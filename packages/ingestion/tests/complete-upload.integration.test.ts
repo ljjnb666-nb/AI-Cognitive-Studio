@@ -95,6 +95,11 @@ async function createPendingUpload(storage: FakeStorageProvider, bytes: Uint8Arr
 afterEach(async () => {
   if (outboxAggregateIds.length) await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: outboxAggregateIds } } });
   if (workspaceIds.length) {
+    await prisma.currentDocumentExtraction.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
+    await prisma.sourceSpan.deleteMany({ where: { sourceBlock: { extraction: { workspaceId: { in: workspaceIds } } } } });
+    await prisma.sourceBlock.deleteMany({ where: { extraction: { workspaceId: { in: workspaceIds } } } });
+    await prisma.sourcePage.deleteMany({ where: { extraction: { workspaceId: { in: workspaceIds } } } });
+    await prisma.documentExtraction.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.ingestionRun.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.uploadCompletion.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.uploadSession.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
@@ -286,5 +291,48 @@ describe("completeUpload", () => {
     expect(firstDocument.sourceBlobId).toBe(secondDocument.sourceBlobId);
     await expect(prisma.sourceBlob.count({ where: { workspaceId: workspace.id } })).resolves.toBe(1);
     await expect(prisma.sourceDocument.count({ where: { workspaceId: workspace.id } })).resolves.toBe(2);
+  });
+
+  it("deduplicates bytes without deduplicating TXT and Markdown interpretation", async () => {
+    const storage = new FakeStorageProvider();
+    const { user, workspace } = await createWorkspaceFixture();
+    const context = { userId: user.id, workspaceId: workspace.id };
+    const service = createIngestionService(storage);
+    const bytes = Buffer.from("# Heading\n\nParagraph.");
+    const txt = await service.createUploadIntent(context, { filename: "same.txt", mediaType: "text/plain", sizeBytes: bytes.byteLength });
+    const markdown = await service.createUploadIntent(context, { filename: "same.md", mediaType: "text/markdown", sizeBytes: bytes.byteLength });
+    storage.objects.set(txt.session.temporaryStorageKey, bytes);
+    storage.objects.set(markdown.session.temporaryStorageKey, bytes);
+
+    const txtDocument = await service.completeUpload(context, txt.session.id);
+    const markdownDocument = await service.completeUpload(context, markdown.session.id);
+    const [txtRun, markdownRun] = await Promise.all([
+      prisma.ingestionRun.findFirstOrThrow({ where: { sourceDocumentId: txtDocument.id, workspaceId: workspace.id } }),
+      prisma.ingestionRun.findFirstOrThrow({ where: { sourceDocumentId: markdownDocument.id, workspaceId: workspace.id } }),
+    ]);
+
+    expect(txtDocument.sourceBlobId).toBe(markdownDocument.sourceBlobId);
+    expect(txtDocument.mediaType).toBe("text/plain");
+    expect(markdownDocument.mediaType).toBe("text/markdown");
+    expect(txtRun.parserVersion).toBe("text-parser-v1");
+    expect(markdownRun.parserVersion).toBe("markdown-parser-v1");
+    await expect(prisma.sourceBlob.count({ where: { workspaceId: workspace.id } })).resolves.toBe(1);
+    await expect(prisma.sourceDocument.count({ where: { workspaceId: workspace.id } })).resolves.toBe(2);
+
+    await service.processIngestionRun(txtRun.id);
+    await service.processIngestionRun(markdownRun.id);
+    const [txtExtraction, markdownExtraction, txtBlocks, markdownBlocks, current] = await Promise.all([
+      prisma.documentExtraction.findUniqueOrThrow({ where: { ingestionRunId: txtRun.id } }),
+      prisma.documentExtraction.findUniqueOrThrow({ where: { ingestionRunId: markdownRun.id } }),
+      prisma.sourceBlock.findMany({ where: { extraction: { ingestionRunId: txtRun.id } }, orderBy: { ordinal: "asc" } }),
+      prisma.sourceBlock.findMany({ where: { extraction: { ingestionRunId: markdownRun.id } }, orderBy: { ordinal: "asc" } }),
+      prisma.currentDocumentExtraction.findMany({ where: { workspaceId: workspace.id } }),
+    ]);
+
+    expect(txtBlocks[0]).toMatchObject({ kind: "PARAGRAPH", text: "# Heading" });
+    expect(markdownBlocks[0]).toMatchObject({ kind: "HEADING", text: "# Heading" });
+    expect(txtExtraction).toMatchObject({ parserName: "builtin-text", parserVersion: "text-parser-v1" });
+    expect(markdownExtraction).toMatchObject({ parserName: "builtin-markdown", parserVersion: "markdown-parser-v1" });
+    expect(current.map((entry) => entry.sourceDocumentId).sort()).toEqual([txtDocument.id, markdownDocument.id].sort());
   });
 });

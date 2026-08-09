@@ -65,6 +65,15 @@ describe("S3CompatibleStorageProvider against MinIO", () => {
       },
     });
     expect(preflightResponse.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+    const evilPreflightResponse = await fetch(upload.url, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://evil.example",
+        "Access-Control-Request-Method": "PUT",
+        "Access-Control-Request-Headers": "content-type",
+      },
+    });
+    expect(evilPreflightResponse.headers.get("access-control-allow-origin")).not.toBe("http://evil.example");
     const uploadResponse = await fetch(upload.url, { method: "PUT", headers: upload.headers, body: encoder.encode("presigned payload") });
     expect(uploadResponse.ok).toBe(true);
     expect(decoder.decode(await provider.getObjectBytes(uploadedKey))).toBe("presigned payload");

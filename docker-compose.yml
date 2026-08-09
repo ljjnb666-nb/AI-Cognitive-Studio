@@ -50,15 +50,12 @@ services:
     depends_on:
       minio:
         condition: service_healthy
-    volumes:
-      - ./infra/minio/cors.json:/config/cors.json:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
         mc alias set local http://minio:9000 local-development-only local-development-only &&
         mc mb --ignore-existing local/ai-cognitive-studio-dev &&
-        mc anonymous set none local/ai-cognitive-studio-dev &&
-        test -s /config/cors.json
+        mc anonymous set none local/ai-cognitive-studio-dev
 
 volumes:
   postgres-data:
