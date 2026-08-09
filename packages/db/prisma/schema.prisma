@@ -49,6 +49,20 @@ enum ExtractionStatus {
   OCR_REQUIRED
 }
 
+enum SourceBlockKind {
+  HEADING
+  PARAGRAPH
+  LIST_ITEM
+  QUOTE
+  TABLE
+  IMAGE
+  CAPTION
+  FOOTNOTE
+  CODE
+  EQUATION
+  UNKNOWN
+}
+
 model User {
   id          String            @id @default(cuid())
   email       String            @unique
@@ -172,20 +186,22 @@ model SourceBlob {
 }
 
 model SourceDocument {
-  id               String            @id @default(cuid())
-  sourceId         String
-  sourceBlobId     String
-  workspaceId      String
-  version          Int
-  sha256           String
-  sizeBytes        BigInt
-  mediaType        String
-  storageKey       String
-  createdAt        DateTime          @default(now())
-  source           Source            @relation(fields: [sourceId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  sourceBlob       SourceBlob        @relation(fields: [sourceBlobId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  uploadCompletion UploadCompletion?
-  ingestionRuns    IngestionRun[]
+  id                String                     @id @default(cuid())
+  sourceId          String
+  sourceBlobId      String
+  workspaceId       String
+  version           Int
+  sha256            String
+  sizeBytes         BigInt
+  mediaType         String
+  storageKey        String
+  createdAt         DateTime                   @default(now())
+  source            Source                     @relation(fields: [sourceId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  sourceBlob        SourceBlob                 @relation(fields: [sourceBlobId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  uploadCompletion  UploadCompletion?
+  ingestionRuns     IngestionRun[]
+  extractions       DocumentExtraction[]       @relation("DocumentExtractionSourceDocument")
+  currentExtraction CurrentDocumentExtraction? @relation("CurrentExtractionSourceDocument")
 
   @@unique([id, workspaceId])
   @@unique([sourceId, version])
@@ -241,16 +257,39 @@ model IngestionRun {
 }
 
 model DocumentExtraction {
-  id             String           @id @default(cuid())
-  ingestionRunId String           @unique
-  status         ExtractionStatus
-  textStorageKey String?
-  textSha256     String?
-  characterCount Int?
-  createdAt      DateTime         @default(now())
-  ingestionRun   IngestionRun     @relation(fields: [ingestionRunId], references: [id], onDelete: Cascade)
-  pages          SourcePage[]
-  blocks         SourceBlock[]
+  id                   String                     @id @default(cuid())
+  ingestionRunId       String                     @unique
+  sourceDocumentId     String
+  workspaceId          String
+  status               ExtractionStatus
+  parserName           String
+  parserVersion        String
+  normalizationVersion String
+  textStorageKey       String?
+  textSha256           String?
+  characterCount       Int?
+  createdAt            DateTime                   @default(now())
+  ingestionRun         IngestionRun               @relation(fields: [ingestionRunId], references: [id], onDelete: Cascade)
+  sourceDocument       SourceDocument             @relation("DocumentExtractionSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  currentMarker        CurrentDocumentExtraction? @relation("CurrentExtractionDocument")
+  pages                SourcePage[]
+  blocks               SourceBlock[]
+
+  @@unique([id, sourceDocumentId, workspaceId])
+}
+
+model CurrentDocumentExtraction {
+  id               String             @id @default(cuid())
+  sourceDocumentId String
+  extractionId     String
+  workspaceId      String
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  sourceDocument   SourceDocument     @relation("CurrentExtractionSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  extraction       DocumentExtraction @relation("CurrentExtractionDocument", fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
+
+  @@unique([sourceDocumentId, workspaceId])
+  @@unique([extractionId, sourceDocumentId, workspaceId])
 }
 
 model SourcePage {
@@ -259,6 +298,9 @@ model SourcePage {
   ordinal           Int
   physicalPageIndex Int?
   printedPageLabel  String?
+  width             Float?
+  height            Float?
+  metadata          Json?
   createdAt         DateTime           @default(now())
   extraction        DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
   blocks            SourceBlock[]
@@ -271,10 +313,11 @@ model SourceBlock {
   extractionId String
   sourcePageId String?
   ordinal      Int
-  kind         String
-  textStart    Int
-  textEnd      Int
+  kind         SourceBlockKind
+  text         String
   contentHash  String
+  metadata     Json?
+  bbox         Json?
   createdAt    DateTime           @default(now())
   extraction   DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
   sourcePage   SourcePage?        @relation(fields: [sourcePageId], references: [id], onDelete: SetNull)
@@ -288,7 +331,8 @@ model SourceSpan {
   sourceBlockId String
   startOffset   Int
   endOffset     Int
-  quote         String
+  quoteText     String
+  quoteHash     String
   createdAt     DateTime    @default(now())
   sourceBlock   SourceBlock @relation(fields: [sourceBlockId], references: [id], onDelete: Cascade)
 }

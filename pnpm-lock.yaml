@@ -110,6 +110,9 @@ importers:
         specifier: ^6.19.0
         version: 6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)
     devDependencies:
+      '@ai-cognitive/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@eslint/js':
         specifier: ^9.39.1
         version: 9.39.5
@@ -144,6 +147,9 @@ importers:
       '@eslint/js':
         specifier: ^9.39.1
         version: 9.39.5
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.13.3
       eslint:
         specifier: ^9.39.1
         version: 9.39.5(jiti@2.7.0)

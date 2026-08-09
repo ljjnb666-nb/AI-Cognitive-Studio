@@ -21,6 +21,7 @@
     "@prisma/client": "^6.19.0"
   },
   "devDependencies": {
+    "@ai-cognitive/domain": "workspace:*",
     "@eslint/js": "^9.39.1",
     "@types/node": "^24.10.1",
     "dotenv": "^16.6.1",
