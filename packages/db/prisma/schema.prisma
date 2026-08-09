@@ -26,19 +26,25 @@ model User {
 }
 
 model Job {
-  id          String    @id @default(cuid())
-  userId      String
-  type        String
-  status      JobStatus @default(QUEUED)
-  progress    Int       @default(0)
-  payload     Json
-  result      Json?
-  error       Json?
-  createdAt   DateTime  @default(now())
-  startedAt   DateTime?
-  completedAt DateTime?
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id             String    @id @default(cuid())
+  userId         String?
+  queueJobId     String?   @unique
+  idempotencyKey String?   @unique
+  correlationId  String?
+  type           String
+  status         JobStatus @default(QUEUED)
+  progress       Int       @default(0)
+  attemptCount   Int       @default(0)
+  payload        Json
+  result         Json?
+  error          Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  startedAt      DateTime?
+  completedAt    DateTime?
+  user           User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([status])
+  @@index([correlationId])
 }

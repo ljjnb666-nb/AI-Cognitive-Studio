@@ -1,6 +1,7 @@
 import { Queue, QueueEvents, type JobsOptions, type Worker } from "bullmq";
 import type IORedis from "ioredis";
-import { createRedisConnection, logger } from "@ai-cognitive/shared";
+import { logger } from "@ai-cognitive/shared";
+import { createRedisConnection } from "@ai-cognitive/shared/server";
 import type { HealthCheckPayload } from "@ai-cognitive/domain";
 import { HEALTH_CHECK_JOB, HEALTH_CHECK_QUEUE } from "./jobs/health-check.js";
 

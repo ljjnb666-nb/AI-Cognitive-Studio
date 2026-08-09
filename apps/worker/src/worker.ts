@@ -1,6 +1,7 @@
 import { Worker } from "bullmq";
 import { AppError, type HealthCheckPayload } from "@ai-cognitive/domain";
-import { createRedisConnection, logger } from "@ai-cognitive/shared";
+import { logger } from "@ai-cognitive/shared";
+import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { HEALTH_CHECK_QUEUE } from "./jobs/health-check.js";
 import { processHealthCheck } from "./processors/health-check.js";
 

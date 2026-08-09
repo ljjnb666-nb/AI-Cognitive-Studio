@@ -1,4 +1,5 @@
-import { readEnvironment, logger } from "@ai-cognitive/shared";
+import { logger } from "@ai-cognitive/shared";
+import { readEnvironment } from "@ai-cognitive/shared/server";
 import { createHealthCheckWorker } from "./worker.js";
 
 const environment = readEnvironment();
