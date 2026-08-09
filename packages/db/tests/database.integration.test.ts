@@ -57,5 +57,6 @@ describe("database integration", () => {
 
     const systemJob = await prisma.job.findFirstOrThrow({ where: { userId: null } });
     expect(systemJob.userId).toBeNull();
+    expect(systemJob.workspaceId).toBeNull();
   });
 });

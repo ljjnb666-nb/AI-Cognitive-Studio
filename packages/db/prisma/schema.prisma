@@ -71,6 +71,7 @@ model Workspace {
   sources        Source[]
   sourceBlobs    SourceBlob[]
   uploadSessions UploadSession[]
+  jobs           Job[]
 }
 
 model WorkspaceMember {
@@ -92,14 +93,17 @@ model Project {
   updatedAt   DateTime        @updatedAt
   workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   sources     ProjectSource[]
+
+  @@unique([id, workspaceId])
 }
 
 model ProjectSource {
-  projectId String
-  sourceId  String
-  createdAt DateTime @default(now())
-  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  source    Source   @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  projectId   String
+  sourceId    String
+  workspaceId String
+  createdAt   DateTime @default(now())
+  project     Project  @relation(fields: [projectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  source      Source   @relation(fields: [sourceId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 
   @@id([projectId, sourceId])
 }
@@ -113,11 +117,14 @@ model Work {
   updatedAt   DateTime  @updatedAt
   workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   editions    Edition[]
+
+  @@unique([id, workspaceId])
 }
 
 model Edition {
   id              String   @id @default(cuid())
   workId          String
+  workspaceId     String
   language        String?
   publisher       String?
   isbn10          String?
@@ -125,8 +132,10 @@ model Edition {
   publicationYear Int?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-  work            Work     @relation(fields: [workId], references: [id], onDelete: Cascade)
+  work            Work     @relation(fields: [workId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   sources         Source[]
+
+  @@unique([id, workspaceId])
 }
 
 model Source {
@@ -139,10 +148,11 @@ model Source {
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
   workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  edition     Edition?         @relation(fields: [editionId], references: [id], onDelete: SetNull)
+  edition     Edition?         @relation(fields: [editionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   documents   SourceDocument[]
   projects    ProjectSource[]
 
+  @@unique([id, workspaceId])
   @@index([workspaceId])
 }
 
@@ -158,22 +168,26 @@ model SourceBlob {
   documents   SourceDocument[]
 
   @@unique([workspaceId, sha256])
+  @@unique([id, workspaceId])
 }
 
 model SourceDocument {
-  id            String         @id @default(cuid())
-  sourceId      String
-  sourceBlobId  String
-  version       Int
-  sha256        String
-  sizeBytes     BigInt
-  mediaType     String
-  storageKey    String
-  createdAt     DateTime       @default(now())
-  source        Source         @relation(fields: [sourceId], references: [id], onDelete: Restrict)
-  sourceBlob    SourceBlob     @relation(fields: [sourceBlobId], references: [id], onDelete: Restrict)
-  ingestionRuns IngestionRun[]
+  id               String            @id @default(cuid())
+  sourceId         String
+  sourceBlobId     String
+  workspaceId      String
+  version          Int
+  sha256           String
+  sizeBytes        BigInt
+  mediaType        String
+  storageKey       String
+  createdAt        DateTime          @default(now())
+  source           Source            @relation(fields: [sourceId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  sourceBlob       SourceBlob        @relation(fields: [sourceBlobId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  uploadCompletion UploadCompletion?
+  ingestionRuns    IngestionRun[]
 
+  @@unique([id, workspaceId])
   @@unique([sourceId, version])
 }
 
@@ -187,17 +201,32 @@ model UploadSession {
   status              UploadSessionStatus @default(CREATED)
   expiresAt           DateTime
   completedAt         DateTime?
-  sourceDocumentId    String?             @unique
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
   workspace           Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  completion          UploadCompletion?
 
+  @@unique([id, workspaceId])
   @@index([workspaceId, status])
+}
+
+model UploadCompletion {
+  id               String         @id @default(cuid())
+  uploadSessionId  String
+  sourceDocumentId String
+  workspaceId      String
+  createdAt        DateTime       @default(now())
+  uploadSession    UploadSession  @relation(fields: [uploadSessionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  sourceDocument   SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@unique([uploadSessionId, workspaceId])
+  @@unique([sourceDocumentId, workspaceId])
 }
 
 model IngestionRun {
   id                   String              @id @default(cuid())
   sourceDocumentId     String
+  workspaceId          String
   jobId                String              @unique
   status               IngestionStatus     @default(QUEUED)
   parserVersion        String
@@ -206,7 +235,7 @@ model IngestionRun {
   createdAt            DateTime            @default(now())
   startedAt            DateTime?
   completedAt          DateTime?
-  sourceDocument       SourceDocument      @relation(fields: [sourceDocumentId], references: [id], onDelete: Restrict)
+  sourceDocument       SourceDocument      @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   job                  Job                 @relation(fields: [jobId], references: [id], onDelete: Restrict)
   extraction           DocumentExtraction?
 }
@@ -278,6 +307,7 @@ model OutboxEvent {
 model Job {
   id             String        @id @default(cuid())
   userId         String?
+  workspaceId    String?
   queueJobId     String?       @unique
   idempotencyKey String?       @unique
   correlationId  String?
@@ -289,13 +319,15 @@ model Job {
   result         Json?
   error          Json?
   createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  updatedAt      DateTime      @default(now()) @updatedAt
   startedAt      DateTime?
   completedAt    DateTime?
   user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace      Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   ingestionRun   IngestionRun?
 
   @@index([userId])
   @@index([status])
   @@index([correlationId])
+  @@index([workspaceId, status])
 }

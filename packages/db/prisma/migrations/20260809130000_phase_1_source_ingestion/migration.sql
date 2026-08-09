@@ -14,7 +14,7 @@ CREATE TYPE "IngestionStatus" AS ENUM ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED
 CREATE TYPE "ExtractionStatus" AS ENUM ('SUCCEEDED', 'FAILED', 'OCR_REQUIRED');
 
 -- AlterTable
-ALTER TABLE "Job" ALTER COLUMN "updatedAt" DROP DEFAULT;
+ALTER TABLE "Job" ADD COLUMN     "workspaceId" TEXT;
 
 -- CreateTable
 CREATE TABLE "Workspace" (
@@ -51,6 +51,7 @@ CREATE TABLE "Project" (
 CREATE TABLE "ProjectSource" (
     "projectId" TEXT NOT NULL,
     "sourceId" TEXT NOT NULL,
+    "workspaceId" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "ProjectSource_pkey" PRIMARY KEY ("projectId","sourceId")
@@ -72,6 +73,7 @@ CREATE TABLE "Work" (
 CREATE TABLE "Edition" (
     "id" TEXT NOT NULL,
     "workId" TEXT NOT NULL,
+    "workspaceId" TEXT NOT NULL,
     "language" TEXT,
     "publisher" TEXT,
     "isbn10" TEXT,
@@ -115,6 +117,7 @@ CREATE TABLE "SourceDocument" (
     "id" TEXT NOT NULL,
     "sourceId" TEXT NOT NULL,
     "sourceBlobId" TEXT NOT NULL,
+    "workspaceId" TEXT NOT NULL,
     "version" INTEGER NOT NULL,
     "sha256" TEXT NOT NULL,
     "sizeBytes" BIGINT NOT NULL,
@@ -136,7 +139,6 @@ CREATE TABLE "UploadSession" (
     "status" "UploadSessionStatus" NOT NULL DEFAULT 'CREATED',
     "expiresAt" TIMESTAMP(3) NOT NULL,
     "completedAt" TIMESTAMP(3),
-    "sourceDocumentId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -144,9 +146,21 @@ CREATE TABLE "UploadSession" (
 );
 
 -- CreateTable
+CREATE TABLE "UploadCompletion" (
+    "id" TEXT NOT NULL,
+    "uploadSessionId" TEXT NOT NULL,
+    "sourceDocumentId" TEXT NOT NULL,
+    "workspaceId" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "UploadCompletion_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "IngestionRun" (
     "id" TEXT NOT NULL,
     "sourceDocumentId" TEXT NOT NULL,
+    "workspaceId" TEXT NOT NULL,
     "jobId" TEXT NOT NULL,
     "status" "IngestionStatus" NOT NULL DEFAULT 'QUEUED',
     "parserVersion" TEXT NOT NULL,
@@ -224,19 +238,43 @@ CREATE TABLE "OutboxEvent" (
 );
 
 -- CreateIndex
+CREATE UNIQUE INDEX "Project_id_workspaceId_key" ON "Project"("id", "workspaceId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Work_id_workspaceId_key" ON "Work"("id", "workspaceId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Edition_id_workspaceId_key" ON "Edition"("id", "workspaceId");
+
+-- CreateIndex
 CREATE INDEX "Source_workspaceId_idx" ON "Source"("workspaceId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Source_id_workspaceId_key" ON "Source"("id", "workspaceId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "SourceBlob_workspaceId_sha256_key" ON "SourceBlob"("workspaceId", "sha256");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "SourceBlob_id_workspaceId_key" ON "SourceBlob"("id", "workspaceId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "SourceDocument_id_workspaceId_key" ON "SourceDocument"("id", "workspaceId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "SourceDocument_sourceId_version_key" ON "SourceDocument"("sourceId", "version");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "UploadSession_sourceDocumentId_key" ON "UploadSession"("sourceDocumentId");
+CREATE INDEX "UploadSession_workspaceId_status_idx" ON "UploadSession"("workspaceId", "status");
 
 -- CreateIndex
-CREATE INDEX "UploadSession_workspaceId_status_idx" ON "UploadSession"("workspaceId", "status");
+CREATE UNIQUE INDEX "UploadSession_id_workspaceId_key" ON "UploadSession"("id", "workspaceId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "UploadCompletion_uploadSessionId_workspaceId_key" ON "UploadCompletion"("uploadSessionId", "workspaceId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "UploadCompletion_sourceDocumentId_workspaceId_key" ON "UploadCompletion"("sourceDocumentId", "workspaceId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "IngestionRun_jobId_key" ON "IngestionRun"("jobId");
@@ -253,6 +291,9 @@ CREATE UNIQUE INDEX "SourceBlock_extractionId_ordinal_key" ON "SourceBlock"("ext
 -- CreateIndex
 CREATE INDEX "OutboxEvent_dispatchedAt_createdAt_idx" ON "OutboxEvent"("dispatchedAt", "createdAt");
 
+-- CreateIndex
+CREATE INDEX "Job_workspaceId_status_idx" ON "Job"("workspaceId", "status");
+
 -- AddForeignKey
 ALTER TABLE "WorkspaceMember" ADD CONSTRAINT "WorkspaceMember_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
@@ -263,37 +304,43 @@ ALTER TABLE "WorkspaceMember" ADD CONSTRAINT "WorkspaceMember_userId_fkey" FOREI
 ALTER TABLE "Project" ADD CONSTRAINT "Project_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ProjectSource" ADD CONSTRAINT "ProjectSource_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ProjectSource" ADD CONSTRAINT "ProjectSource_projectId_workspaceId_fkey" FOREIGN KEY ("projectId", "workspaceId") REFERENCES "Project"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ProjectSource" ADD CONSTRAINT "ProjectSource_sourceId_fkey" FOREIGN KEY ("sourceId") REFERENCES "Source"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ProjectSource" ADD CONSTRAINT "ProjectSource_sourceId_workspaceId_fkey" FOREIGN KEY ("sourceId", "workspaceId") REFERENCES "Source"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Work" ADD CONSTRAINT "Work_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Edition" ADD CONSTRAINT "Edition_workId_fkey" FOREIGN KEY ("workId") REFERENCES "Work"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Edition" ADD CONSTRAINT "Edition_workId_workspaceId_fkey" FOREIGN KEY ("workId", "workspaceId") REFERENCES "Work"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Source" ADD CONSTRAINT "Source_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Source" ADD CONSTRAINT "Source_editionId_fkey" FOREIGN KEY ("editionId") REFERENCES "Edition"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "Source" ADD CONSTRAINT "Source_editionId_workspaceId_fkey" FOREIGN KEY ("editionId", "workspaceId") REFERENCES "Edition"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "SourceBlob" ADD CONSTRAINT "SourceBlob_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "SourceDocument" ADD CONSTRAINT "SourceDocument_sourceId_fkey" FOREIGN KEY ("sourceId") REFERENCES "Source"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "SourceDocument" ADD CONSTRAINT "SourceDocument_sourceId_workspaceId_fkey" FOREIGN KEY ("sourceId", "workspaceId") REFERENCES "Source"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "SourceDocument" ADD CONSTRAINT "SourceDocument_sourceBlobId_fkey" FOREIGN KEY ("sourceBlobId") REFERENCES "SourceBlob"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "SourceDocument" ADD CONSTRAINT "SourceDocument_sourceBlobId_workspaceId_fkey" FOREIGN KEY ("sourceBlobId", "workspaceId") REFERENCES "SourceBlob"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "UploadSession" ADD CONSTRAINT "UploadSession_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "IngestionRun" ADD CONSTRAINT "IngestionRun_sourceDocumentId_fkey" FOREIGN KEY ("sourceDocumentId") REFERENCES "SourceDocument"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "UploadCompletion" ADD CONSTRAINT "UploadCompletion_uploadSessionId_workspaceId_fkey" FOREIGN KEY ("uploadSessionId", "workspaceId") REFERENCES "UploadSession"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "UploadCompletion" ADD CONSTRAINT "UploadCompletion_sourceDocumentId_workspaceId_fkey" FOREIGN KEY ("sourceDocumentId", "workspaceId") REFERENCES "SourceDocument"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "IngestionRun" ADD CONSTRAINT "IngestionRun_sourceDocumentId_workspaceId_fkey" FOREIGN KEY ("sourceDocumentId", "workspaceId") REFERENCES "SourceDocument"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "IngestionRun" ADD CONSTRAINT "IngestionRun_jobId_fkey" FOREIGN KEY ("jobId") REFERENCES "Job"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
@@ -312,3 +359,6 @@ ALTER TABLE "SourceBlock" ADD CONSTRAINT "SourceBlock_sourcePageId_fkey" FOREIGN
 
 -- AddForeignKey
 ALTER TABLE "SourceSpan" ADD CONSTRAINT "SourceSpan_sourceBlockId_fkey" FOREIGN KEY ("sourceBlockId") REFERENCES "SourceBlock"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Job" ADD CONSTRAINT "Job_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
