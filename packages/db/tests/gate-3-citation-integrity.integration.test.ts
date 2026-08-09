@@ -26,6 +26,10 @@ async function createExtraction(document: { id: string; workspaceId: string }) {
 afterEach(async () => {
   if (workspaceIds.length) {
     await prisma.currentDocumentExtraction.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
+    await prisma.sourceSpan.deleteMany({ where: { sourceBlock: { extraction: { workspaceId: { in: workspaceIds } } } } });
+    await prisma.sourceBlock.deleteMany({ where: { extraction: { workspaceId: { in: workspaceIds } } } });
+    await prisma.sourcePage.deleteMany({ where: { extraction: { workspaceId: { in: workspaceIds } } } });
+    await prisma.documentExtraction.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.ingestionRun.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.job.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.sourceDocument.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
@@ -55,6 +59,16 @@ describe("Gate 3 citation integrity", () => {
     const run = await prisma.ingestionRun.create({ data: { workspaceId: workspaceB.id, sourceDocumentId: documentB.id, jobId: job.id, parserVersion: "test", normalizationVersion: "canonical-text-v1" } });
 
     await expect(prisma.documentExtraction.create({ data: { ingestionRunId: run.id, sourceDocumentId: documentB.id, workspaceId: workspaceA.id, status: "SUCCEEDED", parserName: "test", parserVersion: "test", normalizationVersion: "canonical-text-v1" } })).rejects.toMatchObject({ code: "P2003" });
+  });
+
+  it("rejects an extraction that names another same-workspace document than its ingestion run", async () => {
+    const workspace = await createWorkspace();
+    const documentA = await createDocument(workspace.id);
+    const documentB = await createDocument(workspace.id);
+    const job = await prisma.job.create({ data: { workspaceId: workspace.id, type: "source.ingest", payload: {} } });
+    const runA = await prisma.ingestionRun.create({ data: { workspaceId: workspace.id, sourceDocumentId: documentA.id, jobId: job.id, parserVersion: "test", normalizationVersion: "canonical-text-v1" } });
+
+    await expect(prisma.documentExtraction.create({ data: { ingestionRunId: runA.id, sourceDocumentId: documentB.id, workspaceId: workspace.id, status: "SUCCEEDED", parserName: "test", parserVersion: "test", normalizationVersion: "canonical-text-v1" } })).rejects.toMatchObject({ code: "P2003" });
   });
 
   it("enforces exact document ownership and one current marker", async () => {
@@ -92,5 +106,18 @@ describe("Gate 3 citation integrity", () => {
     expect(stored.spans).toEqual([expect.objectContaining({ id: span.id, startOffset: 1, endOffset: 3, quoteText: "🤖", quoteHash: sha256Utf8("🤖") })]);
     expect(validateSourceSpan(stored.text, span.startOffset, span.endOffset, span.quoteText)).toBe(true);
     expect(stored.text.slice(1, 3)).toBe(span.quoteText);
+  });
+
+  it("requires a physical SourcePage to belong to the block's exact extraction", async () => {
+    const workspace = await createWorkspace();
+    const documentA = await createDocument(workspace.id);
+    const documentB = await createDocument(workspace.id);
+    const extractionA = await createExtraction(documentA);
+    const extractionB = await createExtraction(documentB);
+    const pageA = await prisma.sourcePage.create({ data: { extractionId: extractionA.id, ordinal: 0, physicalPageIndex: 0 } });
+    const pageB = await prisma.sourcePage.create({ data: { extractionId: extractionB.id, ordinal: 0, physicalPageIndex: 0 } });
+
+    await expect(prisma.sourceBlock.create({ data: { extractionId: extractionA.id, sourcePageId: pageA.id, ordinal: 0, kind: "PARAGRAPH", text: "page A", contentHash: sha256Utf8("page A") } })).resolves.toMatchObject({ sourcePageId: pageA.id });
+    await expect(prisma.sourceBlock.create({ data: { extractionId: extractionA.id, sourcePageId: pageB.id, ordinal: 1, kind: "PARAGRAPH", text: "wrong page", contentHash: sha256Utf8("wrong page") } })).rejects.toMatchObject({ code: "P2003" });
   });
 });

@@ -254,6 +254,8 @@ model IngestionRun {
   sourceDocument       SourceDocument      @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   job                  Job                 @relation(fields: [jobId], references: [id], onDelete: Restrict)
   extraction           DocumentExtraction?
+
+  @@unique([id, sourceDocumentId, workspaceId])
 }
 
 model DocumentExtraction {
@@ -269,13 +271,14 @@ model DocumentExtraction {
   textSha256           String?
   characterCount       Int?
   createdAt            DateTime                   @default(now())
-  ingestionRun         IngestionRun               @relation(fields: [ingestionRunId], references: [id], onDelete: Cascade)
+  ingestionRun         IngestionRun               @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
   sourceDocument       SourceDocument             @relation("DocumentExtractionSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   currentMarker        CurrentDocumentExtraction? @relation("CurrentExtractionDocument")
   pages                SourcePage[]
   blocks               SourceBlock[]
 
   @@unique([id, sourceDocumentId, workspaceId])
+  @@unique([ingestionRunId, sourceDocumentId, workspaceId])
 }
 
 model CurrentDocumentExtraction {
@@ -306,6 +309,7 @@ model SourcePage {
   blocks            SourceBlock[]
 
   @@unique([extractionId, ordinal])
+  @@unique([id, extractionId])
 }
 
 model SourceBlock {
@@ -320,7 +324,7 @@ model SourceBlock {
   bbox         Json?
   createdAt    DateTime           @default(now())
   extraction   DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
-  sourcePage   SourcePage?        @relation(fields: [sourcePageId], references: [id], onDelete: SetNull)
+  sourcePage   SourcePage?        @relation(fields: [sourcePageId, extractionId], references: [id, extractionId], onDelete: Restrict)
   spans        SourceSpan[]
 
   @@unique([extractionId, ordinal])

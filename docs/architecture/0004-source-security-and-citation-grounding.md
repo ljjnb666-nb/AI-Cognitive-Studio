@@ -8,4 +8,6 @@ Every uploaded byte sequence is untrusted. Server-side code computes SHA-256, ve
 
 `DocumentExtraction` records the actual parser and canonical-normalization provenance. `CurrentDocumentExtraction` is the sole authority for which extraction is current; changing it does not delete or overwrite historical `DocumentExtraction`, `SourcePage`, or `SourceBlock` records. `textStorageKey`, when present, is a derived whole-extraction convenience artifact assembled from canonical block text and is not citation source of truth.
 
+Each `DocumentExtraction` is bound to the exact `IngestionRun` source document and workspace, not merely to an independently valid run and document. A `SourceBlock` with a physical `SourcePage` must similarly reference a page from that exact same extraction. Citation offsets remain UTF-16 code-unit based, but start and end boundaries may not split a surrogate pair; combining-mark boundaries remain valid code-unit boundaries.
+
 The Gate 3 migration follows the unpublished Gate 2 migration within the same Phase 1 migration chain. No production application writes occur between those migrations, so the migration deliberately does not pretend to backfill canonical `SourceBlock.text` from offsets or hashes.

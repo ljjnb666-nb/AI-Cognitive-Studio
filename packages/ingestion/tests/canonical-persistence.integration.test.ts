@@ -6,6 +6,7 @@ import { createIngestionService } from "../src/index.js";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
+const runIds: string[] = [];
 
 class FakeStorageProvider implements StorageProvider {
   readonly objects = new Map<string, Uint8Array>();
@@ -41,13 +42,23 @@ async function ingest(storage: FakeStorageProvider, mediaType: "text/plain" | "t
   storage.objects.set(session.temporaryStorageKey, bytes);
   const document = await service.completeUpload(context, session.id);
   const run = await prisma.ingestionRun.findFirstOrThrow({ where: { sourceDocumentId: document.id, workspaceId: workspace.id } });
+  runIds.push(run.id);
   await service.processIngestionRun(run.id);
   return { service, workspace, document, run };
 }
 
 afterEach(async () => {
+  if (runIds.length) {
+    await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: runIds } } });
+    const leftover = await prisma.outboxEvent.count({ where: { topic: "source.ingestion.requested", aggregateId: { in: runIds } } });
+    if (leftover !== 0) throw new Error("CANONICAL_TEST_OUTBOX_CLEANUP_FAILED");
+  }
   if (workspaceIds.length) {
     await prisma.currentDocumentExtraction.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
+    await prisma.sourceSpan.deleteMany({ where: { sourceBlock: { extraction: { workspaceId: { in: workspaceIds } } } } });
+    await prisma.sourceBlock.deleteMany({ where: { extraction: { workspaceId: { in: workspaceIds } } } });
+    await prisma.sourcePage.deleteMany({ where: { extraction: { workspaceId: { in: workspaceIds } } } });
+    await prisma.documentExtraction.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.ingestionRun.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.uploadCompletion.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.uploadSession.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
@@ -62,6 +73,7 @@ afterEach(async () => {
   if (workspaceIds.length) await prisma.workspace.deleteMany({ where: { id: { in: workspaceIds } } });
   workspaceIds.length = 0;
   userIds.length = 0;
+  runIds.length = 0;
 });
 
 afterAll(async () => { await prisma.$disconnect(); });
@@ -107,6 +119,7 @@ describe("canonical extraction persistence", () => {
     const firstBlockCount = await prisma.sourceBlock.count({ where: { extractionId: first.id } });
     const job = await prisma.job.create({ data: { workspaceId: workspace.id, type: "source.ingest", payload: { sourceDocumentId: document.id }, idempotencyKey: `reingest:${document.id}` } });
     const secondRun = await prisma.ingestionRun.create({ data: { sourceDocumentId: document.id, workspaceId: workspace.id, jobId: job.id, parserVersion: "text-parser-v1", normalizationVersion: "canonical-text-v1" } });
+    runIds.push(secondRun.id);
 
     await service.processIngestionRun(secondRun.id);
 
@@ -124,6 +137,7 @@ describe("canonical extraction persistence", () => {
     const previous = await prisma.documentExtraction.findUniqueOrThrow({ where: { ingestionRunId: run.id } });
     const job = await prisma.job.create({ data: { workspaceId: workspace.id, type: "source.ingest", payload: { sourceDocumentId: document.id }, idempotencyKey: `failed-reingest:${document.id}` } });
     const failedRun = await prisma.ingestionRun.create({ data: { sourceDocumentId: document.id, workspaceId: workspace.id, jobId: job.id, parserVersion: "text-parser-v1", normalizationVersion: "canonical-text-v1" } });
+    runIds.push(failedRun.id);
     storage.objects.delete(document.storageKey);
 
     await expect(service.processIngestionRun(failedRun.id)).rejects.toThrow("OBJECT_NOT_FOUND");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSourceSpan, sha256Utf8, validateSourceSpan } from "../src/citation.js";
+import { buildSourceSpan, isUtf16Boundary, sha256Utf8, validateSourceSpan } from "../src/citation.js";
 
 describe("citation protocol", () => {
   it("uses UTF-16 code-unit offsets for ASCII, Chinese, emoji, and combining marks", () => {
@@ -9,7 +9,11 @@ describe("citation protocol", () => {
     expect(emojiText.length).toBe(4);
     expect(emojiText.slice(1, 3)).toBe("🤖");
     expect(validateSourceSpan(emojiText, 1, 3, "🤖")).toBe(true);
-    expect(validateSourceSpan(emojiText, 1, 2, "🤖")).toBe(false);
+    expect(isUtf16Boundary(emojiText, 1)).toBe(true);
+    expect(isUtf16Boundary(emojiText, 2)).toBe(false);
+    expect(isUtf16Boundary(emojiText, 3)).toBe(true);
+    expect(validateSourceSpan(emojiText, 1, 2, emojiText.slice(1, 2))).toBe(false);
+    expect(validateSourceSpan(emojiText, 2, 3, emojiText.slice(2, 3))).toBe(false);
     const combiningText = "Cafe\u0301";
     expect(combiningText).toBe("Cafe\u0301");
     expect(combiningText).not.toBe("Café");
@@ -34,6 +38,8 @@ describe("citation protocol", () => {
       quoteHash: "b0d125182029e6c500cbcc81011341df77de8fe24d9e80190c32be390c916ec2",
     });
     expect(span.quoteHash).toBe(sha256Utf8(span.quoteText));
+    expect(() => buildSourceSpan("A🤖B", 1, 2)).toThrow("INVALID_SOURCE_SPAN");
+    expect(() => buildSourceSpan("A🤖B", 2, 3)).toThrow("INVALID_SOURCE_SPAN");
     expect(() => buildSourceSpan("abcdef", 2, 2)).toThrow("INVALID_SOURCE_SPAN");
   });
 });
