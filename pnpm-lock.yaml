@@ -63,6 +63,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@ai-cognitive/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@ai-cognitive/domain':
         specifier: workspace:*
         version: link:../../packages/domain

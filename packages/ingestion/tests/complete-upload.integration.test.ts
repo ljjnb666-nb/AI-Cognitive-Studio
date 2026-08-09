@@ -335,4 +335,53 @@ describe("completeUpload", () => {
     expect(markdownExtraction).toMatchObject({ parserName: "builtin-markdown", parserVersion: "markdown-parser-v1" });
     expect(current.map((entry) => entry.sourceDocumentId).sort()).toEqual([txtDocument.id, markdownDocument.id].sort());
   });
+
+  it("converges same-session completion and prevents the non-owner from starting storage work", async () => {
+    const storage = new FakeStorageProvider();
+    const value = await createPendingUpload(storage, Buffer.from("same session concurrent"));
+    const first = value.service.completeUpload(value.context, value.session.id);
+    const second = value.service.completeUpload(value.context, value.session.id);
+    const outcomes = await Promise.allSettled([first, second]);
+    const success = outcomes.find((outcome) => outcome.status === "fulfilled");
+    const inProgress = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+    expect(success?.status).toBe("fulfilled");
+    if (!success || success.status !== "fulfilled") throw new Error("expected one completion owner");
+    expect(success.value.id).toBeDefined();
+    expect(inProgress?.reason).toMatchObject({ message: "UPLOAD_COMPLETION_IN_PROGRESS" });
+    const retried = await value.service.completeUpload(value.context, value.session.id);
+    expect(retried.id).toBe(success?.value.id);
+    await expect(prisma.uploadCompletion.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    await expect(prisma.sourceDocument.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    await expect(prisma.job.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    await expect(prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+  });
+
+  it("reclaims a stale completion claim and clears ownership fields on completion", async () => {
+    const storage = new FakeStorageProvider();
+    const value = await createPendingUpload(storage, Buffer.from("stale completion claim"));
+    await prisma.uploadSession.update({ where: { id: value.session.id }, data: { status: "COMPLETING", completionClaimToken: "abandoned-token", completionClaimedAt: new Date(Date.now() - 10_000), completionLeaseUntil: new Date(Date.now() - 1_000) } });
+    await expect(value.service.completeUpload(value.context, value.session.id)).resolves.toMatchObject({ workspaceId: value.workspace.id });
+    await expect(prisma.uploadSession.findUniqueOrThrow({ where: { id: value.session.id } })).resolves.toMatchObject({ status: "COMPLETED", completionClaimToken: null, completionClaimedAt: null, completionLeaseUntil: null });
+  });
+
+  it("concurrently deduplicates SourceBlob while retaining one document pipeline per session", async () => {
+    const storage = new FakeStorageProvider();
+    const { user, workspace } = await createWorkspaceFixture();
+    const context = { userId: user.id, workspaceId: workspace.id };
+    const service = createIngestionService(storage);
+    const bytes = Buffer.from("concurrent identical bytes");
+    const [a, b] = await Promise.all([
+      service.createUploadIntent(context, { filename: "a.txt", mediaType: "text/plain", sizeBytes: bytes.length }),
+      service.createUploadIntent(context, { filename: "b.txt", mediaType: "text/plain", sizeBytes: bytes.length }),
+    ]);
+    storage.objects.set(a.session.temporaryStorageKey, bytes);
+    storage.objects.set(b.session.temporaryStorageKey, bytes);
+    const [aDocument, bDocument] = await Promise.all([service.completeUpload(context, a.session.id), service.completeUpload(context, b.session.id)]);
+    expect(aDocument.sourceBlobId).toBe(bDocument.sourceBlobId);
+    await expect(prisma.sourceBlob.count({ where: { workspaceId: workspace.id } })).resolves.toBe(1);
+    await expect(prisma.sourceDocument.count({ where: { workspaceId: workspace.id } })).resolves.toBe(2);
+    await expect(prisma.uploadCompletion.count({ where: { workspaceId: workspace.id } })).resolves.toBe(2);
+    await expect(prisma.job.count({ where: { workspaceId: workspace.id } })).resolves.toBe(2);
+    await expect(prisma.ingestionRun.count({ where: { workspaceId: workspace.id } })).resolves.toBe(2);
+  });
 });

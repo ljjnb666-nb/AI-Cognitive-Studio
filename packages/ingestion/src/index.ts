@@ -1,15 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { spawn } from "node:child_process";
 import { prisma, JobStatus } from "@ai-cognitive/db";
 import { sha256Utf8 } from "@ai-cognitive/domain";
 import { logger } from "@ai-cognitive/shared";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import type { Queue } from "bullmq";
-import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION, normalizeCanonicalText } from "./canonical-text.js";
+import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION } from "./canonical-text.js";
 import { inspectObjectStream } from "./object-inspection.js";
+import { parseDocument } from "./document-parsers.js";
+import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
+export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
+export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
+export { parseDocument, DEFAULT_PARSER_LIMITS } from "./document-parsers.js";
 
 export type TrustedRequestContext = { userId: string; workspaceId: string };
 export const INGESTION_QUEUE = "source.ingestion";
@@ -29,7 +30,7 @@ export function sniffMediaType(bytes: Uint8Array, declared: string, filename: st
   if (declared === "text/plain" || /\.(txt|text)$/.test(lower)) return "text/plain";
   throw new Error("MIME_SPOOF_OR_UNSUPPORTED");
 }
-export function createIngestionService(storage: StorageProvider, options = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000 }) {
+export function createIngestionService(storage: StorageProvider, options = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000 }) {
   async function assertMembership(context: TrustedRequestContext) { const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context } }); if (!member) throw new Error("WORKSPACE_ACCESS_DENIED"); }
   return {
     async createUploadIntent(context: TrustedRequestContext, input: { filename: string; mediaType: string; sizeBytes: number }) {
@@ -47,38 +48,65 @@ export function createIngestionService(storage: StorageProvider, options = { max
         });
         return completion.sourceDocument;
       }
-      if (session.expiresAt < new Date()) { await prisma.uploadSession.update({ where: { id: session.id }, data: { status: "EXPIRED" } }); throw new Error("UPLOAD_EXPIRED"); }
-      const head = await storage.headObject(session.temporaryStorageKey); if (!head || head.size !== Number(session.declaredSizeBytes) || head.size > options.maxUploadBytes) { await prisma.uploadSession.update({ where: { id: session.id }, data: { status: "REJECTED" } }); throw new Error("UPLOAD_SIZE_INVALID"); }
-      const inspected = await inspectObjectStream(await storage.getObjectStream(session.temporaryStorageKey));
-      if (inspected.sizeBytes !== head.size || inspected.sizeBytes !== Number(session.declaredSizeBytes)) { await prisma.uploadSession.update({ where: { id: session.id }, data: { status: "REJECTED" } }); throw new Error("UPLOAD_STORAGE_SIZE_MISMATCH"); }
-      const mediaType = sniffMediaType(inspected.prefix, session.declaredMediaType, session.originalFilename); const digest = inspected.sha256; const storageKey = `workspaces/${context.workspaceId}/source-blobs/${digest}`;
-      const existing = await prisma.sourceBlob.findUnique({ where: { workspaceId_sha256: { workspaceId: context.workspaceId, sha256: digest } } });
-      let canonicalWasCreated = false;
-      if (existing) {
-        const existingHead = await storage.headObject(existing.storageKey);
-        if (!existingHead || existingHead.size !== inspected.sizeBytes) throw new Error("CANONICAL_STORAGE_INTEGRITY_FAILURE");
-      } else {
-        const canonicalHead = await storage.headObject(storageKey);
-        if (!canonicalHead) {
-          await storage.copyObject(session.temporaryStorageKey, storageKey);
-          canonicalWasCreated = true;
+      if (session.status === "REJECTED") throw new Error("UPLOAD_REJECTED");
+      if (session.status === "EXPIRED") throw new Error("UPLOAD_EXPIRED");
+      const claim = await claimUploadCompletion(context.workspaceId, session.id, options.completionLeaseMs);
+      if (!claim) {
+        const current = await prisma.uploadSession.findFirstOrThrow({ where: { id: session.id, workspaceId: context.workspaceId } });
+        if (current.status === "COMPLETED") {
+          const completion = await prisma.uploadCompletion.findUniqueOrThrow({ where: { uploadSessionId_workspaceId: { uploadSessionId: session.id, workspaceId: context.workspaceId } }, include: { sourceDocument: true } });
+          return completion.sourceDocument;
         }
-        const canonicalInspection = await inspectObjectStream(await storage.getObjectStream(storageKey));
-        if (canonicalInspection.sha256 !== digest || canonicalInspection.sizeBytes !== inspected.sizeBytes) {
-          if (canonicalWasCreated) await storage.deleteObject(storageKey).catch(() => undefined);
-          throw new Error("CANONICAL_STORAGE_INTEGRITY_FAILURE");
-        }
+        if (current.status === "EXPIRED") throw new Error("UPLOAD_EXPIRED");
+        if (current.status === "REJECTED") throw new Error("UPLOAD_REJECTED");
+        throw new Error("UPLOAD_COMPLETION_IN_PROGRESS");
       }
-      const parser = parserProvenance(mediaType);
-      const result = await prisma.$transaction(async (tx) => { const blob = existing ?? await tx.sourceBlob.create({ data: { workspaceId: context.workspaceId, sha256: digest, sizeBytes: inspected.sizeBytes, mediaType, storageKey } }); const source = await tx.source.create({ data: { workspaceId: context.workspaceId, kind: "FILE", displayName: session.originalFilename } }); const document = await tx.sourceDocument.create({ data: { sourceId: source.id, sourceBlobId: blob.id, workspaceId: context.workspaceId, version: 1, sha256: blob.sha256, sizeBytes: blob.sizeBytes, mediaType, storageKey: blob.storageKey } }); const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId: document.id }, idempotencyKey: `ingest:${document.id}` } }); const run = await tx.ingestionRun.create({ data: { sourceDocumentId: document.id, workspaceId: context.workspaceId, jobId: job.id, parserVersion: parser.version, normalizationVersion: CANONICAL_NORMALIZATION_VERSION } }); await tx.uploadCompletion.create({ data: { uploadSessionId: session.id, sourceDocumentId: document.id, workspaceId: context.workspaceId } }); await tx.outboxEvent.create({ data: { topic: "source.ingestion.requested", aggregateId: run.id, payload: { ingestionRunId: run.id } } }); await tx.uploadSession.update({ where: { id: session.id }, data: { status: "COMPLETED", completedAt: new Date() } }); return document; });
-      await storage.deleteObject(session.temporaryStorageKey); return result;
+      try {
+        if (session.expiresAt < new Date()) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "EXPIRED"); throw new Error("UPLOAD_EXPIRED"); }
+        const head = await storage.headObject(session.temporaryStorageKey); if (!head || head.size !== Number(session.declaredSizeBytes) || head.size > options.maxUploadBytes) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED"); throw new Error("UPLOAD_SIZE_INVALID"); }
+        if (!await renewCompletionClaim(context.workspaceId, session.id, claim.token, options.completionLeaseMs)) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST");
+        const inspected = await inspectObjectStream(await storage.getObjectStream(session.temporaryStorageKey));
+        if (inspected.sizeBytes !== head.size || inspected.sizeBytes !== Number(session.declaredSizeBytes)) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED"); throw new Error("UPLOAD_STORAGE_SIZE_MISMATCH"); }
+        const mediaType = sniffMediaType(inspected.prefix, session.declaredMediaType, session.originalFilename); const digest = inspected.sha256; const storageKey = `workspaces/${context.workspaceId}/source-blobs/${digest}`;
+        if (!await renewCompletionClaim(context.workspaceId, session.id, claim.token, options.completionLeaseMs)) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST");
+        const existing = await prisma.sourceBlob.findUnique({ where: { workspaceId_sha256: { workspaceId: context.workspaceId, sha256: digest } } });
+        let canonicalWasCreated = false;
+        if (existing) {
+          const existingHead = await storage.headObject(existing.storageKey);
+          if (!existingHead || existingHead.size !== inspected.sizeBytes) throw new Error("CANONICAL_STORAGE_INTEGRITY_FAILURE");
+        } else {
+          const canonicalHead = await storage.headObject(storageKey);
+          if (!canonicalHead) { await storage.copyObject(session.temporaryStorageKey, storageKey); canonicalWasCreated = true; }
+          const canonicalInspection = await inspectObjectStream(await storage.getObjectStream(storageKey));
+          if (canonicalInspection.sha256 !== digest || canonicalInspection.sizeBytes !== inspected.sizeBytes) {
+            if (canonicalWasCreated) await storage.deleteObject(storageKey).catch(() => undefined);
+            throw new Error("CANONICAL_STORAGE_INTEGRITY_FAILURE");
+          }
+        }
+        if (!await renewCompletionClaim(context.workspaceId, session.id, claim.token, options.completionLeaseMs)) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST");
+        const parser = parserProvenance(mediaType);
+        const result = await prisma.$transaction(async (tx) => {
+          const owned = await tx.$executeRaw`UPDATE "UploadSession" SET "updatedAt" = NOW() WHERE "id" = ${session.id} AND "workspaceId" = ${context.workspaceId} AND "status" = 'COMPLETING'::"UploadSessionStatus" AND "completionClaimToken" = ${claim.token} AND "completionLeaseUntil" >= NOW()`;
+          if (owned !== 1) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST");
+          await tx.sourceBlob.createMany({ data: [{ workspaceId: context.workspaceId, sha256: digest, sizeBytes: inspected.sizeBytes, mediaType, storageKey }], skipDuplicates: true });
+          const blob = await tx.sourceBlob.findUniqueOrThrow({ where: { workspaceId_sha256: { workspaceId: context.workspaceId, sha256: digest } } });
+          const source = await tx.source.create({ data: { workspaceId: context.workspaceId, kind: "FILE", displayName: session.originalFilename } }); const document = await tx.sourceDocument.create({ data: { sourceId: source.id, sourceBlobId: blob.id, workspaceId: context.workspaceId, version: 1, sha256: blob.sha256, sizeBytes: blob.sizeBytes, mediaType, storageKey: blob.storageKey } }); const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId: document.id }, idempotencyKey: `ingest:${document.id}` } }); const run = await tx.ingestionRun.create({ data: { sourceDocumentId: document.id, workspaceId: context.workspaceId, jobId: job.id, parserVersion: parser.version, normalizationVersion: CANONICAL_NORMALIZATION_VERSION } }); await tx.uploadCompletion.create({ data: { uploadSessionId: session.id, sourceDocumentId: document.id, workspaceId: context.workspaceId } }); await tx.outboxEvent.create({ data: { topic: "source.ingestion.requested", aggregateId: run.id, payload: { ingestionRunId: run.id } } });
+          const completed = await tx.$executeRaw`UPDATE "UploadSession" SET "status" = 'COMPLETED'::"UploadSessionStatus", "completionClaimToken" = NULL, "completionClaimedAt" = NULL, "completionLeaseUntil" = NULL, "completedAt" = NOW(), "updatedAt" = NOW() WHERE "id" = ${session.id} AND "workspaceId" = ${context.workspaceId} AND "status" = 'COMPLETING'::"UploadSessionStatus" AND "completionClaimToken" = ${claim.token}`;
+          if (completed !== 1) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST"); return document;
+        });
+        await storage.deleteObject(session.temporaryStorageKey); return result;
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "UNEXPECTED_ERROR";
+        if (!["UPLOAD_SIZE_INVALID", "UPLOAD_STORAGE_SIZE_MISMATCH", "UPLOAD_EXPIRED", "MIME_SPOOF_OR_UNSUPPORTED"].includes(code)) await releaseCompletionClaim(context.workspaceId, session.id, claim.token);
+        throw error;
+      }
     },
     async processIngestionRun(runId: string) {
       const run = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runId }, include: { sourceDocument: { include: { source: true } }, job: true } }); if (run.status === "SUCCEEDED") return;
       await prisma.$transaction([prisma.ingestionRun.update({ where: { id: runId }, data: { status: "RUNNING", startedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.RUNNING, startedAt: new Date(), attemptCount: { increment: 1 } } })]);
       try {
         const bytes = await storage.getObjectBytes(run.sourceDocument.storageKey);
-        const parsed = await parseDocument(bytes, run.sourceDocument.mediaType, options.maxPdfPages);
+        const parsed = await parseDocument(bytes, run.sourceDocument.mediaType, { maxPdfPages: options.maxPdfPages });
         const canonicalBlocks = parsed.pages.flatMap((page) => page.blocks);
         const text = canonicalBlocks.map((block) => block.text).join(CANONICAL_BLOCK_SEPARATOR);
         const textKey = `workspaces/${run.sourceDocument.source.workspaceId}/extractions/${run.id}/text.txt`;
@@ -113,6 +141,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
                   kind: block.kind,
                   text: block.text,
                   contentHash: sha256Utf8(block.text),
+                  metadata: block.metadata ? JSON.parse(JSON.stringify(block.metadata)) : undefined,
                 },
               });
             }
@@ -130,45 +159,44 @@ export function createIngestionService(storage: StorageProvider, options = { max
   };
 }
 
-export async function dispatchPendingIngestion(queue: Queue<{ ingestionRunId: string }>): Promise<number> {
-  const events = await prisma.outboxEvent.findMany({ where: { topic: "source.ingestion.requested", dispatchedAt: null }, orderBy: { createdAt: "asc" }, take: 100 });
-  for (const event of events) { const ingestionRunId = (event.payload as { ingestionRunId: string }).ingestionRunId; await queue.add(INGESTION_JOB, { ingestionRunId }, { jobId: ingestionRunId }); await prisma.$transaction([prisma.outboxEvent.update({ where: { id: event.id }, data: { dispatchedAt: new Date() } }), prisma.ingestionRun.update({ where: { id: ingestionRunId }, data: { job: { update: { queueJobId: ingestionRunId } } } })]); }
+type IngestionQueue = { add(name: string, payload: { ingestionRunId: string }, options: { jobId: string }): Promise<unknown> };
+export type IngestionDispatchOptions = { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; /** Test-only fault seam; runs after queue acceptance and before the DB finalize transaction. */ beforeFinalize?: (eventId: string) => Promise<void> | void };
+export async function dispatchPendingIngestion(queue: IngestionQueue, options: IngestionDispatchOptions = {}): Promise<number> {
+  const batchSize = options.batchSize ?? 100, leaseMs = options.leaseMs ?? 60_000, maxAttempts = options.maxAttempts ?? 5;
+  const events = await prisma.$queryRaw<Array<{ id: string; payload: unknown }>>`
+    WITH candidates AS (
+      SELECT "id" FROM "OutboxEvent"
+      WHERE "topic" = 'source.ingestion.requested'
+        AND (${options.aggregateIds ?? []}::text[] = '{}'::text[] OR "aggregateId" = ANY(${options.aggregateIds ?? []}::text[]))
+        AND ("status" = 'PENDING'::"OutboxStatus" OR ("status" = 'PROCESSING'::"OutboxStatus" AND "leaseUntil" < NOW()))
+        AND "attemptCount" < ${maxAttempts}
+      ORDER BY "createdAt" ASC FOR UPDATE SKIP LOCKED LIMIT ${batchSize}
+    )
+    UPDATE "OutboxEvent" AS event SET "status" = 'PROCESSING'::"OutboxStatus", "claimedAt" = NOW(),
+      "leaseUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond'), "attemptCount" = event."attemptCount" + 1, "updatedAt" = NOW()
+    FROM candidates WHERE event."id" = candidates."id" RETURNING event."id", event."payload"
+  `;
+  for (const event of events) {
+    const ingestionRunId = (event.payload as { ingestionRunId: string }).ingestionRunId;
+    try {
+      await queue.add(INGESTION_JOB, { ingestionRunId }, { jobId: ingestionRunId });
+      await options.beforeFinalize?.(event.id);
+      await prisma.$transaction(async (tx) => {
+        const marked = await tx.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'DISPATCHED'::"OutboxStatus", "dispatchedAt" = NOW(), "leaseUntil" = NULL, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus"`;
+        if (marked !== 1) throw new Error("OUTBOX_CLAIM_LOST");
+        await tx.ingestionRun.update({ where: { id: ingestionRunId }, data: { job: { update: { queueJobId: ingestionRunId } } } });
+      });
+    } catch (error) {
+      const lastError = error instanceof Error ? error.message.slice(0, 2000) : "UNEXPECTED_ERROR";
+      await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = CASE WHEN "attemptCount" >= ${maxAttempts} THEN 'FAILED'::"OutboxStatus" ELSE 'PENDING'::"OutboxStatus" END, "leaseUntil" = NULL, "lastError" = ${lastError}, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus"`;
+    }
+  }
   return events.length;
 }
-type ParserProvenance = { name: string; version: string };
-type SourceBlockKind = "HEADING" | "PARAGRAPH" | "LIST_ITEM" | "QUOTE" | "TABLE" | "IMAGE" | "CAPTION" | "FOOTNOTE" | "CODE" | "EQUATION" | "UNKNOWN";
-type ParsedBlock = { kind: SourceBlockKind; text: string };
-type Parsed = { parser: ParserProvenance; pages: Array<{ physicalPageIndex: number | null; blocks: ParsedBlock[] }> };
-
-function parserProvenance(mediaType: string): ParserProvenance {
+function parserProvenance(mediaType: string): { name: string; version: string } {
   if (mediaType === "text/plain") return { name: "builtin-text", version: "text-parser-v1" };
   if (mediaType === "text/markdown") return { name: "builtin-markdown", version: "markdown-parser-v1" };
-  if (mediaType === "application/pdf") return { name: "pdftotext", version: "pdftotext-adapter-v1" };
+  if (mediaType === "application/pdf") return { name: "pdftotext-isolated", version: "pdf-isolation-v2" };
+  if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v1" };
   return { name: "unsupported", version: "unsupported-v1" };
 }
-
-async function parseDocument(bytes: Uint8Array, mediaType: string, maxPdfPages: number): Promise<Parsed> {
-  if (mediaType === "text/plain") return blocksFromText(Buffer.from(bytes).toString("utf8"), "PARAGRAPH", parserProvenance(mediaType));
-  if (mediaType === "text/markdown") return { parser: parserProvenance(mediaType), pages: [{ physicalPageIndex: null, blocks: markdownBlocks(Buffer.from(bytes).toString("utf8")) }] };
-  if (mediaType === "application/pdf") return parsePdf(bytes, maxPdfPages);
-  if (mediaType === "application/epub+zip") throw new Error("EPUB_PARSER_NOT_AVAILABLE");
-  throw new Error("UNSUPPORTED_MEDIA_TYPE");
-}
-
-function splitCanonicalBlocks(text: string): string[] {
-  const normalized = normalizeCanonicalText(text, { stripDocumentBom: true });
-  return normalized.split(/\n[ \t]*\n+/).map((block) => normalizeCanonicalText(block)).filter(Boolean);
-}
-
-function blocksFromText(text: string, kind: SourceBlockKind, parser: ParserProvenance): Parsed {
-  return { parser, pages: [{ physicalPageIndex: null, blocks: splitCanonicalBlocks(text).map((value) => ({ kind, text: value })) }] };
-}
-
-function markdownBlocks(text: string): ParsedBlock[] {
-  return splitCanonicalBlocks(text).map((block) => ({
-    kind: /^#{1,6}\s/.test(block) ? "HEADING" : /^[-*+]\s/.test(block) ? "LIST_ITEM" : /^>\s/.test(block) ? "QUOTE" : /^```/.test(block) ? "CODE" : "PARAGRAPH",
-    text: block,
-  }));
-}
-
-async function parsePdf(bytes: Uint8Array, maxPages: number): Promise<Parsed> { if (!Buffer.from(bytes.slice(0, 8)).toString().startsWith("%PDF-")) throw new Error("SOURCE_CORRUPTED"); const directory = join(tmpdir(), `ai-cognitive-${randomUUID()}`); await mkdir(directory); const input = join(directory, "source.pdf"), output = join(directory, "source.txt"); try { await writeFile(input, bytes); await new Promise<void>((resolve, reject) => { const child = spawn(process.env.PDFTOTEXT_PATH ?? "pdftotext", ["-enc", "UTF-8", input, output], { windowsHide: true }); child.on("error", () => reject(new Error("PDF_PARSER_UNAVAILABLE"))); child.on("exit", (code) => code === 0 ? resolve() : reject(new Error("SOURCE_CORRUPTED"))); }); const pages = (await readFile(output, "utf8")).split("\f").map((text, index) => ({ physicalPageIndex: index, blocks: markdownBlocks(text) })).filter((page) => page.blocks.length); if (!pages.length) throw new Error("OCR_REQUIRED"); if (pages.length > maxPages) throw new Error("PDF_PAGE_LIMIT_EXCEEDED"); return { parser: parserProvenance("application/pdf"), pages }; } finally { await rm(directory, { recursive: true, force: true }); } }

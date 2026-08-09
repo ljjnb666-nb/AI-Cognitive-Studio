@@ -31,6 +31,7 @@ enum SourceKind {
 enum UploadSessionStatus {
   CREATED
   UPLOADED
+  COMPLETING
   COMPLETED
   EXPIRED
   REJECTED
@@ -47,6 +48,13 @@ enum ExtractionStatus {
   SUCCEEDED
   FAILED
   OCR_REQUIRED
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DISPATCHED
+  FAILED
 }
 
 enum SourceBlockKind {
@@ -215,6 +223,9 @@ model UploadSession {
   declaredSizeBytes   BigInt
   temporaryStorageKey String
   status              UploadSessionStatus @default(CREATED)
+  completionClaimToken String?
+  completionClaimedAt  DateTime?
+  completionLeaseUntil DateTime?
   expiresAt           DateTime
   completedAt         DateTime?
   createdAt           DateTime            @default(now())
@@ -224,6 +235,7 @@ model UploadSession {
 
   @@unique([id, workspaceId])
   @@index([workspaceId, status])
+  @@index([workspaceId, status, completionLeaseUntil])
 }
 
 model UploadCompletion {
@@ -346,10 +358,17 @@ model OutboxEvent {
   topic        String
   aggregateId  String
   payload      Json
+  status       OutboxStatus @default(PENDING)
+  attemptCount Int       @default(0)
+  claimedAt    DateTime?
+  leaseUntil   DateTime?
+  lastError    String?
   createdAt    DateTime  @default(now())
   dispatchedAt DateTime?
+  updatedAt    DateTime  @updatedAt
 
   @@index([dispatchedAt, createdAt])
+  @@index([status, leaseUntil, createdAt])
 }
 
 model Job {

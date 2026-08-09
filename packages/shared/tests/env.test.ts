@@ -33,4 +33,9 @@ describe("readEnvironment storage safety", () => {
   it("allows local credentials outside production and parses the public endpoint", () => {
     expect(readEnvironment(environment({ NODE_ENV: "test", S3_PUBLIC_ENDPOINT: "http://localhost:9000" }))).toMatchObject({ S3_PUBLIC_ENDPOINT: "http://localhost:9000", S3_ACCESS_KEY: "local-development-only" });
   });
+
+  it("parses a positive upload completion lease duration", () => {
+    expect(readEnvironment(environment({ SOURCE_UPLOAD_COMPLETION_LEASE_MS: "1200" }))).toMatchObject({ SOURCE_UPLOAD_COMPLETION_LEASE_MS: 1200 });
+    expect(() => readEnvironment(environment({ SOURCE_UPLOAD_COMPLETION_LEASE_MS: "0" }))).toThrow();
+  });
 });
