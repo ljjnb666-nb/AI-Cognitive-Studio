@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import process from "node:process";
 import { getDocument, PasswordResponses } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const [input, pagesText, outputChars] = process.argv.slice(2);
