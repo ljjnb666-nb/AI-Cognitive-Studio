@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
 import { normalizeCanonicalText, splitCanonicalBlock } from "./canonical-text.js";
 import { SourceError, sourceErrorForParserResult } from "./source-errors.js";
@@ -10,10 +11,10 @@ import { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export type SourceBlockKind = "HEADING" | "PARAGRAPH" | "LIST_ITEM" | "QUOTE" | "TABLE" | "IMAGE" | "CAPTION" | "FOOTNOTE" | "CODE" | "EQUATION" | "UNKNOWN";
 export type ParsedBlock = { kind: SourceBlockKind; text: string; metadata?: Record<string, unknown> };
 export type Parsed = { parser: { name: string; version: string }; pages: Array<{ physicalPageIndex: number | null; blocks: ParsedBlock[] }> };
-export type ParserLimits = { maxPdfPages: number; maxPdfOutputChars: number; pdfTimeoutMs: number; maxArchiveEntries: number; maxArchiveEntryBytes: number; maxArchiveTotalBytes: number; maxArchiveCompressionRatio: number };
-export const DEFAULT_PARSER_LIMITS: ParserLimits = { maxPdfPages: 2000, maxPdfOutputChars: 20_000_000, pdfTimeoutMs: 30_000, maxArchiveEntries: 10_000, maxArchiveEntryBytes: 25_000_000, maxArchiveTotalBytes: 100_000_000, maxArchiveCompressionRatio: 100 };
+export type ParserLimits = { maxPdfPages: number; maxPdfOutputChars: number; pdfTimeoutMs: number; pdfMemoryMb: number; maxPdfIpcBytes: number; maxPdfStderrBytes: number; maxArchiveEntries: number; maxArchiveEntryBytes: number; maxArchiveTotalBytes: number; maxArchiveCompressionRatio: number };
+export const DEFAULT_PARSER_LIMITS: ParserLimits = { maxPdfPages: 2000, maxPdfOutputChars: 20_000_000, pdfTimeoutMs: 30_000, pdfMemoryMb: 128, maxPdfIpcBytes: 24_000_000, maxPdfStderrBytes: 32_000, maxArchiveEntries: 10_000, maxArchiveEntryBytes: 25_000_000, maxArchiveTotalBytes: 100_000_000, maxArchiveCompressionRatio: 100 };
 
-const parsers = { text: { name: "builtin-text", version: "text-parser-v1" }, markdown: { name: "builtin-markdown", version: "markdown-parser-v1" }, pdf: { name: "pdftotext-isolated", version: "pdf-isolation-v2" }, epub: { name: "builtin-epub", version: "epub-parser-v1" } };
+const parsers = { text: { name: "builtin-text", version: "text-parser-v1" }, markdown: { name: "builtin-markdown", version: "markdown-parser-v1" }, pdf: { name: "pdfjs-isolated", version: "pdf-isolation-v3" }, epub: { name: "builtin-epub", version: "epub-parser-v1" } };
 
 export async function parseDocument(bytes: Uint8Array, mediaType: string, limits: Partial<ParserLimits> = {}): Promise<Parsed> {
   const effective = { ...DEFAULT_PARSER_LIMITS, ...limits };
@@ -30,32 +31,22 @@ function blocksFromText(text: string, kind: SourceBlockKind, parser: Parsed["par
 function markdownBlocks(text: string): ParsedBlock[] { return splitText(text).map((text) => ({ kind: /^#{1,6}\s/.test(text) ? "HEADING" : /^[-*+]\s/.test(text) ? "LIST_ITEM" : /^>\s/.test(text) ? "QUOTE" : /^```/.test(text) ? "CODE" : "PARAGRAPH", text })); }
 
 /**
- * Runs the native parser outside the worker process. The child is killable, has a
- * wall-clock timeout, bounded stderr and bounded extracted output. Native tools
- * cannot receive V8 heap limits; their resource boundary is this process, timeout
- * and output limit (deployments should additionally apply OS/container memory limits).
+ * Runs PDF.js in a dedicated Node process with a V8 heap limit; the worker never parses untrusted PDFs.
  */
 async function parsePdf(bytes: Uint8Array, limits: ParserLimits): Promise<Parsed> {
   if (!Buffer.from(bytes.subarray(0, 8)).toString("ascii").startsWith("%PDF-")) throw new Error(SourceError.CORRUPTED);
-  const dir = join(tmpdir(), `ai-cognitive-pdf-${randomUUID()}`); const input = join(dir, "source.pdf"); const output = join(dir, "source.txt");
+  const dir = join(tmpdir(), `ai-cognitive-pdf-${randomUUID()}`); const input = join(dir, "source.pdf");
   try {
     await mkdir(dir); await writeFile(input, bytes);
-    const info = await runNative(process.env.PDFINFO_PATH ?? "pdfinfo", [input], limits.pdfTimeoutMs, 32_000);
-    if (info.code !== 0) throw new Error(pdfFailure(info.stderr));
-    const pagesMatch = /^Pages:\s*(\d+)$/m.exec(info.stdout);
-    if (!pagesMatch) throw new Error(SourceError.CORRUPTED);
-    if (Number(pagesMatch[1]) > limits.maxPdfPages) throw new Error(SourceError.TOO_LARGE);
-    const result = await runNative(process.env.PDFTOTEXT_PATH ?? "pdftotext", ["-enc", "UTF-8", input, output], limits.pdfTimeoutMs, 32_000);
-    if (result.code !== 0) throw new Error(pdfFailure(result.stderr));
-    const text = await readFile(output, "utf8").catch(() => { throw new Error(SourceError.PARSE); });
-    if (text.length > limits.maxPdfOutputChars) throw new Error(SourceError.TOO_LARGE);
-    const chunks = text.split("\f");
-    const pages = Array.from({ length: Number(pagesMatch[1]) }, (_, physicalPageIndex) => ({ physicalPageIndex, blocks: markdownBlocks(chunks[physicalPageIndex] ?? "") }));
+    const child = await runPdfChild(input, limits); if (child.error) throw new Error(child.error);
+    const pages = child.pages.map(({ physicalPageIndex, text }) => ({ physicalPageIndex, blocks: splitText(text).map((value) => ({ kind: "PARAGRAPH" as const, text: value })) }));
     if (!pages.some((page) => page.blocks.length)) throw new Error(SourceError.OCR_REQUIRED);
     return { parser: parsers.pdf, pages };
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 function pdfFailure(stderr: string): string { if (/password|encrypted/i.test(stderr)) return SourceError.PASSWORD_REQUIRED; if (/syntax error|damaged|xref|trailer/i.test(stderr)) return SourceError.CORRUPTED; return SourceError.PARSE; }
+export function pdfChildArgs(input: string, limits: ParserLimits): string[] { return [`--max-old-space-size=${limits.pdfMemoryMb}`, fileURLToPath(new URL("./pdf-parser-child.mjs", import.meta.url)), input, String(limits.maxPdfPages), String(limits.maxPdfOutputChars)]; }
+async function runPdfChild(input: string, limits: ParserLimits): Promise<{ pages: Array<{ physicalPageIndex: number; text: string }>; error?: string }> { return new Promise((resolve, reject) => { const child = spawn(process.execPath, pdfChildArgs(input, limits), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }); let stdout = "", stderr = "", done = false; const finish = (fn: () => void) => { if (!done) { done = true; clearTimeout(timer); fn(); } }; const timer = setTimeout(() => { child.kill(); finish(() => reject(new Error(SourceError.PARSE_TIMEOUT))); }, limits.pdfTimeoutMs); const capture = (current: string, data: Buffer, max: number) => current.length + data.length > max ? null : current + data.toString("utf8"); child.stdout.on("data", (data: Buffer) => { const next = capture(stdout, data, limits.maxPdfIpcBytes); if (next === null) { child.kill(); finish(() => reject(new Error(SourceError.TOO_LARGE))); } else stdout = next; }); child.stderr.on("data", (data: Buffer) => { const next = capture(stderr, data, limits.maxPdfStderrBytes); if (next === null) { child.kill(); finish(() => reject(new Error(SourceError.PARSE))); } else stderr = next; }); child.on("error", () => finish(() => reject(new Error(SourceError.PARSE)))); child.on("close", () => finish(() => { try { const records = stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); const failure = records.find((record) => record.type === "error"); resolve({ pages: records.filter((record) => record.type === "page"), error: failure?.code }); } catch { reject(new Error(pdfFailure(stderr))); } })); }); }
 export async function runNative(command: string, args: string[], timeoutMs: number, maxStderr: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }); let stdout = "", stderr = "", timedOut = false;

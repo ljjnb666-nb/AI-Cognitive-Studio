@@ -155,7 +155,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
           await tx.ingestionRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", completedAt: new Date() } });
           await tx.job.update({ where: { id: run.jobId }, data: { status: JobStatus.SUCCEEDED, progress: 100, completedAt: new Date() } });
         });
-      } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "UNEXPECTED_ERROR"; const status = code === SourceError.OCR_REQUIRED ? "OCR_REQUIRED" : code === SourceError.PASSWORD_REQUIRED ? "PASSWORD_REQUIRED" : [SourceError.TYPE_MISMATCH, SourceError.UNSUPPORTED_TYPE, SourceError.TOO_LARGE, SourceError.ARCHIVE_UNSAFE].includes(code as never) ? "REJECTED" : "FAILED"; await prisma.$transaction([prisma.ingestionRun.update({ where: { id: run.id }, data: { status, errorCode: code, completedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.FAILED, error: { code }, completedAt: new Date() } })]); logger.error("ingestion.failed", { ingestionRunId: run.id, code }); throw error; }
+      } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "UNEXPECTED_ERROR"; const status = code === SourceError.OCR_REQUIRED ? "OCR_REQUIRED" : code === SourceError.PASSWORD_REQUIRED ? "PASSWORD_REQUIRED" : [SourceError.TYPE_MISMATCH, SourceError.UNSUPPORTED_TYPE, SourceError.TOO_LARGE, SourceError.ARCHIVE_UNSAFE, SourceError.CORRUPTED].includes(code as never) ? "REJECTED" : "FAILED"; await prisma.$transaction([prisma.ingestionRun.update({ where: { id: run.id }, data: { status, errorCode: code, completedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.FAILED, error: { code }, completedAt: new Date() } })]); logger.error("ingestion.failed", { ingestionRunId: run.id, code }); throw error; }
     },
   };
 }
@@ -198,7 +198,7 @@ export async function dispatchPendingIngestion(queue: IngestionQueue, options: I
 function parserProvenance(mediaType: string): { name: string; version: string } {
   if (mediaType === "text/plain") return { name: "builtin-text", version: "text-parser-v1" };
   if (mediaType === "text/markdown") return { name: "builtin-markdown", version: "markdown-parser-v1" };
-  if (mediaType === "application/pdf") return { name: "pdftotext-isolated", version: "pdf-isolation-v2" };
+  if (mediaType === "application/pdf") return { name: "pdfjs-isolated", version: "pdf-isolation-v3" };
   if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v1" };
   return { name: "unsupported", version: "unsupported-v1" };
 }

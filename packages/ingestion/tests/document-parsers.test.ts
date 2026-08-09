@@ -1,5 +1,7 @@
 import { deflateRawSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
+import { PassThrough } from "node:stream";
+import PDFDocument from "pdfkit";
 import { describe, expect, it } from "vitest";
 import { parseDocument, runNative } from "../src/document-parsers.js";
 
@@ -14,6 +16,7 @@ function zip(entries: Entry[]): Uint8Array {
   const directory = Buffer.concat(central), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16); return Buffer.concat([...locals, directory, end]);
 }
 function epub(overrides: Entry[] = []): Uint8Array { return zip([{ name: "mimetype", text: "application/epub+zip" }, { name: "META-INF/container.xml", text: '<container><rootfile full-path="OPS/book.opf"/></container>' }, { name: "OPS/book.opf", text: '<package><manifest><item id="a" href="a.xhtml"/><item id="b" href="b.xhtml"/></manifest><spine><itemref idref="b"/><itemref idref="a"/></spine></package>' }, { name: "OPS/a.xhtml", text: "<html><body><h1>First</h1><p>A</p></body></html>" }, { name: "OPS/b.xhtml", text: "<html><body><p>B</p><li>C</li></body></html>" }, ...overrides]); }
+async function pdf(pages: Array<string | null>, options: ConstructorParameters<typeof PDFDocument>[0] = {}): Promise<Buffer> { const document = new PDFDocument({ autoFirstPage: false, ...options }); const stream = new PassThrough(), chunks: Buffer[] = []; stream.on("data", (chunk: Buffer) => chunks.push(chunk)); const complete = new Promise<Buffer>((resolve) => stream.on("end", () => resolve(Buffer.concat(chunks)))); document.pipe(stream); for (const text of pages) { document.addPage(); if (text === null) document.rect(20, 20, 100, 100).fill(); else document.text(text); } document.end(); return complete; }
 
 describe("safe EPUB parser", () => {
   it("uses OPF spine order, emits no pages, and retains spine metadata", async () => { const parsed = await parseDocument(epub(), "application/epub+zip"); expect(parsed.pages[0]?.physicalPageIndex).toBeNull(); expect(parsed.pages[0]?.blocks.map((block) => block.text)).toEqual(["B", "C", "First", "A"]); expect(parsed.pages[0]?.blocks[0]?.metadata).toEqual({ spineIndex: 0, href: "OPS/b.xhtml" }); });
@@ -28,6 +31,8 @@ describe("safe EPUB parser", () => {
 });
 
 describe("isolated PDF parser", () => {
+  it("extracts ordered conservative paragraph blocks through the memory-capped child", async () => { const parsed = await parseDocument(await pdf(["Hello PDF", "Second Page"]), "application/pdf"); expect(parsed.parser.name).toBe("pdfjs-isolated"); expect(parsed.pages.map((page) => page.physicalPageIndex)).toEqual([0, 1]); expect(parsed.pages.flatMap((page) => page.blocks)).toMatchObject([{ kind: "PARAGRAPH", text: "Hello PDF" }, { kind: "PARAGRAPH", text: "Second Page" }]); });
+  it("classifies password, OCR, page, and output limits in the child", async () => { await expect(parseDocument(await pdf(["secret"], { userPassword: "secret" }), "application/pdf")).rejects.toThrow("SOURCE_PASSWORD_REQUIRED"); await expect(parseDocument(await pdf([null]), "application/pdf")).rejects.toThrow("SOURCE_OCR_REQUIRED"); await expect(parseDocument(await pdf(["one", "two", "three"]), "application/pdf", { maxPdfPages: 2 })).rejects.toThrow("SOURCE_TOO_LARGE"); await expect(parseDocument(await pdf(["x".repeat(500)]), "application/pdf", { maxPdfOutputChars: 50 })).rejects.toThrow("SOURCE_TOO_LARGE"); }, 30_000);
   it("executes the native child boundary for malformed PDFs", async () => { await expect(parseDocument(Buffer.from("%PDF-1.7\nnot a PDF"), "application/pdf")).rejects.toThrow(); });
   it("kills a stalled child at the parser timeout", async () => { const fixture = fileURLToPath(new URL("./fixtures/pdf-child-stall.mjs", import.meta.url)); await expect(runNative(process.execPath, [fixture], 5, 1024)).rejects.toThrow("SOURCE_PARSE_TIMEOUT"); });
 });
