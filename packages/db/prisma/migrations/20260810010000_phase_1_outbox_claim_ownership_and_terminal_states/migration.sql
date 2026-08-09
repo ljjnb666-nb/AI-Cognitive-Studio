@@ -1,0 +1,5 @@
+ALTER TYPE "IngestionStatus" ADD VALUE 'REJECTED';
+ALTER TYPE "IngestionStatus" ADD VALUE 'OCR_REQUIRED';
+ALTER TYPE "IngestionStatus" ADD VALUE 'PASSWORD_REQUIRED';
+
+ALTER TABLE "OutboxEvent" ADD COLUMN "claimToken" TEXT;

@@ -42,6 +42,9 @@ enum IngestionStatus {
   RUNNING
   SUCCEEDED
   FAILED
+  REJECTED
+  OCR_REQUIRED
+  PASSWORD_REQUIRED
 }
 
 enum ExtractionStatus {
@@ -363,6 +366,7 @@ model OutboxEvent {
   claimedAt    DateTime?
   leaseUntil   DateTime?
   lastError    String?
+  claimToken   String?
   createdAt    DateTime  @default(now())
   dispatchedAt DateTime?
   updatedAt    DateTime  @updatedAt

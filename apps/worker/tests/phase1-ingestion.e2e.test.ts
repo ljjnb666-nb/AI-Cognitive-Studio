@@ -1,5 +1,3 @@
-import { config } from "dotenv";
-import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { QueueEvents } from "bullmq";
 import { prisma } from "../../../packages/db/src/index.js";
@@ -8,7 +6,6 @@ import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { readEnvironment, createRedisConnection } from "@ai-cognitive/shared/server";
 import { createSourceIngestionQueue, createSourceIngestionWorker, dispatchSourceIngestion } from "../src/source-ingestion.js";
 
-process.env.NODE_ENV = "test"; config({ path: fileURLToPath(new URL("../../../.env", import.meta.url)) }); process.env.DATABASE_URL ??= process.env.DATABASE_URL_TEST;
 const environment = readEnvironment(); const workspaceIds: string[] = [];
 function storage() { return new S3CompatibleStorageProvider({ endpoint: environment.S3_ENDPOINT, publicEndpoint: environment.S3_PUBLIC_ENDPOINT, region: environment.S3_REGION, bucket: environment.S3_BUCKET, accessKey: environment.S3_ACCESS_KEY, secretKey: environment.S3_SECRET_KEY, forcePathStyle: environment.S3_FORCE_PATH_STYLE }); }
 async function fixture() { const user = await prisma.user.create({ data: { email: `${crypto.randomUUID()}@test` } }); const workspace = await prisma.workspace.create({ data: { name: crypto.randomUUID() } }); workspaceIds.push(workspace.id); await prisma.workspaceMember.create({ data: { workspaceId: workspace.id, userId: user.id, role: "OWNER" } }); return { user, workspace }; }

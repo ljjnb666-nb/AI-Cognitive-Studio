@@ -74,6 +74,8 @@ jobs:
         run: pnpm test:unit
       - name: Integration tests
         run: pnpm test:integration
+      - name: Phase 1 real infrastructure ingestion
+        run: pnpm test:phase1:e2e
       - name: Install Playwright browser
         run: pnpm --filter @ai-cognitive/web exec playwright install --with-deps chromium
       - name: End-to-end tests

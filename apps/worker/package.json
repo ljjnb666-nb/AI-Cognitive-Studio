@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:phase1:e2e": "vitest run tests/phase1-ingestion.e2e.test.ts"
+    "test:phase1:e2e": "vitest run --config vitest.phase1-e2e.config.ts"
   },
   "dependencies": {
     "@ai-cognitive/db": "workspace:*",

@@ -29,5 +29,5 @@ describe("safe EPUB parser", () => {
 
 describe("isolated PDF parser", () => {
   it("executes the native child boundary for malformed PDFs", async () => { await expect(parseDocument(Buffer.from("%PDF-1.7\nnot a PDF"), "application/pdf")).rejects.toThrow(); });
-  it("kills a stalled child at the parser timeout", async () => { const fixture = fileURLToPath(new URL("./fixtures/pdf-child-stall.cmd", import.meta.url)); await expect(runNative("cmd.exe", ["/d", "/s", "/c", fixture], 5, 1024)).rejects.toThrow("SOURCE_PARSE_TIMEOUT"); });
+  it("kills a stalled child at the parser timeout", async () => { const fixture = fileURLToPath(new URL("./fixtures/pdf-child-stall.mjs", import.meta.url)); await expect(runNative(process.execPath, [fixture], 5, 1024)).rejects.toThrow("SOURCE_PARSE_TIMEOUT"); });
 });

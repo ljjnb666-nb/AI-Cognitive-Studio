@@ -3,10 +3,10 @@ import { prisma, JobStatus } from "@ai-cognitive/db";
 import { sha256Utf8 } from "@ai-cognitive/domain";
 import { logger } from "@ai-cognitive/shared";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import type { Queue } from "bullmq";
 import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION } from "./canonical-text.js";
 import { inspectObjectStream } from "./object-inspection.js";
 import { parseDocument } from "./document-parsers.js";
+import { SourceError } from "./source-errors.js";
 import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
@@ -28,7 +28,7 @@ export function sniffMediaType(bytes: Uint8Array, declared: string, filename: st
   if (bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) return "application/epub+zip";
   if (declared === "text/markdown" || /\.md$/.test(lower)) return "text/markdown";
   if (declared === "text/plain" || /\.(txt|text)$/.test(lower)) return "text/plain";
-  throw new Error("MIME_SPOOF_OR_UNSUPPORTED");
+  throw new Error(SourceError.TYPE_MISMATCH);
 }
 export function createIngestionService(storage: StorageProvider, options = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000 }) {
   async function assertMembership(context: TrustedRequestContext) { const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context } }); if (!member) throw new Error("WORKSPACE_ACCESS_DENIED"); }
@@ -97,7 +97,8 @@ export function createIngestionService(storage: StorageProvider, options = { max
         await storage.deleteObject(session.temporaryStorageKey); return result;
       } catch (error) {
         const code = error instanceof Error ? error.message : "UNEXPECTED_ERROR";
-        if (!["UPLOAD_SIZE_INVALID", "UPLOAD_STORAGE_SIZE_MISMATCH", "UPLOAD_EXPIRED", "MIME_SPOOF_OR_UNSUPPORTED"].includes(code)) await releaseCompletionClaim(context.workspaceId, session.id, claim.token);
+        if (code === SourceError.TYPE_MISMATCH || code === SourceError.UNSUPPORTED_TYPE) await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED");
+        else if (!["UPLOAD_SIZE_INVALID", "UPLOAD_STORAGE_SIZE_MISMATCH", "UPLOAD_EXPIRED"].includes(code)) await releaseCompletionClaim(context.workspaceId, session.id, claim.token);
         throw error;
       }
     },
@@ -154,7 +155,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
           await tx.ingestionRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", completedAt: new Date() } });
           await tx.job.update({ where: { id: run.jobId }, data: { status: JobStatus.SUCCEEDED, progress: 100, completedAt: new Date() } });
         });
-      } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "UNEXPECTED_ERROR"; await prisma.$transaction([prisma.ingestionRun.update({ where: { id: run.id }, data: { status: "FAILED", errorCode: code, completedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.FAILED, error: { code }, completedAt: new Date() } })]); logger.error("ingestion.failed", { ingestionRunId: run.id, code }); throw error; }
+      } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "UNEXPECTED_ERROR"; const status = code === SourceError.OCR_REQUIRED ? "OCR_REQUIRED" : code === SourceError.PASSWORD_REQUIRED ? "PASSWORD_REQUIRED" : [SourceError.TYPE_MISMATCH, SourceError.UNSUPPORTED_TYPE, SourceError.TOO_LARGE, SourceError.ARCHIVE_UNSAFE].includes(code as never) ? "REJECTED" : "FAILED"; await prisma.$transaction([prisma.ingestionRun.update({ where: { id: run.id }, data: { status, errorCode: code, completedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.FAILED, error: { code }, completedAt: new Date() } })]); logger.error("ingestion.failed", { ingestionRunId: run.id, code }); throw error; }
     },
   };
 }
@@ -163,7 +164,8 @@ type IngestionQueue = { add(name: string, payload: { ingestionRunId: string }, o
 export type IngestionDispatchOptions = { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; /** Test-only fault seam; runs after queue acceptance and before the DB finalize transaction. */ beforeFinalize?: (eventId: string) => Promise<void> | void };
 export async function dispatchPendingIngestion(queue: IngestionQueue, options: IngestionDispatchOptions = {}): Promise<number> {
   const batchSize = options.batchSize ?? 100, leaseMs = options.leaseMs ?? 60_000, maxAttempts = options.maxAttempts ?? 5;
-  const events = await prisma.$queryRaw<Array<{ id: string; payload: unknown }>>`
+  await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'FAILED'::"OutboxStatus", "leaseUntil" = NULL, "claimToken" = NULL, "lastError" = COALESCE("lastError", 'OUTBOX_MAX_ATTEMPTS_EXCEEDED'), "updatedAt" = NOW() WHERE "topic" = 'source.ingestion.requested' AND "status" = 'PROCESSING'::"OutboxStatus" AND "leaseUntil" < NOW() AND "attemptCount" >= ${maxAttempts}`;
+  const events = await prisma.$queryRaw<Array<{ id: string; payload: unknown; claimToken: string }>>`
     WITH candidates AS (
       SELECT "id" FROM "OutboxEvent"
       WHERE "topic" = 'source.ingestion.requested'
@@ -173,8 +175,8 @@ export async function dispatchPendingIngestion(queue: IngestionQueue, options: I
       ORDER BY "createdAt" ASC FOR UPDATE SKIP LOCKED LIMIT ${batchSize}
     )
     UPDATE "OutboxEvent" AS event SET "status" = 'PROCESSING'::"OutboxStatus", "claimedAt" = NOW(),
-      "leaseUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond'), "attemptCount" = event."attemptCount" + 1, "updatedAt" = NOW()
-    FROM candidates WHERE event."id" = candidates."id" RETURNING event."id", event."payload"
+      "claimToken" = md5(random()::text || clock_timestamp()::text || event."id"), "leaseUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond'), "attemptCount" = event."attemptCount" + 1, "updatedAt" = NOW()
+    FROM candidates WHERE event."id" = candidates."id" RETURNING event."id", event."payload", event."claimToken"
   `;
   for (const event of events) {
     const ingestionRunId = (event.payload as { ingestionRunId: string }).ingestionRunId;
@@ -182,13 +184,13 @@ export async function dispatchPendingIngestion(queue: IngestionQueue, options: I
       await queue.add(INGESTION_JOB, { ingestionRunId }, { jobId: ingestionRunId });
       await options.beforeFinalize?.(event.id);
       await prisma.$transaction(async (tx) => {
-        const marked = await tx.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'DISPATCHED'::"OutboxStatus", "dispatchedAt" = NOW(), "leaseUntil" = NULL, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus"`;
+        const marked = await tx.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'DISPATCHED'::"OutboxStatus", "dispatchedAt" = NOW(), "leaseUntil" = NULL, "claimToken" = NULL, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus" AND "claimToken" = ${event.claimToken}`;
         if (marked !== 1) throw new Error("OUTBOX_CLAIM_LOST");
         await tx.ingestionRun.update({ where: { id: ingestionRunId }, data: { job: { update: { queueJobId: ingestionRunId } } } });
       });
     } catch (error) {
       const lastError = error instanceof Error ? error.message.slice(0, 2000) : "UNEXPECTED_ERROR";
-      await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = CASE WHEN "attemptCount" >= ${maxAttempts} THEN 'FAILED'::"OutboxStatus" ELSE 'PENDING'::"OutboxStatus" END, "leaseUntil" = NULL, "lastError" = ${lastError}, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus"`;
+      await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = CASE WHEN "attemptCount" >= ${maxAttempts} THEN 'FAILED'::"OutboxStatus" ELSE 'PENDING'::"OutboxStatus" END, "leaseUntil" = NULL, "claimToken" = NULL, "lastError" = ${lastError}, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus" AND "claimToken" = ${event.claimToken}`;
     }
   }
   return events.length;
