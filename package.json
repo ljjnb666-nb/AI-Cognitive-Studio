@@ -30,6 +30,7 @@
     "build": "pnpm -r --if-present build",
     "db:generate": "pnpm --filter @ai-cognitive/db prisma:generate:root",
     "db:migrate": "pnpm --filter @ai-cognitive/db prisma:migrate:root",
+    "db:migrate:deploy": "pnpm --filter @ai-cognitive/db prisma:migrate:deploy:root",
     "db:studio": "pnpm --filter @ai-cognitive/db prisma:studio:root"
   },
   "devDependencies": {

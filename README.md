@@ -21,6 +21,16 @@ pnpm db:migrate
 pnpm dev
 ```
 
+`pnpm db:migrate` is the local development command. It runs `prisma migrate dev`, which creates and applies a development migration when the Prisma schema changes. Do not use it in CI or deployment.
+
+For CI and deployment, apply only checked-in migrations:
+
+```bash
+pnpm db:migrate:deploy
+```
+
+`pnpm db:migrate:deploy` runs `prisma migrate deploy`; it never creates a new migration.
+
 The integration suite uses `DATABASE_URL_TEST`. Create the test database once after containers start:
 
 ```bash
@@ -31,7 +41,7 @@ Then apply the checked-in migration to it:
 
 ```bash
 $env:DATABASE_URL = (Select-String '^DATABASE_URL_TEST=' .env).Line.Split('=', 2)[1]
-pnpm --filter @ai-cognitive/db prisma migrate deploy
+pnpm db:migrate:deploy
 ```
 
 ## Validation
