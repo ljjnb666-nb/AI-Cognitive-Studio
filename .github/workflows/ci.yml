@@ -54,10 +54,10 @@ jobs:
           cache: pnpm
       - name: Install
         run: pnpm install --frozen-lockfile
-      - name: Start MinIO and initialize private bucket
-        run: docker compose up -d minio minio-init
-      - name: Verify MinIO bootstrap
-        run: docker compose wait minio-init
+      - name: Start MinIO
+        run: docker compose up -d minio
+      - name: Initialize private MinIO bucket
+        run: docker compose run --rm minio-init
       - name: Create isolated test database
         run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
       - name: Generate Prisma client
