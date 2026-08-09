@@ -22,6 +22,7 @@ describe("BullMQ health-check integration", () => {
     const worker = createHealthCheckWorker(process.env.REDIS_URL!, queueName);
     resources.push(resource);
     workers.push(worker);
+    await resource.events.waitUntilReady();
 
     const job = await enqueueHealthCheck(resource.queue);
     const completed = await job.waitUntilFinished(resource.events, 15_000);
@@ -35,6 +36,7 @@ describe("BullMQ health-check integration", () => {
     const worker = createHealthCheckWorker(process.env.REDIS_URL!, queueName);
     resources.push(resource);
     workers.push(worker);
+    await resource.events.waitUntilReady();
 
     const job = await resource.queue.add("system.health-check", { message: "invalid" } as never, { attempts: 1 });
     await expect(job.waitUntilFinished(resource.events, 15_000)).rejects.toThrow();
