@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,11 +9,11 @@ import { logger } from "@ai-cognitive/shared";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import type { Queue } from "bullmq";
 import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION, normalizeCanonicalText } from "./canonical-text.js";
+import { inspectObjectStream } from "./object-inspection.js";
 
 export type TrustedRequestContext = { userId: string; workspaceId: string };
 export const INGESTION_QUEUE = "source.ingestion";
 export const INGESTION_JOB = "source.ingest";
-const sha256Bytes = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").map((character) => character.charCodeAt(0) < 32 ? "_" : character).join("").slice(0, 180) || "source";
 
 export function assertSafeUrl(value: string): URL {
@@ -49,10 +49,28 @@ export function createIngestionService(storage: StorageProvider, options = { max
       }
       if (session.expiresAt < new Date()) { await prisma.uploadSession.update({ where: { id: session.id }, data: { status: "EXPIRED" } }); throw new Error("UPLOAD_EXPIRED"); }
       const head = await storage.headObject(session.temporaryStorageKey); if (!head || head.size !== Number(session.declaredSizeBytes) || head.size > options.maxUploadBytes) { await prisma.uploadSession.update({ where: { id: session.id }, data: { status: "REJECTED" } }); throw new Error("UPLOAD_SIZE_INVALID"); }
-      const bytes = await storage.getObjectBytes(session.temporaryStorageKey); const mediaType = sniffMediaType(bytes, session.declaredMediaType, session.originalFilename); const digest = sha256Bytes(bytes); const storageKey = `workspaces/${context.workspaceId}/source-blobs/${digest}`;
-      const existing = await prisma.sourceBlob.findUnique({ where: { workspaceId_sha256: { workspaceId: context.workspaceId, sha256: digest } } }); if (!existing) { if (!(await storage.objectExists(storageKey))) await storage.copyObject(session.temporaryStorageKey, storageKey); }
+      const inspected = await inspectObjectStream(await storage.getObjectStream(session.temporaryStorageKey));
+      if (inspected.sizeBytes !== head.size || inspected.sizeBytes !== Number(session.declaredSizeBytes)) { await prisma.uploadSession.update({ where: { id: session.id }, data: { status: "REJECTED" } }); throw new Error("UPLOAD_STORAGE_SIZE_MISMATCH"); }
+      const mediaType = sniffMediaType(inspected.prefix, session.declaredMediaType, session.originalFilename); const digest = inspected.sha256; const storageKey = `workspaces/${context.workspaceId}/source-blobs/${digest}`;
+      const existing = await prisma.sourceBlob.findUnique({ where: { workspaceId_sha256: { workspaceId: context.workspaceId, sha256: digest } } });
+      let canonicalWasCreated = false;
+      if (existing) {
+        const existingHead = await storage.headObject(existing.storageKey);
+        if (!existingHead || existingHead.size !== inspected.sizeBytes) throw new Error("CANONICAL_STORAGE_INTEGRITY_FAILURE");
+      } else {
+        const canonicalHead = await storage.headObject(storageKey);
+        if (!canonicalHead) {
+          await storage.copyObject(session.temporaryStorageKey, storageKey);
+          canonicalWasCreated = true;
+        }
+        const canonicalInspection = await inspectObjectStream(await storage.getObjectStream(storageKey));
+        if (canonicalInspection.sha256 !== digest || canonicalInspection.sizeBytes !== inspected.sizeBytes) {
+          if (canonicalWasCreated) await storage.deleteObject(storageKey).catch(() => undefined);
+          throw new Error("CANONICAL_STORAGE_INTEGRITY_FAILURE");
+        }
+      }
       const parser = parserProvenance(mediaType);
-      const result = await prisma.$transaction(async (tx) => { const blob = existing ?? await tx.sourceBlob.create({ data: { workspaceId: context.workspaceId, sha256: digest, sizeBytes: bytes.length, mediaType, storageKey } }); const source = await tx.source.create({ data: { workspaceId: context.workspaceId, kind: "FILE", displayName: session.originalFilename } }); const document = await tx.sourceDocument.create({ data: { sourceId: source.id, sourceBlobId: blob.id, workspaceId: context.workspaceId, version: 1, sha256: digest, sizeBytes: bytes.length, mediaType, storageKey } }); const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId: document.id }, idempotencyKey: `ingest:${document.id}` } }); const run = await tx.ingestionRun.create({ data: { sourceDocumentId: document.id, workspaceId: context.workspaceId, jobId: job.id, parserVersion: parser.version, normalizationVersion: CANONICAL_NORMALIZATION_VERSION } }); await tx.uploadCompletion.create({ data: { uploadSessionId: session.id, sourceDocumentId: document.id, workspaceId: context.workspaceId } }); await tx.outboxEvent.create({ data: { topic: "source.ingestion.requested", aggregateId: run.id, payload: { ingestionRunId: run.id } } }); await tx.uploadSession.update({ where: { id: session.id }, data: { status: "COMPLETED", completedAt: new Date() } }); return document; });
+      const result = await prisma.$transaction(async (tx) => { const blob = existing ?? await tx.sourceBlob.create({ data: { workspaceId: context.workspaceId, sha256: digest, sizeBytes: inspected.sizeBytes, mediaType, storageKey } }); const source = await tx.source.create({ data: { workspaceId: context.workspaceId, kind: "FILE", displayName: session.originalFilename } }); const document = await tx.sourceDocument.create({ data: { sourceId: source.id, sourceBlobId: blob.id, workspaceId: context.workspaceId, version: 1, sha256: blob.sha256, sizeBytes: blob.sizeBytes, mediaType: blob.mediaType, storageKey: blob.storageKey } }); const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId: document.id }, idempotencyKey: `ingest:${document.id}` } }); const run = await tx.ingestionRun.create({ data: { sourceDocumentId: document.id, workspaceId: context.workspaceId, jobId: job.id, parserVersion: parser.version, normalizationVersion: CANONICAL_NORMALIZATION_VERSION } }); await tx.uploadCompletion.create({ data: { uploadSessionId: session.id, sourceDocumentId: document.id, workspaceId: context.workspaceId } }); await tx.outboxEvent.create({ data: { topic: "source.ingestion.requested", aggregateId: run.id, payload: { ingestionRunId: run.id } } }); await tx.uploadSession.update({ where: { id: session.id }, data: { status: "COMPLETED", completedAt: new Date() } }); return document; });
       await storage.deleteObject(session.temporaryStorageKey); return result;
     },
     async processIngestionRun(runId: string) {

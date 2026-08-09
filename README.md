@@ -33,7 +33,7 @@ pnpm db:migrate:deploy
 
 `pnpm db:migrate:deploy` runs `prisma migrate deploy`; it never creates a new migration.
 
-The compose stack includes PostgreSQL, Redis, and MinIO. The S3 credentials in `.env.example` are local-development-only dummy values; production requires separately managed secrets. File ingestion is invoked through trusted server-side service calls until authentication is implemented, so there is intentionally no public upload endpoint.
+The compose stack includes PostgreSQL, Redis, and MinIO. `minio-init` idempotently creates the private development bucket and applies a local-only CORS policy for browser PUT and HEAD requests from `http://localhost:3000`. The S3 credentials in `.env.example` are local-development-only dummy values; production requires separately managed secrets and rejects known dummy credential values. `S3_ENDPOINT` is used by server-side storage calls; `S3_PUBLIC_ENDPOINT` is optional and is used only to create presigned browser URLs. File ingestion is invoked through trusted server-side service calls until authentication is implemented, so there is intentionally no public upload endpoint.
 
 The integration suite uses `DATABASE_URL_TEST`. Create the test database once after containers start:
 

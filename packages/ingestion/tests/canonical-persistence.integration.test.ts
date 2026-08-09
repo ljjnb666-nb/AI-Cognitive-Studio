@@ -15,6 +15,10 @@ class FakeStorageProvider implements StorageProvider {
     return { url: `https://storage.test/${input.key}`, headers: { "content-type": input.contentType } };
   }
   async headObject(key: string) { const body = this.objects.get(key); return body ? { key, size: body.length, contentType: "text/plain" } : null; }
+  async getObjectStream(key: string) {
+    const body = await this.getObjectBytes(key);
+    return (async function* () { yield body; })();
+  }
   async getObjectBytes(key: string) { const body = this.objects.get(key); if (!body) throw new Error(`OBJECT_NOT_FOUND:${key}`); return body; }
   async putObject({ key, body }: { key: string; body: Uint8Array; contentType: string }) { this.objects.set(key, body); }
   async copyObject(sourceKey: string, targetKey: string) { this.objects.set(targetKey, await this.getObjectBytes(sourceKey)); }
