@@ -103,7 +103,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
       }
     },
     async processIngestionRun(runId: string) {
-      const run = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runId }, include: { sourceDocument: { include: { source: true } }, job: true } }); if (run.status === "SUCCEEDED") return;
+      const run = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runId }, include: { sourceDocument: { include: { source: true } }, job: true } }); if (["SUCCEEDED", "REJECTED", "OCR_REQUIRED", "PASSWORD_REQUIRED"].includes(run.status)) return;
       await prisma.$transaction([prisma.ingestionRun.update({ where: { id: runId }, data: { status: "RUNNING", startedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.RUNNING, startedAt: new Date(), attemptCount: { increment: 1 } } })]);
       try {
         const bytes = await storage.getObjectBytes(run.sourceDocument.storageKey);
