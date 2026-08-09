@@ -7,6 +7,16 @@
     "node": ">=24.0.0 <25",
     "pnpm": "10.30.3"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "esbuild",
+      "msgpackr-extract",
+      "prisma",
+      "unrs-resolver"
+    ]
+  },
   "scripts": {
     "dev": "pnpm --parallel --filter @ai-cognitive/web --filter @ai-cognitive/worker dev",
     "dev:web": "pnpm --filter @ai-cognitive/web dev",
@@ -18,9 +28,9 @@
     "test:integration": "pnpm --filter @ai-cognitive/db test:integration && pnpm --filter @ai-cognitive/worker test:integration && pnpm --filter @ai-cognitive/web test:integration",
     "test:e2e": "pnpm --filter @ai-cognitive/web test:e2e",
     "build": "pnpm -r --if-present build",
-    "db:generate": "pnpm --filter @ai-cognitive/db prisma generate",
-    "db:migrate": "pnpm --filter @ai-cognitive/db prisma migrate dev",
-    "db:studio": "pnpm --filter @ai-cognitive/db prisma studio"
+    "db:generate": "pnpm --filter @ai-cognitive/db prisma:generate:root",
+    "db:migrate": "pnpm --filter @ai-cognitive/db prisma:migrate:root",
+    "db:studio": "pnpm --filter @ai-cognitive/db prisma:studio:root"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

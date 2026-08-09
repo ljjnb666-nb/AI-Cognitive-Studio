@@ -11,7 +11,10 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "prisma": "prisma"
+    "prisma": "prisma",
+    "prisma:generate:root": "dotenv -e ../../.env -- prisma generate",
+    "prisma:migrate:root": "dotenv -e ../../.env -- prisma migrate deploy",
+    "prisma:studio:root": "dotenv -e ../../.env -- prisma studio"
   },
   "dependencies": {
     "@prisma/client": "^6.19.0"
@@ -20,6 +23,7 @@
     "@eslint/js": "^9.39.1",
     "@types/node": "^24.10.1",
     "dotenv": "^16.6.1",
+    "dotenv-cli": "^8.0.0",
     "eslint": "^9.39.1",
     "prisma": "^6.19.0",
     "typescript": "^5.9.3",
