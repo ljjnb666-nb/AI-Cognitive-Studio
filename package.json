@@ -25,7 +25,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm run test:unit && pnpm run test:integration && pnpm run test:e2e",
     "test:unit": "pnpm --filter @ai-cognitive/domain test",
-    "test:integration": "pnpm --filter @ai-cognitive/db test:integration && pnpm --filter @ai-cognitive/worker test:integration && pnpm --filter @ai-cognitive/web test:integration",
+    "test:integration": "pnpm --filter @ai-cognitive/db test:integration && pnpm --filter @ai-cognitive/ingestion test:integration && pnpm --filter @ai-cognitive/worker test:integration && pnpm --filter @ai-cognitive/web test:integration",
     "test:e2e": "pnpm --filter @ai-cognitive/web test:e2e",
     "build": "pnpm -r --if-present build",
     "db:generate": "pnpm --filter @ai-cognitive/db prisma:generate:root",
