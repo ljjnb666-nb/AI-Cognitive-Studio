@@ -31,7 +31,7 @@ describe("database integration", () => {
     });
 
     expect(updated.status).toBe(JobStatus.SUCCEEDED);
-    expect(updated.user.email).toBe("phase0@example.test");
+    expect(updated.user).toMatchObject({ email: "phase0@example.test" });
     expect(updated.result).toEqual({ ok: true });
     expect(updated.attemptCount).toBe(1);
   });
