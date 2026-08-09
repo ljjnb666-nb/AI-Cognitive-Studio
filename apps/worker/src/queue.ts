@@ -1,5 +1,5 @@
 import { Queue, QueueEvents, type JobsOptions, type Worker } from "bullmq";
-import type IORedis from "ioredis";
+import type { Redis } from "ioredis";
 import { logger } from "@ai-cognitive/shared";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import type { HealthCheckPayload } from "@ai-cognitive/domain";
@@ -15,7 +15,7 @@ const defaultJobOptions: JobsOptions = {
 export function createHealthCheckQueue(redisUrl: string, queueName = HEALTH_CHECK_QUEUE): {
   queue: Queue<HealthCheckPayload>;
   events: QueueEvents;
-  connection: IORedis;
+  connection: Redis;
 } {
   const connection = createRedisConnection(redisUrl);
   return {
@@ -37,7 +37,7 @@ export async function enqueueHealthCheck(
 export async function closeQueueResources(
   queue: Queue,
   events: QueueEvents,
-  connection: IORedis,
+  connection: Redis,
   worker?: Worker,
 ): Promise<void> {
   await worker?.close();
