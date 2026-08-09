@@ -1,0 +1,24 @@
+{
+  "name": "ai-cognitive-studio",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @ai-cognitive/web --filter @ai-cognitive/worker dev",
+    "dev:web": "pnpm --filter @ai-cognitive/web dev",
+    "dev:worker": "pnpm --filter @ai-cognitive/worker dev",
+    "lint": "pnpm -r --if-present lint",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm run test:unit && pnpm run test:integration && pnpm run test:e2e",
+    "test:unit": "pnpm --filter @ai-cognitive/domain test",
+    "test:integration": "pnpm --filter @ai-cognitive/db test:integration && pnpm --filter @ai-cognitive/worker test:integration && pnpm --filter @ai-cognitive/web test:integration",
+    "test:e2e": "pnpm --filter @ai-cognitive/web test:e2e",
+    "build": "pnpm -r --if-present build",
+    "db:generate": "pnpm --filter @ai-cognitive/db prisma generate",
+    "db:migrate": "pnpm --filter @ai-cognitive/db prisma migrate dev",
+    "db:studio": "pnpm --filter @ai-cognitive/db prisma studio"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
