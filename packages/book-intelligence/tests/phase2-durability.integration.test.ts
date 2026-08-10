@@ -6,6 +6,7 @@ import {
   DeterministicFakeEmbeddingProvider,
   claimChunkSetMaterialization,
   buildBookContext,
+  estimateAnalysisTokens,
   materializeChunkSet,
   processBookAnalysisRun,
   requestBookAnalysis,
@@ -86,6 +87,34 @@ class BarrierProvider implements AnalysisProvider {
 }
 
 async function expireLease(runId: string) { await prisma.$executeRaw`UPDATE "BookAnalysisRun" SET "executionLeaseUntil" = NOW() - INTERVAL '1 second' WHERE "id" = ${runId}`; }
+
+class DeterministicBarrier {
+  readonly entered: Promise<void>;
+  private markEntered!: () => void;
+  private release!: () => void;
+  private readonly released: Promise<void>;
+  constructor() {
+    this.entered = new Promise((resolve) => { this.markEntered = resolve; });
+    this.released = new Promise((resolve) => { this.release = resolve; });
+  }
+  async wait() { this.markEntered(); await this.released; }
+  unblock() { this.release(); }
+}
+
+async function createReplacementExtraction(data: Awaited<ReturnType<typeof fixture>>) {
+  const suffix = crypto.randomUUID();
+  const ingestionJob = await prisma.job.create({ data: { workspaceId: data.workspace.id, type: "source.ingest", payload: {}, idempotencyKey: `replacement-${suffix}` } });
+  const ingestion = await prisma.ingestionRun.create({ data: { workspaceId: data.workspace.id, sourceDocumentId: data.document.id, jobId: ingestionJob.id, parserVersion: "test-b", normalizationVersion: "test-b" } });
+  return prisma.documentExtraction.create({ data: { workspaceId: data.workspace.id, sourceDocumentId: data.document.id, ingestionRunId: ingestion.id, status: "SUCCEEDED", parserName: "test", parserVersion: "test-b", normalizationVersion: "test-b" } });
+}
+
+async function waitForPostgresRowLock(backendPid: number) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const [state] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT cardinality(pg_blocking_pids(${backendPid}::int)) > 0 AS blocked`;
+    if (state?.blocked) return;
+  }
+  throw new Error("EXPECTED_CURRENT_EXTRACTION_ROW_LOCK");
+}
 
 afterEach(async () => {
   for (const workspaceId of workspaces.splice(0)) {
@@ -230,6 +259,83 @@ describe("durable Phase 2 orchestration", () => {
     expect(embeddings.calls).toHaveLength(0);
   });
 
+  it("does not publish A when extraction B commits before finalization locks the current row", async () => {
+    const data = await fixture();
+    const barrier = new DeterministicBarrier();
+    const finalization = processBookAnalysisRun(data.run.id, {
+      analysisProvider: new DurableProvider(data.blocks),
+      embeddingProvider: new RecordingEmbeddingProvider(),
+      faultInjector: async (point) => { if (point === "beforeFinalization") await barrier.wait(); },
+    });
+    await barrier.entered;
+    try {
+      const extractionB = await createReplacementExtraction(data);
+      await prisma.currentDocumentExtraction.update({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } }, data: { extractionId: extractionB.id } });
+    } finally {
+      barrier.unblock();
+    }
+    await finalization;
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status).toBe("SUCCEEDED");
+    expect(await prisma.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } } })).toBeNull();
+  });
+
+  it("serializes extraction B after a finalizer holding the current-row lock and rejects A as stale", async () => {
+    const data = await fixture();
+    const barrier = new DeterministicBarrier();
+    const embeddings = new RecordingEmbeddingProvider();
+    const finalization = processBookAnalysisRun(data.run.id, {
+      analysisProvider: new DurableProvider(data.blocks),
+      embeddingProvider: embeddings,
+      faultInjector: async (point) => { if (point === "afterCurrentExtractionLock") await barrier.wait(); },
+    });
+    await barrier.entered;
+    const extractionB = await createReplacementExtraction(data);
+    let publishBackendPid!: (pid: number) => void;
+    const backendPid = new Promise<number>((resolve) => { publishBackendPid = resolve; });
+    const moveCurrent = prisma.$transaction(async (tx) => {
+      const [session] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+      publishBackendPid(session!.pid);
+      await tx.currentDocumentExtraction.update({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } }, data: { extractionId: extractionB.id } });
+    });
+    try {
+      await waitForPostgresRowLock(await backendPid);
+    } finally {
+      barrier.unblock();
+    }
+    await Promise.all([finalization, moveCurrent]);
+    const intelligence = await prisma.currentBookIntelligence.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } } });
+    expect(intelligence.extractionId).toBe(data.extraction.id);
+    await expect(retrieveBookKnowledge({ workspaceId: data.workspace.id, sourceDocumentId: data.document.id, query: "evidence", limit: 5, embeddingProvider: embeddings })).rejects.toThrow("BOOK_INTELLIGENCE_STALE");
+  });
+
+  it("uses conservative English, Chinese, mixed-language, and emoji estimates in built context", async () => {
+    const data = await fixture();
+    const embeddings = new RecordingEmbeddingProvider();
+    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: embeddings });
+    const memoryCount = await prisma.bookMemoryItem.count({ where: { analysisRunId: data.run.id } });
+    const samples = [
+      "A concise English sentence with several words.",
+      "这是一个用于验证中文预算估算的确定性测试。",
+      "中文 mixed English 12345",
+      "😀🚀🧠✨😀🚀🧠✨",
+    ];
+    for (const content of samples) {
+      await prisma.bookMemoryItem.updateMany({ where: { analysisRunId: data.run.id }, data: { content } });
+      const context = await buildBookContext({ workspaceId: data.workspace.id, sourceDocumentId: data.document.id, task: "budget", tokenBudget: 1_000_000, embeddingProvider: embeddings });
+      expect(context.items).toHaveLength(memoryCount);
+      expect(context.estimatedTokens).toBe(context.items.reduce((sum, item) => sum + estimateAnalysisTokens(item.content), 0));
+      expect(context.estimatedTokens).toBeLessThanOrEqual(1_000_000);
+    }
+    const chinese = "中文预算回归".repeat(12);
+    const oldQuarterLengthBudget = Math.ceil(chinese.length / 4);
+    expect(estimateAnalysisTokens(chinese)).toBeGreaterThan(oldQuarterLengthBudget);
+    await prisma.bookMemoryItem.updateMany({ where: { analysisRunId: data.run.id }, data: { content: chinese } });
+    const constrained = await buildBookContext({ workspaceId: data.workspace.id, sourceDocumentId: data.document.id, task: "budget", tokenBudget: oldQuarterLengthBudget, embeddingProvider: embeddings });
+    expect(constrained.items).toHaveLength(0);
+    expect(constrained.estimatedTokens).toBe(0);
+    expect(constrained.estimatedTokens).toBeLessThanOrEqual(oldQuarterLengthBudget);
+  });
+
   it("rejects stale current intelligence while preserving historical results and exposes complete context provenance", async () => {
     const data = await fixture();
     const embeddings = new RecordingEmbeddingProvider();
@@ -237,9 +343,7 @@ describe("durable Phase 2 orchestration", () => {
     const context = await buildBookContext({ workspaceId: data.workspace.id, sourceDocumentId: data.document.id, task: "evidence", tokenBudget: 1000, embeddingProvider: embeddings });
     expect(context.items.length).toBeGreaterThan(0);
     expect(context.items.every((item) => item.sourceDocumentId === data.document.id && item.extractionId === data.extraction.id && item.chunkSetId === data.chunkSet.id && item.analysisRunId === data.run.id && item.memoryItemId && item.type && item.embedding?.embeddingIdentityHash && item.selectionReason && item.tokenEstimate > 0 && Array.isArray(item.sourceBlockEvidenceSpans))).toBe(true);
-    const ingestionJob = await prisma.job.create({ data: { workspaceId: data.workspace.id, type: "source.ingest", payload: {}, idempotencyKey: `stale-${crypto.randomUUID()}` } });
-    const ingestion = await prisma.ingestionRun.create({ data: { workspaceId: data.workspace.id, sourceDocumentId: data.document.id, jobId: ingestionJob.id, parserVersion: "test-b", normalizationVersion: "test-b" } });
-    const extractionB = await prisma.documentExtraction.create({ data: { workspaceId: data.workspace.id, sourceDocumentId: data.document.id, ingestionRunId: ingestion.id, status: "SUCCEEDED", parserName: "test", parserVersion: "test-b", normalizationVersion: "test-b" } });
+    const extractionB = await createReplacementExtraction(data);
     await prisma.currentDocumentExtraction.update({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } }, data: { extractionId: extractionB.id } });
     await expect(retrieveBookKnowledge({ workspaceId: data.workspace.id, sourceDocumentId: data.document.id, query: "evidence", limit: 5, embeddingProvider: embeddings })).rejects.toThrow("BOOK_INTELLIGENCE_STALE");
     await expect(buildBookContext({ workspaceId: data.workspace.id, sourceDocumentId: data.document.id, task: "evidence", tokenBudget: 100, embeddingProvider: embeddings })).rejects.toThrow("BOOK_INTELLIGENCE_STALE");

@@ -14,7 +14,7 @@ import {
   validateQuote,
 } from "./analysis.js";
 import { buildContext } from "./context.js";
-import { cosineSimilarity, type EmbeddingProvider } from "./embeddings.js";
+import { cosineSimilarity, embeddingIdentityWithHash, type EmbeddingProvider } from "./embeddings.js";
 import { sha256, type SourceBlockInput } from "./chunking.js";
 import { dispatchPendingOutbox } from "../../ingestion/src/outbox-dispatcher.js";
 import {
@@ -34,7 +34,7 @@ export const BOOK_ANALYSIS_TOPIC = "book.analysis.requested";
 const contextLimit = 8_000;
 const stageOrder = ["CHUNK_ANALYSIS", "SECTION_ANALYSIS", "CHAPTER_ANALYSIS", "BOOK_SYNTHESIS", "MEMORY_FINALIZATION", "EMBEDDINGS", "FINALIZING", "COMPLETED"] as const;
 type DurableStage = typeof stageOrder[number];
-type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "beforeFinalization";
+type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "beforeFinalization" | "afterCurrentExtractionLock";
 export type AnalysisFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
 export type ProcessBookAnalysisDependencies = {
   analysisProvider: AnalysisProvider;
@@ -47,11 +47,7 @@ type RequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?
 type StageContext = { blocks: SourceBlockInput[]; blockMap: Map<string, SourceBlockInput>; chunks: any[]; nodes: any[] };
 
 const asBlocks = (blocks: Array<{ id: string; ordinal: number; text: string; kind: string; metadata: unknown }>): SourceBlockInput[] => blocks.map((block) => ({ ...block, kind: block.kind as SourceBlockInput["kind"], metadata: block.metadata as SourceBlockInput["metadata"] }));
-const embeddingIdentity = (provider: EmbeddingProvider, override?: string) => {
-  const identity = provider.identity;
-  const embeddingVersion = override ?? identity.embeddingVersion;
-  return { ...identity, embeddingVersion, hash: sha256(JSON.stringify([identity.provider, identity.model, identity.modelVersion ?? "", embeddingVersion, identity.dimensions ?? null])) };
-};
+const embeddingIdentity = (provider: EmbeddingProvider, override?: string) => embeddingIdentityWithHash(provider.identity, override);
 const logFields = (run: any, correlationId?: string) => ({ workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, analysisRunId: run.id, chunkSetId: run.chunkSetId, analysisStage: run.analysisStage, correlationId: correlationId ?? run.id });
 
 export async function requestBookAnalysis(input: RequestInput) {
@@ -338,8 +334,8 @@ async function runMemoryStage(run: any, token: string, dependencies: ProcessBook
   await advanceStage(run, token, "MEMORY_FINALIZATION", "EMBEDDINGS", dependencies.correlationId);
 }
 
-function validateVectors(vectors: number[][], expected: number, dimensions?: number) {
-  if (vectors.length !== expected || vectors.some((vector) => !vector.length || vector.some((value) => !Number.isFinite(value))) || vectors.some((vector) => vector.length !== vectors[0]!.length) || (dimensions !== undefined && vectors.some((vector) => vector.length !== dimensions))) throw new Error("EMBEDDING_PROVIDER_RESPONSE_INVALID");
+function validateVectors(vectors: number[][], expected: number, dimensions: number) {
+  if (vectors.length !== expected || vectors.some((vector) => !vector.length || vector.some((value) => !Number.isFinite(value))) || vectors.some((vector) => vector.length !== vectors[0]!.length) || vectors.some((vector) => vector.length !== dimensions)) throw new Error("EMBEDDING_PROVIDER_RESPONSE_INVALID");
 }
 
 async function runEmbeddingStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
@@ -395,7 +391,14 @@ async function runFinalizingStage(run: any, token: string, dependencies: Process
   await withOwnedAnalysisTransaction(run.id, token, async (tx) => {
     const ownedRun = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } });
     if (ownedRun.analysisStage !== "FINALIZING") throw new Error(BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST);
-    const [chunks, sections, chapters, books, artifacts, memories, chunkEmbeddings, memoryEmbeddings, currentExtraction] = await Promise.all([
+    const [currentExtraction] = await tx.$queryRaw<Array<{ extractionId: string }>>`
+      SELECT "extractionId"
+      FROM "CurrentDocumentExtraction"
+      WHERE "sourceDocumentId" = ${run.sourceDocumentId} AND "workspaceId" = ${run.workspaceId}
+      FOR UPDATE
+    `;
+    await dependencies.faultInjector?.("afterCurrentExtractionLock", { analysisRunId: run.id, extractionId: currentExtraction?.extractionId });
+    const [chunks, sections, chapters, books, artifacts, memories, chunkEmbeddings, memoryEmbeddings] = await Promise.all([
       tx.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "CHUNK", chunkId: { in: context.chunks.map((chunk) => chunk.id) } } }),
       tx.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "SECTION", structureNodeId: { in: sectionNodes.map((node) => node.id) } } }),
       tx.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "CHAPTER", structureNodeId: { in: chapterNodes.map((node) => node.id) } } }),
@@ -404,7 +407,6 @@ async function runFinalizingStage(run: any, token: string, dependencies: Process
       tx.bookMemoryItem.count({ where: { analysisRunId: run.id, memoryKey: { in: requiredMemoryKeys } } }),
       tx.documentChunkEmbedding.count({ where: { chunkId: { in: context.chunks.map((chunk) => chunk.id) }, embeddingIdentityHash: identity.hash } }),
       tx.bookMemoryEmbedding.count({ where: { analysisRunId: run.id, embeddingIdentityHash: identity.hash } }),
-      tx.currentDocumentExtraction.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId } } }),
     ]);
     const artifactById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
     const allChunksReachBook = artifacts.filter((artifact) => artifact.scope === "CHUNK").every((artifact) => { let cursor = artifact; for (let depth = 0; depth < 4 && cursor.parentId; depth++) { const parent = artifactById.get(cursor.parentId); if (!parent) return false; if (parent.scope === "BOOK") return true; cursor = parent; } return false; });
@@ -488,6 +490,6 @@ export async function retrieveBookKnowledge(input: { workspaceId: string; source
 export async function buildBookContext(input: { workspaceId: string; sourceDocumentId: string; task: string; tokenBudget: number; query?: string; embeddingProvider: EmbeddingProvider }) {
   const items = await retrieveBookKnowledge({ ...input, query: input.query ?? input.task, limit: 100 });
   const byId = new Map(items.map((item) => [item.memoryItemId, item]));
-  const context = buildContext(items.map((item) => ({ id: item.memoryItemId, content: item.content, type: item.type, score: item.score, tokenEstimate: Math.ceil(item.content.length / 4), provenance: item.evidence.map((evidence) => ({ sourceBlockId: evidence.sourceBlockId, ordinal: 0, startOffset: evidence.startOffset, endOffset: evidence.endOffset })) })), input.tokenBudget);
+  const context = buildContext(items.map((item) => ({ id: item.memoryItemId, content: item.content, type: item.type, score: item.score, tokenEstimate: estimateAnalysisTokens(item.content), provenance: item.evidence.map((evidence) => ({ sourceBlockId: evidence.sourceBlockId, ordinal: 0, startOffset: evidence.startOffset, endOffset: evidence.endOffset })) })), input.tokenBudget);
   return { ...context, items: context.selected.map((item) => ({ ...item, ...byId.get(item.id), selectionReason: "semantic_score_then_stable_id", tokenEstimate: item.tokenEstimate, sourceBlockEvidenceSpans: item.provenance })) };
 }
