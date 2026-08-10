@@ -1,6 +1,6 @@
 import { prisma } from "../../db/src/index.js";
 import { logger } from "@ai-cognitive/shared";
-import { CHUNKING_VERSION, buildStructure, chunkBlocks, sha256, validateEvidence, type ChunkingOptions, type SourceBlockInput } from "./chunking.js";
+import { CHUNKING_VERSION, STRUCTURE_VERSION, buildStructure, chunkBlocks, sha256, validateEvidence, type ChunkingOptions, type SourceBlockInput } from "./chunking.js";
 
 const stable = (value: unknown): string => JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 const defaults: ChunkingOptions = { targetSize: 1200, hardMax: 1600 };
@@ -30,15 +30,15 @@ export async function materializeChunkSet(input: MaterializeChunkSetInput) {
       if (reconstructed !== chunk.content || chunk.sourceSpans.some((span, ordinal) => span.ordinal !== ordinal)) throw new Error("CHUNK_PROVENANCE_RECONSTRUCTION_FAILED");
     }
     await prisma.$transaction(async (tx) => {
-      const existing = await tx.documentStructureNode.findMany({ where: { extractionId: current.extractionId }, orderBy: { ordinal: "asc" } });
+      const existing = await tx.documentStructureNode.findMany({ where: { extractionId: current.extractionId, structureVersion: STRUCTURE_VERSION }, orderBy: { ordinal: "asc" } });
       const nodeIds = new Map<number, string>();
       if (existing.length) existing.forEach((node) => nodeIds.set(node.ordinal, node.id));
-      else for (const node of structure) { const parentId = node.parentOrdinal === undefined ? null : nodeIds.get(node.parentOrdinal) ?? null; const created = await tx.documentStructureNode.create({ data: { extractionId: current.extractionId, parentId, ordinal: node.ordinal, kind: node.kind, title: node.title, startBlockOrdinal: node.startBlockOrdinal, endBlockOrdinal: node.endBlockOrdinal, metadata: { effectiveDepth: node.effectiveDepth } } }); nodeIds.set(node.ordinal, created.id); }
+      else for (const node of structure) { const parentId = node.parentOrdinal === undefined ? null : nodeIds.get(node.parentOrdinal) ?? null; const created = await tx.documentStructureNode.create({ data: { extractionId: current.extractionId, structureVersion: STRUCTURE_VERSION, parentId, ordinal: node.ordinal, kind: node.kind, title: node.title, startBlockOrdinal: node.startBlockOrdinal, endBlockOrdinal: node.endBlockOrdinal, metadata: { effectiveDepth: node.effectiveDepth } } }); nodeIds.set(node.ordinal, created.id); }
       for (const chunk of chunks) {
         const spanBlocks = chunk.sourceSpans.map((span) => blocks.find((block) => block.id === span.sourceBlockId)!); const first = spanBlocks[0]!, last = spanBlocks.at(-1)!;
         const structureNode = structure.filter((node) => node.ordinal !== 0 && node.startBlockOrdinal <= first.ordinal && node.endBlockOrdinal >= last.ordinal).sort((a,b)=>b.effectiveDepth-a.effectiveDepth)[0];
         const headingPath = structure.filter((node) => node.ordinal !== 0 && node.startBlockOrdinal <= first.ordinal && node.endBlockOrdinal >= first.ordinal).sort((a,b)=>a.effectiveDepth-b.effectiveDepth).map((node)=>node.title).filter((title): title is string => typeof title === "string");
-        const created = await tx.documentChunk.create({ data: { workspaceId: input.workspaceId, extractionId: current.extractionId, chunkSetId: chunkSet.id, structureNodeId: structureNode ? nodeIds.get(structureNode.ordinal) : undefined, ordinal: chunk.ordinal, content: chunk.content, contentHash: chunk.contentHash, characterCount: chunk.characterCount, tokenEstimate: chunk.tokenEstimate, metadata: { headingPath, pageRange: [first.sourcePage?.ordinal ?? null, last.sourcePage?.ordinal ?? null], blockOrdinalRange: [first.ordinal, last.ordinal] } } });
+        const created = await tx.documentChunk.create({ data: { workspaceId: input.workspaceId, extractionId: current.extractionId, chunkSetId: chunkSet.id, structureVersion: STRUCTURE_VERSION, structureNodeId: structureNode ? nodeIds.get(structureNode.ordinal) : undefined, ordinal: chunk.ordinal, content: chunk.content, contentHash: chunk.contentHash, characterCount: chunk.characterCount, tokenEstimate: chunk.tokenEstimate, metadata: { headingPath, structureVersion: STRUCTURE_VERSION, pageRange: [first.sourcePage?.ordinal ?? null, last.sourcePage?.ordinal ?? null], blockOrdinalRange: [first.ordinal, last.ordinal] } } });
         await tx.chunkSourceSpan.createMany({ data: chunk.sourceSpans.map((span) => ({ chunkId: created.id, sourceBlockId: span.sourceBlockId, extractionId: current.extractionId, ordinal: span.ordinal, startOffset: span.startOffset, endOffset: span.endOffset })) });
       }
       await tx.chunkSet.update({ where: { id: chunkSet.id }, data: { status: "SUCCEEDED", completedAt: new Date(), errorCode: null } });

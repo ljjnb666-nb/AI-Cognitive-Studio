@@ -423,6 +423,7 @@ model SourceSpan {
 model DocumentStructureNode {
   id String @id @default(cuid())
   extractionId String
+  structureVersion String
   parentId String?
   ordinal Int
   kind StructureNodeKind
@@ -432,11 +433,12 @@ model DocumentStructureNode {
   metadata Json?
   createdAt DateTime @default(now())
   extraction DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
-  parent DocumentStructureNode? @relation("StructureTree", fields: [parentId, extractionId], references: [id, extractionId], onDelete: Cascade)
+  parent DocumentStructureNode? @relation("StructureTree", fields: [parentId, extractionId, structureVersion], references: [id, extractionId, structureVersion], onDelete: Cascade)
   children DocumentStructureNode[] @relation("StructureTree")
   chunks DocumentChunk[]
-  @@unique([extractionId, ordinal])
+  @@unique([extractionId, structureVersion, ordinal])
   @@unique([id, extractionId])
+  @@unique([id, extractionId, structureVersion])
   @@index([extractionId, startBlockOrdinal, endBlockOrdinal])
 }
 
@@ -450,6 +452,9 @@ model ChunkSet {
   configurationHash String
   status ChunkSetStatus @default(QUEUED)
   errorCode String?
+  materializationClaimToken String?
+  materializationClaimedAt DateTime?
+  materializationLeaseUntil DateTime?
   createdAt DateTime @default(now())
   completedAt DateTime?
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -472,6 +477,7 @@ model DocumentChunk {
   chunkSetId String
   extractionId String
   structureNodeId String?
+  structureVersion String
   ordinal Int
   content String
   contentHash String
@@ -480,7 +486,7 @@ model DocumentChunk {
   metadata Json?
   createdAt DateTime @default(now())
   chunkSet ChunkSet @relation(fields: [chunkSetId, workspaceId, extractionId], references: [id, workspaceId, extractionId], onDelete: Cascade)
-  structureNode DocumentStructureNode? @relation(fields: [structureNodeId, extractionId], references: [id, extractionId], onDelete: Restrict)
+  structureNode DocumentStructureNode? @relation(fields: [structureNodeId, extractionId, structureVersion], references: [id, extractionId, structureVersion], onDelete: Restrict)
   sourceSpans ChunkSourceSpan[]
   analysisArtifacts AnalysisArtifact[]
   embeddings DocumentChunkEmbedding[]
@@ -519,8 +525,12 @@ model BookAnalysisRun {
   model String
   modelVersion String?
   idempotencyKey String @unique
+  analysisIdentityHash String @unique
   status AnalysisRunStatus @default(QUEUED)
   errorCode String?
+  executionClaimToken String?
+  executionClaimedAt DateTime?
+  executionLeaseUntil DateTime?
   createdAt DateTime @default(now())
   startedAt DateTime?
   completedAt DateTime?
@@ -532,7 +542,6 @@ model BookAnalysisRun {
   artifacts AnalysisArtifact[]
   memoryItems BookMemoryItem[]
   currentMarkers CurrentBookIntelligence[] @relation("CurrentIntelligenceRun")
-  @@unique([chunkSetId, pipelineVersion, promptVersion, provider, model])
   @@unique([id, workspaceId])
   @@unique([id, workspaceId, chunkSetId])
   @@unique([id, workspaceId, sourceDocumentId, extractionId], map: "BookAnalysisRun_lineage_key")

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const CHUNKING_VERSION = "structure-aware-v1";
+export const STRUCTURE_VERSION = "structure-aware-v2";
 export type BlockKind = "HEADING" | "PARAGRAPH" | "LIST_ITEM" | "QUOTE" | "TABLE" | "IMAGE" | "CAPTION" | "FOOTNOTE" | "CODE" | "EQUATION" | "UNKNOWN";
 export interface SourceBlockInput { id: string; ordinal: number; text: string; kind: BlockKind; pageOrdinal?: number | null; metadata?: { headingLevel?: unknown } }
 export interface Provenance { sourceBlockId: string; ordinal: number; startOffset: number; endOffset: number }
