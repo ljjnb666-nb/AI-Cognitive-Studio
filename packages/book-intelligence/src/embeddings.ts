@@ -1,0 +1,3 @@
+export interface EmbeddingProvider { embed(input: { texts: string[]; model: string; correlationId: string }): Promise<number[][]> }
+export class DeterministicFakeEmbeddingProvider implements EmbeddingProvider { async embed(input: { texts: string[] }): Promise<number[][]> { return input.texts.map((text) => { const v = [0, 0, 0, 0]; for (let i=0;i<text.length;i++) { const index = i % v.length; v[index] = (v[index]! + text.charCodeAt(i) * (i + 1)) % 997; } const length=Math.hypot(...v) || 1; return v.map((n)=>n/length); }); } }
+export const cosineSimilarity = (a: number[], b: number[]) => a.length === b.length ? a.reduce((sum, value, index) => sum + value * b[index]!, 0) : -Infinity;
