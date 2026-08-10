@@ -28,7 +28,7 @@
     "test:integration": "pnpm --filter @ai-cognitive/storage test:integration && pnpm --filter @ai-cognitive/db test:integration && pnpm --filter @ai-cognitive/ingestion test:integration && pnpm --filter @ai-cognitive/book-intelligence test:integration && pnpm --filter @ai-cognitive/worker test:integration && pnpm --filter @ai-cognitive/web test:integration",
     "test:e2e": "pnpm --filter @ai-cognitive/web test:e2e",
     "test:phase1:e2e": "pnpm --filter @ai-cognitive/worker test:phase1:e2e",
-    "test:phase2:e2e": "pnpm --filter @ai-cognitive/book-intelligence test:phase2:e2e",
+    "test:phase2:e2e": "pnpm --filter @ai-cognitive/worker test:phase2:e2e",
     "build": "pnpm -r --if-present build",
     "db:generate": "pnpm --filter @ai-cognitive/db prisma:generate:root",
     "db:migrate": "pnpm --filter @ai-cognitive/db prisma:migrate:root",
