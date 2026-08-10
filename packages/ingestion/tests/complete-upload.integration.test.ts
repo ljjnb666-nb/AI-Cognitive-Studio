@@ -364,6 +364,56 @@ describe("completeUpload", () => {
     await expect(prisma.uploadSession.findUniqueOrThrow({ where: { id: value.session.id } })).resolves.toMatchObject({ status: "COMPLETED", completionClaimToken: null, completionClaimedAt: null, completionLeaseUntil: null });
   });
 
+  it.each(["SUCCEEDED", "REJECTED", "OCR_REQUIRED", "PASSWORD_REQUIRED"] as const)("does not re-enter parsing when a %s ingestion run is redelivered", async (status) => {
+    const value = await createCompletedFixture();
+    const storage = new FakeStorageProvider();
+    storage.forbidGetObjectBytes = true;
+    const service = createIngestionService(storage);
+    const job = await prisma.job.create({
+      data: {
+        workspaceId: value.workspace.id,
+        userId: value.user.id,
+        type: "source.ingest",
+        status: "FAILED",
+        attemptCount: 7,
+        payload: { sourceDocumentId: value.document.id },
+        idempotencyKey: `terminal-redelivery:${status}:${value.document.id}`,
+      },
+    });
+    const run = await prisma.ingestionRun.create({
+      data: {
+        workspaceId: value.workspace.id,
+        sourceDocumentId: value.document.id,
+        jobId: job.id,
+        status,
+        parserVersion: "terminal-redelivery-test",
+        normalizationVersion: "terminal-redelivery-test",
+        completedAt: new Date(),
+      },
+    });
+    const [beforeJob, beforeExtractionCount, beforeCurrent] = await Promise.all([
+      prisma.job.findUniqueOrThrow({ where: { id: job.id } }),
+      prisma.documentExtraction.count({ where: { sourceDocumentId: value.document.id, workspaceId: value.workspace.id } }),
+      prisma.currentDocumentExtraction.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: value.document.id, workspaceId: value.workspace.id } } }),
+    ]);
+
+    await service.processIngestionRun(run.id);
+
+    const [afterRun, afterJob, afterExtractionCount, afterCurrent] = await Promise.all([
+      prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } }),
+      prisma.job.findUniqueOrThrow({ where: { id: job.id } }),
+      prisma.documentExtraction.count({ where: { sourceDocumentId: value.document.id, workspaceId: value.workspace.id } }),
+      prisma.currentDocumentExtraction.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: value.document.id, workspaceId: value.workspace.id } } }),
+    ]);
+
+    expect(afterRun.status).toBe(status);
+    expect(afterJob.attemptCount).toBe(beforeJob.attemptCount);
+    expect(afterJob.status).toBe(beforeJob.status);
+    expect(afterJob.status).not.toBe("RUNNING");
+    expect(afterExtractionCount).toBe(beforeExtractionCount);
+    expect(afterCurrent).toEqual(beforeCurrent);
+  });
+
   it("concurrently deduplicates SourceBlob while retaining one document pipeline per session", async () => {
     const storage = new FakeStorageProvider();
     const { user, workspace } = await createWorkspaceFixture();
