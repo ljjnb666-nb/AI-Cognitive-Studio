@@ -462,6 +462,7 @@ model ChunkSet {
   @@unique([id, workspaceId])
   @@unique([id, extractionId])
   @@unique([id, workspaceId, extractionId])
+  @@unique([id, workspaceId, sourceDocumentId, extractionId])
   @@index([workspaceId, sourceDocumentId, extractionId, status])
 }
 
@@ -524,13 +525,15 @@ model BookAnalysisRun {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   sourceDocument SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   extraction DocumentExtraction @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
-  chunkSet ChunkSet @relation(fields: [chunkSetId, workspaceId, extractionId], references: [id, workspaceId, extractionId], onDelete: Restrict)
+  chunkSet ChunkSet @relation(fields: [chunkSetId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Restrict)
   artifacts AnalysisArtifact[]
   memoryItems BookMemoryItem[]
   currentMarkers CurrentBookIntelligence[] @relation("CurrentIntelligenceRun")
   @@unique([chunkSetId, pipelineVersion, promptVersion, provider, model])
   @@unique([id, workspaceId])
   @@unique([id, workspaceId, chunkSetId])
+  @@unique([id, workspaceId, sourceDocumentId, extractionId], map: "BookAnalysisRun_lineage_key")
+  @@unique([id, workspaceId, sourceDocumentId, extractionId, chunkSetId], map: "BookAnalysisRun_current_lineage_key")
 }
 
 model AnalysisArtifact {
@@ -567,11 +570,13 @@ model BookMemoryItem {
   metadata Json?
   createdAt DateTime @default(now())
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  analysisRun BookAnalysisRun @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+  analysisRun BookAnalysisRun @relation(fields: [analysisRunId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Cascade)
   evidence BookMemoryEvidence[]
   outboundRelations BookMemoryRelation[] @relation("MemoryRelationFrom")
   inboundRelations BookMemoryRelation[] @relation("MemoryRelationTo")
   @@unique([analysisRunId, ordinal])
+  @@unique([id, analysisRunId, workspaceId])
+  @@unique([id, analysisRunId, workspaceId, extractionId])
   @@index([workspaceId, sourceDocumentId, extractionId, type])
 }
 
@@ -579,13 +584,16 @@ model BookMemoryEvidence {
   id String @id @default(cuid())
   memoryItemId String
   sourceBlockId String
+  extractionId String
+  analysisRunId String
+  workspaceId String
   startOffset Int
   endOffset Int
   quoteText String?
   quoteHash String?
   createdAt DateTime @default(now())
-  memoryItem BookMemoryItem @relation(fields: [memoryItemId], references: [id], onDelete: Cascade)
-  sourceBlock SourceBlock @relation(fields: [sourceBlockId], references: [id], onDelete: Restrict)
+  memoryItem BookMemoryItem @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Cascade)
+  sourceBlock SourceBlock @relation(fields: [sourceBlockId, extractionId], references: [id, extractionId], onDelete: Restrict)
   @@index([sourceBlockId, startOffset, endOffset])
 }
 
@@ -597,8 +605,8 @@ model BookMemoryRelation {
   toMemoryItemId String
   type BookMemoryRelationType
   createdAt DateTime @default(now())
-  fromMemoryItem BookMemoryItem @relation("MemoryRelationFrom", fields: [fromMemoryItemId], references: [id], onDelete: Cascade)
-  toMemoryItem BookMemoryItem @relation("MemoryRelationTo", fields: [toMemoryItemId], references: [id], onDelete: Cascade)
+  fromMemoryItem BookMemoryItem @relation("MemoryRelationFrom", fields: [fromMemoryItemId, analysisRunId, workspaceId], references: [id, analysisRunId, workspaceId], onDelete: Cascade)
+  toMemoryItem BookMemoryItem @relation("MemoryRelationTo", fields: [toMemoryItemId, analysisRunId, workspaceId], references: [id, analysisRunId, workspaceId], onDelete: Cascade)
   @@unique([analysisRunId, fromMemoryItemId, toMemoryItemId, type])
   @@index([workspaceId, analysisRunId])
 }
@@ -607,13 +615,14 @@ model CurrentBookIntelligence {
   id String @id @default(cuid())
   workspaceId String
   sourceDocumentId String
+  extractionId String
   chunkSetId String
   analysisRunId String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   sourceDocument SourceDocument @relation("CurrentIntelligenceSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  chunkSet ChunkSet @relation("CurrentIntelligenceChunkSet", fields: [chunkSetId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  analysisRun BookAnalysisRun @relation("CurrentIntelligenceRun", fields: [analysisRunId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  chunkSet ChunkSet @relation("CurrentIntelligenceChunkSet", fields: [chunkSetId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Restrict)
+  analysisRun BookAnalysisRun @relation("CurrentIntelligenceRun", fields: [analysisRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId], references: [id, workspaceId, sourceDocumentId, extractionId, chunkSetId], onDelete: Restrict)
   @@unique([sourceDocumentId, workspaceId])
 }
 

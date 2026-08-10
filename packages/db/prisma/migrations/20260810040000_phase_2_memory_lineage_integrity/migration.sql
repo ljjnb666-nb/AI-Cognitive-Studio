@@ -1,0 +1,22 @@
+-- Book memory, evidence, relations, and current pointers must remain inside one immutable lineage.
+ALTER TABLE "ChunkSet" ADD CONSTRAINT "ChunkSet_full_lineage_key" UNIQUE ("id", "workspaceId", "sourceDocumentId", "extractionId");
+ALTER TABLE "BookAnalysisRun" ADD CONSTRAINT "BookAnalysisRun_lineage_key" UNIQUE ("id", "workspaceId", "sourceDocumentId", "extractionId");
+ALTER TABLE "BookAnalysisRun" ADD CONSTRAINT "BookAnalysisRun_current_lineage_key" UNIQUE ("id", "workspaceId", "sourceDocumentId", "extractionId", "chunkSetId");
+ALTER TABLE "BookAnalysisRun" DROP CONSTRAINT "BookAnalysisRun_chunkset_lineage_fkey";
+ALTER TABLE "BookAnalysisRun" ADD CONSTRAINT "BookAnalysisRun_full_chunkset_lineage_fkey" FOREIGN KEY ("chunkSetId", "workspaceId", "sourceDocumentId", "extractionId") REFERENCES "ChunkSet"("id", "workspaceId", "sourceDocumentId", "extractionId") ON DELETE RESTRICT;
+ALTER TABLE "BookMemoryItem" ADD CONSTRAINT "BookMemoryItem_run_workspace_key" UNIQUE ("id", "analysisRunId", "workspaceId");
+ALTER TABLE "BookMemoryItem" ADD CONSTRAINT "BookMemoryItem_run_workspace_extraction_key" UNIQUE ("id", "analysisRunId", "workspaceId", "extractionId");
+ALTER TABLE "BookMemoryItem" DROP CONSTRAINT "BookMemoryItem_analysisRunId_fkey";
+ALTER TABLE "BookMemoryItem" ADD CONSTRAINT "BookMemoryItem_run_lineage_fkey" FOREIGN KEY ("analysisRunId", "workspaceId", "sourceDocumentId", "extractionId") REFERENCES "BookAnalysisRun"("id", "workspaceId", "sourceDocumentId", "extractionId") ON DELETE CASCADE;
+ALTER TABLE "BookMemoryEvidence" ADD COLUMN "extractionId" TEXT NOT NULL, ADD COLUMN "analysisRunId" TEXT NOT NULL, ADD COLUMN "workspaceId" TEXT NOT NULL;
+ALTER TABLE "BookMemoryEvidence" DROP CONSTRAINT "BookMemoryEvidence_memoryItemId_fkey";
+ALTER TABLE "BookMemoryEvidence" ADD CONSTRAINT "BookMemoryEvidence_item_lineage_fkey" FOREIGN KEY ("memoryItemId", "analysisRunId", "workspaceId", "extractionId") REFERENCES "BookMemoryItem"("id", "analysisRunId", "workspaceId", "extractionId") ON DELETE CASCADE;
+ALTER TABLE "BookMemoryEvidence" DROP CONSTRAINT "BookMemoryEvidence_sourceBlockId_fkey";
+ALTER TABLE "BookMemoryEvidence" ADD CONSTRAINT "BookMemoryEvidence_block_lineage_fkey" FOREIGN KEY ("sourceBlockId", "extractionId") REFERENCES "SourceBlock"("id", "extractionId") ON DELETE RESTRICT;
+ALTER TABLE "BookMemoryRelation" DROP CONSTRAINT "BookMemoryRelation_fromMemoryItemId_fkey", DROP CONSTRAINT "BookMemoryRelation_toMemoryItemId_fkey";
+ALTER TABLE "BookMemoryRelation" ADD CONSTRAINT "BookMemoryRelation_from_lineage_fkey" FOREIGN KEY ("fromMemoryItemId", "analysisRunId", "workspaceId") REFERENCES "BookMemoryItem"("id", "analysisRunId", "workspaceId") ON DELETE CASCADE;
+ALTER TABLE "BookMemoryRelation" ADD CONSTRAINT "BookMemoryRelation_to_lineage_fkey" FOREIGN KEY ("toMemoryItemId", "analysisRunId", "workspaceId") REFERENCES "BookMemoryItem"("id", "analysisRunId", "workspaceId") ON DELETE CASCADE;
+ALTER TABLE "CurrentBookIntelligence" ADD COLUMN "extractionId" TEXT NOT NULL;
+ALTER TABLE "CurrentBookIntelligence" DROP CONSTRAINT "CurrentBookIntelligence_chunkSetId_workspaceId_fkey", DROP CONSTRAINT "CurrentBookIntelligence_analysisRunId_workspaceId_fkey";
+ALTER TABLE "CurrentBookIntelligence" ADD CONSTRAINT "CurrentBookIntelligence_chunkset_lineage_fkey" FOREIGN KEY ("chunkSetId", "workspaceId", "sourceDocumentId", "extractionId") REFERENCES "ChunkSet"("id", "workspaceId", "sourceDocumentId", "extractionId") ON DELETE RESTRICT;
+ALTER TABLE "CurrentBookIntelligence" ADD CONSTRAINT "CurrentBookIntelligence_run_lineage_fkey" FOREIGN KEY ("analysisRunId", "workspaceId", "sourceDocumentId", "extractionId", "chunkSetId") REFERENCES "BookAnalysisRun"("id", "workspaceId", "sourceDocumentId", "extractionId", "chunkSetId") ON DELETE RESTRICT;

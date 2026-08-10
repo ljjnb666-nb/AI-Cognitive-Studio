@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 export const CHUNKING_VERSION = "structure-aware-v1";
 export type BlockKind = "HEADING" | "PARAGRAPH" | "LIST_ITEM" | "QUOTE" | "TABLE" | "IMAGE" | "CAPTION" | "FOOTNOTE" | "CODE" | "EQUATION" | "UNKNOWN";
-export interface SourceBlockInput { id: string; ordinal: number; text: string; kind: BlockKind; pageOrdinal?: number | null }
+export interface SourceBlockInput { id: string; ordinal: number; text: string; kind: BlockKind; pageOrdinal?: number | null; metadata?: { headingLevel?: unknown } }
 export interface Provenance { sourceBlockId: string; ordinal: number; startOffset: number; endOffset: number }
 export interface StructureNode { ordinal: number; kind: "ROOT" | "CHAPTER" | "SECTION" | "SUBSECTION" | "STRUCTURAL_GROUP" | "PAGE_GROUP"; title?: string; startBlockOrdinal: number; endBlockOrdinal: number; parentOrdinal?: number }
 export interface BuiltChunk { ordinal: number; content: string; contentHash: string; characterCount: number; tokenEstimate: number; sourceSpans: Provenance[]; structureOrdinal?: number }
@@ -21,10 +21,12 @@ export function buildStructure(blocks: SourceBlockInput[]): StructureNode[] {
   for (const block of ordered) {
     if (block.kind !== "HEADING") continue;
     const match = block.text.match(/^(#{1,6})\s+(.+?)\s*$/);
-    // Canonical heading kind is evidence of a heading. Only Markdown syntax supplies reliable depth.
-    const depth = match?.[1]?.length;
-    const kind = depth === 1 ? "CHAPTER" : depth === 2 ? "SECTION" : depth ? "SUBSECTION" : "SECTION";
-    while (stack.length > 1 && ((stack.at(-1)!.kind === "CHAPTER" ? 1 : stack.at(-1)!.kind === "SECTION" ? 2 : 3) >= depth)) { stack.pop()!.endBlockOrdinal = block.ordinal - 1; }
+    // Canonical HEADING is structural evidence. Markdown syntax is only a depth fallback.
+    const metadataLevel = block.metadata?.headingLevel;
+    const markdownDepth = match?.[1]?.length;
+    const effectiveDepth = typeof metadataLevel === "number" && Number.isInteger(metadataLevel) && metadataLevel >= 1 && metadataLevel <= 6 ? metadataLevel : markdownDepth ?? 2;
+    const kind = effectiveDepth === 1 ? "CHAPTER" : effectiveDepth === 2 ? "SECTION" : "SUBSECTION";
+    while (stack.length > 1 && ((stack.at(-1)!.kind === "CHAPTER" ? 1 : stack.at(-1)!.kind === "SECTION" ? 2 : 3) >= effectiveDepth)) { stack.pop()!.endBlockOrdinal = block.ordinal - 1; }
     const node: StructureNode = { ordinal: next++, kind, title: match?.[2] ?? block.text.trim(), startBlockOrdinal: block.ordinal, endBlockOrdinal: ordered.at(-1)!.ordinal, parentOrdinal: stack.at(-1)!.ordinal }; nodes.push(node); stack.push(node);
   }
   if (nodes.length === 1) nodes.push({ ordinal: 1, kind: ordered.some((b) => b.pageOrdinal != null) ? "PAGE_GROUP" : "STRUCTURAL_GROUP", startBlockOrdinal: ordered[0]!.ordinal, endBlockOrdinal: ordered.at(-1)!.ordinal, parentOrdinal: 0 });
