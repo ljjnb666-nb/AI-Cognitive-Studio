@@ -18,14 +18,15 @@ export function validateAnalysisResponse(value: unknown): AnalysisResponse {
 }
 export async function guardedGenerateStructured(provider: AnalysisProvider, request: AnalysisRequest, blocks: SourceBlockInput[], limit: number): Promise<AnalysisResponse> { assertBoundedProviderRequest(request, blocks, limit); return validateAnalysisResponse(await provider.generateStructured(request)); }
 export async function reduceBoundedAnalysisChildren(input: { provider: AnalysisProvider; stage: AnalysisStage; children: Array<{ ordinal: number; summary: string }>; blocks: SourceBlockInput[]; limit: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string }): Promise<AnalysisResponse> {
-  let level = [...input.children].sort((a, b) => a.ordinal - b.ordinal).map((child) => child.summary);
+  let level = [...input.children].sort((a, b) => a.ordinal - b.ordinal).map((child) => child.summary), depth = 0;
   if (!level.length) return { summary: "" };
   while (level.length > 1 || level[0]!.length > input.limit) {
+    if (++depth > 12) throw new Error("ANALYSIS_REDUCTION_DID_NOT_CONVERGE");
     const batches: string[][] = []; let batch: string[] = [], size = 0;
     for (const summary of level) { if (summary.length > input.limit) { if (batch.length) { batches.push(batch); batch=[]; size=0; } for (let offset=0; offset<summary.length; offset += input.limit) batches.push([summary.slice(offset, offset + input.limit)]); continue; } const cost = (batch.length ? 1 : 0) + summary.length; if (batch.length && size + cost > input.limit) { batches.push(batch); batch=[]; size=0; } batch.push(summary); size += (batch.length === 1 ? 0 : 1) + summary.length; }
     if (batch.length) batches.push(batch); const next: string[] = [];
-    for (const group of batches) { const response = await guardedGenerateStructured(input.provider, { stage: input.stage, content: group.join("\n"), sourceBlockIds: [], tokenBudget: Math.ceil(input.limit / 4), correlationId: input.correlationId, systemInstructions: input.systemInstructions, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion }, input.blocks, input.limit); next.push(response.summary); }
-    level = next;
+    for (const group of batches) { const response = await guardedGenerateStructured(input.provider, { stage: input.stage, content: group.join("\n"), sourceBlockIds: [], tokenBudget: Math.ceil(input.limit / 2), correlationId: input.correlationId, systemInstructions: input.systemInstructions, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion }, input.blocks, input.limit); next.push(response.summary); }
+    if (next.length >= level.length && next.every((summary, index) => summary.length >= (level[index]?.length ?? 0))) throw new Error("ANALYSIS_REDUCTION_DID_NOT_CONVERGE"); level = next;
   }
   return { summary: level[0]! };
 }
@@ -33,7 +34,7 @@ export async function reduceBoundedAnalysisChildren(input: { provider: AnalysisP
 export function assertNoFullBookPrompt(requests: AnalysisRequest[], blocks: SourceBlockInput[], limit: number): void { for (const request of requests) assertBoundedProviderRequest(request, blocks, limit); }
 export function assertBoundedProviderRequest(request: AnalysisRequest, blocks: SourceBlockInput[], limit: number): void {
   const whole = blocks.map((b) => b.text).join("\n\n"), ids = new Set(blocks.map((b) => b.id)), requested = new Set(request.sourceBlockIds);
-  if (!request.systemInstructions || request.content === whole || request.content.length > limit || [...ids].every((id) => requested.has(id))) throw new Error("FULL_BOOK_PROMPT_PROHIBITED");
+  if (!request.systemInstructions || request.content === whole || request.content.length > limit || [...ids].every((id) => requested.has(id))) throw new Error("FULL_BOOK_PROMPT_PROHIBITED"); if (Math.ceil(request.content.length / 2) > request.tokenBudget) throw new Error("ANALYSIS_TOKEN_BUDGET_EXCEEDED");
 }
 export function validateQuote(block: Pick<SourceBlockInput, "text">, evidence: EvidenceCandidate): string {
   if (!evidence.quoteText || !validateEvidence(block, evidence, evidence.quoteText)) throw new Error("INVALID_DIRECT_QUOTE");

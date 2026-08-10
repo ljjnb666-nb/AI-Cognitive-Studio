@@ -524,6 +524,7 @@ model BookAnalysisRun {
   provider String
   model String
   modelVersion String?
+  modelVersionKey String
   idempotencyKey String @unique
   analysisIdentityHash String @unique
   status AnalysisRunStatus @default(QUEUED)
@@ -531,6 +532,7 @@ model BookAnalysisRun {
   executionClaimToken String?
   executionClaimedAt DateTime?
   executionLeaseUntil DateTime?
+  analysisStage String @default("QUEUED")
   createdAt DateTime @default(now())
   startedAt DateTime?
   completedAt DateTime?
@@ -546,6 +548,7 @@ model BookAnalysisRun {
   @@unique([id, workspaceId, chunkSetId])
   @@unique([id, workspaceId, sourceDocumentId, extractionId], map: "BookAnalysisRun_lineage_key")
   @@unique([id, workspaceId, sourceDocumentId, extractionId, chunkSetId], map: "BookAnalysisRun_current_lineage_key")
+  @@unique([chunkSetId, pipelineVersion, promptVersion, provider, model, modelVersionKey])
 }
 
 model AnalysisArtifact {
