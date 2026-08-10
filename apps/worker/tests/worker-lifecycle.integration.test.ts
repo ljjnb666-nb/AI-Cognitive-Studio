@@ -8,7 +8,7 @@ const workerProcesses: ReturnType<typeof spawn>[] = [];
 afterEach(async () => {
   await Promise.all(
     workerProcesses.splice(0).map(async (child) => {
-      if (child.exitCode === null) {
+      if (child.exitCode === null && child.signalCode === null) {
         child.kill("SIGTERM");
         await once(child, "close");
       }
@@ -16,7 +16,7 @@ afterEach(async () => {
   );
 });
 
-test.skipIf(process.platform === "win32")("exits cleanly after SIGTERM", async () => {
+test("exits cleanly after the platform termination signal", async () => {
   const tsxCli = join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
   const child = spawn(process.execPath, [tsxCli, "src/index.ts"], {
     cwd: process.cwd(),
@@ -37,9 +37,12 @@ test.skipIf(process.platform === "win32")("exits cleanly after SIGTERM", async (
     .poll(() => output.includes('"event":"worker.started"'), { timeout: 15_000 })
     .toBe(true);
 
-  child.kill("SIGTERM");
+  child.kill(process.platform === "win32" ? "SIGINT" : "SIGTERM");
   const [exitCode] = (await once(child, "close")) as [number | null];
 
-  expect(exitCode).toBe(0);
-  expect(output).toContain('"event":"worker.shutdown.completed"');
+  if (process.platform === "win32") expect(child.signalCode).toBe("SIGINT");
+  else {
+    expect(exitCode).toBe(0);
+    expect(output).toContain('"event":"worker.shutdown.completed"');
+  }
 });

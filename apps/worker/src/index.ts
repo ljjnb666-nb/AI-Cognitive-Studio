@@ -8,6 +8,7 @@ const environment = readEnvironment();
 const worker = createHealthCheckWorker(environment.REDIS_URL);
 const ingestionWorker = createSourceIngestionWorker(environment);
 const bookAnalysisWorker = process.env.BOOK_ANALYSIS_PROVIDER ? createBookAnalysisWorker(environment) : undefined;
+if (!bookAnalysisWorker) logger.info("worker.book_analysis.disabled", { reason: "BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED" });
 const dispatchTimer = setInterval(() => void dispatchSourceIngestion(environment), 1000);
 const bookDispatchTimer = bookAnalysisWorker ? setInterval(() => void dispatchBookAnalysis(environment), 1000) : undefined;
 void dispatchSourceIngestion(environment);
