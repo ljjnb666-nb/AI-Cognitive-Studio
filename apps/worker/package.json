@@ -13,6 +13,7 @@
     "test:phase1:e2e": "vitest run --config vitest.phase1-e2e.config.ts"
   },
   "dependencies": {
+    "@ai-cognitive/book-intelligence": "workspace:*",
     "@ai-cognitive/db": "workspace:*",
     "@ai-cognitive/domain": "workspace:*",
     "@ai-cognitive/ingestion": "workspace:*",
