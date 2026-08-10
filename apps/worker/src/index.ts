@@ -7,19 +7,19 @@ import { createBookAnalysisWorker, dispatchBookAnalysis } from "./book-analysis.
 const environment = readEnvironment();
 const worker = createHealthCheckWorker(environment.REDIS_URL);
 const ingestionWorker = createSourceIngestionWorker(environment);
-const bookAnalysisWorker = createBookAnalysisWorker(environment);
+const bookAnalysisWorker = process.env.BOOK_ANALYSIS_PROVIDER ? createBookAnalysisWorker(environment) : undefined;
 const dispatchTimer = setInterval(() => void dispatchSourceIngestion(environment), 1000);
-const bookDispatchTimer = setInterval(() => void dispatchBookAnalysis(environment), 1000);
+const bookDispatchTimer = bookAnalysisWorker ? setInterval(() => void dispatchBookAnalysis(environment), 1000) : undefined;
 void dispatchSourceIngestion(environment);
-void dispatchBookAnalysis(environment);
+if (bookAnalysisWorker) void dispatchBookAnalysis(environment);
 
 async function shutdown(signal: string): Promise<void> {
   logger.info("worker.shutdown.started", { signal });
   await worker.close();
   clearInterval(dispatchTimer);
-  clearInterval(bookDispatchTimer);
+  if (bookDispatchTimer) clearInterval(bookDispatchTimer);
   await ingestionWorker.close();
-  await bookAnalysisWorker.close();
+  await bookAnalysisWorker?.close();
   logger.info("worker.shutdown.completed", { signal });
   process.exit(0);
 }
