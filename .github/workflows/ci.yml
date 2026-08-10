@@ -36,6 +36,13 @@ jobs:
       DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio?schema=public
       DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
       REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ai-cognitive-studio-dev
+      S3_ACCESS_KEY: local-development-only
+      S3_SECRET_KEY: local-development-only
+      S3_FORCE_PATH_STYLE: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -47,6 +54,10 @@ jobs:
           cache: pnpm
       - name: Install
         run: pnpm install --frozen-lockfile
+      - name: Start MinIO
+        run: docker compose up -d minio
+      - name: Initialize private MinIO bucket
+        run: docker compose run --rm minio-init
       - name: Create isolated test database
         run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
       - name: Generate Prisma client
@@ -63,6 +74,8 @@ jobs:
         run: pnpm test:unit
       - name: Integration tests
         run: pnpm test:integration
+      - name: Phase 1 real infrastructure ingestion
+        run: pnpm test:phase1:e2e
       - name: Install Playwright browser
         run: pnpm --filter @ai-cognitive/web exec playwright install --with-deps chromium
       - name: End-to-end tests

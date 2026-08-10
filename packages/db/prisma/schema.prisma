@@ -15,36 +15,390 @@ enum JobStatus {
   CANCELLED
 }
 
+enum WorkspaceRole {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+enum SourceKind {
+  FILE
+  URL
+  NOTE
+  TRANSCRIPT
+}
+
+enum UploadSessionStatus {
+  CREATED
+  UPLOADED
+  COMPLETING
+  COMPLETED
+  EXPIRED
+  REJECTED
+}
+
+enum IngestionStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  REJECTED
+  OCR_REQUIRED
+  PASSWORD_REQUIRED
+}
+
+enum ExtractionStatus {
+  SUCCEEDED
+  FAILED
+  OCR_REQUIRED
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DISPATCHED
+  FAILED
+}
+
+enum SourceBlockKind {
+  HEADING
+  PARAGRAPH
+  LIST_ITEM
+  QUOTE
+  TABLE
+  IMAGE
+  CAPTION
+  FOOTNOTE
+  CODE
+  EQUATION
+  UNKNOWN
+}
+
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  avatarUrl String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  jobs      Job[]
+  id          String            @id @default(cuid())
+  email       String            @unique
+  name        String?
+  avatarUrl   String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  jobs        Job[]
+  memberships WorkspaceMember[]
+}
+
+model Workspace {
+  id             String            @id @default(cuid())
+  name           String
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  members        WorkspaceMember[]
+  projects       Project[]
+  works          Work[]
+  sources        Source[]
+  sourceBlobs    SourceBlob[]
+  uploadSessions UploadSession[]
+  jobs           Job[]
+}
+
+model WorkspaceMember {
+  workspaceId String
+  userId      String
+  role        WorkspaceRole
+  createdAt   DateTime      @default(now())
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, userId])
+}
+
+model Project {
+  id          String          @id @default(cuid())
+  workspaceId String
+  name        String
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sources     ProjectSource[]
+
+  @@unique([id, workspaceId])
+}
+
+model ProjectSource {
+  projectId   String
+  sourceId    String
+  workspaceId String
+  createdAt   DateTime @default(now())
+  project     Project  @relation(fields: [projectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  source      Source   @relation(fields: [sourceId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@id([projectId, sourceId])
+}
+
+model Work {
+  id          String    @id @default(cuid())
+  workspaceId String
+  title       String
+  authors     Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  editions    Edition[]
+
+  @@unique([id, workspaceId])
+}
+
+model Edition {
+  id              String   @id @default(cuid())
+  workId          String
+  workspaceId     String
+  language        String?
+  publisher       String?
+  isbn10          String?
+  isbn13          String?
+  publicationYear Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  work            Work     @relation(fields: [workId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  sources         Source[]
+
+  @@unique([id, workspaceId])
+}
+
+model Source {
+  id          String           @id @default(cuid())
+  workspaceId String
+  editionId   String?
+  kind        SourceKind
+  displayName String
+  archivedAt  DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  edition     Edition?         @relation(fields: [editionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  documents   SourceDocument[]
+  projects    ProjectSource[]
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId])
+}
+
+model SourceBlob {
+  id          String           @id @default(cuid())
+  workspaceId String
+  sha256      String
+  sizeBytes   BigInt
+  mediaType   String
+  storageKey  String
+  createdAt   DateTime         @default(now())
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  documents   SourceDocument[]
+
+  @@unique([workspaceId, sha256])
+  @@unique([id, workspaceId])
+}
+
+model SourceDocument {
+  id                String                     @id @default(cuid())
+  sourceId          String
+  sourceBlobId      String
+  workspaceId       String
+  version           Int
+  sha256            String
+  sizeBytes         BigInt
+  mediaType         String
+  storageKey        String
+  createdAt         DateTime                   @default(now())
+  source            Source                     @relation(fields: [sourceId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  sourceBlob        SourceBlob                 @relation(fields: [sourceBlobId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  uploadCompletion  UploadCompletion?
+  ingestionRuns     IngestionRun[]
+  extractions       DocumentExtraction[]       @relation("DocumentExtractionSourceDocument")
+  currentExtraction CurrentDocumentExtraction? @relation("CurrentExtractionSourceDocument")
+
+  @@unique([id, workspaceId])
+  @@unique([sourceId, version])
+}
+
+model UploadSession {
+  id                  String              @id @default(cuid())
+  workspaceId         String
+  originalFilename    String
+  declaredMediaType   String
+  declaredSizeBytes   BigInt
+  temporaryStorageKey String
+  status              UploadSessionStatus @default(CREATED)
+  completionClaimToken String?
+  completionClaimedAt  DateTime?
+  completionLeaseUntil DateTime?
+  expiresAt           DateTime
+  completedAt         DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  workspace           Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  completion          UploadCompletion?
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, status])
+  @@index([workspaceId, status, completionLeaseUntil])
+}
+
+model UploadCompletion {
+  id               String         @id @default(cuid())
+  uploadSessionId  String
+  sourceDocumentId String
+  workspaceId      String
+  createdAt        DateTime       @default(now())
+  uploadSession    UploadSession  @relation(fields: [uploadSessionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  sourceDocument   SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@unique([uploadSessionId, workspaceId])
+  @@unique([sourceDocumentId, workspaceId])
+}
+
+model IngestionRun {
+  id                   String              @id @default(cuid())
+  sourceDocumentId     String
+  workspaceId          String
+  jobId                String              @unique
+  status               IngestionStatus     @default(QUEUED)
+  parserVersion        String
+  normalizationVersion String
+  errorCode            String?
+  createdAt            DateTime            @default(now())
+  startedAt            DateTime?
+  completedAt          DateTime?
+  sourceDocument       SourceDocument      @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  job                  Job                 @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  extraction           DocumentExtraction?
+
+  @@unique([id, sourceDocumentId, workspaceId])
+}
+
+model DocumentExtraction {
+  id                   String                     @id @default(cuid())
+  ingestionRunId       String                     @unique
+  sourceDocumentId     String
+  workspaceId          String
+  status               ExtractionStatus
+  parserName           String
+  parserVersion        String
+  normalizationVersion String
+  textStorageKey       String?
+  textSha256           String?
+  characterCount       Int?
+  createdAt            DateTime                   @default(now())
+  ingestionRun         IngestionRun               @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+  sourceDocument       SourceDocument             @relation("DocumentExtractionSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  currentMarker        CurrentDocumentExtraction? @relation("CurrentExtractionDocument")
+  pages                SourcePage[]
+  blocks               SourceBlock[]
+
+  @@unique([id, sourceDocumentId, workspaceId])
+  @@unique([ingestionRunId, sourceDocumentId, workspaceId])
+}
+
+model CurrentDocumentExtraction {
+  id               String             @id @default(cuid())
+  sourceDocumentId String
+  extractionId     String
+  workspaceId      String
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  sourceDocument   SourceDocument     @relation("CurrentExtractionSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  extraction       DocumentExtraction @relation("CurrentExtractionDocument", fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
+
+  @@unique([sourceDocumentId, workspaceId])
+  @@unique([extractionId, sourceDocumentId, workspaceId])
+}
+
+model SourcePage {
+  id                String             @id @default(cuid())
+  extractionId      String
+  ordinal           Int
+  physicalPageIndex Int?
+  printedPageLabel  String?
+  width             Float?
+  height            Float?
+  metadata          Json?
+  createdAt         DateTime           @default(now())
+  extraction        DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
+  blocks            SourceBlock[]
+
+  @@unique([extractionId, ordinal])
+  @@unique([id, extractionId])
+}
+
+model SourceBlock {
+  id           String             @id @default(cuid())
+  extractionId String
+  sourcePageId String?
+  ordinal      Int
+  kind         SourceBlockKind
+  text         String
+  contentHash  String
+  metadata     Json?
+  bbox         Json?
+  createdAt    DateTime           @default(now())
+  extraction   DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
+  sourcePage   SourcePage?        @relation(fields: [sourcePageId, extractionId], references: [id, extractionId], onDelete: Restrict)
+  spans        SourceSpan[]
+
+  @@unique([extractionId, ordinal])
+}
+
+model SourceSpan {
+  id            String      @id @default(cuid())
+  sourceBlockId String
+  startOffset   Int
+  endOffset     Int
+  quoteText     String
+  quoteHash     String
+  createdAt     DateTime    @default(now())
+  sourceBlock   SourceBlock @relation(fields: [sourceBlockId], references: [id], onDelete: Cascade)
+}
+
+model OutboxEvent {
+  id           String    @id @default(cuid())
+  topic        String
+  aggregateId  String
+  payload      Json
+  status       OutboxStatus @default(PENDING)
+  attemptCount Int       @default(0)
+  claimedAt    DateTime?
+  leaseUntil   DateTime?
+  lastError    String?
+  claimToken   String?
+  createdAt    DateTime  @default(now())
+  dispatchedAt DateTime?
+  updatedAt    DateTime  @updatedAt
+
+  @@index([dispatchedAt, createdAt])
+  @@index([status, leaseUntil, createdAt])
 }
 
 model Job {
-  id             String    @id @default(cuid())
+  id             String        @id @default(cuid())
   userId         String?
-  queueJobId     String?   @unique
-  idempotencyKey String?   @unique
+  workspaceId    String?
+  queueJobId     String?       @unique
+  idempotencyKey String?       @unique
   correlationId  String?
   type           String
-  status         JobStatus @default(QUEUED)
-  progress       Int       @default(0)
-  attemptCount   Int       @default(0)
+  status         JobStatus     @default(QUEUED)
+  progress       Int           @default(0)
+  attemptCount   Int           @default(0)
   payload        Json
   result         Json?
   error          Json?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @default(now()) @updatedAt
   startedAt      DateTime?
   completedAt    DateTime?
-  user           User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace      Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  ingestionRun   IngestionRun?
 
   @@index([userId])
   @@index([status])
   @@index([correlationId])
+  @@index([workspaceId, status])
 }

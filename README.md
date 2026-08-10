@@ -1,6 +1,6 @@
 # AI Cognitive Studio
 
-AI Cognitive Studio is a future platform for deep book understanding and content creation. Phase 0 establishes only the engineering foundation; product workflows are deliberately out of scope.
+AI Cognitive Studio is a future platform for deep book understanding and content creation. Phase 1 establishes the server-only source ingestion foundation; AI and product workflows remain out of scope.
 
 ## Architecture
 
@@ -9,6 +9,8 @@ AI Cognitive Studio is a future platform for deep book understanding and content
 - `packages/db`: Prisma schema, migration, and shared Prisma client.
 - `packages/domain`: Zod schemas and the shared `AppError` model.
 - `packages/shared`: environment validation, structured logger, and Redis connection factory.
+- `packages/storage`: private S3-compatible object storage abstraction.
+- `packages/ingestion`: upload intent, immutable source identity, parsing, and outbox-backed ingestion orchestration.
 
 ## Local Setup
 
@@ -30,6 +32,8 @@ pnpm db:migrate:deploy
 ```
 
 `pnpm db:migrate:deploy` runs `prisma migrate deploy`; it never creates a new migration.
+
+The compose stack includes PostgreSQL, Redis, and MinIO. `minio-init` idempotently creates the private development bucket and applies a local-only CORS policy for browser PUT and HEAD requests from `http://localhost:3000`. The S3 credentials in `.env.example` are local-development-only dummy values; production requires separately managed secrets and rejects known dummy credential values. `S3_ENDPOINT` is used by server-side storage calls; `S3_PUBLIC_ENDPOINT` is optional and is used only to create presigned browser URLs. File ingestion is invoked through trusted server-side service calls until authentication is implemented, so there is intentionally no public upload endpoint.
 
 The integration suite uses `DATABASE_URL_TEST`. Create the test database once after containers start:
 

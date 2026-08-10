@@ -9,9 +9,10 @@
     "./server": "./src/server.ts"
   },
   "scripts": {
-    "lint": "eslint src",
+    "lint": "eslint src tests",
     "typecheck": "tsc --noEmit",
-    "build": "tsc --noEmit"
+    "build": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "ioredis": "^5.8.2",
@@ -22,6 +23,7 @@
     "@types/node": "^24.10.1",
     "eslint": "^9.39.1",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.46.4"
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^4.0.8"
   }
 }
