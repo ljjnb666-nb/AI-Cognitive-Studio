@@ -553,7 +553,8 @@ model BookAnalysisRun {
   extraction DocumentExtraction @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
   chunkSet ChunkSet @relation(fields: [chunkSetId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Restrict)
   job Job @relation(fields: [jobId], references: [id], onDelete: Restrict)
-  artifacts AnalysisArtifact[]
+    artifacts AnalysisArtifact[]
+    reductionResults AnalysisReductionResult[]
   memoryItems BookMemoryItem[]
   currentMarkers CurrentBookIntelligence[] @relation("CurrentIntelligenceRun")
   @@unique([id, workspaceId])
@@ -570,6 +571,7 @@ model AnalysisArtifact {
   chunkSetId String
   parentId String?
   chunkId String?
+  structureNodeId String?
   scope AnalysisScope
   ordinal Int
   title String?
@@ -584,6 +586,23 @@ model AnalysisArtifact {
   @@unique([id, analysisRunId])
 }
 
+model AnalysisReductionResult {
+  id String @id @default(cuid())
+  workspaceId String
+  analysisRunId String
+  stage AnalysisScope
+  parentKey String
+  level Int
+  batchOrdinal Int
+  inputHash String
+  summary String
+  structuredOutput Json
+  createdAt DateTime @default(now())
+  analysisRun BookAnalysisRun @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+  @@unique([analysisRunId, stage, parentKey, level, batchOrdinal, inputHash])
+  @@index([workspaceId, analysisRunId, stage])
+}
+
 model BookMemoryItem {
   id String @id @default(cuid())
   workspaceId String
@@ -594,6 +613,8 @@ model BookMemoryItem {
   ordinal Int
   content String
   contentHash String
+  sourceArtifactId String?
+  memoryKey String? @unique
   metadata Json?
   createdAt DateTime @default(now())
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -617,11 +638,13 @@ model DocumentChunkEmbedding {
   model String
   modelVersion String?
   embeddingVersion String
+  embeddingIdentityHash String?
   dimensions Int
   vector Json
   createdAt DateTime @default(now())
   chunk DocumentChunk @relation(fields: [chunkId, workspaceId, extractionId], references: [id, workspaceId, extractionId], onDelete: Cascade)
   @@unique([chunkId, embeddingVersion])
+  @@index([chunkId, embeddingIdentityHash])
   @@index([workspaceId, extractionId, embeddingVersion])
 }
 
@@ -635,11 +658,13 @@ model BookMemoryEmbedding {
   model String
   modelVersion String?
   embeddingVersion String
+  embeddingIdentityHash String?
   dimensions Int
   vector Json
   createdAt DateTime @default(now())
   memoryItem BookMemoryItem @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Cascade)
   @@unique([memoryItemId, embeddingVersion])
+  @@index([memoryItemId, embeddingIdentityHash])
   @@index([workspaceId, extractionId, embeddingVersion])
 }
 
