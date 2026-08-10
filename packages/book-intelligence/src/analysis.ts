@@ -17,6 +17,18 @@ export function validateAnalysisResponse(value: unknown): AnalysisResponse {
   for (const relation of response.relations ?? []) if (!relation || !relationTypes.has(relation.type) || !Number.isInteger(relation.fromOrdinal) || !Number.isInteger(relation.toOrdinal)) throw new Error("ANALYSIS_PROVIDER_RESPONSE_INVALID"); return response;
 }
 export async function guardedGenerateStructured(provider: AnalysisProvider, request: AnalysisRequest, blocks: SourceBlockInput[], limit: number): Promise<AnalysisResponse> { assertBoundedProviderRequest(request, blocks, limit); return validateAnalysisResponse(await provider.generateStructured(request)); }
+export async function reduceBoundedAnalysisChildren(input: { provider: AnalysisProvider; stage: AnalysisStage; children: Array<{ ordinal: number; summary: string }>; blocks: SourceBlockInput[]; limit: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string }): Promise<AnalysisResponse> {
+  let level = [...input.children].sort((a, b) => a.ordinal - b.ordinal).map((child) => child.summary);
+  if (!level.length) return { summary: "" };
+  while (level.length > 1 || level[0]!.length > input.limit) {
+    const batches: string[][] = []; let batch: string[] = [], size = 0;
+    for (const summary of level) { if (summary.length > input.limit) { if (batch.length) { batches.push(batch); batch=[]; size=0; } for (let offset=0; offset<summary.length; offset += input.limit) batches.push([summary.slice(offset, offset + input.limit)]); continue; } const cost = (batch.length ? 1 : 0) + summary.length; if (batch.length && size + cost > input.limit) { batches.push(batch); batch=[]; size=0; } batch.push(summary); size += (batch.length === 1 ? 0 : 1) + summary.length; }
+    if (batch.length) batches.push(batch); const next: string[] = [];
+    for (const group of batches) { const response = await guardedGenerateStructured(input.provider, { stage: input.stage, content: group.join("\n"), sourceBlockIds: [], tokenBudget: Math.ceil(input.limit / 4), correlationId: input.correlationId, systemInstructions: input.systemInstructions, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion }, input.blocks, input.limit); next.push(response.summary); }
+    level = next;
+  }
+  return { summary: level[0]! };
+}
 
 export function assertNoFullBookPrompt(requests: AnalysisRequest[], blocks: SourceBlockInput[], limit: number): void { for (const request of requests) assertBoundedProviderRequest(request, blocks, limit); }
 export function assertBoundedProviderRequest(request: AnalysisRequest, blocks: SourceBlockInput[], limit: number): void {
