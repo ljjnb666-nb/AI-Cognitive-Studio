@@ -74,6 +74,58 @@ enum SourceBlockKind {
   UNKNOWN
 }
 
+enum ChunkSetStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum AnalysisRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum StructureNodeKind {
+  ROOT
+  CHAPTER
+  SECTION
+  SUBSECTION
+  STRUCTURAL_GROUP
+  PAGE_GROUP
+}
+
+enum AnalysisScope {
+  CHUNK
+  SECTION
+  CHAPTER
+  BOOK
+}
+
+enum BookMemoryItemType {
+  SUMMARY
+  CONCEPT
+  ARGUMENT
+  CLAIM
+  EXAMPLE
+  STORY
+  QUOTE
+  PERSON
+  QUESTION
+  COUNTERPOINT
+  RELATION
+}
+
+enum BookMemoryRelationType {
+  EXPLAINS
+  SUPPORTS
+  OPPOSES
+  ASSOCIATED_WITH
+  DEVELOPS
+}
+
 model User {
   id          String            @id @default(cuid())
   email       String            @unique
@@ -97,6 +149,9 @@ model Workspace {
   sourceBlobs    SourceBlob[]
   uploadSessions UploadSession[]
   jobs           Job[]
+  chunkSets      ChunkSet[]
+  analysisRuns   BookAnalysisRun[]
+  memoryItems    BookMemoryItem[]
 }
 
 model WorkspaceMember {
@@ -213,6 +268,9 @@ model SourceDocument {
   ingestionRuns     IngestionRun[]
   extractions       DocumentExtraction[]       @relation("DocumentExtractionSourceDocument")
   currentExtraction CurrentDocumentExtraction? @relation("CurrentExtractionSourceDocument")
+  chunkSets          ChunkSet[]
+  analysisRuns       BookAnalysisRun[]
+  currentIntelligence CurrentBookIntelligence? @relation("CurrentIntelligenceSourceDocument")
 
   @@unique([id, workspaceId])
   @@unique([sourceId, version])
@@ -291,6 +349,9 @@ model DocumentExtraction {
   currentMarker        CurrentDocumentExtraction? @relation("CurrentExtractionDocument")
   pages                SourcePage[]
   blocks               SourceBlock[]
+  structureNodes       DocumentStructureNode[]
+  chunkSets            ChunkSet[]
+  analysisRuns         BookAnalysisRun[]
 
   @@unique([id, sourceDocumentId, workspaceId])
   @@unique([ingestionRunId, sourceDocumentId, workspaceId])
@@ -341,6 +402,8 @@ model SourceBlock {
   extraction   DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
   sourcePage   SourcePage?        @relation(fields: [sourcePageId, extractionId], references: [id, extractionId], onDelete: Restrict)
   spans        SourceSpan[]
+  chunkSpans   ChunkSourceSpan[]
+  memoryEvidence BookMemoryEvidence[]
 
   @@unique([extractionId, ordinal])
 }
@@ -354,6 +417,191 @@ model SourceSpan {
   quoteHash     String
   createdAt     DateTime    @default(now())
   sourceBlock   SourceBlock @relation(fields: [sourceBlockId], references: [id], onDelete: Cascade)
+}
+
+model DocumentStructureNode {
+  id String @id @default(cuid())
+  extractionId String
+  parentId String?
+  ordinal Int
+  kind StructureNodeKind
+  title String?
+  startBlockOrdinal Int
+  endBlockOrdinal Int
+  metadata Json?
+  createdAt DateTime @default(now())
+  extraction DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
+  parent DocumentStructureNode? @relation("StructureTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children DocumentStructureNode[] @relation("StructureTree")
+  chunks DocumentChunk[]
+  @@unique([extractionId, ordinal])
+  @@index([extractionId, startBlockOrdinal, endBlockOrdinal])
+}
+
+model ChunkSet {
+  id String @id @default(cuid())
+  workspaceId String
+  sourceDocumentId String
+  extractionId String
+  chunkingVersion String
+  configuration Json
+  configurationHash String
+  status ChunkSetStatus @default(QUEUED)
+  errorCode String?
+  createdAt DateTime @default(now())
+  completedAt DateTime?
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceDocument SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  extraction DocumentExtraction @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
+  chunks DocumentChunk[]
+  analysisRuns BookAnalysisRun[]
+  currentMarkers CurrentBookIntelligence[] @relation("CurrentIntelligenceChunkSet")
+  @@unique([extractionId, chunkingVersion, configurationHash])
+  @@unique([id, workspaceId])
+  @@index([workspaceId, sourceDocumentId, extractionId, status])
+}
+
+model DocumentChunk {
+  id String @id @default(cuid())
+  workspaceId String
+  chunkSetId String
+  structureNodeId String?
+  ordinal Int
+  content String
+  contentHash String
+  characterCount Int
+  tokenEstimate Int
+  metadata Json?
+  createdAt DateTime @default(now())
+  chunkSet ChunkSet @relation(fields: [chunkSetId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  structureNode DocumentStructureNode? @relation(fields: [structureNodeId], references: [id], onDelete: Restrict)
+  sourceSpans ChunkSourceSpan[]
+  analysisArtifacts AnalysisArtifact[]
+  @@unique([chunkSetId, ordinal])
+  @@unique([id, workspaceId])
+}
+
+model ChunkSourceSpan {
+  id String @id @default(cuid())
+  chunkId String
+  sourceBlockId String
+  ordinal Int
+  startOffset Int
+  endOffset Int
+  createdAt DateTime @default(now())
+  chunk DocumentChunk @relation(fields: [chunkId], references: [id], onDelete: Cascade)
+  sourceBlock SourceBlock @relation(fields: [sourceBlockId], references: [id], onDelete: Restrict)
+  @@unique([chunkId, ordinal])
+  @@index([sourceBlockId, startOffset, endOffset])
+}
+
+model BookAnalysisRun {
+  id String @id @default(cuid())
+  workspaceId String
+  sourceDocumentId String
+  extractionId String
+  chunkSetId String
+  pipelineVersion String
+  promptVersion String
+  provider String
+  model String
+  modelVersion String?
+  idempotencyKey String @unique
+  status AnalysisRunStatus @default(QUEUED)
+  errorCode String?
+  createdAt DateTime @default(now())
+  startedAt DateTime?
+  completedAt DateTime?
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceDocument SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  extraction DocumentExtraction @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
+  chunkSet ChunkSet @relation(fields: [chunkSetId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  artifacts AnalysisArtifact[]
+  memoryItems BookMemoryItem[]
+  currentMarkers CurrentBookIntelligence[] @relation("CurrentIntelligenceRun")
+  @@unique([chunkSetId, pipelineVersion, promptVersion, provider, model])
+  @@unique([id, workspaceId])
+}
+
+model AnalysisArtifact {
+  id String @id @default(cuid())
+  analysisRunId String
+  parentId String?
+  chunkId String?
+  scope AnalysisScope
+  ordinal Int
+  title String?
+  summary String?
+  structuredOutput Json
+  createdAt DateTime @default(now())
+  analysisRun BookAnalysisRun @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+  parent AnalysisArtifact? @relation("AnalysisTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children AnalysisArtifact[] @relation("AnalysisTree")
+  chunk DocumentChunk? @relation(fields: [chunkId], references: [id], onDelete: Restrict)
+  @@unique([analysisRunId, scope, ordinal])
+}
+
+model BookMemoryItem {
+  id String @id @default(cuid())
+  workspaceId String
+  sourceDocumentId String
+  extractionId String
+  analysisRunId String
+  type BookMemoryItemType
+  ordinal Int
+  content String
+  contentHash String
+  metadata Json?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  analysisRun BookAnalysisRun @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+  evidence BookMemoryEvidence[]
+  outboundRelations BookMemoryRelation[] @relation("MemoryRelationFrom")
+  inboundRelations BookMemoryRelation[] @relation("MemoryRelationTo")
+  @@unique([analysisRunId, ordinal])
+  @@index([workspaceId, sourceDocumentId, extractionId, type])
+}
+
+model BookMemoryEvidence {
+  id String @id @default(cuid())
+  memoryItemId String
+  sourceBlockId String
+  startOffset Int
+  endOffset Int
+  quoteText String?
+  quoteHash String?
+  createdAt DateTime @default(now())
+  memoryItem BookMemoryItem @relation(fields: [memoryItemId], references: [id], onDelete: Cascade)
+  sourceBlock SourceBlock @relation(fields: [sourceBlockId], references: [id], onDelete: Restrict)
+  @@index([sourceBlockId, startOffset, endOffset])
+}
+
+model BookMemoryRelation {
+  id String @id @default(cuid())
+  workspaceId String
+  analysisRunId String
+  fromMemoryItemId String
+  toMemoryItemId String
+  type BookMemoryRelationType
+  createdAt DateTime @default(now())
+  fromMemoryItem BookMemoryItem @relation("MemoryRelationFrom", fields: [fromMemoryItemId], references: [id], onDelete: Cascade)
+  toMemoryItem BookMemoryItem @relation("MemoryRelationTo", fields: [toMemoryItemId], references: [id], onDelete: Cascade)
+  @@unique([analysisRunId, fromMemoryItemId, toMemoryItemId, type])
+  @@index([workspaceId, analysisRunId])
+}
+
+model CurrentBookIntelligence {
+  id String @id @default(cuid())
+  workspaceId String
+  sourceDocumentId String
+  chunkSetId String
+  analysisRunId String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sourceDocument SourceDocument @relation("CurrentIntelligenceSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  chunkSet ChunkSet @relation("CurrentIntelligenceChunkSet", fields: [chunkSetId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  analysisRun BookAnalysisRun @relation("CurrentIntelligenceRun", fields: [analysisRunId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  @@unique([sourceDocumentId, workspaceId])
 }
 
 model OutboxEvent {
