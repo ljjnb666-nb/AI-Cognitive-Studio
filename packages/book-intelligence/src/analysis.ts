@@ -7,6 +7,7 @@ export type AnalysisResponse = { summary: string; memory?: MemoryCandidate[]; re
 export interface AnalysisRequest { stage: AnalysisStage; content: string; sourceBlockIds: string[]; tokenBudget: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; provider?: string; model?: string }
 export interface AnalysisProvider { generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> }
 export class RecordingFakeAnalysisProvider implements AnalysisProvider { requests: AnalysisRequest[] = []; async generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> { this.requests.push(structuredClone(request)); return { summary: request.content.slice(0, 240) }; } }
+export function estimateAnalysisTokens(text: string): number { let cjkOrEmoji = 0, ascii = 0; for (const codePoint of text) { if (/^[\u3400-\u9FFF\uF900-\uFAFF\u{1F000}-\u{1FAFF}]$/u.test(codePoint)) cjkOrEmoji++; else ascii++; } return Math.max(cjkOrEmoji + Math.ceil(ascii / 3), Math.ceil([...text].length / 2)); }
 
 const memoryTypes = new Set(["SUMMARY", "CONCEPT", "ARGUMENT", "CLAIM", "EXAMPLE", "STORY", "QUOTE", "PERSON", "QUESTION", "COUNTERPOINT"]);
 const relationTypes = new Set(["EXPLAINS", "SUPPORTS", "OPPOSES", "ASSOCIATED_WITH", "DEVELOPS"]);
@@ -25,7 +26,7 @@ export async function reduceBoundedAnalysisChildren(input: { provider: AnalysisP
     const batches: string[][] = []; let batch: string[] = [], size = 0;
     for (const summary of level) { if (summary.length > input.limit) { if (batch.length) { batches.push(batch); batch=[]; size=0; } for (let offset=0; offset<summary.length; offset += input.limit) batches.push([summary.slice(offset, offset + input.limit)]); continue; } const cost = (batch.length ? 1 : 0) + summary.length; if (batch.length && size + cost > input.limit) { batches.push(batch); batch=[]; size=0; } batch.push(summary); size += (batch.length === 1 ? 0 : 1) + summary.length; }
     if (batch.length) batches.push(batch); const next: string[] = [];
-    for (const group of batches) { const response = await guardedGenerateStructured(input.provider, { stage: input.stage, content: group.join("\n"), sourceBlockIds: [], tokenBudget: Math.ceil(input.limit / 2), correlationId: input.correlationId, systemInstructions: input.systemInstructions, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion }, input.blocks, input.limit); next.push(response.summary); }
+    for (const group of batches) { const response = await guardedGenerateStructured(input.provider, { stage: input.stage, content: group.join("\n"), sourceBlockIds: [], tokenBudget: estimateAnalysisTokens(group.join("\n")), correlationId: input.correlationId, systemInstructions: input.systemInstructions, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion }, input.blocks, input.limit); next.push(response.summary); }
     if (next.length >= level.length && next.every((summary, index) => summary.length >= (level[index]?.length ?? 0))) throw new Error("ANALYSIS_REDUCTION_DID_NOT_CONVERGE"); level = next;
   }
   return { summary: level[0]! };
@@ -34,7 +35,7 @@ export async function reduceBoundedAnalysisChildren(input: { provider: AnalysisP
 export function assertNoFullBookPrompt(requests: AnalysisRequest[], blocks: SourceBlockInput[], limit: number): void { for (const request of requests) assertBoundedProviderRequest(request, blocks, limit); }
 export function assertBoundedProviderRequest(request: AnalysisRequest, blocks: SourceBlockInput[], limit: number): void {
   const whole = blocks.map((b) => b.text).join("\n\n"), ids = new Set(blocks.map((b) => b.id)), requested = new Set(request.sourceBlockIds);
-  if (!request.systemInstructions || request.content === whole || request.content.length > limit || [...ids].every((id) => requested.has(id))) throw new Error("FULL_BOOK_PROMPT_PROHIBITED"); if (Math.ceil(request.content.length / 2) > request.tokenBudget) throw new Error("ANALYSIS_TOKEN_BUDGET_EXCEEDED");
+  if (!request.systemInstructions || request.content === whole || request.content.length > limit || [...ids].every((id) => requested.has(id))) throw new Error("FULL_BOOK_PROMPT_PROHIBITED"); if (estimateAnalysisTokens(request.content) > request.tokenBudget) throw new Error("ANALYSIS_TOKEN_BUDGET_EXCEEDED");
 }
 export function validateQuote(block: Pick<SourceBlockInput, "text">, evidence: EvidenceCandidate): string {
   if (!evidence.quoteText || !validateEvidence(block, evidence, evidence.quoteText)) throw new Error("INVALID_DIRECT_QUOTE");

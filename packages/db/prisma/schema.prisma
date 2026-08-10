@@ -104,6 +104,18 @@ enum AnalysisScope {
   BOOK
 }
 
+enum AnalysisRunStage {
+  QUEUED
+  CHUNK_ANALYSIS
+  SECTION_ANALYSIS
+  CHAPTER_ANALYSIS
+  BOOK_SYNTHESIS
+  MEMORY_FINALIZATION
+  EMBEDDINGS
+  FINALIZING
+  COMPLETED
+}
+
 enum BookMemoryItemType {
   SUMMARY
   CONCEPT
@@ -532,7 +544,7 @@ model BookAnalysisRun {
   executionClaimToken String?
   executionClaimedAt DateTime?
   executionLeaseUntil DateTime?
-  analysisStage String @default("QUEUED")
+  analysisStage AnalysisRunStage @default(QUEUED)
   createdAt DateTime @default(now())
   startedAt DateTime?
   completedAt DateTime?
