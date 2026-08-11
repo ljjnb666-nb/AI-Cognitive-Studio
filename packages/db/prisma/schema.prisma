@@ -1163,7 +1163,7 @@ model PodcastScriptRevision {
   episode                  PodcastEpisode          @relation(fields: [episodeId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   parent                   PodcastScriptRevision?  @relation("PodcastRevisionLineage", fields: [parentRevisionId, episodeId], references: [id, episodeId], onDelete: Restrict)
   children                 PodcastScriptRevision[] @relation("PodcastRevisionLineage")
-  generationRun            PodcastGenerationRun?   @relation(fields: [generationRunId], references: [id], onDelete: Restrict)
+  generationRun            PodcastGenerationRun?   @relation(fields: [generationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Restrict)
   currentMarker            CurrentPodcastScript?   @relation("CurrentPodcastRevision")
   evaluations              PodcastEvaluationRun[]
 

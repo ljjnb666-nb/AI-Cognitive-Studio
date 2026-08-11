@@ -91,11 +91,12 @@ export async function requestPodcastGeneration(context: TrustedRequestContext, i
 export async function getPodcastGenerationStatus(context: TrustedRequestContext, runId: string) { await assertMembership(context); return prisma.podcastGenerationRun.findFirstOrThrow({ where: { id: runId, workspaceId: context.workspaceId }, include: { job: true, segments: { orderBy: { ordinal: "asc" } } } }); }
 export async function getEpisodeScript(context: TrustedRequestContext, episodeId: string) { await assertMembership(context); return prisma.currentPodcastScript.findFirstOrThrow({ where: { episodeId, workspaceId: context.workspaceId }, include: { revision: { include: { evaluations: { include: { result: true } } } } } }); }
 export async function getScriptRevision(context: TrustedRequestContext, revisionId: string) { await assertMembership(context); return prisma.podcastScriptRevision.findFirstOrThrow({ where: { id: revisionId, workspaceId: context.workspaceId }, include: { evaluations: { include: { result: true } } } }); }
-export async function evaluatePodcastScript(context: TrustedRequestContext, revisionId: string, evaluatorVersion = "phase3-deterministic-v1") {
+export async function evaluatePodcastScript(context: TrustedRequestContext, revisionId: string, evaluatorVersion = "phase3-deterministic-v2") {
   await assertMembership(context);
-  const revision = await prisma.podcastScriptRevision.findFirstOrThrow({ where: { id: revisionId, workspaceId: context.workspaceId } });
+  const revision = await prisma.podcastScriptRevision.findFirstOrThrow({ where: { id: revisionId, workspaceId: context.workspaceId }, include: { generationRun: { include: { sources: true } } } });
   const snapshot = revision.scriptSnapshot as { utterances?: EvaluationUtterance[] };
-  const evaluation = evaluatePodcastScriptData(snapshot.utterances ?? []);
+  const sourceTexts = revision.generationRun ? (await prisma.sourceBlock.findMany({ where: { extractionId: { in: revision.generationRun.sources.map((source) => source.extractionId) } }, orderBy: [{ extractionId: "asc" }, { ordinal: "asc" }], select: { text: true } })).map((block) => block.text) : [];
+  const evaluation = evaluatePodcastScriptData(snapshot.utterances ?? [], { sourceTexts, contextWithinBudget: true });
   return prisma.$transaction(async (tx) => {
     const run = await tx.podcastEvaluationRun.upsert({ where: { revisionId_evaluatorVersion: { revisionId, evaluatorVersion } }, create: { workspaceId: context.workspaceId, episodeId: revision.episodeId, revisionId, evaluatorVersion, status: "SUCCEEDED", completedAt: new Date() }, update: { status: "SUCCEEDED", errorCode: null, completedAt: new Date() } });
     await tx.podcastEvaluationResult.upsert({ where: { evaluationRunId: run.id }, create: { evaluationRunId: run.id, ...evaluation }, update: evaluation });

@@ -19,12 +19,19 @@ Hosts may express rhetorical perspective, intuition, or a hypothetical scene. Th
 - Evidence leads through `BookMemoryItem` to `SourceBlock` and JavaScript UTF-16 half-open offsets `[startOffset,endOffset)`.
 - Grounding validation runs after humanization and rejects cross-source lineage, invalid offsets, inexact quote evidence, detached direct quotes, and unsupported substantive claims.
 - Reactions and conversational glue do not require citations. Unsupported claims are removed, reframed as interpretation, or regenerated at the bounded segment level; evidence is never invented.
+- Phase 3 uses a conservative humanization invariant: direct quotes and all substantive or evidence-backed utterances are text-immutable. Only non-substantive conversational glue may be rewritten. A later semantic validator may relax this in a separately reviewed phase.
 
 ## Anti-template and source-copy rules
 
 Repeated generic agreement, formal essay transitions, mechanical `first/second/finally` sequences, repeated summaries, identical host vocabulary, and symmetric turn lengths produce warnings and lower deterministic scores. One natural occurrence is not banned; density is measured.
 
-The script is transformative discussion, not audiobook reproduction. Direct quotes must be short, purposeful, exact, and evidenced. Long sequential overlap with source text is a source-copy risk and can become a hard policy failure at stricter deployment thresholds.
+The script is transformative discussion, not audiobook reproduction. Direct quotes must be short, purposeful, exact, and evidenced. Production finalization and revision reevaluation load source blocks from the exact generation-run lineage and perform local utterance, segment, and script overlap checks. At normalized overlap 0.35 a warning is emitted; at 0.80 the Phase 3 hard gate fails. No source text is sent to a quality-judge model.
+
+## Provider input budgets and proxy scores
+
+Every provider input is serialized and estimated with the shared conservative multilingual estimator before invocation. Planning, narrative, outline, drafting, and humanization each have explicit total-input limits in addition to the smaller context-only limits. Runtime schemas cap every provider-generated string, list, list item, question, segment, host/persona field, and style free-text field, so an oversized plan cannot become a narrative request.
+
+`cognitiveValueScore` and `structuralCoherenceScore` are deterministic regression proxies, not objective measurements of cognition or editorial quality. Cognitive value combines grounded substantive ratio, distinct evidence coverage, questions, challenges, callbacks/synthesis, and non-redundancy. Structural coherence combines contiguous segment ordering, opening/development/closing signals, callback/synthesis coverage, orphan detection, and repetition penalties.
 
 ## Hard failures and warnings
 

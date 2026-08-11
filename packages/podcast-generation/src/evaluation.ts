@@ -1,4 +1,4 @@
-export type EvaluationUtterance = { speakerHostId: string; text: string; utteranceType: string; substantive?: boolean; evidenceCount?: number };
+export type EvaluationUtterance = { speakerHostId: string; text: string; utteranceType: string; substantive?: boolean; evidenceCount?: number; evidenceMemoryIds?: string[]; segmentOrdinal?: number };
 const agreementPhrases = ["你说得非常对", "你说得对", "确实如此", "没错", "这个观点非常有意思", "这是一个非常重要的问题"];
 const transitionPhrases = ["总的来说", "综上所述", "接下来让我们", "首先", "其次", "最后"];
 const summaryPhrases = ["总而言之", "归根结底", "简单总结一下", "总结一下"];
@@ -9,6 +9,21 @@ const words = (text: string) => text.toLowerCase().match(/[\p{Script=Han}]|[\p{L
 const variance = (values: number[]) => { if (!values.length) return 0; const mean = values.reduce((a, b) => a + b, 0) / values.length; return values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length; };
 const jaccard = (a: Set<string>, b: Set<string>) => { const union = new Set([...a, ...b]); if (!union.size) return 1; return [...a].filter((item) => b.has(item)).length / union.size; };
 const clamp = (value: number) => Math.max(0, Math.min(100, value));
+const normalized = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+const windows = (value: string, size: number, step = Math.max(1, Math.floor(size / 3))) => { const result: string[] = []; for (let index = 0; index + size <= value.length; index += step) result.push(value.slice(index, index + size)); return result; };
+
+function sourceCopyRisk(utterances: EvaluationUtterance[], sourceTexts: string[]) {
+  const sources = sourceTexts.map(normalized).filter(Boolean);
+  if (!sources.length) return { risk: 0, utteranceRisk: 0, segmentRisk: 0, scriptRisk: 0 };
+  const sourceWindows = new Set(sources.flatMap((source) => windows(source, 60, 20)));
+  const overlap = (text: string) => { const candidate = normalized(text); if (candidate.length < 60) return 0; if (candidate.length >= 120 && sources.some((source) => source.includes(candidate))) return 1; const candidateWindows = windows(candidate, 60, 20); return candidateWindows.filter((window) => sourceWindows.has(window)).length / Math.max(1, candidateWindows.length); };
+  const utteranceRisk = Math.max(0, ...utterances.map((item) => overlap(item.text)));
+  const bySegment = new Map<number, string[]>();
+  for (const item of utterances) { const ordinal = item.segmentOrdinal ?? 0; bySegment.set(ordinal, [...(bySegment.get(ordinal) ?? []), item.text]); }
+  const segmentRisk = Math.max(0, ...[...bySegment.values()].map((items) => overlap(items.join(" "))));
+  const scriptRisk = overlap(utterances.map((item) => item.text).join(" "));
+  return { risk: Math.max(utteranceRisk, segmentRisk, scriptRisk), utteranceRisk, segmentRisk, scriptRisk };
+}
 
 export function evaluateNaturalness(utterances: EvaluationUtterance[]) {
   const total = Math.max(1, utterances.length), text = utterances.map((item) => item.text).join("\n");
@@ -41,9 +56,25 @@ export function evaluatePodcastScriptData(utterances: EvaluationUtterance[], opt
   const grounded = substantive.filter((item) => (item.evidenceCount ?? 0) > 0);
   const groundingScore = substantive.length ? grounded.length / substantive.length * 100 : 100;
   const fabricated = utterances.filter((item) => biographyPatterns.some((pattern) => pattern.test(item.text)));
-  const sourceTexts = options.sourceTexts ?? [];
-  const copied = utterances.filter((item) => sourceTexts.some((source) => item.text.length >= 120 && source.includes(item.text))).length;
-  const sourceCopyRiskScore = clamp(100 - copied * 35);
-  const hardFailures = [groundingScore < 100 ? "UNSUPPORTED_SUBSTANTIVE_CLAIM" : null, fabricated.length ? "FABRICATED_BIOGRAPHY" : null, options.contextWithinBudget === false ? "CONTEXT_BUDGET_VIOLATION" : null].filter((item): item is string => !!item);
-  return { naturalnessScore: natural.naturalnessScore, groundingScore, hostDifferentiationScore: natural.hostDifferentiationScore, cognitiveValueScore: 80, structuralCoherenceScore: 80, repetitionScore: clamp(100 - natural.metrics.repetitiveNGramRate * 100), aiFeelScore: clamp(natural.naturalnessScore - natural.metrics.agreementPhraseFrequency * 20), sourceCopyRiskScore, contextBudgetScore: options.contextWithinBudget === false ? 0 : 100, fabricationBoundaryScore: fabricated.length ? 0 : 100, metrics: natural.metrics, hardFailures, warnings: natural.warnings };
+  const distinctEvidence = new Set(grounded.flatMap((item) => item.evidenceMemoryIds ?? []));
+  const questionCoverage = utterances.some((item) => item.utteranceType === "QUESTION") ? 1 : 0;
+  const challengeCoverage = utterances.some((item) => item.utteranceType === "CHALLENGE") ? 1 : 0;
+  const synthesisCoverage = utterances.some((item) => item.utteranceType === "CALLBACK" || item.utteranceType === "CLARIFICATION") ? 1 : 0;
+  const substantiveRatio = substantive.length / Math.max(1, utterances.length);
+  const evidenceDiversity = Math.min(1, distinctEvidence.size / Math.max(1, substantive.length));
+  const cognitiveValueScore = clamp(100 * (0.35 * groundingScore / 100 + 0.2 * Math.min(1, substantiveRatio * 2) + 0.2 * evidenceDiversity + 0.1 * questionCoverage + 0.1 * challengeCoverage + 0.05 * synthesisCoverage) - natural.metrics.repetitiveNGramRate * 20);
+  const segmentOrdinals = utterances.map((item) => item.segmentOrdinal).filter((value): value is number => typeof value === "number");
+  const distinctSegments = [...new Set(segmentOrdinals)].sort((a, b) => a - b);
+  const contiguousSegments = distinctSegments.every((ordinal, index) => ordinal === index + 1);
+  const emptyOrOrphanPenalty = utterances.length && distinctSegments.length ? 0 : 35;
+  const opening = utterances[0]?.utteranceType;
+  const closing = utterances.at(-1)?.utteranceType;
+  const openingProgression = opening === "QUESTION" || opening === "STATEMENT" || opening === "CHALLENGE" ? 1 : 0.5;
+  const closingProgression = closing === "CALLBACK" || closing === "CLARIFICATION" || closing === "QUESTION" ? 1 : 0.5;
+  const structuralCoherenceScore = clamp(100 * (0.3 * (contiguousSegments ? 1 : 0) + 0.2 * openingProgression + 0.2 * closingProgression + 0.15 * synthesisCoverage + 0.15 * Math.min(1, distinctSegments.length / 2)) - emptyOrOrphanPenalty - natural.metrics.repetitiveNGramRate * 25);
+  const copy = sourceCopyRisk(utterances, options.sourceTexts ?? []);
+  const sourceCopyRiskScore = clamp(100 * (1 - copy.risk));
+  const hardFailures = [groundingScore < 100 ? "UNSUPPORTED_SUBSTANTIVE_CLAIM" : null, fabricated.length ? "FABRICATED_BIOGRAPHY" : null, options.contextWithinBudget === false ? "CONTEXT_BUDGET_VIOLATION" : null, copy.risk >= 0.8 ? "SOURCE_COPY_HARD_GATE" : null].filter((item): item is string => !!item);
+  const warnings = [...natural.warnings, copy.risk >= 0.35 ? "SOURCE_COPY_OVERLAP" : null].filter((item): item is string => !!item);
+  return { naturalnessScore: natural.naturalnessScore, groundingScore, hostDifferentiationScore: natural.hostDifferentiationScore, cognitiveValueScore, structuralCoherenceScore, repetitionScore: clamp(100 - natural.metrics.repetitiveNGramRate * 100), aiFeelScore: clamp(natural.naturalnessScore - natural.metrics.agreementPhraseFrequency * 20), sourceCopyRiskScore, contextBudgetScore: options.contextWithinBudget === false ? 0 : 100, fabricationBoundaryScore: fabricated.length ? 0 : 100, metrics: { ...natural.metrics, proxyScoreVersion: "phase3-deterministic-v2", substantiveGroundedRatio: groundingScore / 100, distinctEvidenceCoverage: distinctEvidence.size, questionCoverage, challengeCoverage, synthesisCoverage, contiguousSegments, sourceCopy: copy }, hardFailures, warnings };
 }

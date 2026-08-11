@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { afterEach, expect, test } from "vitest";
+import { resolvePodcastRuntimeAdapter } from "../src/runtime.js";
 
 const workerProcesses: ReturnType<typeof spawn>[] = [];
 
@@ -43,4 +44,9 @@ test("exits cleanly after the platform termination signal", async () => {
     expect(exitCode).toBe(0);
     expect(output).toContain('"event":"worker.shutdown.completed"');
   }
+});
+
+test("podcast runtime configuration is disabled when absent and fails explicitly when unsupported", () => {
+  expect(resolvePodcastRuntimeAdapter({})).toBeUndefined();
+  expect(() => resolvePodcastRuntimeAdapter({ PODCAST_GENERATION_PROVIDER: "unsupported-vendor" })).toThrow("PODCAST_GENERATION_PROVIDER_UNSUPPORTED:unsupported-vendor");
 });
