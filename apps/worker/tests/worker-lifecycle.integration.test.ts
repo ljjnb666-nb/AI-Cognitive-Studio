@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 
 const workerProcesses: ReturnType<typeof spawn>[] = [];
@@ -17,8 +16,7 @@ afterEach(async () => {
 });
 
 test("exits cleanly after the platform termination signal", async () => {
-  const tsxCli = join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
-  const child = spawn(process.execPath, [tsxCli, "src/index.ts"], {
+  const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
     cwd: process.cwd(),
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
