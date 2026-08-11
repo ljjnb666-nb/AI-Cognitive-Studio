@@ -138,6 +138,67 @@ enum BookMemoryRelationType {
   DEVELOPS
 }
 
+enum PodcastEpisodeStatus {
+  DRAFT
+  GENERATING
+  READY
+  FAILED
+}
+
+enum PodcastGenerationStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum PodcastGenerationStage {
+  QUEUED
+  EPISODE_PLANNING
+  NARRATIVE_DESIGN
+  SEGMENT_OUTLINE
+  SEGMENT_DRAFTING
+  HUMANIZATION
+  GROUNDING_VALIDATION
+  FINALIZING
+  COMPLETED
+}
+
+enum PodcastSegmentStatus {
+  PLANNED
+  DRAFTED
+  HUMANIZED
+  GROUNDED
+}
+
+enum PodcastUtteranceType {
+  STATEMENT
+  QUESTION
+  REACTION
+  CHALLENGE
+  CLARIFICATION
+  EXAMPLE
+  TRANSITION
+  CALLBACK
+}
+
+enum PodcastRevisionSource {
+  GENERATED
+  REGENERATED
+  USER_EDIT
+}
+
+enum PodcastRevisionStatus {
+  FINAL
+  SUPERSEDED
+}
+
+enum PodcastEvaluationStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
 model User {
   id          String            @id @default(cuid())
   email       String            @unique
@@ -150,20 +211,23 @@ model User {
 }
 
 model Workspace {
-  id             String            @id @default(cuid())
-  name           String
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
-  members        WorkspaceMember[]
-  projects       Project[]
-  works          Work[]
-  sources        Source[]
-  sourceBlobs    SourceBlob[]
-  uploadSessions UploadSession[]
-  jobs           Job[]
-  chunkSets      ChunkSet[]
-  analysisRuns   BookAnalysisRun[]
-  memoryItems    BookMemoryItem[]
+  id                    String                 @id @default(cuid())
+  name                  String
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  members               WorkspaceMember[]
+  projects              Project[]
+  works                 Work[]
+  sources               Source[]
+  sourceBlobs           SourceBlob[]
+  uploadSessions        UploadSession[]
+  jobs                  Job[]
+  chunkSets             ChunkSet[]
+  analysisRuns          BookAnalysisRun[]
+  memoryItems           BookMemoryItem[]
+  podcastProjects       PodcastProject[]
+  podcastEpisodes       PodcastEpisode[]
+  podcastGenerationRuns PodcastGenerationRun[]
 }
 
 model WorkspaceMember {
@@ -264,47 +328,49 @@ model SourceBlob {
 }
 
 model SourceDocument {
-  id                String                     @id @default(cuid())
-  sourceId          String
-  sourceBlobId      String
-  workspaceId       String
-  version           Int
-  sha256            String
-  sizeBytes         BigInt
-  mediaType         String
-  storageKey        String
-  createdAt         DateTime                   @default(now())
-  source            Source                     @relation(fields: [sourceId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  sourceBlob        SourceBlob                 @relation(fields: [sourceBlobId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  uploadCompletion  UploadCompletion?
-  ingestionRuns     IngestionRun[]
-  extractions       DocumentExtraction[]       @relation("DocumentExtractionSourceDocument")
-  currentExtraction CurrentDocumentExtraction? @relation("CurrentExtractionSourceDocument")
-  chunkSets          ChunkSet[]
-  analysisRuns       BookAnalysisRun[]
-  currentIntelligence CurrentBookIntelligence? @relation("CurrentIntelligenceSourceDocument")
+  id                       String                     @id @default(cuid())
+  sourceId                 String
+  sourceBlobId             String
+  workspaceId              String
+  version                  Int
+  sha256                   String
+  sizeBytes                BigInt
+  mediaType                String
+  storageKey               String
+  createdAt                DateTime                   @default(now())
+  source                   Source                     @relation(fields: [sourceId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  sourceBlob               SourceBlob                 @relation(fields: [sourceBlobId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  uploadCompletion         UploadCompletion?
+  ingestionRuns            IngestionRun[]
+  extractions              DocumentExtraction[]       @relation("DocumentExtractionSourceDocument")
+  currentExtraction        CurrentDocumentExtraction? @relation("CurrentExtractionSourceDocument")
+  chunkSets                ChunkSet[]
+  analysisRuns             BookAnalysisRun[]
+  currentIntelligence      CurrentBookIntelligence?   @relation("CurrentIntelligenceSourceDocument")
+  podcastProjects          PodcastProjectSource[]
+  podcastGenerationSources PodcastGenerationSource[]
 
   @@unique([id, workspaceId])
   @@unique([sourceId, version])
 }
 
 model UploadSession {
-  id                  String              @id @default(cuid())
-  workspaceId         String
-  originalFilename    String
-  declaredMediaType   String
-  declaredSizeBytes   BigInt
-  temporaryStorageKey String
-  status              UploadSessionStatus @default(CREATED)
+  id                   String              @id @default(cuid())
+  workspaceId          String
+  originalFilename     String
+  declaredMediaType    String
+  declaredSizeBytes    BigInt
+  temporaryStorageKey  String
+  status               UploadSessionStatus @default(CREATED)
   completionClaimToken String?
   completionClaimedAt  DateTime?
   completionLeaseUntil DateTime?
-  expiresAt           DateTime
-  completedAt         DateTime?
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
-  workspace           Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  completion          UploadCompletion?
+  expiresAt            DateTime
+  completedAt          DateTime?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  workspace            Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  completion           UploadCompletion?
 
   @@unique([id, workspaceId])
   @@index([workspaceId, status])
@@ -401,21 +467,22 @@ model SourcePage {
 }
 
 model SourceBlock {
-  id           String             @id @default(cuid())
-  extractionId String
-  sourcePageId String?
-  ordinal      Int
-  kind         SourceBlockKind
-  text         String
-  contentHash  String
-  metadata     Json?
-  bbox         Json?
-  createdAt    DateTime           @default(now())
-  extraction   DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
-  sourcePage   SourcePage?        @relation(fields: [sourcePageId, extractionId], references: [id, extractionId], onDelete: Restrict)
-  spans        SourceSpan[]
-  chunkSpans   ChunkSourceSpan[]
-  memoryEvidence BookMemoryEvidence[]
+  id              String                     @id @default(cuid())
+  extractionId    String
+  sourcePageId    String?
+  ordinal         Int
+  kind            SourceBlockKind
+  text            String
+  contentHash     String
+  metadata        Json?
+  bbox            Json?
+  createdAt       DateTime                   @default(now())
+  extraction      DocumentExtraction         @relation(fields: [extractionId], references: [id], onDelete: Cascade)
+  sourcePage      SourcePage?                @relation(fields: [sourcePageId, extractionId], references: [id, extractionId], onDelete: Restrict)
+  spans           SourceSpan[]
+  chunkSpans      ChunkSourceSpan[]
+  memoryEvidence  BookMemoryEvidence[]
+  podcastEvidence PodcastUtteranceEvidence[]
 
   @@unique([extractionId, ordinal])
   @@unique([id, extractionId])
@@ -433,22 +500,23 @@ model SourceSpan {
 }
 
 model DocumentStructureNode {
-  id String @id @default(cuid())
-  extractionId String
-  structureVersion String
-  parentId String?
-  ordinal Int
-  kind StructureNodeKind
-  title String?
+  id                String                  @id @default(cuid())
+  extractionId      String
+  structureVersion  String
+  parentId          String?
+  ordinal           Int
+  kind              StructureNodeKind
+  title             String?
   startBlockOrdinal Int
-  endBlockOrdinal Int
-  metadata Json?
-  createdAt DateTime @default(now())
-  extraction DocumentExtraction @relation(fields: [extractionId], references: [id], onDelete: Cascade)
-  parent DocumentStructureNode? @relation("StructureTree", fields: [parentId, extractionId, structureVersion], references: [id, extractionId, structureVersion], onDelete: Cascade)
-  children DocumentStructureNode[] @relation("StructureTree")
-  chunks DocumentChunk[]
+  endBlockOrdinal   Int
+  metadata          Json?
+  createdAt         DateTime                @default(now())
+  extraction        DocumentExtraction      @relation(fields: [extractionId], references: [id], onDelete: Cascade)
+  parent            DocumentStructureNode?  @relation("StructureTree", fields: [parentId, extractionId, structureVersion], references: [id, extractionId, structureVersion], onDelete: Cascade)
+  children          DocumentStructureNode[] @relation("StructureTree")
+  chunks            DocumentChunk[]
   analysisArtifacts AnalysisArtifact[]
+
   @@unique([extractionId, structureVersion, ordinal])
   @@unique([id, extractionId])
   @@unique([id, extractionId, structureVersion])
@@ -456,26 +524,27 @@ model DocumentStructureNode {
 }
 
 model ChunkSet {
-  id String @id @default(cuid())
-  workspaceId String
-  sourceDocumentId String
-  extractionId String
-  chunkingVersion String
-  configuration Json
-  configurationHash String
-  status ChunkSetStatus @default(QUEUED)
-  errorCode String?
+  id                        String                    @id @default(cuid())
+  workspaceId               String
+  sourceDocumentId          String
+  extractionId              String
+  chunkingVersion           String
+  configuration             Json
+  configurationHash         String
+  status                    ChunkSetStatus            @default(QUEUED)
+  errorCode                 String?
   materializationClaimToken String?
-  materializationClaimedAt DateTime?
+  materializationClaimedAt  DateTime?
   materializationLeaseUntil DateTime?
-  createdAt DateTime @default(now())
-  completedAt DateTime?
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  sourceDocument SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  extraction DocumentExtraction @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
-  chunks DocumentChunk[]
-  analysisRuns BookAnalysisRun[]
-  currentMarkers CurrentBookIntelligence[] @relation("CurrentIntelligenceChunkSet")
+  createdAt                 DateTime                  @default(now())
+  completedAt               DateTime?
+  workspace                 Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceDocument            SourceDocument            @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  extraction                DocumentExtraction        @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
+  chunks                    DocumentChunk[]
+  analysisRuns              BookAnalysisRun[]
+  currentMarkers            CurrentBookIntelligence[] @relation("CurrentIntelligenceChunkSet")
+
   @@unique([extractionId, chunkingVersion, configurationHash])
   @@unique([id, workspaceId])
   @@unique([id, extractionId])
@@ -485,24 +554,25 @@ model ChunkSet {
 }
 
 model DocumentChunk {
-  id String @id @default(cuid())
-  workspaceId String
-  chunkSetId String
-  extractionId String
-  structureNodeId String?
-  structureVersion String
-  ordinal Int
-  content String
-  contentHash String
-  characterCount Int
-  tokenEstimate Int
-  metadata Json?
-  createdAt DateTime @default(now())
-  chunkSet ChunkSet @relation(fields: [chunkSetId, workspaceId, extractionId], references: [id, workspaceId, extractionId], onDelete: Cascade)
-  structureNode DocumentStructureNode? @relation(fields: [structureNodeId, extractionId, structureVersion], references: [id, extractionId, structureVersion], onDelete: Restrict)
-  sourceSpans ChunkSourceSpan[]
+  id                String                   @id @default(cuid())
+  workspaceId       String
+  chunkSetId        String
+  extractionId      String
+  structureNodeId   String?
+  structureVersion  String
+  ordinal           Int
+  content           String
+  contentHash       String
+  characterCount    Int
+  tokenEstimate     Int
+  metadata          Json?
+  createdAt         DateTime                 @default(now())
+  chunkSet          ChunkSet                 @relation(fields: [chunkSetId, workspaceId, extractionId], references: [id, workspaceId, extractionId], onDelete: Cascade)
+  structureNode     DocumentStructureNode?   @relation(fields: [structureNodeId, extractionId, structureVersion], references: [id, extractionId, structureVersion], onDelete: Restrict)
+  sourceSpans       ChunkSourceSpan[]
   analysisArtifacts AnalysisArtifact[]
-  embeddings DocumentChunkEmbedding[]
+  embeddings        DocumentChunkEmbedding[]
+
   @@unique([chunkSetId, ordinal])
   @@unique([id, workspaceId])
   @@unique([id, extractionId])
@@ -511,53 +581,56 @@ model DocumentChunk {
 }
 
 model ChunkSourceSpan {
-  id String @id @default(cuid())
-  chunkId String
+  id            String        @id @default(cuid())
+  chunkId       String
   sourceBlockId String
-  extractionId String
-  ordinal Int
-  startOffset Int
-  endOffset Int
-  createdAt DateTime @default(now())
-  chunk DocumentChunk @relation(fields: [chunkId, extractionId], references: [id, extractionId], onDelete: Cascade)
-  sourceBlock SourceBlock @relation(fields: [sourceBlockId, extractionId], references: [id, extractionId], onDelete: Restrict)
+  extractionId  String
+  ordinal       Int
+  startOffset   Int
+  endOffset     Int
+  createdAt     DateTime      @default(now())
+  chunk         DocumentChunk @relation(fields: [chunkId, extractionId], references: [id, extractionId], onDelete: Cascade)
+  sourceBlock   SourceBlock   @relation(fields: [sourceBlockId, extractionId], references: [id, extractionId], onDelete: Restrict)
+
   @@unique([chunkId, ordinal])
   @@index([sourceBlockId, startOffset, endOffset])
 }
 
 model BookAnalysisRun {
-  id String @id @default(cuid())
-  workspaceId String
-  sourceDocumentId String
-  extractionId String
-  chunkSetId String
-  jobId String @unique
-  pipelineVersion String
-  promptVersion String
-  provider String
-  model String
-  modelVersion String?
-  modelVersionKey String
-  idempotencyKey String @unique
-  analysisIdentityHash String @unique
-  status AnalysisRunStatus @default(QUEUED)
-  errorCode String?
-  executionClaimToken String?
-  executionClaimedAt DateTime?
-  executionLeaseUntil DateTime?
-  analysisStage AnalysisRunStage @default(QUEUED)
-  createdAt DateTime @default(now())
-  startedAt DateTime?
-  completedAt DateTime?
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  sourceDocument SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  extraction DocumentExtraction @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
-  chunkSet ChunkSet @relation(fields: [chunkSetId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Restrict)
-  job Job @relation(fields: [jobId], references: [id], onDelete: Restrict)
-    artifacts AnalysisArtifact[]
-    reductionResults AnalysisReductionResult[]
-  memoryItems BookMemoryItem[]
-  currentMarkers CurrentBookIntelligence[] @relation("CurrentIntelligenceRun")
+  id                       String                    @id @default(cuid())
+  workspaceId              String
+  sourceDocumentId         String
+  extractionId             String
+  chunkSetId               String
+  jobId                    String                    @unique
+  pipelineVersion          String
+  promptVersion            String
+  provider                 String
+  model                    String
+  modelVersion             String?
+  modelVersionKey          String
+  idempotencyKey           String                    @unique
+  analysisIdentityHash     String                    @unique
+  status                   AnalysisRunStatus         @default(QUEUED)
+  errorCode                String?
+  executionClaimToken      String?
+  executionClaimedAt       DateTime?
+  executionLeaseUntil      DateTime?
+  analysisStage            AnalysisRunStage          @default(QUEUED)
+  createdAt                DateTime                  @default(now())
+  startedAt                DateTime?
+  completedAt              DateTime?
+  workspace                Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceDocument           SourceDocument            @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  extraction               DocumentExtraction        @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
+  chunkSet                 ChunkSet                  @relation(fields: [chunkSetId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Restrict)
+  job                      Job                       @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  artifacts                AnalysisArtifact[]
+  reductionResults         AnalysisReductionResult[]
+  memoryItems              BookMemoryItem[]
+  currentMarkers           CurrentBookIntelligence[] @relation("CurrentIntelligenceRun")
+  podcastGenerationSources PodcastGenerationSource[]
+
   @@unique([id, workspaceId])
   @@unique([id, workspaceId, chunkSetId])
   @@unique([id, workspaceId, sourceDocumentId, extractionId], map: "BookAnalysisRun_lineage_key")
@@ -566,69 +639,75 @@ model BookAnalysisRun {
 }
 
 model AnalysisArtifact {
-  id String @id @default(cuid())
-  analysisRunId String
-  workspaceId String
-  chunkSetId String
-  extractionId String
-  structureVersion String?
-  parentId String?
-  chunkId String?
-  structureNodeId String?
-  scope AnalysisScope
-  ordinal Int
-  title String?
-  summary String?
-  structuredOutput Json
-  createdAt DateTime @default(now())
-  analysisRun BookAnalysisRun @relation(fields: [analysisRunId, workspaceId, chunkSetId], references: [id, workspaceId, chunkSetId], onDelete: Cascade)
-  parent AnalysisArtifact? @relation("AnalysisTree", fields: [parentId, analysisRunId], references: [id, analysisRunId], onDelete: Cascade)
-  children AnalysisArtifact[] @relation("AnalysisTree")
+  id                String                 @id @default(cuid())
+  analysisRunId     String
+  workspaceId       String
+  chunkSetId        String
+  extractionId      String
+  structureVersion  String?
+  parentId          String?
+  chunkId           String?
+  structureNodeId   String?
+  scope             AnalysisScope
+  ordinal           Int
+  title             String?
+  summary           String?
+  structuredOutput  Json
+  createdAt         DateTime               @default(now())
+  analysisRun       BookAnalysisRun        @relation(fields: [analysisRunId, workspaceId, chunkSetId], references: [id, workspaceId, chunkSetId], onDelete: Cascade)
+  parent            AnalysisArtifact?      @relation("AnalysisTree", fields: [parentId, analysisRunId], references: [id, analysisRunId], onDelete: Cascade)
+  children          AnalysisArtifact[]     @relation("AnalysisTree")
   sourceMemoryItems BookMemoryItem[]
-  chunk DocumentChunk? @relation(fields: [chunkId, workspaceId, chunkSetId], references: [id, workspaceId, chunkSetId], onDelete: Restrict)
-  structureNode DocumentStructureNode? @relation(fields: [structureNodeId, extractionId, structureVersion], references: [id, extractionId, structureVersion], onDelete: Restrict)
+  chunk             DocumentChunk?         @relation(fields: [chunkId, workspaceId, chunkSetId], references: [id, workspaceId, chunkSetId], onDelete: Restrict)
+  structureNode     DocumentStructureNode? @relation(fields: [structureNodeId, extractionId, structureVersion], references: [id, extractionId, structureVersion], onDelete: Restrict)
+
   @@unique([analysisRunId, scope, ordinal])
   @@unique([id, analysisRunId])
 }
 
 model AnalysisReductionResult {
-  id String @id @default(cuid())
-  workspaceId String
-  analysisRunId String
-  stage AnalysisScope
-  parentKey String
-  level Int
-  batchOrdinal Int
-  inputHash String
-  summary String
+  id               String          @id @default(cuid())
+  workspaceId      String
+  analysisRunId    String
+  stage            AnalysisScope
+  parentKey        String
+  level            Int
+  batchOrdinal     Int
+  inputHash        String
+  summary          String
   structuredOutput Json
-  createdAt DateTime @default(now())
-  analysisRun BookAnalysisRun @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+  createdAt        DateTime        @default(now())
+  analysisRun      BookAnalysisRun @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+
   @@unique([analysisRunId, stage, parentKey, level, batchOrdinal, inputHash])
   @@index([workspaceId, analysisRunId, stage])
 }
 
 model BookMemoryItem {
-  id String @id @default(cuid())
-  workspaceId String
-  sourceDocumentId String
-  extractionId String
-  analysisRunId String
-  type BookMemoryItemType
-  ordinal Int
-  content String
-  contentHash String
-  sourceArtifactId String
-  memoryKey String @unique
-  metadata Json?
-  createdAt DateTime @default(now())
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  analysisRun BookAnalysisRun @relation(fields: [analysisRunId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Cascade)
-  sourceArtifact AnalysisArtifact @relation(fields: [sourceArtifactId, analysisRunId], references: [id, analysisRunId], onDelete: Restrict)
-  evidence BookMemoryEvidence[]
-  outboundRelations BookMemoryRelation[] @relation("MemoryRelationFrom")
-  inboundRelations BookMemoryRelation[] @relation("MemoryRelationTo")
-  embeddings BookMemoryEmbedding[]
+  id                    String                      @id @default(cuid())
+  workspaceId           String
+  sourceDocumentId      String
+  extractionId          String
+  analysisRunId         String
+  type                  BookMemoryItemType
+  ordinal               Int
+  content               String
+  contentHash           String
+  sourceArtifactId      String
+  memoryKey             String                      @unique
+  metadata              Json?
+  createdAt             DateTime                    @default(now())
+  workspace             Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  analysisRun           BookAnalysisRun             @relation(fields: [analysisRunId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Cascade)
+  sourceArtifact        AnalysisArtifact            @relation(fields: [sourceArtifactId, analysisRunId], references: [id, analysisRunId], onDelete: Restrict)
+  evidence              BookMemoryEvidence[]
+  outboundRelations     BookMemoryRelation[]        @relation("MemoryRelationFrom")
+  inboundRelations      BookMemoryRelation[]        @relation("MemoryRelationTo")
+  embeddings            BookMemoryEmbedding[]
+  podcastPlanContext    PodcastPlanContextItem[]
+  podcastSegmentContext PodcastSegmentContextItem[]
+  podcastEvidence       PodcastUtteranceEvidence[]
+
   @@unique([analysisRunId, ordinal])
   @@unique([id, analysisRunId, workspaceId])
   @@unique([id, analysisRunId, workspaceId, extractionId])
@@ -636,131 +715,555 @@ model BookMemoryItem {
 }
 
 model DocumentChunkEmbedding {
-  id String @id @default(cuid())
-  chunkId String
-  workspaceId String
-  extractionId String
-  provider String
-  model String
-  modelVersion String?
-  embeddingVersion String
+  id                    String        @id @default(cuid())
+  chunkId               String
+  workspaceId           String
+  extractionId          String
+  provider              String
+  model                 String
+  modelVersion          String?
+  embeddingVersion      String
   embeddingIdentityHash String
-  dimensions Int
-  vector Json
-  createdAt DateTime @default(now())
-  chunk DocumentChunk @relation(fields: [chunkId, workspaceId, extractionId], references: [id, workspaceId, extractionId], onDelete: Cascade)
+  dimensions            Int
+  vector                Json
+  createdAt             DateTime      @default(now())
+  chunk                 DocumentChunk @relation(fields: [chunkId, workspaceId, extractionId], references: [id, workspaceId, extractionId], onDelete: Cascade)
+
   @@unique([chunkId, embeddingIdentityHash], map: "DocumentChunkEmbedding_identity")
   @@index([chunkId, embeddingIdentityHash])
   @@index([workspaceId, extractionId, embeddingVersion])
 }
 
 model BookMemoryEmbedding {
-  id String @id @default(cuid())
-  memoryItemId String
-  analysisRunId String
-  workspaceId String
-  extractionId String
-  provider String
-  model String
-  modelVersion String?
-  embeddingVersion String
+  id                    String         @id @default(cuid())
+  memoryItemId          String
+  analysisRunId         String
+  workspaceId           String
+  extractionId          String
+  provider              String
+  model                 String
+  modelVersion          String?
+  embeddingVersion      String
   embeddingIdentityHash String
-  dimensions Int
-  vector Json
-  createdAt DateTime @default(now())
-  memoryItem BookMemoryItem @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Cascade)
+  dimensions            Int
+  vector                Json
+  createdAt             DateTime       @default(now())
+  memoryItem            BookMemoryItem @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Cascade)
+
   @@unique([memoryItemId, embeddingIdentityHash], map: "BookMemoryEmbedding_identity")
   @@index([memoryItemId, embeddingIdentityHash])
   @@index([workspaceId, extractionId, embeddingVersion])
 }
 
 model BookMemoryEvidence {
-  id String @id @default(cuid())
-  memoryItemId String
+  id            String         @id @default(cuid())
+  memoryItemId  String
   sourceBlockId String
-  extractionId String
+  extractionId  String
   analysisRunId String
-  workspaceId String
-  startOffset Int
-  endOffset Int
-  quoteText String?
-  quoteHash String?
-  createdAt DateTime @default(now())
-  memoryItem BookMemoryItem @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Cascade)
-  sourceBlock SourceBlock @relation(fields: [sourceBlockId, extractionId], references: [id, extractionId], onDelete: Restrict)
+  workspaceId   String
+  startOffset   Int
+  endOffset     Int
+  quoteText     String?
+  quoteHash     String?
+  createdAt     DateTime       @default(now())
+  memoryItem    BookMemoryItem @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Cascade)
+  sourceBlock   SourceBlock    @relation(fields: [sourceBlockId, extractionId], references: [id, extractionId], onDelete: Restrict)
+
   @@index([sourceBlockId, startOffset, endOffset])
 }
 
 model BookMemoryRelation {
-  id String @id @default(cuid())
-  workspaceId String
-  analysisRunId String
+  id               String                 @id @default(cuid())
+  workspaceId      String
+  analysisRunId    String
   fromMemoryItemId String
-  toMemoryItemId String
-  type BookMemoryRelationType
-  createdAt DateTime @default(now())
-  fromMemoryItem BookMemoryItem @relation("MemoryRelationFrom", fields: [fromMemoryItemId, analysisRunId, workspaceId], references: [id, analysisRunId, workspaceId], onDelete: Cascade)
-  toMemoryItem BookMemoryItem @relation("MemoryRelationTo", fields: [toMemoryItemId, analysisRunId, workspaceId], references: [id, analysisRunId, workspaceId], onDelete: Cascade)
+  toMemoryItemId   String
+  type             BookMemoryRelationType
+  createdAt        DateTime               @default(now())
+  fromMemoryItem   BookMemoryItem         @relation("MemoryRelationFrom", fields: [fromMemoryItemId, analysisRunId, workspaceId], references: [id, analysisRunId, workspaceId], onDelete: Cascade)
+  toMemoryItem     BookMemoryItem         @relation("MemoryRelationTo", fields: [toMemoryItemId, analysisRunId, workspaceId], references: [id, analysisRunId, workspaceId], onDelete: Cascade)
+
   @@unique([analysisRunId, fromMemoryItemId, toMemoryItemId, type])
   @@index([workspaceId, analysisRunId])
 }
 
 model CurrentBookIntelligence {
-  id String @id @default(cuid())
-  workspaceId String
+  id               String          @id @default(cuid())
+  workspaceId      String
   sourceDocumentId String
-  extractionId String
-  chunkSetId String
-  analysisRunId String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  sourceDocument SourceDocument @relation("CurrentIntelligenceSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  chunkSet ChunkSet @relation("CurrentIntelligenceChunkSet", fields: [chunkSetId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Restrict)
-  analysisRun BookAnalysisRun @relation("CurrentIntelligenceRun", fields: [analysisRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId], references: [id, workspaceId, sourceDocumentId, extractionId, chunkSetId], onDelete: Restrict)
+  extractionId     String
+  chunkSetId       String
+  analysisRunId    String
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  sourceDocument   SourceDocument  @relation("CurrentIntelligenceSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  chunkSet         ChunkSet        @relation("CurrentIntelligenceChunkSet", fields: [chunkSetId, workspaceId, sourceDocumentId, extractionId], references: [id, workspaceId, sourceDocumentId, extractionId], onDelete: Restrict)
+  analysisRun      BookAnalysisRun @relation("CurrentIntelligenceRun", fields: [analysisRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId], references: [id, workspaceId, sourceDocumentId, extractionId, chunkSetId], onDelete: Restrict)
+
   @@unique([sourceDocumentId, workspaceId])
 }
 
+model PodcastProject {
+  id            String                 @id @default(cuid())
+  workspaceId   String
+  name          String
+  description   String?
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+  workspace     Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sources       PodcastProjectSource[]
+  episodes      PodcastEpisode[]
+  styleProfiles PodcastStyleProfile[]
+  hosts         PodcastHost[]
+
+  @@unique([id, workspaceId])
+}
+
+model PodcastProjectSource {
+  podcastProjectId String
+  sourceDocumentId String
+  workspaceId      String
+  createdAt        DateTime       @default(now())
+  project          PodcastProject @relation(fields: [podcastProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  sourceDocument   SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@id([podcastProjectId, sourceDocumentId])
+  @@index([workspaceId, sourceDocumentId])
+}
+
+model PodcastStyleProfile {
+  id                    String                 @id @default(cuid())
+  workspaceId           String
+  podcastProjectId      String
+  version               Int
+  language              String                 @default("zh-CN")
+  tone                  String                 @default("cognitive-conversation")
+  depth                 Int                    @default(7)
+  pace                  Int                    @default(5)
+  hostCount             Int                    @default(2)
+  targetDurationMinutes Int                    @default(30)
+  targetAudience        String                 @default("general-curious")
+  formality             Int                    @default(4)
+  humorLevel            Int                    @default(3)
+  debateLevel           Int                    @default(5)
+  storytellingLevel     Int                    @default(5)
+  interruptionLevel     Int                    @default(3)
+  disagreementLevel     Int                    @default(5)
+  technicalDepth        Int                    @default(5)
+  summaryDensity        Int                    @default(3)
+  exampleDensity        Int                    @default(6)
+  createdAt             DateTime               @default(now())
+  project               PodcastProject         @relation(fields: [podcastProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  episodes              PodcastEpisode[]
+  generationRuns        PodcastGenerationRun[]
+
+  @@unique([podcastProjectId, version])
+  @@unique([id, workspaceId, podcastProjectId])
+}
+
+model PodcastHost {
+  id                      String             @id @default(cuid())
+  workspaceId             String
+  podcastProjectId        String
+  configurationVersion    Int                @default(1)
+  personaVersion          Int                @default(1)
+  ordinal                 Int
+  displayName             String
+  role                    String
+  speakingStyle           String
+  knowledgeStyle          String
+  temperament             String
+  skepticism              Int                @default(5)
+  humor                   Int                @default(3)
+  verbosity               Int                @default(5)
+  questionStyle           String
+  disagreementStyle       String
+  preferredSentenceLength String
+  fillerPreference        String
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  project                 PodcastProject     @relation(fields: [podcastProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  utterances              PodcastUtterance[]
+
+  @@unique([podcastProjectId, configurationVersion, ordinal])
+  @@unique([id, workspaceId, podcastProjectId])
+}
+
+model PodcastEpisode {
+  id                       String                  @id @default(cuid())
+  workspaceId              String
+  podcastProjectId         String
+  styleProfileId           String
+  title                    String
+  description              String?
+  language                 String
+  targetDurationMinutes    Int
+  estimatedDurationSeconds Int?
+  status                   PodcastEpisodeStatus    @default(DRAFT)
+  createdAt                DateTime                @default(now())
+  updatedAt                DateTime                @updatedAt
+  workspace                Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project                  PodcastProject          @relation(fields: [podcastProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  styleProfile             PodcastStyleProfile     @relation(fields: [styleProfileId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
+  generationRuns           PodcastGenerationRun[]
+  segments                 EpisodeSegment[]
+  revisions                PodcastScriptRevision[]
+  currentScript            CurrentPodcastScript?
+
+  @@unique([id, workspaceId])
+  @@unique([id, workspaceId, podcastProjectId])
+}
+
+model PodcastGenerationRun {
+  id                       String                      @id @default(cuid())
+  workspaceId              String
+  podcastProjectId         String
+  episodeId                String
+  styleProfileId           String
+  jobId                    String                      @unique
+  pipelineVersion          String
+  promptVersion            String
+  provider                 String
+  model                    String
+  modelVersion             String?
+  modelVersionKey          String
+  hostConfigurationHash    String
+  hostConfigurationVersion Int
+  generationIdentityHash   String                      @unique
+  idempotencyKey           String                      @unique
+  status                   PodcastGenerationStatus     @default(QUEUED)
+  stage                    PodcastGenerationStage      @default(QUEUED)
+  errorCode                String?
+  executionClaimToken      String?
+  executionClaimedAt       DateTime?
+  executionLeaseUntil      DateTime?
+  correlationId            String?
+  createdAt                DateTime                    @default(now())
+  startedAt                DateTime?
+  completedAt              DateTime?
+  workspace                Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  episode                  PodcastEpisode              @relation(fields: [episodeId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
+  styleProfile             PodcastStyleProfile         @relation(fields: [styleProfileId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
+  job                      Job                         @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  sources                  PodcastGenerationSource[]
+  plan                     EpisodePlan?
+  narrative                EpisodeNarrative?
+  segments                 EpisodeSegment[]
+  planContext              PodcastPlanContextItem[]
+  segmentContext           PodcastSegmentContextItem[]
+  revisions                PodcastScriptRevision[]
+
+  @@unique([id, workspaceId])
+  @@unique([id, workspaceId, episodeId])
+  @@unique([episodeId, generationIdentityHash])
+}
+
+model PodcastGenerationSource {
+  podcastGenerationRunId String
+  workspaceId            String
+  episodeId              String
+  sourceDocumentId       String
+  extractionId           String
+  chunkSetId             String
+  analysisRunId          String
+  createdAt              DateTime                    @default(now())
+  generationRun          PodcastGenerationRun        @relation(fields: [podcastGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+  sourceDocument         SourceDocument              @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  analysisRun            BookAnalysisRun             @relation(fields: [analysisRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId], references: [id, workspaceId, sourceDocumentId, extractionId, chunkSetId], onDelete: Restrict)
+  planContext            PodcastPlanContextItem[]
+  segmentContext         PodcastSegmentContextItem[]
+  evidence               PodcastUtteranceEvidence[]
+
+  @@id([podcastGenerationRunId, sourceDocumentId])
+  @@unique([podcastGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], map: "PodcastGenerationSource_lineage_key")
+}
+
+model EpisodePlan {
+  id                     String               @id @default(cuid())
+  podcastGenerationRunId String               @unique
+  workspaceId            String
+  episodeId              String
+  centralQuestion        String
+  listenerStartingPoint  String
+  listenerTakeaway       String
+  coreThesis             String
+  tensions               Json
+  surprisingIdeas        Json
+  misconceptions         Json
+  keyConcepts            Json
+  candidateStories       Json
+  candidateExamples      Json
+  openQuestions          Json
+  createdAt              DateTime             @default(now())
+  generationRun          PodcastGenerationRun @relation(fields: [podcastGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+
+  @@unique([id, podcastGenerationRunId])
+  @@unique([podcastGenerationRunId, workspaceId, episodeId])
+}
+
+model EpisodeNarrative {
+  id                      String               @id @default(cuid())
+  podcastGenerationRunId  String               @unique
+  workspaceId             String
+  episodeId               String
+  arcType                 String
+  intellectualProgression Json
+  openingMove             String
+  closingMove             String
+  createdAt               DateTime             @default(now())
+  generationRun           PodcastGenerationRun @relation(fields: [podcastGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+
+  @@unique([podcastGenerationRunId, workspaceId, episodeId])
+}
+
+model EpisodeSegment {
+  id                       String                      @id @default(cuid())
+  podcastGenerationRunId   String
+  workspaceId              String
+  podcastProjectId         String
+  episodeId                String
+  ordinal                  Int
+  purpose                  String
+  internalLabel            String
+  targetDurationSeconds    Int
+  estimatedDurationSeconds Int?
+  narrativeFunction        String
+  keyQuestions             Json
+  requiredMemoryIds        Json
+  optionalMemoryIds        Json
+  disagreementReason       String?
+  generationAttemptCount   Int                         @default(0)
+  status                   PodcastSegmentStatus        @default(PLANNED)
+  createdAt                DateTime                    @default(now())
+  updatedAt                DateTime                    @updatedAt
+  generationRun            PodcastGenerationRun        @relation(fields: [podcastGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+  episode                  PodcastEpisode              @relation(fields: [episodeId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
+  contextItems             PodcastSegmentContextItem[]
+  utterances               PodcastUtterance[]
+
+  @@unique([podcastGenerationRunId, ordinal])
+  @@unique([id, podcastGenerationRunId, workspaceId, episodeId])
+}
+
+model PodcastPlanContextItem {
+  id                     String                  @id @default(cuid())
+  podcastGenerationRunId String
+  workspaceId            String
+  episodeId              String
+  sourceDocumentId       String
+  extractionId           String
+  chunkSetId             String
+  analysisRunId          String
+  memoryItemId           String
+  artifactId             String
+  chunkId                String?
+  score                  Float
+  selectionReason        String
+  tokenEstimate          Int
+  evidenceSpans          Json
+  createdAt              DateTime                @default(now())
+  generationRun          PodcastGenerationRun    @relation(fields: [podcastGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade, map: "PodcastPlanContext_run_fkey")
+  generationSource       PodcastGenerationSource @relation(fields: [podcastGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], references: [podcastGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], onDelete: Restrict, map: "PodcastPlanContext_source_fkey")
+  memoryItem             BookMemoryItem          @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Restrict)
+
+  @@unique([podcastGenerationRunId, memoryItemId])
+}
+
+model PodcastSegmentContextItem {
+  id                     String                  @id @default(cuid())
+  podcastGenerationRunId String
+  segmentId              String
+  workspaceId            String
+  episodeId              String
+  sourceDocumentId       String
+  extractionId           String
+  chunkSetId             String
+  analysisRunId          String
+  memoryItemId           String
+  artifactId             String
+  chunkId                String?
+  score                  Float
+  selectionReason        String
+  tokenEstimate          Int
+  evidenceSpans          Json
+  createdAt              DateTime                @default(now())
+  generationRun          PodcastGenerationRun    @relation(fields: [podcastGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade, map: "PodcastSegmentContext_run_fkey")
+  segment                EpisodeSegment          @relation(fields: [segmentId, podcastGenerationRunId, workspaceId, episodeId], references: [id, podcastGenerationRunId, workspaceId, episodeId], onDelete: Cascade)
+  generationSource       PodcastGenerationSource @relation(fields: [podcastGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], references: [podcastGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], onDelete: Restrict, map: "PodcastSegmentContext_source_fkey")
+  memoryItem             BookMemoryItem          @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Restrict)
+
+  @@unique([segmentId, memoryItemId])
+}
+
+model PodcastUtterance {
+  id                     String                     @id @default(cuid())
+  segmentId              String
+  podcastGenerationRunId String
+  workspaceId            String
+  podcastProjectId       String
+  episodeId              String
+  speakerHostId          String
+  ordinal                Int
+  draftText              String
+  text                   String
+  utteranceType          PodcastUtteranceType
+  substantive            Boolean
+  isDirectQuote          Boolean                    @default(false)
+  estimatedDurationMs    Int
+  humanizedAt            DateTime?
+  createdAt              DateTime                   @default(now())
+  segment                EpisodeSegment             @relation(fields: [segmentId, podcastGenerationRunId, workspaceId, episodeId], references: [id, podcastGenerationRunId, workspaceId, episodeId], onDelete: Cascade)
+  speaker                PodcastHost                @relation(fields: [speakerHostId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
+  evidence               PodcastUtteranceEvidence[]
+
+  @@unique([segmentId, ordinal])
+  @@unique([id, segmentId])
+  @@index([episodeId, podcastGenerationRunId, ordinal])
+}
+
+model PodcastUtteranceEvidence {
+  id                     String                  @id @default(cuid())
+  utteranceId            String
+  segmentId              String
+  podcastGenerationRunId String
+  workspaceId            String
+  sourceDocumentId       String
+  extractionId           String
+  chunkSetId             String
+  analysisRunId          String
+  memoryItemId           String
+  sourceBlockId          String
+  startOffset            Int
+  endOffset              Int
+  quoteText              String?
+  quoteHash              String?
+  createdAt              DateTime                @default(now())
+  utterance              PodcastUtterance        @relation(fields: [utteranceId, segmentId], references: [id, segmentId], onDelete: Cascade)
+  generationSource       PodcastGenerationSource @relation(fields: [podcastGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], references: [podcastGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], onDelete: Restrict)
+  memoryItem             BookMemoryItem          @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Restrict)
+  sourceBlock            SourceBlock             @relation(fields: [sourceBlockId, extractionId], references: [id, extractionId], onDelete: Restrict)
+
+  @@unique([utteranceId, memoryItemId, sourceBlockId, startOffset, endOffset])
+}
+
+model PodcastScriptRevision {
+  id                       String                  @id @default(cuid())
+  workspaceId              String
+  episodeId                String
+  revisionNumber           Int
+  parentRevisionId         String?
+  generationRunId          String?                 @unique
+  source                   PodcastRevisionSource
+  status                   PodcastRevisionStatus   @default(FINAL)
+  scriptSnapshot           Json
+  estimatedDurationSeconds Int
+  createdByUserId          String?
+  createdAt                DateTime                @default(now())
+  episode                  PodcastEpisode          @relation(fields: [episodeId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  parent                   PodcastScriptRevision?  @relation("PodcastRevisionLineage", fields: [parentRevisionId, episodeId], references: [id, episodeId], onDelete: Restrict)
+  children                 PodcastScriptRevision[] @relation("PodcastRevisionLineage")
+  generationRun            PodcastGenerationRun?   @relation(fields: [generationRunId], references: [id], onDelete: Restrict)
+  currentMarker            CurrentPodcastScript?   @relation("CurrentPodcastRevision")
+  evaluations              PodcastEvaluationRun[]
+
+  @@unique([episodeId, revisionNumber])
+  @@unique([id, episodeId])
+  @@unique([id, workspaceId, episodeId])
+}
+
+model CurrentPodcastScript {
+  id          String                @id @default(cuid())
+  workspaceId String
+  episodeId   String                @unique
+  revisionId  String                @unique
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  episode     PodcastEpisode        @relation(fields: [episodeId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  revision    PodcastScriptRevision @relation("CurrentPodcastRevision", fields: [revisionId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Restrict)
+
+  @@unique([episodeId, workspaceId])
+  @@unique([revisionId, workspaceId, episodeId])
+}
+
+model PodcastEvaluationRun {
+  id               String                   @id @default(cuid())
+  workspaceId      String
+  episodeId        String
+  revisionId       String
+  evaluatorVersion String
+  status           PodcastEvaluationStatus  @default(RUNNING)
+  errorCode        String?
+  createdAt        DateTime                 @default(now())
+  completedAt      DateTime?
+  revision         PodcastScriptRevision    @relation(fields: [revisionId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+  result           PodcastEvaluationResult?
+
+  @@unique([revisionId, evaluatorVersion])
+}
+
+model PodcastEvaluationResult {
+  id                       String               @id @default(cuid())
+  evaluationRunId          String               @unique
+  naturalnessScore         Float
+  groundingScore           Float
+  hostDifferentiationScore Float
+  cognitiveValueScore      Float
+  structuralCoherenceScore Float
+  repetitionScore          Float
+  aiFeelScore              Float
+  sourceCopyRiskScore      Float
+  contextBudgetScore       Float
+  fabricationBoundaryScore Float
+  metrics                  Json
+  hardFailures             Json
+  warnings                 Json
+  createdAt                DateTime             @default(now())
+  evaluationRun            PodcastEvaluationRun @relation(fields: [evaluationRunId], references: [id], onDelete: Cascade)
+}
+
 model OutboxEvent {
-  id           String    @id @default(cuid())
+  id           String       @id @default(cuid())
   topic        String
   aggregateId  String
   payload      Json
   status       OutboxStatus @default(PENDING)
-  attemptCount Int       @default(0)
+  attemptCount Int          @default(0)
   claimedAt    DateTime?
   leaseUntil   DateTime?
   lastError    String?
   claimToken   String?
-  createdAt    DateTime  @default(now())
+  createdAt    DateTime     @default(now())
   dispatchedAt DateTime?
-  updatedAt    DateTime  @updatedAt
+  updatedAt    DateTime     @updatedAt
 
   @@index([dispatchedAt, createdAt])
   @@index([status, leaseUntil, createdAt])
 }
 
 model Job {
-  id             String        @id @default(cuid())
-  userId         String?
-  workspaceId    String?
-  queueJobId     String?       @unique
-  idempotencyKey String?       @unique
-  correlationId  String?
-  type           String
-  status         JobStatus     @default(QUEUED)
-  progress       Int           @default(0)
-  attemptCount   Int           @default(0)
-  payload        Json
-  result         Json?
-  error          Json?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @default(now()) @updatedAt
-  startedAt      DateTime?
-  completedAt    DateTime?
-  user           User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workspace      Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
-  ingestionRun   IngestionRun?
-  bookAnalysisRun BookAnalysisRun?
+  id                   String                @id @default(cuid())
+  userId               String?
+  workspaceId          String?
+  queueJobId           String?               @unique
+  idempotencyKey       String?               @unique
+  correlationId        String?
+  type                 String
+  status               JobStatus             @default(QUEUED)
+  progress             Int                   @default(0)
+  attemptCount         Int                   @default(0)
+  payload              Json
+  result               Json?
+  error                Json?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @default(now()) @updatedAt
+  startedAt            DateTime?
+  completedAt          DateTime?
+  user                 User?                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace            Workspace?            @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  ingestionRun         IngestionRun?
+  bookAnalysisRun      BookAnalysisRun?
+  podcastGenerationRun PodcastGenerationRun?
 
   @@index([userId])
   @@index([status])
