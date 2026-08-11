@@ -1371,7 +1371,6 @@ model AudioGenerationHostVoice {
   host                 PodcastHost         @relation(fields: [hostId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   voiceProfile         PodcastVoiceProfile @relation(fields: [voiceProfileId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   @@unique([audioGenerationRunId, hostId])
-  @@unique([audioGenerationRunId, voiceIdentityHash])
 }
 
 model UtteranceSpeechPlan {
@@ -1398,7 +1397,31 @@ model UtteranceSpeechPlan {
   createdAt            DateTime           @default(now())
   run                  AudioGenerationRun @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
   artifacts            UtteranceAudioArtifact[]
+  chunks               UtteranceSpeechChunk[]
   @@unique([audioGenerationRunId, utteranceId, preparationVersion])
+}
+
+model UtteranceSpeechChunk {
+  id                   String             @id @default(cuid())
+  speechPlanId         String
+  ordinal              Int
+  text                 String
+  textHash             String
+  synthesisIdentityHash String
+  status               AudioArtifactStatus @default(PENDING)
+  storageKey           String?
+  sha256               String?
+  sizeBytes            Int?
+  mediaType            String?
+  format               String?
+  durationMs           Int?
+  sampleRate           Int?
+  channels             Int?
+  createdAt            DateTime           @default(now())
+  speechPlan           UtteranceSpeechPlan @relation(fields: [speechPlanId], references: [id], onDelete: Cascade)
+
+  @@unique([speechPlanId, ordinal])
+  @@unique([synthesisIdentityHash])
 }
 
 model UtteranceAudioArtifact {
