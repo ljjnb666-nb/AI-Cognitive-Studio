@@ -11,13 +11,15 @@
     "build": "tsc --noEmit",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:phase1:e2e": "vitest run --config vitest.phase1-e2e.config.ts",
-    "test:phase2:e2e": "vitest run --config vitest.phase2-e2e.config.ts"
+    "test:phase2:e2e": "vitest run --config vitest.phase2-e2e.config.ts",
+    "test:phase3:e2e": "vitest run --config vitest.phase3-e2e.config.ts"
   },
   "dependencies": {
     "@ai-cognitive/book-intelligence": "workspace:*",
     "@ai-cognitive/db": "workspace:*",
     "@ai-cognitive/domain": "workspace:*",
     "@ai-cognitive/ingestion": "workspace:*",
+    "@ai-cognitive/podcast-generation": "workspace:*",
     "@ai-cognitive/shared": "workspace:*",
     "@ai-cognitive/storage": "workspace:*",
     "bullmq": "^5.61.0"
