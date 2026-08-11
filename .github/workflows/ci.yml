@@ -80,6 +80,8 @@ jobs:
         run: pnpm test:phase2:e2e
       - name: Phase 3 podcast generation
         run: pnpm test:phase3:e2e
+      - name: Install FFmpeg for Phase 4 audio processing
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Check FFmpeg for Phase 4 audio processing
         run: ffmpeg -version
       - name: Phase 4 podcast audio generation
