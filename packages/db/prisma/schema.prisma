@@ -199,6 +199,31 @@ enum PodcastEvaluationStatus {
   FAILED
 }
 
+enum AudioGenerationStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum AudioGenerationStage {
+  QUEUED
+  SPEECH_PREPARATION
+  UTTERANCE_SYNTHESIS
+  SEGMENT_ASSEMBLY
+  EPISODE_ASSEMBLY
+  AUDIO_NORMALIZATION
+  QUALITY_VALIDATION
+  FINALIZING
+  COMPLETED
+}
+
+enum AudioArtifactStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
 model User {
   id          String            @id @default(cuid())
   email       String            @unique
@@ -228,6 +253,9 @@ model Workspace {
   podcastProjects       PodcastProject[]
   podcastEpisodes       PodcastEpisode[]
   podcastGenerationRuns PodcastGenerationRun[]
+  podcastVoiceProfiles  PodcastVoiceProfile[]
+  audioGenerationRuns   AudioGenerationRun[]
+  podcastAudioRevisions PodcastAudioRevision[]
 }
 
 model WorkspaceMember {
@@ -816,6 +844,8 @@ model PodcastProject {
   episodes      PodcastEpisode[]
   styleProfiles PodcastStyleProfile[]
   hosts         PodcastHost[]
+  voiceProfiles PodcastVoiceProfile[]
+  audioConfigs  PodcastEpisodeAudioConfig[]
 
   @@unique([id, workspaceId])
 }
@@ -885,8 +915,10 @@ model PodcastHost {
   updatedAt               DateTime           @updatedAt
   project                 PodcastProject     @relation(fields: [podcastProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   utterances              PodcastUtterance[]
+  audioHostVoices         AudioGenerationHostVoice[]
 
   @@unique([podcastProjectId, configurationVersion, ordinal])
+  @@unique([id, workspaceId])
   @@unique([id, workspaceId, podcastProjectId])
 }
 
@@ -910,6 +942,10 @@ model PodcastEpisode {
   segments                 EpisodeSegment[]
   revisions                PodcastScriptRevision[]
   currentScript            CurrentPodcastScript?
+  audioConfigs             PodcastEpisodeAudioConfig[]
+  audioGenerationRuns      AudioGenerationRun[]
+  audioRevisions           PodcastAudioRevision[]
+  currentAudio             CurrentPodcastAudio?
 
   @@unique([id, workspaceId])
   @@unique([id, workspaceId, podcastProjectId])
@@ -1166,6 +1202,8 @@ model PodcastScriptRevision {
   generationRun            PodcastGenerationRun?   @relation(fields: [generationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Restrict)
   currentMarker            CurrentPodcastScript?   @relation("CurrentPodcastRevision")
   evaluations              PodcastEvaluationRun[]
+  audioRuns                AudioGenerationRun[]
+  audioRevisions           PodcastAudioRevision[]
 
   @@unique([episodeId, revisionNumber])
   @@unique([id, episodeId])
@@ -1222,6 +1260,276 @@ model PodcastEvaluationResult {
   evaluationRun            PodcastEvaluationRun @relation(fields: [evaluationRunId], references: [id], onDelete: Cascade)
 }
 
+model PodcastVoiceProfile {
+  id                            String         @id @default(cuid())
+  workspaceId                   String
+  podcastProjectId              String
+  displayName                   String
+  language                      String
+  provider                      String
+  providerVoiceId               String
+  voiceVersion                  String
+  model                         String
+  modelVersion                  String?
+  speakingRate                  Float          @default(1)
+  pitch                         Float          @default(0)
+  energy                        Float          @default(0.5)
+  style                         String?
+  pauseStyle                    String?
+  pronunciationProfileVersion   String         @default("v1")
+  providerOptions               Json?
+  createdAt                     DateTime       @default(now())
+  workspace                     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project                       PodcastProject @relation(fields: [podcastProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  assignments                   AudioGenerationHostVoice[]
+  @@unique([workspaceId, provider, providerVoiceId, voiceVersion, model, modelVersion])
+  @@unique([id, workspaceId])
+  @@unique([id, workspaceId, podcastProjectId])
+}
+
+model PodcastEpisodeAudioConfig {
+  id                      String         @id @default(cuid())
+  workspaceId             String
+  podcastProjectId        String
+  episodeId               String
+  version                 Int
+  outputFormat            String         @default("wav")
+  sampleRate              Int            @default(24000)
+  channels                Int            @default(1)
+  targetLufs              Float          @default(-16)
+  truePeakLimitDb         Float          @default(-1)
+  defaultPauseMs          Int            @default(420)
+  shortReactionPauseMs    Int            @default(120)
+  interruptionPauseMs     Int            @default(80)
+  segmentBoundaryPauseMs  Int            @default(850)
+  speakingRateMultiplier  Float          @default(1)
+  normalizeLoudness       Boolean        @default(true)
+  trimLeadingSilence      Boolean        @default(true)
+  trimTrailingSilence     Boolean        @default(true)
+  createdAt               DateTime       @default(now())
+  project                 PodcastProject @relation(fields: [podcastProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  episode                 PodcastEpisode @relation(fields: [episodeId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Cascade)
+  runs                    AudioGenerationRun[]
+  @@unique([episodeId, version])
+  @@unique([id, workspaceId, podcastProjectId, episodeId])
+}
+
+model AudioGenerationRun {
+  id                         String                    @id @default(cuid())
+  workspaceId                String
+  podcastProjectId           String
+  episodeId                  String
+  scriptRevisionId           String
+  audioConfigId              String
+  jobId                      String                    @unique
+  provider                   String
+  model                      String
+  modelVersion               String?
+  pipelineVersion            String
+  speechPreparationVersion   String
+  assemblyVersion            String
+  normalizationVersion       String
+  outputFormat               String
+  generationIdentityHash     String
+  idempotencyKey             String                    @unique
+  status                     AudioGenerationStatus     @default(QUEUED)
+  stage                      AudioGenerationStage      @default(QUEUED)
+  errorCode                  String?
+  executionClaimToken        String?
+  executionClaimedAt         DateTime?
+  executionLeaseUntil        DateTime?
+  correlationId              String?
+  createdAt                  DateTime                  @default(now())
+  startedAt                  DateTime?
+  completedAt                DateTime?
+  workspace                  Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  episode                    PodcastEpisode            @relation(fields: [episodeId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
+  scriptRevision             PodcastScriptRevision     @relation(fields: [scriptRevisionId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Restrict)
+  audioConfig                PodcastEpisodeAudioConfig @relation(fields: [audioConfigId, workspaceId, podcastProjectId, episodeId], references: [id, workspaceId, podcastProjectId, episodeId], onDelete: Restrict)
+  job                        Job                       @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  hostVoices                 AudioGenerationHostVoice[]
+  speechPlans                UtteranceSpeechPlan[]
+  utteranceArtifacts         UtteranceAudioArtifact[]
+  segmentArtifacts           SegmentAudioArtifact[]
+  episodeArtifacts           EpisodeAudioArtifact[]
+  revisions                  PodcastAudioRevision[]
+  evaluations                AudioEvaluationRun[]
+  @@unique([episodeId, generationIdentityHash])
+  @@unique([id, workspaceId, episodeId])
+}
+
+model AudioGenerationHostVoice {
+  id                   String              @id @default(cuid())
+  audioGenerationRunId String
+  workspaceId          String
+  episodeId            String
+  hostId               String
+  voiceProfileId       String
+  voiceIdentityHash    String
+  createdAt            DateTime            @default(now())
+  run                  AudioGenerationRun  @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+  host                 PodcastHost         @relation(fields: [hostId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  voiceProfile         PodcastVoiceProfile @relation(fields: [voiceProfileId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  @@unique([audioGenerationRunId, hostId])
+  @@unique([audioGenerationRunId, voiceIdentityHash])
+}
+
+model UtteranceSpeechPlan {
+  id                   String             @id @default(cuid())
+  audioGenerationRunId String
+  workspaceId          String
+  episodeId            String
+  utteranceId          String
+  segmentId            String
+  ordinal              Int
+  spokenText           String
+  originalTextHash     String
+  spokenTextHash       String
+  language             String
+  speechRole           String
+  pauseBeforeMs        Int
+  pauseAfterMs         Int
+  speakingRate         Float
+  prosodyHints         Json?
+  pronunciationRules   Json?
+  isInterruptive       Boolean            @default(false)
+  isShortReaction      Boolean            @default(false)
+  preparationVersion   String
+  createdAt            DateTime           @default(now())
+  run                  AudioGenerationRun @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+  artifacts            UtteranceAudioArtifact[]
+  @@unique([audioGenerationRunId, utteranceId, preparationVersion])
+}
+
+model UtteranceAudioArtifact {
+  id                   String             @id @default(cuid())
+  audioGenerationRunId String
+  speechPlanId         String
+  workspaceId          String
+  episodeId            String
+  synthesisIdentityHash String
+  status               AudioArtifactStatus @default(PENDING)
+  storageKey           String
+  sha256               String
+  sizeBytes            Int
+  mediaType            String
+  format               String
+  durationMs           Int
+  sampleRate           Int
+  channels             Int
+  providerMetadata     Json?
+  createdAt            DateTime           @default(now())
+  run                  AudioGenerationRun @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+  speechPlan           UtteranceSpeechPlan @relation(fields: [speechPlanId], references: [id], onDelete: Cascade)
+  @@unique([audioGenerationRunId, synthesisIdentityHash])
+}
+
+model SegmentAudioArtifact {
+  id                   String             @id @default(cuid())
+  audioGenerationRunId String
+  workspaceId          String
+  episodeId            String
+  segmentId            String
+  assemblyIdentityHash String
+  storageKey           String
+  sha256               String
+  sizeBytes            Int
+  mediaType            String
+  format               String
+  durationMs           Int
+  createdAt            DateTime           @default(now())
+  run                  AudioGenerationRun @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+  @@unique([audioGenerationRunId, segmentId, assemblyIdentityHash])
+}
+
+model EpisodeAudioArtifact {
+  id                   String             @id @default(cuid())
+  audioGenerationRunId String
+  workspaceId          String
+  episodeId            String
+  kind                 String
+  storageKey           String
+  sha256               String
+  sizeBytes            Int
+  mediaType            String
+  format               String
+  durationMs           Int
+  integratedLufs       Float?
+  truePeakDb           Float?
+  loudnessRange        Float?
+  createdAt            DateTime           @default(now())
+  run                  AudioGenerationRun @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+  @@unique([audioGenerationRunId, kind])
+}
+
+model PodcastAudioRevision {
+  id                   String                @id @default(cuid())
+  workspaceId          String
+  episodeId            String
+  scriptRevisionId     String
+  audioGenerationRunId String                @unique
+  revisionNumber       Int
+  parentRevisionId     String?
+  storageKey           String
+  sha256               String
+  format               String
+  mediaType            String
+  durationMs           Int
+  status               AudioArtifactStatus   @default(SUCCEEDED)
+  createdAt            DateTime              @default(now())
+  workspace            Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  episode              PodcastEpisode        @relation(fields: [episodeId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  scriptRevision       PodcastScriptRevision @relation(fields: [scriptRevisionId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Restrict)
+  run                  AudioGenerationRun    @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Restrict)
+  currentMarker        CurrentPodcastAudio?  @relation("CurrentPodcastAudioRevision")
+  @@unique([episodeId, revisionNumber])
+  @@unique([id, workspaceId, episodeId])
+}
+
+model CurrentPodcastAudio {
+  id          String               @id @default(cuid())
+  workspaceId String
+  episodeId   String               @unique
+  revisionId  String               @unique
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  episode     PodcastEpisode       @relation(fields: [episodeId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  revision    PodcastAudioRevision @relation("CurrentPodcastAudioRevision", fields: [revisionId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Restrict)
+  @@unique([episodeId, workspaceId])
+  @@unique([revisionId, workspaceId, episodeId])
+}
+
+model AudioEvaluationRun {
+  id                   String             @id @default(cuid())
+  audioGenerationRunId String
+  workspaceId          String
+  episodeId            String
+  evaluatorVersion     String
+  status               AudioArtifactStatus @default(PENDING)
+  errorCode            String?
+  createdAt            DateTime           @default(now())
+  completedAt          DateTime?
+  run                  AudioGenerationRun @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
+  result               AudioEvaluationResult?
+  @@unique([audioGenerationRunId, evaluatorVersion])
+}
+
+model AudioEvaluationResult {
+  id                      String             @id @default(cuid())
+  evaluationRunId         String             @unique
+  metrics                 Json
+  hardFailures            Json
+  warnings                Json
+  decodeSuccess           Boolean
+  durationDriftRatio      Float
+  silenceRatio            Float
+  maxSilenceGapMs         Int
+  averageGapMs            Int
+  hostVoiceDistinctness   Boolean
+  createdAt               DateTime           @default(now())
+  evaluationRun           AudioEvaluationRun @relation(fields: [evaluationRunId], references: [id], onDelete: Cascade)
+}
+
 model OutboxEvent {
   id           String       @id @default(cuid())
   topic        String
@@ -1264,6 +1572,7 @@ model Job {
   ingestionRun         IngestionRun?
   bookAnalysisRun      BookAnalysisRun?
   podcastGenerationRun PodcastGenerationRun?
+  audioGenerationRun   AudioGenerationRun?
 
   @@index([userId])
   @@index([status])

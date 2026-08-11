@@ -16,6 +16,7 @@
     "@ai-cognitive/db": "workspace:*",
     "@ai-cognitive/ingestion": "workspace:*",
     "@ai-cognitive/shared": "workspace:*",
+    "@ai-cognitive/storage": "workspace:*",
     "zod": "^4.1.12"
   },
   "devDependencies": {
