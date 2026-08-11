@@ -8,7 +8,7 @@
     "lint": "eslint src tests",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test:unit": "vitest run tests/phase3-evaluation.test.ts",
+    "test:unit": "vitest run tests/phase3-evaluation.test.ts tests/phase4-audio.test.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
