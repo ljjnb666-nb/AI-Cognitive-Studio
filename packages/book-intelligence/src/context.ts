@@ -1,0 +1,3 @@
+import type { Provenance } from "./chunking.js";
+export interface ContextItem { id: string; content: string; tokenEstimate: number; score: number; provenance: Provenance[]; type?: string }
+export function buildContext(items: ContextItem[], tokenBudget: number) { let used = 0; const selected: ContextItem[] = []; for (const item of [...items].sort((a,b)=>b.score-a.score || a.id.localeCompare(b.id))) if (item.tokenEstimate <= tokenBudget - used) { selected.push(item); used += item.tokenEstimate; } return { selected, estimatedTokens: used, provenance: selected.flatMap((item)=>item.provenance), selection: selected.map((item)=>({ id:item.id, score:item.score, reason:"score_then_stable_id" })) }; }

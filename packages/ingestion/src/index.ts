@@ -8,6 +8,7 @@ import { inspectObjectStream } from "./object-inspection.js";
 import { parseDocument } from "./document-parsers.js";
 import { SourceError } from "./source-errors.js";
 import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
+import { dispatchPendingOutbox } from "./outbox-dispatcher.js";
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export { parseDocument, DEFAULT_PARSER_LIMITS } from "./document-parsers.js";
@@ -163,7 +164,8 @@ export function createIngestionService(storage: StorageProvider, options = { max
 type IngestionQueue = { add(name: string, payload: { ingestionRunId: string }, options: { jobId: string }): Promise<unknown> };
 export type IngestionDispatchOptions = { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; /** Test-only fault seam; runs after queue acceptance and before the DB finalize transaction. */ beforeFinalize?: (eventId: string) => Promise<void> | void };
 export async function dispatchPendingIngestion(queue: IngestionQueue, options: IngestionDispatchOptions = {}): Promise<number> {
-  const batchSize = options.batchSize ?? 100, leaseMs = options.leaseMs ?? 60_000, maxAttempts = options.maxAttempts ?? 5;
+  return dispatchPendingOutbox({ topic: "source.ingestion.requested", queue, jobName: INGESTION_JOB, parse: (payload) => payload as { ingestionRunId: string }, jobId: (payload) => payload.ingestionRunId, afterDispatch: async (tx, payload, jobId) => { await tx.ingestionRun.update({ where: { id: payload.ingestionRunId }, data: { job: { update: { queueJobId: jobId } } } }); }, ...options });
+  /* const batchSize = options.batchSize ?? 100, leaseMs = options.leaseMs ?? 60_000, maxAttempts = options.maxAttempts ?? 5;
   await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'FAILED'::"OutboxStatus", "leaseUntil" = NULL, "claimToken" = NULL, "lastError" = COALESCE("lastError", 'OUTBOX_MAX_ATTEMPTS_EXCEEDED'), "updatedAt" = NOW() WHERE "topic" = 'source.ingestion.requested' AND "status" = 'PROCESSING'::"OutboxStatus" AND "leaseUntil" < NOW() AND "attemptCount" >= ${maxAttempts}`;
   const events = await prisma.$queryRaw<Array<{ id: string; payload: unknown; claimToken: string }>>`
     WITH candidates AS (
@@ -193,7 +195,7 @@ export async function dispatchPendingIngestion(queue: IngestionQueue, options: I
       await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = CASE WHEN "attemptCount" >= ${maxAttempts} THEN 'FAILED'::"OutboxStatus" ELSE 'PENDING'::"OutboxStatus" END, "leaseUntil" = NULL, "claimToken" = NULL, "lastError" = ${lastError}, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus" AND "claimToken" = ${event.claimToken}`;
     }
   }
-  return events.length;
+  return events.length; */
 }
 function parserProvenance(mediaType: string): { name: string; version: string } {
   if (mediaType === "text/plain") return { name: "builtin-text", version: "text-parser-v1" };
