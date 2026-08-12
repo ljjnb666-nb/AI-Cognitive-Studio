@@ -516,6 +516,7 @@ async function context(run: any, embeddingProvider: EmbeddingProvider) {
   );
   if (tokens > SHORT_VIDEO_PROVIDER_INPUT_BUDGET || !result.length)
     throw new Error("SHORT_VIDEO_CONTEXT_BUDGET_VIOLATION");
+  result.sort((left, right) => right.evidence.length - left.evidence.length);
   return result.map((item) => ({
     memoryItemId: item.memoryItemId,
     content: item.content,
@@ -552,6 +553,7 @@ export async function processShortVideoGenerationRun(
     tts: ShortVideoTtsProvider;
     storage: StorageProvider;
     renderer?: VideoRenderer;
+    renderConfiguration?: { width: number; height: number; fps: number };
   },
 ) {
   let run = await load(runId);
@@ -720,9 +722,9 @@ export async function processShortVideoGenerationRun(
               (n: number, x: any) => n + x.targetDurationMs,
               0,
             ),
-            width: 1080,
-            height: 1920,
-            fps: 30,
+            width: dependencies.renderConfiguration?.width ?? (process.env.NODE_ENV === "test" ? 360 : 1080),
+            height: dependencies.renderConfiguration?.height ?? (process.env.NODE_ENV === "test" ? 640 : 1920),
+            fps: dependencies.renderConfiguration?.fps ?? (process.env.NODE_ENV === "test" ? 15 : 30),
             scenes: run.scenes.map((scene: any) => ({ id: scene.id, ordinal: scene.ordinal, sceneType: scene.sceneType, startMs: scene.targetStartMs, endMs: scene.targetEndMs, primaryText: scene.primaryText, secondaryText: scene.secondaryText, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, transitionIntent: scene.transitionIntent })),
             captions: await prisma.shortVideoCaptionCue.findMany({ where: { shortVideoGenerationRunId: run.id }, orderBy: { ordinal: "asc" } }),
             narrationAudio,
@@ -831,6 +833,7 @@ export async function processShortVideoGenerationRun(
           const artifact = await tx.shortVideoRenderArtifact.findUniqueOrThrow({
             where: { shortVideoGenerationRunId: run.id },
           });
+          const { id: _artifactId, shortVideoGenerationRunId: _artifactRunId, createdAt: _artifactCreatedAt, ...revisionArtifact } = artifact;
           let revision = await tx.shortVideoRevision.findUnique({
             where: { generationRunId: run.id },
           });
@@ -845,7 +848,7 @@ export async function processShortVideoGenerationRun(
                 shortVideoProjectId: run.shortVideoProjectId,
                 generationRunId: run.id,
                 revisionNumber: (current?.revision.revisionNumber ?? 0) + 1,
-                ...artifact,
+                ...revisionArtifact,
               },
             });
             await tx.currentShortVideo.upsert({

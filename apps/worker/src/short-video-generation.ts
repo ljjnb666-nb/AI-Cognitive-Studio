@@ -17,6 +17,7 @@ export type ShortVideoRuntimeAdapter = {
   provider: ShortVideoProvider;
   embeddingProvider: EmbeddingProvider;
   tts: ShortVideoTtsProvider;
+  renderConfiguration?: { width: number; height: number; fps: number };
 };
 export function createShortVideoGenerationWorker(
   environment: Environment,
