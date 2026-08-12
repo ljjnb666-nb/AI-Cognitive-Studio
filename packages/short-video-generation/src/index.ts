@@ -3,7 +3,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -676,6 +676,16 @@ export async function processShortVideoGenerationRun(
         await synthesizeNarration(run, token, dependencies);
         await stage(run.id, token, "NARRATION_SYNTHESIS", "VISUAL_PREPARATION");
       } else if (run.stage === "VISUAL_PREPARATION") {
+        const existing = await prisma.shortVideoVisualAsset.count({ where: { shortVideoGenerationRunId: run.id } });
+        if (!existing) await owned(run.id, token, (tx) => tx.shortVideoVisualAsset.createMany({
+          data: run.scenes.map((scene: any) => ({
+            shortVideoGenerationRunId: run.id,
+            sceneId: scene.id,
+            kind: "DETERMINISTIC_EDITORIAL_FRAME",
+            templateId: scene.layoutTemplate,
+            metadata: { sceneType: scene.sceneType, primaryText: scene.primaryText, secondaryText: scene.secondaryText, keywords: scene.keywords, motionPreset: scene.motionPreset },
+          })),
+        }));
         await stage(run.id, token, "VISUAL_PREPARATION", "CAPTION_GENERATION");
       } else if (run.stage === "CAPTION_GENERATION") {
         const existing = await prisma.shortVideoCaptionCue.count({
@@ -699,6 +709,12 @@ export async function processShortVideoGenerationRun(
       } else if (run.stage === "VIDEO_RENDERING") {
         if (!run.renderArtifact) {
           const renderer = dependencies.renderer ?? new FfmpegVideoRenderer();
+          const narrationAudio = await Promise.all(run.audioArtifacts.map(async (artifact: any) => {
+            if (!artifact.sceneId) throw new Error("SHORT_VIDEO_NARRATION_AUDIO_MISSING");
+            const bytes = await dependencies.storage.getObjectBytes(artifact.storageKey);
+            if (sha256(bytes) !== artifact.sha256) throw new Error("SHORT_VIDEO_STORAGE_HASH_MISMATCH");
+            return { sceneId: artifact.sceneId, bytes, mediaType: artifact.mediaType, durationMs: artifact.durationMs };
+          }));
           const output = await renderer.render({
             durationMs: run.scenes.reduce(
               (n: number, x: any) => n + x.targetDurationMs,
@@ -707,6 +723,9 @@ export async function processShortVideoGenerationRun(
             width: 1080,
             height: 1920,
             fps: 30,
+            scenes: run.scenes.map((scene: any) => ({ id: scene.id, ordinal: scene.ordinal, sceneType: scene.sceneType, startMs: scene.targetStartMs, endMs: scene.targetEndMs, primaryText: scene.primaryText, secondaryText: scene.secondaryText, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, transitionIntent: scene.transitionIntent })),
+            captions: await prisma.shortVideoCaptionCue.findMany({ where: { shortVideoGenerationRunId: run.id }, orderBy: { ordinal: "asc" } }),
+            narrationAudio,
           });
           const bytes = await readFile(output.path);
           const hash = sha256(bytes);
@@ -745,13 +764,23 @@ export async function processShortVideoGenerationRun(
         const actual = await dependencies.storage.getObjectBytes(
           artifact.storageKey,
         );
+        const captions = await prisma.shortVideoCaptionCue.findMany({ where: { shortVideoGenerationRunId: run.id }, orderBy: { ordinal: "asc" } });
+        const probe = await probeMp4(actual);
         const hardFailures = [
           sha256(actual) !== artifact.sha256 ? "SHA_MISMATCH" : "",
+          !probe.ok ? "MP4_UNDECODABLE" : "",
+          probe.durationMs <= 0 ? "DURATION_INVALID" : "",
+          probe.width <= 0 || probe.height <= 0 ? "DIMENSIONS_INVALID" : "",
           artifact.width * 16 !== artifact.height * 9
             ? "ASPECT_RATIO_INVALID"
             : "",
           !run.scenes.length ? "SCENES_MISSING" : "",
+          !probe.hasAac ? "AUDIO_STREAM_MISSING" : "",
+          run.scenes.some((scene: any, index: number) => scene.ordinal !== index + 1 || scene.targetEndMs <= scene.targetStartMs || (index > 0 && scene.targetStartMs < run.scenes[index - 1]!.targetEndMs) || scene.targetEndMs > probe.durationMs + 750) ? "SCENE_TIMING_INVALID" : "",
+          captions.some((cue: any) => cue.endMs <= cue.startMs || cue.startMs < 0 || cue.endMs > probe.durationMs + 750) ? "CAPTION_TIMING_INVALID" : "",
+          Math.abs(probe.durationMs - artifact.durationMs) > 1_000 ? "RENDER_DURATION_MISMATCH" : "",
         ].filter(Boolean);
+        const warnings = evaluateWarnings(run.scenes, captions);
         if (hardFailures.length)
           throw new Error(`SHORT_VIDEO_QUALITY_FAILED:${hardFailures[0]}`);
         await owned(run.id, token, async (tx) => {
@@ -783,7 +812,7 @@ export async function processShortVideoGenerationRun(
                 durationMs: artifact.durationMs,
               },
               hardFailures,
-              warnings: [],
+              warnings,
             },
             update: {
               metrics: {
@@ -791,7 +820,7 @@ export async function processShortVideoGenerationRun(
                 durationMs: artifact.durationMs,
               },
               hardFailures,
-              warnings: [],
+              warnings,
             },
           });
         });
@@ -855,8 +884,8 @@ export async function processShortVideoGenerationRun(
       error instanceof Error
         ? error.message.split(":")[0]!
         : "SHORT_VIDEO_GENERATION_FAILED";
-    await prisma.$executeRaw`UPDATE "ShortVideoGenerationRun" SET "status"='FAILED'::"ShortVideoGenerationStatus", "errorCode"=${code}, "completedAt"=NOW(), "executionClaimToken"=NULL, "executionClaimedAt"=NULL, "executionLeaseUntil"=NULL WHERE "id"=${run.id} AND "executionClaimToken"=${token} AND "status"='RUNNING'::"ShortVideoGenerationStatus"`;
-    await prisma.job.update({
+    const failed = await prisma.$executeRaw`UPDATE "ShortVideoGenerationRun" SET "status"='FAILED'::"ShortVideoGenerationStatus", "errorCode"=${code}, "completedAt"=NOW(), "executionClaimToken"=NULL, "executionClaimedAt"=NULL, "executionLeaseUntil"=NULL WHERE "id"=${run.id} AND "executionClaimToken"=${token} AND "status"='RUNNING'::"ShortVideoGenerationStatus"`;
+    if (failed === 1) await prisma.job.update({
       where: { id: run.jobId },
       data: { status: "FAILED", error: { code }, completedAt: new Date() },
     });
@@ -900,6 +929,9 @@ export interface VideoRenderer {
     width: number;
     height: number;
     fps: number;
+    scenes: Array<{ id: string; ordinal: number; sceneType: string; startMs: number; endMs: number; primaryText: string; secondaryText?: string | null; keywords: unknown; layoutTemplate: string; transitionIntent: string }>;
+    captions: Array<{ startMs: number; endMs: number; text: string }>;
+    narrationAudio: Array<{ sceneId: string; bytes: Uint8Array; mediaType: string; durationMs: number }>;
   }): Promise<{
     path: string;
     width: number;
@@ -915,33 +947,50 @@ export class FfmpegVideoRenderer implements VideoRenderer {
     width: number;
     height: number;
     fps: number;
+    scenes: Array<{ id: string; ordinal: number; sceneType: string; startMs: number; endMs: number; primaryText: string; secondaryText?: string | null; keywords: unknown; layoutTemplate: string; transitionIntent: string }>;
+    captions: Array<{ startMs: number; endMs: number; text: string }>;
+    narrationAudio: Array<{ sceneId: string; bytes: Uint8Array; mediaType: string; durationMs: number }>;
   }) {
     if (
       input.durationMs <= 0 ||
       input.width <= 0 ||
       input.height <= 0 ||
-      input.width * 16 !== input.height * 9
+      input.width * 16 !== input.height * 9 || !input.scenes.length || !input.narrationAudio.length
     )
       throw new Error("VIDEO_RENDER_INPUT_INVALID");
     const directory = await mkdtemp(
       join(tmpdir(), "ai-cognitive-short-video-"),
     );
-    const output = join(directory, "render.mp4");
-    const duration = (input.durationMs / 1000).toFixed(3);
+    const output = join(directory, "render.mp4"), captions = join(directory, "captions.srt");
     try {
+      const ordered = [...input.scenes].sort((a, b) => a.ordinal - b.ordinal);
+      if (ordered.some((scene, index) => scene.ordinal !== index + 1 || scene.endMs <= scene.startMs || (index && scene.startMs < ordered[index - 1]!.endMs))) throw new Error("VIDEO_RENDER_SCENE_TIMING_INVALID");
+      const audioByScene = new Map(input.narrationAudio.map((audio) => [audio.sceneId, audio]));
+      if (ordered.some((scene) => !audioByScene.has(scene.id))) throw new Error("VIDEO_RENDER_NARRATION_MISSING");
+      await writeFile(captions, input.captions.map((cue, index) => `${index + 1}\n${srtTime(cue.startMs)} --> ${srtTime(cue.endMs)}\n${cue.text.replace(/\r?\n/g, " ")}\n`).join("\n"), "utf8");
+      const args = ["-y"];
+      for (const [index, scene] of ordered.entries()) {
+        const primary = join(directory, `scene-${index}-primary.txt`), secondary = join(directory, `scene-${index}-secondary.txt`);
+        await writeFile(primary, scene.primaryText, "utf8"); await writeFile(secondary, scene.secondaryText ?? scene.sceneType, "utf8");
+        const duration = ((scene.endMs - scene.startMs) / 1000).toFixed(3);
+        const palette = ["#0f172a", "#172554", "#1e1b4b", "#312e81", "#3f1d2e", "#134e4a"][index % 6]!;
+        const escapePath = (path: string) => path.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+        const filter = `color=c=${palette}:s=${input.width}x${input.height}:r=${input.fps}:d=${duration},drawbox=x=70:y=250:w=${input.width - 140}:h=10:color=0x38bdf8@0.9:t=fill,drawtext=textfile='${escapePath(primary)}':fontcolor=white:fontsize=${Math.max(34, Math.floor(input.width / 11))}:x=(w-text_w)/2:y=h*0.32:line_spacing=12:enable='between(t,0.15,${duration})',drawtext=textfile='${escapePath(secondary)}':fontcolor=0x94a3b8:fontsize=${Math.max(22, Math.floor(input.width / 20))}:x=(w-text_w)/2:y=h*0.52:line_spacing=8`;
+        args.push("-f", "lavfi", "-i", filter);
+      }
+      for (const [index, scene] of ordered.entries()) {
+        const audio = audioByScene.get(scene.id)!;
+        const extension = audio.mediaType.includes("mpeg") ? "mp3" : audio.mediaType.includes("wav") ? "wav" : "m4a";
+        const audioPath = join(directory, `narration-${index}.${extension}`); await writeFile(audioPath, audio.bytes); args.push("-i", audioPath);
+      }
+      const videoInputs = ordered.map((_, index) => `[${index}:v]`).join("");
+      const audioInputs = ordered.map((_, index) => `[${index + ordered.length}:a]`).join("");
+      const escapedCaptions = captions.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
       await execute(
         "ffmpeg",
-        [
-          "-y",
-          "-f",
-          "lavfi",
-          "-i",
-          `color=c=#111827:s=${input.width}x${input.height}:r=${input.fps}:d=${duration}`,
-          "-f",
-          "lavfi",
-          "-i",
-          `anullsrc=r=48000:cl=stereo:d=${duration}`,
-          "-shortest",
+        [...args,
+          "-filter_complex", `${videoInputs}concat=n=${ordered.length}:v=1:a=0[v];${audioInputs}concat=n=${ordered.length}:v=0:a=1[a];[v]subtitles='${escapedCaptions}'[captioned]`,
+          "-map", "[captioned]", "-map", "[a]", "-shortest",
           "-c:v",
           "libx264",
           "-pix_fmt",
@@ -959,7 +1008,7 @@ export class FfmpegVideoRenderer implements VideoRenderer {
         width: input.width,
         height: input.height,
         fps: input.fps,
-        durationMs: input.durationMs,
+        durationMs: (await probeMp4(await readFile(output))).durationMs,
         cleanup: () => rm(directory, { recursive: true, force: true }),
       };
     } catch (error) {
@@ -968,3 +1017,10 @@ export class FfmpegVideoRenderer implements VideoRenderer {
     }
   }
 }
+
+function srtTime(milliseconds: number) { const hours = Math.floor(milliseconds / 3_600_000); const minutes = Math.floor((milliseconds % 3_600_000) / 60_000); const seconds = Math.floor((milliseconds % 60_000) / 1_000); return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")},${String(milliseconds % 1000).padStart(3, "0")}`; }
+async function probeMp4(bytes: Uint8Array) {
+  const directory = await mkdtemp(join(tmpdir(), "ai-cognitive-short-video-probe-")), path = join(directory, "artifact.mp4");
+  try { await writeFile(path, bytes); const { stdout } = await execute("ffprobe", ["-v", "error", "-show_entries", "format=format_name,duration:stream=codec_name,codec_type,width,height", "-of", "json", path], { timeout: 30_000, maxBuffer: 500_000, windowsHide: true }); const value = JSON.parse(stdout) as any; const video = value.streams?.find((stream: any) => stream.codec_type === "video"); const audio = value.streams?.find((stream: any) => stream.codec_type === "audio"); return { ok: String(value.format?.format_name ?? "").includes("mp4") && video?.codec_name === "h264", durationMs: Math.round(Number(value.format?.duration ?? 0) * 1000), width: Number(video?.width ?? 0), height: Number(video?.height ?? 0), hasAac: audio?.codec_name === "aac" }; } catch { return { ok: false, durationMs: 0, width: 0, height: 0, hasAac: false }; } finally { await rm(directory, { recursive: true, force: true }); }
+}
+function evaluateWarnings(scenes: any[], captions: any[]) { const warnings: string[] = []; const joined = scenes.map((scene) => scene.narrationText).join(" "); if (scenes.some((scene) => scene.targetDurationMs < 1_000)) warnings.push("SCENE_TOO_SHORT"); if (scenes.some((scene) => scene.targetDurationMs > 12_000)) warnings.push("SCENE_TOO_LONG"); if (captions.reduce((total, cue) => total + cue.text.length, 0) > scenes.length * 260) warnings.push("CAPTION_DENSITY_HIGH"); if (/(首先|其次|最后|总结一下|总的来说|综上|让我们|今天我们来聊聊)/.test(joined)) warnings.push("AI_STYLE_PHRASE_OVERUSE"); if (scenes.length > 1 && scenes.every((scene) => scene.layoutTemplate === scenes[0].layoutTemplate)) warnings.push("REPEATED_LAYOUT"); return warnings; }
