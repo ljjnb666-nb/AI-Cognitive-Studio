@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- deterministic provider fixture inputs span four product stages. */
 import { createHash } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { prisma } from "../../../packages/db/src/index.js";
