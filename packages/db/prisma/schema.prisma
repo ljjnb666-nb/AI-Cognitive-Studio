@@ -1427,7 +1427,7 @@ model UtteranceSpeechChunk {
   speechPlan           UtteranceSpeechPlan @relation(fields: [speechPlanId, audioGenerationRunId, workspaceId, episodeId], references: [id, audioGenerationRunId, workspaceId, episodeId], onDelete: Cascade)
 
   @@unique([speechPlanId, ordinal])
-  @@unique([synthesisIdentityHash])
+  @@unique([audioGenerationRunId, synthesisIdentityHash])
 }
 
 model UtteranceAudioArtifact {
