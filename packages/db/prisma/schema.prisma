@@ -1407,6 +1407,9 @@ model UtteranceSpeechPlan {
 model UtteranceSpeechChunk {
   id                   String             @id @default(cuid())
   speechPlanId         String
+  audioGenerationRunId String
+  workspaceId          String
+  episodeId            String
   ordinal              Int
   text                 String
   textHash             String
@@ -1421,7 +1424,7 @@ model UtteranceSpeechChunk {
   sampleRate           Int?
   channels             Int?
   createdAt            DateTime           @default(now())
-  speechPlan           UtteranceSpeechPlan @relation(fields: [speechPlanId], references: [id], onDelete: Cascade)
+  speechPlan           UtteranceSpeechPlan @relation(fields: [speechPlanId, audioGenerationRunId, workspaceId, episodeId], references: [id, audioGenerationRunId, workspaceId, episodeId], onDelete: Cascade)
 
   @@unique([speechPlanId, ordinal])
   @@unique([synthesisIdentityHash])
