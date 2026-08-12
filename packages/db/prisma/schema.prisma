@@ -1356,20 +1356,22 @@ model AudioGenerationRun {
   evaluations                AudioEvaluationRun[]
   @@unique([episodeId, generationIdentityHash])
   @@unique([id, workspaceId, episodeId])
+  @@unique([id, workspaceId, episodeId, podcastProjectId])
 }
 
 model AudioGenerationHostVoice {
   id                   String              @id @default(cuid())
   audioGenerationRunId String
   workspaceId          String
+  podcastProjectId     String
   episodeId            String
   hostId               String
   voiceProfileId       String
   voiceIdentityHash    String
   createdAt            DateTime            @default(now())
-  run                  AudioGenerationRun  @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
-  host                 PodcastHost         @relation(fields: [hostId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  voiceProfile         PodcastVoiceProfile @relation(fields: [voiceProfileId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  run                  AudioGenerationRun  @relation(fields: [audioGenerationRunId, workspaceId, episodeId, podcastProjectId], references: [id, workspaceId, episodeId, podcastProjectId], onDelete: Cascade)
+  host                 PodcastHost         @relation(fields: [hostId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
+  voiceProfile         PodcastVoiceProfile @relation(fields: [voiceProfileId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
   @@unique([audioGenerationRunId, hostId])
 }
 
@@ -1399,6 +1401,7 @@ model UtteranceSpeechPlan {
   artifacts            UtteranceAudioArtifact[]
   chunks               UtteranceSpeechChunk[]
   @@unique([audioGenerationRunId, utteranceId, preparationVersion])
+  @@unique([id, audioGenerationRunId, workspaceId, episodeId])
 }
 
 model UtteranceSpeechChunk {
@@ -1443,7 +1446,7 @@ model UtteranceAudioArtifact {
   providerMetadata     Json?
   createdAt            DateTime           @default(now())
   run                  AudioGenerationRun @relation(fields: [audioGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
-  speechPlan           UtteranceSpeechPlan @relation(fields: [speechPlanId], references: [id], onDelete: Cascade)
+  speechPlan           UtteranceSpeechPlan @relation(fields: [speechPlanId, audioGenerationRunId, workspaceId, episodeId], references: [id, audioGenerationRunId, workspaceId, episodeId], onDelete: Cascade)
   @@unique([audioGenerationRunId, synthesisIdentityHash])
 }
 
