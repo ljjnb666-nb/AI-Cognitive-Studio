@@ -1698,6 +1698,7 @@ model ShortVideoGenerationRun {
   revision ShortVideoRevision?
   evaluations ShortVideoEvaluationRun[]
   @@unique([shortVideoProjectId, generationIdentityHash])
+  @@unique([id, workspaceId])
   @@unique([id, workspaceId, shortVideoProjectId])
   @@index([workspaceId, status, executionLeaseUntil])
 }
@@ -1714,12 +1715,14 @@ model ShortVideoGenerationSource {
   createdAt DateTime @default(now())
   run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId, workspaceId, shortVideoProjectId], references: [id, workspaceId, shortVideoProjectId], onDelete: Cascade)
   sourceDocument SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  evidence ShortVideoNarrationEvidence[]
   @@unique([shortVideoGenerationRunId, sourceDocumentId])
+  @@unique([shortVideoGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId])
 }
 
 model ShortVideoPlan {
   id String @id @default(cuid())
-  shortVideoGenerationRunId String @unique
+  shortVideoGenerationRunId String
   workspaceId String
   centralQuestion String
   viewerAssumption String
@@ -1732,7 +1735,9 @@ model ShortVideoPlan {
   targetDurationSeconds Int
   tone String
   createdAt DateTime @default(now())
-  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId], references: [id], onDelete: Cascade)
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  @@unique([shortVideoGenerationRunId, workspaceId])
+  @@unique([id, workspaceId])
 }
 
 model ShortVideoScene {
@@ -1803,8 +1808,10 @@ model ShortVideoNarrationEvidence {
   createdAt DateTime @default(now())
   scene ShortVideoScene @relation(fields: [sceneId, shortVideoGenerationRunId, workspaceId], references: [id, shortVideoGenerationRunId, workspaceId], onDelete: Cascade)
   narration ShortVideoNarration @relation(fields: [narrationId, shortVideoGenerationRunId], references: [id, shortVideoGenerationRunId], onDelete: Cascade)
-  sourceBlock SourceBlock @relation(fields: [sourceBlockId], references: [id], onDelete: Restrict)
+  sourceBlock SourceBlock @relation(fields: [sourceBlockId, extractionId], references: [id, extractionId], onDelete: Restrict)
+  generationSource ShortVideoGenerationSource @relation(fields: [shortVideoGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], references: [shortVideoGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], onDelete: Restrict)
   @@index([shortVideoGenerationRunId, sceneId])
+  @@index([workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId])
 }
 
 model ShortVideoCaptionCue {

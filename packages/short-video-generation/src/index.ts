@@ -28,6 +28,7 @@ const stable = (value: unknown) =>
   );
 const sha256 = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
+const HEARTBEAT_MS = 30_000;
 export const SHORT_VIDEO_GENERATION_JOB = "short-video.generation";
 export const SHORT_VIDEO_GENERATION_TOPIC = "short-video.generation.requested";
 export const SHORT_VIDEO_PROVIDER_INPUT_BUDGET = 4_000;
@@ -83,6 +84,8 @@ export const shortVideoSceneSchema = z.object({
         sourceBlockId: text(128),
         startOffset: z.number().int().nonnegative(),
         endOffset: z.number().int().positive(),
+        quoteText: z.string().optional(),
+        quoteHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
       }),
     )
     .max(8),
@@ -368,6 +371,18 @@ async function claim(runId: string, token: string) {
   });
   return true;
 }
+async function renew(runId: string, token: string, onRenewed?: () => void) {
+  const changed = await prisma.$executeRaw`UPDATE "ShortVideoGenerationRun" SET "executionLeaseUntil"=NOW()+INTERVAL '2 minutes' WHERE "id"=${runId} AND "executionClaimToken"=${token} AND "executionLeaseUntil">NOW() AND "status"='RUNNING'::"ShortVideoGenerationStatus"`;
+  if (changed !== 1) throw new Error("SHORT_VIDEO_OWNERSHIP_LOST");
+  onRenewed?.();
+}
+async function withLeaseHeartbeat<T>(runId: string, token: string, work: () => Promise<T>, interval = HEARTBEAT_MS, onRenewed?: () => void) {
+  await renew(runId, token, onRenewed);
+  let lost: Error | undefined;
+  const timer = setInterval(() => { void renew(runId, token, onRenewed).catch(error => { lost = error as Error; }); }, interval);
+  try { const value = await work(); if (lost) throw lost; await renew(runId, token, onRenewed); return value; }
+  finally { clearInterval(timer); }
+}
 async function stage(
   runId: string,
   token: string,
@@ -429,7 +444,7 @@ async function synthesizeNarration(
   dependencies: {
     tts: ShortVideoTtsProvider;
     storage: StorageProvider;
-    faultInjector?: (point: "afterPlanPersist" | "afterNarrationArtifactPersist") => void | Promise<void>;
+    faultInjector?: (point: "afterPlanPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist") => void | Promise<void>;
   },
 ) {
   for (const narration of run.narration) {
@@ -475,6 +490,7 @@ async function synthesizeNarration(
         body: response.bytes,
         contentType: response.mediaType,
       });
+      await dependencies.faultInjector?.("afterNarrationObjectUpload");
       await owned(run.id, token, (tx) =>
         tx.shortVideoAudioArtifact.create({
           data: {
@@ -530,6 +546,33 @@ async function context(run: any, embeddingProvider: EmbeddingProvider) {
     source: item.source,
   }));
 }
+function splitsSurrogate(text: string, offset: number) {
+  return offset > 0 && offset < text.length && /[\uD800-\uDBFF]/.test(text[offset - 1]!) && /[\uDC00-\uDFFF]/.test(text[offset]!);
+}
+async function validateGrounding(run: any) {
+  const evidence = await prisma.shortVideoNarrationEvidence.findMany({ where: { shortVideoGenerationRunId: run.id }, include: { sourceBlock: true } });
+  const sources = new Set(run.sources.map((source: any) => `${source.workspaceId}:${source.sourceDocumentId}:${source.extractionId}:${source.chunkSetId}:${source.analysisRunId}`));
+  const byScene = new Map<string, typeof evidence>(); for (const item of evidence) byScene.set(item.sceneId, [...(byScene.get(item.sceneId) ?? []), item]);
+  const failures: string[] = [];
+  let quoted = 0;
+  for (const scene of run.scenes) {
+    const items = byScene.get(scene.id) ?? [];
+    if (["EVIDENCE", "CLAIM"].includes(scene.sceneType) && !items.length) failures.push("GROUNDING_EVIDENCE_REQUIRED");
+    for (const item of items) {
+      if (!sources.has(`${item.workspaceId}:${item.sourceDocumentId}:${item.extractionId}:${item.chunkSetId}:${item.analysisRunId}`)) failures.push("GROUNDING_FOREIGN_LINEAGE");
+      const block = item.sourceBlock.text;
+      if (item.startOffset < 0 || item.endOffset <= item.startOffset || item.endOffset > block.length) failures.push("GROUNDING_OFFSET_INVALID");
+      else if (splitsSurrogate(block, item.startOffset) || splitsSurrogate(block, item.endOffset)) failures.push("GROUNDING_SURROGATE_SPLIT");
+      else if (item.quoteText !== null) { const quote = block.slice(item.startOffset, item.endOffset); quoted += quote.length; if (item.quoteText !== quote) failures.push("GROUNDING_QUOTE_MISMATCH"); if (item.quoteHash !== sha256(quote)) failures.push("GROUNDING_QUOTE_HASH_MISMATCH"); }
+    }
+  }
+  if (quoted > 300 || quoted > run.scenes.reduce((sum: number, scene: any) => sum + scene.narrationText.length, 0) * 0.2) failures.push("GROUNDING_QUOTE_BUDGET_EXCEEDED");
+  return [...new Set(failures)];
+}
+/** Deterministic validator used by the publication gate and integration coverage. */
+export async function validateShortVideoGrounding(runId: string) {
+  return validateGrounding(await load(runId));
+}
 function assertBudget(input: unknown) {
   if (
     estimateAnalysisTokens(JSON.stringify(input)) >
@@ -559,8 +602,11 @@ export async function processShortVideoGenerationRun(
     storage: StorageProvider;
     renderer?: VideoRenderer;
     renderConfiguration?: { width: number; height: number; fps: number };
+    heartbeatIntervalMs?: number;
+    /** Test-only observability seam for proving bounded lease renewal. */
+    onLeaseRenewed?: () => void;
     /** Test-only deterministic crash seam; production callers leave this unset. */
-    faultInjector?: (point: "afterPlanPersist" | "afterNarrationArtifactPersist") => void | Promise<void>;
+    faultInjector?: (point: "afterPlanPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist") => void | Promise<void>;
   },
 ) {
   let run = await load(runId);
@@ -593,7 +639,7 @@ export async function processShortVideoGenerationRun(
           };
           assertBudget(input);
           const plan = shortVideoPlanSchema.parse(
-            await dependencies.provider.plan(input),
+            await withLeaseHeartbeat(run.id, token, () => dependencies.provider.plan(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed),
           );
           await owned(run.id, token, (tx) =>
             tx.shortVideoPlan.create({
@@ -619,7 +665,7 @@ export async function processShortVideoGenerationRun(
           };
           assertBudget(input);
           const scenes = shortVideoScenesSchema.parse(
-            await dependencies.provider.scenes(input),
+            await withLeaseHeartbeat(run.id, token, () => dependencies.provider.scenes(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed),
           ).scenes;
           assertScenes(scenes, run.styleProfile.targetDurationSeconds * 1000);
           const evidenceSources = new Map<string, any>();
@@ -675,6 +721,8 @@ export async function processShortVideoGenerationRun(
                     sourceBlockId: evidence.sourceBlockId,
                     startOffset: evidence.startOffset,
                     endOffset: evidence.endOffset,
+                    quoteText: evidence.quoteText ?? null,
+                    quoteHash: evidence.quoteHash ?? null,
                   },
                 });
               }
@@ -684,7 +732,7 @@ export async function processShortVideoGenerationRun(
         }
         await stage(run.id, token, "SCENE_PLANNING", "NARRATION_SYNTHESIS");
       } else if (run.stage === "NARRATION_SYNTHESIS") {
-        await synthesizeNarration(run, token, dependencies);
+        await synthesizeNarration(run, token, { ...dependencies, tts: { ...dependencies.tts, synthesize: input => withLeaseHeartbeat(run.id, token, () => dependencies.tts.synthesize(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed) } });
         await stage(run.id, token, "NARRATION_SYNTHESIS", "VISUAL_PREPARATION");
       } else if (run.stage === "VISUAL_PREPARATION") {
         const existing = await prisma.shortVideoVisualAsset.count({ where: { shortVideoGenerationRunId: run.id } });
@@ -726,7 +774,8 @@ export async function processShortVideoGenerationRun(
             if (sha256(bytes) !== artifact.sha256) throw new Error("SHORT_VIDEO_STORAGE_HASH_MISMATCH");
             return { sceneId: artifact.sceneId, bytes, mediaType: artifact.mediaType, durationMs: artifact.durationMs };
           }));
-          const output = await renderer.render({
+          const renderCaptions = await prisma.shortVideoCaptionCue.findMany({ where: { shortVideoGenerationRunId: run.id }, orderBy: { ordinal: "asc" } });
+          const output = await withLeaseHeartbeat(run.id, token, () => renderer.render({
             durationMs: run.scenes.reduce(
               (n: number, x: any) => n + x.targetDurationMs,
               0,
@@ -735,10 +784,10 @@ export async function processShortVideoGenerationRun(
             height: dependencies.renderConfiguration?.height ?? (process.env.NODE_ENV === "test" ? 640 : 1920),
             fps: dependencies.renderConfiguration?.fps ?? (process.env.NODE_ENV === "test" ? 15 : 30),
             scenes: run.scenes.map((scene: any) => ({ id: scene.id, ordinal: scene.ordinal, sceneType: scene.sceneType, startMs: scene.targetStartMs, endMs: scene.targetEndMs, primaryText: scene.primaryText, secondaryText: scene.secondaryText, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, transitionIntent: scene.transitionIntent })),
-            captions: await prisma.shortVideoCaptionCue.findMany({ where: { shortVideoGenerationRunId: run.id }, orderBy: { ordinal: "asc" } }),
+            captions: renderCaptions,
             narrationAudio,
-          });
-          const bytes = await readFile(output.path);
+          }), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed);
+          try { const bytes = await readFile(output.path);
           const hash = sha256(bytes);
           const key = `short-videos/${run.workspaceId}/${run.id}/${hash}.mp4`;
           await dependencies.storage.putObject({
@@ -764,7 +813,7 @@ export async function processShortVideoGenerationRun(
               },
             }),
           );
-          await output.cleanup();
+          } finally { await output.cleanup(); }
         }
         await stage(run.id, token, "VIDEO_RENDERING", "QUALITY_VALIDATION");
       } else if (run.stage === "QUALITY_VALIDATION") {
@@ -791,9 +840,9 @@ export async function processShortVideoGenerationRun(
           captions.some((cue: any) => cue.endMs <= cue.startMs || cue.startMs < 0 || cue.endMs > probe.durationMs + 750) ? "CAPTION_TIMING_INVALID" : "",
           Math.abs(probe.durationMs - artifact.durationMs) > 1_000 ? "RENDER_DURATION_MISMATCH" : "",
         ].filter(Boolean);
+        const groundingFailures = await validateGrounding(run);
+        hardFailures.push(...groundingFailures);
         const warnings = evaluateWarnings(run.scenes, captions);
-        if (hardFailures.length)
-          throw new Error(`SHORT_VIDEO_QUALITY_FAILED:${hardFailures[0]}`);
         await owned(run.id, token, async (tx) => {
           const evaluation = await tx.shortVideoEvaluationRun.upsert({
             where: {
@@ -805,13 +854,14 @@ export async function processShortVideoGenerationRun(
             create: {
               shortVideoGenerationRunId: run.id,
               evaluatorVersion: "phase5-deterministic-v1",
-              status: "SUCCEEDED",
+              status: hardFailures.length ? "FAILED" : "SUCCEEDED",
               completedAt: new Date(),
+              errorCode: hardFailures[0] ?? null,
             },
             update: {
-              status: "SUCCEEDED",
+              status: hardFailures.length ? "FAILED" : "SUCCEEDED",
               completedAt: new Date(),
-              errorCode: null,
+              errorCode: hardFailures[0] ?? null,
             },
           });
           await tx.shortVideoEvaluationResult.upsert({
@@ -835,6 +885,8 @@ export async function processShortVideoGenerationRun(
             },
           });
         });
+        if (hardFailures.length)
+          throw new Error(`SHORT_VIDEO_QUALITY_FAILED:${hardFailures[0]}`);
         await stage(run.id, token, "QUALITY_VALIDATION", "FINALIZING");
       } else if (run.stage === "FINALIZING") {
         await owned(run.id, token, async (tx) => {
@@ -901,7 +953,7 @@ export async function processShortVideoGenerationRun(
       error instanceof Error
         ? error.message.split(":")[0]!
         : "SHORT_VIDEO_GENERATION_FAILED";
-    const failed = await prisma.$executeRaw`UPDATE "ShortVideoGenerationRun" SET "status"='FAILED'::"ShortVideoGenerationStatus", "errorCode"=${code}, "completedAt"=NOW(), "executionClaimToken"=NULL, "executionClaimedAt"=NULL, "executionLeaseUntil"=NULL WHERE "id"=${run.id} AND "executionClaimToken"=${token} AND "status"='RUNNING'::"ShortVideoGenerationStatus"`;
+    const failed = await prisma.$executeRaw`UPDATE "ShortVideoGenerationRun" SET "status"='FAILED'::"ShortVideoGenerationStatus", "errorCode"=${code}, "completedAt"=NOW(), "executionClaimToken"=NULL, "executionClaimedAt"=NULL, "executionLeaseUntil"=NULL WHERE "id"=${run.id} AND "executionClaimToken"=${token} AND "executionLeaseUntil">NOW() AND "status"='RUNNING'::"ShortVideoGenerationStatus"`;
     if (failed === 1) await prisma.job.update({
       where: { id: run.jobId },
       data: { status: "FAILED", error: { code }, completedAt: new Date() },
