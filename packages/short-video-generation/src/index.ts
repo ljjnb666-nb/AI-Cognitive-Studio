@@ -641,7 +641,7 @@ export async function processShortVideoGenerationRun(
                   transitionIntent: scene.transitionIntent,
                 },
               });
-              await tx.shortVideoNarration.create({
+              const narration = await tx.shortVideoNarration.create({
                 data: {
                   shortVideoGenerationRunId: run.id,
                   sceneId: created.id,
@@ -658,6 +658,7 @@ export async function processShortVideoGenerationRun(
                   data: {
                     shortVideoGenerationRunId: run.id,
                     sceneId: created.id,
+                    narrationId: narration.id,
                     workspaceId: run.workspaceId,
                     sourceDocumentId: source.sourceDocumentId,
                     extractionId: source.extractionId,

@@ -22,4 +22,11 @@ describe("Phase 5 PostgreSQL lineage", () => {
     const project = await createShortVideoProject({ workspaceId: a.workspace.id, userId: a.user.id }, { name: "A", sourceDocumentIds: [a.document.id] });
     await expect(prisma.shortVideoProjectSource.create({ data: { shortVideoProjectId: project.id, sourceDocumentId: b.document.id, workspaceId: a.workspace.id } })).rejects.toThrow();
   });
+  it("rejects direct cross-workspace project/run and revision/run lineage writes", async () => {
+    const a = await fixture(), b = await fixture();
+    const project = await createShortVideoProject({ workspaceId: a.workspace.id, userId: a.user.id }, { name: "A", sourceDocumentIds: [a.document.id] });
+    const foreignProject = await createShortVideoProject({ workspaceId: b.workspace.id, userId: b.user.id }, { name: "B", sourceDocumentIds: [b.document.id] });
+    const job = await prisma.job.create({ data: { workspaceId: a.workspace.id, userId: a.user.id, type: "short-video.generation", payload: {} } });
+    await expect(prisma.$executeRawUnsafe(`INSERT INTO "ShortVideoGenerationRun" ("id","workspaceId","shortVideoProjectId","styleProfileId","jobId","provider","model","modelVersionKey","promptVersion","pipelineVersion","retrievalVersion","scenePlannerVersion","captionVersion","audioVersion","renderVersion","generationIdentityHash","idempotencyKey") SELECT 'bad-${crypto.randomUUID()}', '${a.workspace.id}', '${foreignProject.id}', "id", '${job.id}', 'p', 'm', '', 'v', 'v', 'v', 'v', 'v', 'v', 'v', '${crypto.randomUUID()}', '${crypto.randomUUID()}' FROM "ShortVideoStyleProfile" WHERE "shortVideoProjectId"='${project.id}' LIMIT 1`)).rejects.toThrow();
+  });
 });

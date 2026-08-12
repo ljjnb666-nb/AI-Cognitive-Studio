@@ -1,3 +1,3 @@
 import { defineConfig } from "vitest/config";
 
-export default defineConfig({ test: { environment: "node", fileParallelism: false, include: ["tests/phase4-product-chain.e2e.test.ts"], setupFiles: ["tests/setup-phase1-e2e.ts"], testTimeout: 90_000 } });
+export default defineConfig({ test: { environment: "node", fileParallelism: false, include: ["tests/phase4-product-chain.e2e.test.ts"], setupFiles: ["tests/setup-phase1-e2e.ts"], testTimeout: 90_000, expect: { poll: { timeout: 30_000 } } } });

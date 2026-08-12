@@ -8,7 +8,7 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test:unit": "vitest run",
+    "test:unit": "vitest run tests/renderer.test.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
