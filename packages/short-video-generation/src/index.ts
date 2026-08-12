@@ -833,7 +833,12 @@ export async function processShortVideoGenerationRun(
           const artifact = await tx.shortVideoRenderArtifact.findUniqueOrThrow({
             where: { shortVideoGenerationRunId: run.id },
           });
-          const { id: _artifactId, shortVideoGenerationRunId: _artifactRunId, createdAt: _artifactCreatedAt, ...revisionArtifact } = artifact;
+          const revisionArtifact = {
+            storageKey: artifact.storageKey, sha256: artifact.sha256, sizeBytes: artifact.sizeBytes,
+            mediaType: artifact.mediaType, container: artifact.container, width: artifact.width,
+            height: artifact.height, fps: artifact.fps, durationMs: artifact.durationMs,
+            videoCodec: artifact.videoCodec, audioCodec: artifact.audioCodec,
+          };
           let revision = await tx.shortVideoRevision.findUnique({
             where: { generationRunId: run.id },
           });
