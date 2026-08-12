@@ -426,7 +426,11 @@ function boundedSynthesisUnits(value: string, maximum = 420) {
 async function synthesizeNarration(
   run: any,
   token: string,
-  dependencies: { tts: ShortVideoTtsProvider; storage: StorageProvider },
+  dependencies: {
+    tts: ShortVideoTtsProvider;
+    storage: StorageProvider;
+    faultInjector?: (point: "afterPlanPersist" | "afterNarrationArtifactPersist") => void | Promise<void>;
+  },
 ) {
   for (const narration of run.narration) {
     for (const [unitOrdinal, unit] of boundedSynthesisUnits(
@@ -488,6 +492,7 @@ async function synthesizeNarration(
           },
         }),
       );
+      await dependencies.faultInjector?.("afterNarrationArtifactPersist");
     }
   }
 }
@@ -554,6 +559,8 @@ export async function processShortVideoGenerationRun(
     storage: StorageProvider;
     renderer?: VideoRenderer;
     renderConfiguration?: { width: number; height: number; fps: number };
+    /** Test-only deterministic crash seam; production callers leave this unset. */
+    faultInjector?: (point: "afterPlanPersist" | "afterNarrationArtifactPersist") => void | Promise<void>;
   },
 ) {
   let run = await load(runId);
@@ -597,6 +604,7 @@ export async function processShortVideoGenerationRun(
               },
             }),
           );
+          await dependencies.faultInjector?.("afterPlanPersist");
         }
         await stage(run.id, token, "VIDEO_PLANNING", "NARRATIVE_GENERATION");
       } else if (run.stage === "NARRATIVE_GENERATION") {
