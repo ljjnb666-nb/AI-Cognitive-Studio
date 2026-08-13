@@ -70,8 +70,8 @@ jobs:
         run: pnpm lint
       - name: Typecheck
         run: pnpm typecheck
-      - name: Install FFmpeg and FFprobe for media processing
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install FFmpeg, FFprobe, and Redis CLI for media and Phase 6 processing
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg redis-tools
       - name: Unit tests
         run: pnpm test:unit
       - name: Integration tests

@@ -1,4 +1,5 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
@@ -23,6 +24,8 @@ const environment = {
   S3_FORCE_PATH_STYLE: "true",
   WEB_DEV_BOOTSTRAP_IDENTITY: "true",
   WEB_DEV_BOOTSTRAP_EMAIL: "phase6-browser@ai-cognitive-studio.test",
+  WEB_TEST_HARNESS_TOKEN: randomUUID(),
+  WEB_TEST_HARNESS_EMAIL: "phase6-browser@ai-cognitive-studio.test",
   BOOK_ANALYSIS_PROVIDER: "phase6-analysis",
   BOOK_ANALYSIS_MODEL: "fixture",
   PODCAST_GENERATION_PROVIDER: "phase6-podcast",
@@ -46,6 +49,10 @@ function postgres(sql) {
   try { execFileSync("psql", ["-h", "localhost", "-p", postgresPort, "-U", "app", "-d", "postgres", "-c", sql], { cwd: root, env: { ...environment, PGPASSWORD: "app" }, stdio: "inherit" }); }
   catch { command("docker", ["compose", "exec", "-T", "postgres", "psql", "-U", "app", "-d", "postgres", "-c", sql]); }
 }
+function redis(argumentsList) {
+  try { execFileSync("redis-cli", argumentsList, { cwd: root, env: environment, stdio: "inherit" }); }
+  catch { command("docker", ["compose", "exec", "-T", "redis", "redis-cli", ...argumentsList]); }
+}
 
 let worker;
 async function stopWorker() {
@@ -60,7 +67,7 @@ function minio(commandLine) {
 try {
   postgres(`DROP DATABASE IF EXISTS ${database} WITH (FORCE);`);
   postgres(`CREATE DATABASE ${database};`);
-  command("docker", ["compose", "exec", "-T", "redis", "redis-cli", "-n", "15", "FLUSHDB"]);
+  redis(["-n", "15", "FLUSHDB"]);
   minio(`mc alias set phase6 http://localhost:9000 ${environment.S3_ACCESS_KEY} ${environment.S3_SECRET_KEY} && (mc rb --force phase6/${environment.S3_BUCKET} || true) && mc mb phase6/${environment.S3_BUCKET}`);
   command("pnpm", ["db:migrate:deploy"]);
   command("pnpm", ["--filter", "@ai-cognitive/web", "build"]);
@@ -87,7 +94,7 @@ try {
   throw error;
 } finally {
   await stopWorker();
-  try { command("docker", ["compose", "exec", "-T", "redis", "redis-cli", "-n", "15", "FLUSHDB"]); } catch { /* isolated cleanup is best effort */ }
+  try { redis(["-n", "15", "FLUSHDB"]); } catch { /* isolated cleanup is best effort */ }
   try { minio(`mc alias set phase6 http://localhost:9000 ${environment.S3_ACCESS_KEY} ${environment.S3_SECRET_KEY} && (mc rb --force phase6/${environment.S3_BUCKET} || true)`); } catch { /* isolated cleanup is best effort */ }
   postgres(`DROP DATABASE IF EXISTS ${database} WITH (FORCE);`);
 }
