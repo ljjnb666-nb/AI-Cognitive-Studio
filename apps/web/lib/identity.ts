@@ -2,11 +2,13 @@ import "server-only";
 
 import { cookies } from "next/headers";
 import { prisma } from "@ai-cognitive/db";
+import { developmentBootstrapAllowed } from "./identity-policy";
 
 export type WebIdentityContext = { userId: string; workspaceId: string };
 
 const USER_COOKIE = "acs_user_id";
 const WORKSPACE_COOKIE = "acs_workspace_id";
+const DEVELOPMENT_WORKSPACE_ID = "cm000000000000000000000001";
 
 /**
  * This is intentionally the only web identity entrypoint. Production callers
@@ -22,26 +24,25 @@ export async function resolveWebIdentity(): Promise<WebIdentityContext> {
   // `next start` runs with NODE_ENV=production even in the isolated browser
   // acceptance harness. The marker is set only by that test command; ordinary
   // production deployments still require an upstream verified identity.
-  const phase6Acceptance = process.env.PHASE6_BROWSER_ACCEPTANCE === "true"
-    && process.env.WEB_DEV_BOOTSTRAP_IDENTITY === "true"
-    && process.env.DATABASE_URL?.includes("ai_cognitive_studio_phase6_test");
-  if ((process.env.NODE_ENV === "production" && !phase6Acceptance) || (process.env.NODE_ENV !== "production" && process.env.WEB_DEV_BOOTSTRAP_IDENTITY !== "true")) {
+  if (!developmentBootstrapAllowed()) {
     throw new Error("WEB_IDENTITY_REQUIRED");
   }
 
   const email = process.env.WEB_DEV_BOOTSTRAP_EMAIL ?? "local-product@ai-cognitive-studio.test";
-  const user = await prisma.user.upsert({
-    where: { email },
-    create: { email },
+  const user = await prisma.user.findUnique({ where: { email } }) ?? await prisma.user.create({ data: { email } }).catch(async (error: unknown) => {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "P2002") throw error;
+    return prisma.user.findUniqueOrThrow({ where: { email } });
+  });
+  const workspace = await prisma.workspace.upsert({
+    where: { id: DEVELOPMENT_WORKSPACE_ID },
+    create: { id: DEVELOPMENT_WORKSPACE_ID, name: "本地产品工作区" },
     update: {},
   });
-  const existing = await prisma.workspaceMember.findFirst({
-    where: { userId: user.id },
-    orderBy: { createdAt: "asc" },
+  await prisma.workspaceMember.upsert({
+    where: { workspaceId_userId: { workspaceId: workspace.id, userId: user.id } },
+    create: { workspaceId: workspace.id, userId: user.id, role: "OWNER" },
+    update: {},
   });
-  if (existing) return { userId: existing.userId, workspaceId: existing.workspaceId };
-  const workspace = await prisma.workspace.create({ data: { name: "本地产品工作区" } });
-  await prisma.workspaceMember.create({ data: { workspaceId: workspace.id, userId: user.id, role: "OWNER" } });
   return { userId: user.id, workspaceId: workspace.id };
 }
 
