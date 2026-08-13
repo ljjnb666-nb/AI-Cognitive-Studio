@@ -97,7 +97,7 @@ describe("real Phase 2 book intelligence infrastructure", () => {
     } finally {
       await sourceWorker.close();
       await bookWorker.close();
-      await cleanup(workspace.id, user.id);
+      await cleanup(workspace.id, user.id).catch(() => undefined);
     }
   });
 });

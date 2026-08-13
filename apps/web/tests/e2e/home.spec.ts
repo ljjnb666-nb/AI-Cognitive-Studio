@@ -1,11 +1,11 @@
 import { expect, test } from "@playwright/test";
 
-test("shows the Phase 0 foundation status", async ({ page }) => {
-  await page.goto("/");
+test("opens the workspace-scoped product shell", async ({ page }) => {
+  await page.goto("/studio");
 
-  await expect(page.getByRole("heading", { name: "AI Cognitive Studio" })).toBeVisible();
-  await expect(page.getByText("Phase 0 Foundation")).toBeVisible();
-  await expect(page.getByText("System status: Ready")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "让一本书，成为可聆听、可观看的理解" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "知识库" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "上传一本书" })).toBeVisible();
 });
 
 test("serves the health contract over HTTP", async ({ request }) => {
