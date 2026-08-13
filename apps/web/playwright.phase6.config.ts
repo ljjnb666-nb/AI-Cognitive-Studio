@@ -1,0 +1,39 @@
+import { defineConfig, devices } from "@playwright/test";
+
+const environment = {
+  NODE_ENV: "test",
+  PHASE6_BROWSER_ACCEPTANCE: "true",
+  DATABASE_URL: process.env.DATABASE_URL!,
+  DATABASE_URL_TEST: process.env.DATABASE_URL_TEST!,
+  REDIS_URL: process.env.REDIS_URL!,
+  S3_ENDPOINT: process.env.S3_ENDPOINT!,
+  S3_PUBLIC_ENDPOINT: process.env.S3_PUBLIC_ENDPOINT!,
+  S3_REGION: process.env.S3_REGION!,
+  S3_BUCKET: process.env.S3_BUCKET!,
+  S3_ACCESS_KEY: process.env.S3_ACCESS_KEY!,
+  S3_SECRET_KEY: process.env.S3_SECRET_KEY!,
+  S3_FORCE_PATH_STYLE: process.env.S3_FORCE_PATH_STYLE!,
+  WEB_DEV_BOOTSTRAP_IDENTITY: "true",
+  WEB_DEV_BOOTSTRAP_EMAIL: process.env.WEB_DEV_BOOTSTRAP_EMAIL!,
+  BOOK_ANALYSIS_PROVIDER: process.env.BOOK_ANALYSIS_PROVIDER!,
+  BOOK_ANALYSIS_MODEL: process.env.BOOK_ANALYSIS_MODEL!,
+  PODCAST_GENERATION_PROVIDER: process.env.PODCAST_GENERATION_PROVIDER!,
+  PODCAST_GENERATION_MODEL: process.env.PODCAST_GENERATION_MODEL!,
+  PODCAST_GENERATION_MODEL_VERSION: process.env.PODCAST_GENERATION_MODEL_VERSION!,
+  AUDIO_GENERATION_PROVIDER: process.env.AUDIO_GENERATION_PROVIDER!,
+  AUDIO_GENERATION_MODEL: process.env.AUDIO_GENERATION_MODEL!,
+  AUDIO_GENERATION_MODEL_VERSION: process.env.AUDIO_GENERATION_MODEL_VERSION!,
+  SHORT_VIDEO_GENERATION_PROVIDER: process.env.SHORT_VIDEO_GENERATION_PROVIDER!,
+  SHORT_VIDEO_GENERATION_MODEL: process.env.SHORT_VIDEO_GENERATION_MODEL!,
+  SHORT_VIDEO_GENERATION_MODEL_VERSION: process.env.SHORT_VIDEO_GENERATION_MODEL_VERSION!,
+};
+
+export default defineConfig({
+  testDir: "./tests/phase6",
+  timeout: 120_000,
+  expect: { timeout: 90_000 },
+  outputDir: "../../output/playwright/phase6",
+  use: { baseURL: "http://localhost:3000", trace: "retain-on-failure", screenshot: "only-on-failure" },
+  webServer: { command: "pnpm start", url: "http://localhost:3000/api/health", reuseExistingServer: false, env: environment },
+  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+});
