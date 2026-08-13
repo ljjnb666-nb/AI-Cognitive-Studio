@@ -56,7 +56,7 @@ export const shortVideoPlanSchema = z.object({
   supportingIdeas: z.array(text(500)).min(1).max(12),
   evidenceStrategy: text(900),
   ending: text(400),
-  targetDurationSeconds: z.number().int().min(15).max(80),
+  targetDurationSeconds: z.number().int().min(15).max(180),
   tone: text(200),
 });
 export const shortVideoSceneSchema = z.object({
@@ -180,7 +180,7 @@ export async function configureShortVideoStyle(
   if (!previous) throw new Error("SHORT_VIDEO_PROJECT_NOT_FOUND");
   const duration =
     input.targetDurationSeconds ?? previous.targetDurationSeconds;
-  if (!Number.isInteger(duration) || duration < 15 || duration > 80)
+  if (!Number.isInteger(duration) || duration < 15 || duration > 180)
     throw new Error("SHORT_VIDEO_DURATION_INVALID");
   return prisma.shortVideoStyleProfile.create({
     data: {
@@ -444,7 +444,7 @@ async function synthesizeNarration(
   dependencies: {
     tts: ShortVideoTtsProvider;
     storage: StorageProvider;
-    faultInjector?: (point: "afterPlanPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist") => void | Promise<void>;
+    faultInjector?: (point: "afterPlanPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist" | "beforeQualityValidation") => void | Promise<void>;
   },
 ) {
   for (const narration of run.narration) {
@@ -557,7 +557,7 @@ async function validateGrounding(run: any) {
   let quoted = 0;
   for (const scene of run.scenes) {
     const items = byScene.get(scene.id) ?? [];
-    if (["EVIDENCE", "CLAIM"].includes(scene.sceneType) && !items.length) failures.push("GROUNDING_EVIDENCE_REQUIRED");
+    if (["EVIDENCE", "CLAIM", "QUOTE"].includes(scene.sceneType) && !items.length) failures.push("GROUNDING_EVIDENCE_REQUIRED");
     for (const item of items) {
       if (!sources.has(`${item.workspaceId}:${item.sourceDocumentId}:${item.extractionId}:${item.chunkSetId}:${item.analysisRunId}`)) failures.push("GROUNDING_FOREIGN_LINEAGE");
       const block = item.sourceBlock.text;
@@ -606,7 +606,7 @@ export async function processShortVideoGenerationRun(
     /** Test-only observability seam for proving bounded lease renewal. */
     onLeaseRenewed?: () => void;
     /** Test-only deterministic crash seam; production callers leave this unset. */
-    faultInjector?: (point: "afterPlanPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist") => void | Promise<void>;
+    faultInjector?: (point: "afterPlanPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist" | "beforeQualityValidation") => void | Promise<void>;
   },
 ) {
   let run = await load(runId);
@@ -817,6 +817,7 @@ export async function processShortVideoGenerationRun(
         }
         await stage(run.id, token, "VIDEO_RENDERING", "QUALITY_VALIDATION");
       } else if (run.stage === "QUALITY_VALIDATION") {
+        await dependencies.faultInjector?.("beforeQualityValidation");
         const artifact =
           await prisma.shortVideoRenderArtifact.findUniqueOrThrow({
             where: { shortVideoGenerationRunId: run.id },
@@ -840,7 +841,7 @@ export async function processShortVideoGenerationRun(
           captions.some((cue: any) => cue.endMs <= cue.startMs || cue.startMs < 0 || cue.endMs > probe.durationMs + 750) ? "CAPTION_TIMING_INVALID" : "",
           Math.abs(probe.durationMs - artifact.durationMs) > 1_000 ? "RENDER_DURATION_MISMATCH" : "",
         ].filter(Boolean);
-        const groundingFailures = await validateGrounding(run);
+        const groundingFailures = await validateGrounding(await load(run.id));
         hardFailures.push(...groundingFailures);
         const warnings = evaluateWarnings(run.scenes, captions);
         await owned(run.id, token, async (tx) => {
