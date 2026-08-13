@@ -444,7 +444,7 @@ async function synthesizeNarration(
   dependencies: {
     tts: ShortVideoTtsProvider;
     storage: StorageProvider;
-    faultInjector?: (point: "afterPlanPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist" | "beforeQualityValidation") => void | Promise<void>;
+    faultInjector?: (point: "afterPlanPersist" | "afterScenesPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist" | "beforeQualityValidation") => void | Promise<void>;
   },
 ) {
   for (const narration of run.narration) {
@@ -606,7 +606,7 @@ export async function processShortVideoGenerationRun(
     /** Test-only observability seam for proving bounded lease renewal. */
     onLeaseRenewed?: () => void;
     /** Test-only deterministic crash seam; production callers leave this unset. */
-    faultInjector?: (point: "afterPlanPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist" | "beforeQualityValidation") => void | Promise<void>;
+    faultInjector?: (point: "afterPlanPersist" | "afterScenesPersist" | "afterNarrationObjectUpload" | "afterNarrationArtifactPersist" | "beforeQualityValidation") => void | Promise<void>;
   },
 ) {
   let run = await load(runId);
@@ -729,6 +729,7 @@ export async function processShortVideoGenerationRun(
               offset += scene.targetDurationMs;
             }
           });
+          await dependencies.faultInjector?.("afterScenesPersist");
         }
         await stage(run.id, token, "SCENE_PLANNING", "NARRATION_SYNTHESIS");
       } else if (run.stage === "NARRATION_SYNTHESIS") {
