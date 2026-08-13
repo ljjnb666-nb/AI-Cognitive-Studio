@@ -1,0 +1,29 @@
+{
+  "name": "@ai-cognitive/short-video-generation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit",
+    "test:unit": "vitest run tests/renderer.test.ts tests/duration.test.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@ai-cognitive/book-intelligence": "workspace:*",
+    "@ai-cognitive/db": "workspace:*",
+    "@ai-cognitive/ingestion": "workspace:*",
+    "@ai-cognitive/storage": "workspace:*",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^4.0.8"
+  }
+}

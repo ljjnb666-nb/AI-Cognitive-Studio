@@ -224,6 +224,43 @@ enum AudioArtifactStatus {
   FAILED
 }
 
+enum ShortVideoGenerationStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum ShortVideoGenerationStage {
+  QUEUED
+  CONTEXT_RETRIEVAL
+  VIDEO_PLANNING
+  NARRATIVE_GENERATION
+  SCENE_PLANNING
+  NARRATION_SYNTHESIS
+  VISUAL_PREPARATION
+  CAPTION_GENERATION
+  VIDEO_RENDERING
+  QUALITY_VALIDATION
+  FINALIZING
+  COMPLETED
+}
+
+enum ShortVideoSceneType {
+  HOOK
+  QUESTION
+  CLAIM
+  CONTRAST
+  EVIDENCE
+  QUOTE
+  CONCEPT
+  LIST
+  DIAGRAM
+  REFRAME
+  CALLBACK
+  ENDING
+}
+
 model User {
   id          String            @id @default(cuid())
   email       String            @unique
@@ -256,6 +293,9 @@ model Workspace {
   podcastVoiceProfiles  PodcastVoiceProfile[]
   audioGenerationRuns   AudioGenerationRun[]
   podcastAudioRevisions PodcastAudioRevision[]
+  shortVideoProjects ShortVideoProject[]
+  shortVideoGenerationRuns ShortVideoGenerationRun[]
+  shortVideoRevisions ShortVideoRevision[]
 }
 
 model WorkspaceMember {
@@ -377,6 +417,8 @@ model SourceDocument {
   currentIntelligence      CurrentBookIntelligence?   @relation("CurrentIntelligenceSourceDocument")
   podcastProjects          PodcastProjectSource[]
   podcastGenerationSources PodcastGenerationSource[]
+  shortVideoProjectSources ShortVideoProjectSource[]
+  shortVideoGenerationSources ShortVideoGenerationSource[]
 
   @@unique([id, workspaceId])
   @@unique([sourceId, version])
@@ -511,6 +553,7 @@ model SourceBlock {
   chunkSpans      ChunkSourceSpan[]
   memoryEvidence  BookMemoryEvidence[]
   podcastEvidence PodcastUtteranceEvidence[]
+  shortVideoEvidence ShortVideoNarrationEvidence[]
 
   @@unique([extractionId, ordinal])
   @@unique([id, extractionId])
@@ -1559,6 +1602,347 @@ model AudioEvaluationResult {
   evaluationRun           AudioEvaluationRun @relation(fields: [evaluationRunId], references: [id], onDelete: Cascade)
 }
 
+model ShortVideoProject {
+  id String @id @default(cuid())
+  workspaceId String
+  name String
+  description String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sources ShortVideoProjectSource[]
+  styleProfiles ShortVideoStyleProfile[]
+  runs ShortVideoGenerationRun[]
+  revisions ShortVideoRevision[]
+  currentVideo CurrentShortVideo?
+  @@unique([id, workspaceId])
+}
+
+model ShortVideoProjectSource {
+  shortVideoProjectId String
+  sourceDocumentId String
+  workspaceId String
+  createdAt DateTime @default(now())
+  project ShortVideoProject @relation(fields: [shortVideoProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  sourceDocument SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  @@id([shortVideoProjectId, sourceDocumentId])
+}
+
+model ShortVideoStyleProfile {
+  id String @id @default(cuid())
+  workspaceId String
+  shortVideoProjectId String
+  version Int
+  language String @default("zh-CN")
+  tone String @default("clear, curious, grounded")
+  pace Float @default(1)
+  hookStyle String @default("counterintuitive")
+  informationDensity Int @default(5)
+  sentenceStyle String @default("asymmetric")
+  captionDensity Int @default(5)
+  visualDensity Int @default(5)
+  keywordEmphasis Int @default(5)
+  transitionIntensity Int @default(4)
+  textAnimationIntensity Int @default(4)
+  endingStyle String @default("memorable reframe")
+  targetDurationSeconds Int @default(60)
+  safeArea Json @default("{\"top\":180,\"bottom\":260,\"left\":72,\"right\":72}")
+  createdAt DateTime @default(now())
+  project ShortVideoProject @relation(fields: [shortVideoProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  runs ShortVideoGenerationRun[]
+  @@unique([shortVideoProjectId, version])
+  @@unique([id, workspaceId, shortVideoProjectId])
+}
+
+model ShortVideoGenerationRun {
+  id String @id @default(cuid())
+  workspaceId String
+  shortVideoProjectId String
+  styleProfileId String
+  jobId String @unique
+  provider String
+  model String
+  modelVersion String?
+  modelVersionKey String @default("")
+  promptVersion String
+  pipelineVersion String
+  retrievalVersion String
+  scenePlannerVersion String
+  captionVersion String
+  audioVersion String
+  renderVersion String
+  generationIdentityHash String
+  idempotencyKey String @unique
+  correlationId String?
+  status ShortVideoGenerationStatus @default(QUEUED)
+  stage ShortVideoGenerationStage @default(QUEUED)
+  executionClaimToken String?
+  executionClaimedAt DateTime?
+  executionLeaseUntil DateTime?
+  errorCode String?
+  createdAt DateTime @default(now())
+  startedAt DateTime?
+  completedAt DateTime?
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project ShortVideoProject @relation(fields: [shortVideoProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  styleProfile ShortVideoStyleProfile @relation(fields: [styleProfileId, workspaceId, shortVideoProjectId], references: [id, workspaceId, shortVideoProjectId], onDelete: Restrict)
+  job Job @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  sources ShortVideoGenerationSource[]
+  plan ShortVideoPlan?
+  scenes ShortVideoScene[]
+  narration ShortVideoNarration[]
+  captions ShortVideoCaptionCue[]
+  visualAssets ShortVideoVisualAsset[]
+  audioArtifacts ShortVideoAudioArtifact[]
+  renderArtifact ShortVideoRenderArtifact?
+  revision ShortVideoRevision?
+  evaluations ShortVideoEvaluationRun[]
+  @@unique([shortVideoProjectId, generationIdentityHash])
+  @@unique([id, workspaceId])
+  @@unique([id, workspaceId, shortVideoProjectId])
+  @@index([workspaceId, status, executionLeaseUntil])
+}
+
+model ShortVideoGenerationSource {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String
+  workspaceId String
+  shortVideoProjectId String
+  sourceDocumentId String
+  extractionId String
+  chunkSetId String
+  analysisRunId String
+  createdAt DateTime @default(now())
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId, workspaceId, shortVideoProjectId], references: [id, workspaceId, shortVideoProjectId], onDelete: Cascade)
+  sourceDocument SourceDocument @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  evidence ShortVideoNarrationEvidence[]
+  @@unique([shortVideoGenerationRunId, sourceDocumentId])
+  @@unique([shortVideoGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId])
+}
+
+model ShortVideoPlan {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String
+  workspaceId String
+  centralQuestion String
+  viewerAssumption String
+  coreInsight String
+  cognitiveShift String
+  hook String
+  supportingIdeas Json
+  evidenceStrategy String
+  ending String
+  targetDurationSeconds Int
+  tone String
+  createdAt DateTime @default(now())
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  @@unique([shortVideoGenerationRunId, workspaceId])
+  @@unique([id, workspaceId])
+}
+
+model ShortVideoScene {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String
+  workspaceId String
+  shortVideoProjectId String
+  ordinal Int
+  sceneType ShortVideoSceneType
+  targetStartMs Int
+  targetEndMs Int
+  targetDurationMs Int
+  narrationText String
+  visualIntent String
+  primaryText String
+  secondaryText String?
+  keywords Json
+  layoutTemplate String
+  motionPreset String
+  transitionIntent String
+  createdAt DateTime @default(now())
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId, workspaceId, shortVideoProjectId], references: [id, workspaceId, shortVideoProjectId], onDelete: Cascade)
+  narration ShortVideoNarration?
+  evidence ShortVideoNarrationEvidence[]
+  captions ShortVideoCaptionCue[]
+  visualAssets ShortVideoVisualAsset[]
+  audioArtifacts ShortVideoAudioArtifact[]
+  @@unique([shortVideoGenerationRunId, ordinal])
+  @@unique([id, shortVideoGenerationRunId])
+  @@unique([id, shortVideoGenerationRunId, workspaceId, shortVideoProjectId])
+  @@unique([id, shortVideoGenerationRunId, workspaceId])
+}
+
+model ShortVideoNarration {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String
+  sceneId String @unique
+  ordinal Int
+  text String
+  textHash String
+  language String
+  estimatedDurationMs Int
+  createdAt DateTime @default(now())
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId], references: [id], onDelete: Cascade)
+  scene ShortVideoScene @relation(fields: [sceneId, shortVideoGenerationRunId], references: [id, shortVideoGenerationRunId], onDelete: Cascade)
+  evidence ShortVideoNarrationEvidence[]
+  @@unique([shortVideoGenerationRunId, ordinal])
+  @@unique([sceneId, shortVideoGenerationRunId])
+  @@unique([id, shortVideoGenerationRunId])
+}
+
+model ShortVideoNarrationEvidence {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String
+  sceneId String
+  narrationId String
+  workspaceId String
+  sourceDocumentId String
+  extractionId String
+  chunkSetId String
+  analysisRunId String
+  memoryItemId String?
+  sourceBlockId String
+  startOffset Int
+  endOffset Int
+  quoteText String?
+  quoteHash String?
+  createdAt DateTime @default(now())
+  scene ShortVideoScene @relation(fields: [sceneId, shortVideoGenerationRunId, workspaceId], references: [id, shortVideoGenerationRunId, workspaceId], onDelete: Cascade)
+  narration ShortVideoNarration @relation(fields: [narrationId, shortVideoGenerationRunId], references: [id, shortVideoGenerationRunId], onDelete: Cascade)
+  sourceBlock SourceBlock @relation(fields: [sourceBlockId, extractionId], references: [id, extractionId], onDelete: Restrict)
+  generationSource ShortVideoGenerationSource @relation(fields: [shortVideoGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], references: [shortVideoGenerationRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId], onDelete: Restrict)
+  @@index([shortVideoGenerationRunId, sceneId])
+  @@index([workspaceId, sourceDocumentId, extractionId, chunkSetId, analysisRunId])
+}
+
+model ShortVideoCaptionCue {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String
+  sceneId String
+  ordinal Int
+  startMs Int
+  endMs Int
+  text String
+  emphasis Json?
+  createdAt DateTime @default(now())
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId], references: [id], onDelete: Cascade)
+  scene ShortVideoScene @relation(fields: [sceneId, shortVideoGenerationRunId], references: [id, shortVideoGenerationRunId], onDelete: Cascade)
+  @@unique([shortVideoGenerationRunId, ordinal])
+}
+
+model ShortVideoVisualAsset {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String
+  sceneId String?
+  kind String
+  templateId String
+  storageKey String?
+  sha256 String?
+  metadata Json?
+  createdAt DateTime @default(now())
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId], references: [id], onDelete: Cascade)
+  scene ShortVideoScene? @relation(fields: [sceneId, shortVideoGenerationRunId], references: [id, shortVideoGenerationRunId], onDelete: Cascade)
+}
+
+model ShortVideoAudioArtifact {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String
+  sceneId String?
+  synthesisIdentityHash String
+  storageKey String
+  sha256 String
+  sizeBytes Int
+  mediaType String
+  durationMs Int
+  provider String
+  model String
+  voiceIdentity String
+  createdAt DateTime @default(now())
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId], references: [id], onDelete: Cascade)
+  scene ShortVideoScene? @relation(fields: [sceneId, shortVideoGenerationRunId], references: [id, shortVideoGenerationRunId], onDelete: Cascade)
+  @@unique([shortVideoGenerationRunId, synthesisIdentityHash])
+}
+
+model ShortVideoRenderArtifact {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String @unique
+  storageKey String
+  sha256 String
+  sizeBytes Int
+  mediaType String
+  container String
+  width Int
+  height Int
+  fps Int
+  durationMs Int
+  videoCodec String
+  audioCodec String
+  createdAt DateTime @default(now())
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId], references: [id], onDelete: Cascade)
+}
+
+model ShortVideoRevision {
+  id String @id @default(cuid())
+  workspaceId String
+  shortVideoProjectId String
+  generationRunId String @unique
+  revisionNumber Int
+  storageKey String
+  sha256 String
+  sizeBytes Int
+  mediaType String
+  container String
+  width Int
+  height Int
+  fps Int
+  durationMs Int
+  videoCodec String
+  audioCodec String
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project ShortVideoProject @relation(fields: [shortVideoProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  run ShortVideoGenerationRun @relation(fields: [generationRunId, workspaceId, shortVideoProjectId], references: [id, workspaceId, shortVideoProjectId], onDelete: Restrict)
+  currentMarker CurrentShortVideo? @relation("CurrentShortVideoRevision")
+  @@unique([shortVideoProjectId, revisionNumber])
+  @@unique([generationRunId, workspaceId, shortVideoProjectId])
+  @@unique([id, workspaceId, shortVideoProjectId])
+}
+
+model CurrentShortVideo {
+  id String @id @default(cuid())
+  workspaceId String
+  shortVideoProjectId String @unique
+  revisionId String @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  project ShortVideoProject @relation(fields: [shortVideoProjectId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  revision ShortVideoRevision @relation("CurrentShortVideoRevision", fields: [revisionId, workspaceId, shortVideoProjectId], references: [id, workspaceId, shortVideoProjectId], onDelete: Restrict)
+  @@unique([shortVideoProjectId, workspaceId])
+  @@unique([revisionId, workspaceId, shortVideoProjectId])
+}
+
+model ShortVideoEvaluationRun {
+  id String @id @default(cuid())
+  shortVideoGenerationRunId String
+  evaluatorVersion String
+  status ShortVideoGenerationStatus @default(QUEUED)
+  errorCode String?
+  createdAt DateTime @default(now())
+  completedAt DateTime?
+  run ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId], references: [id], onDelete: Cascade)
+  result ShortVideoEvaluationResult?
+  @@unique([shortVideoGenerationRunId, evaluatorVersion])
+}
+
+model ShortVideoEvaluationResult {
+  id String @id @default(cuid())
+  evaluationRunId String @unique
+  metrics Json
+  hardFailures Json
+  warnings Json
+  createdAt DateTime @default(now())
+  evaluationRun ShortVideoEvaluationRun @relation(fields: [evaluationRunId], references: [id], onDelete: Cascade)
+}
+
 model OutboxEvent {
   id           String       @id @default(cuid())
   topic        String
@@ -1602,6 +1986,7 @@ model Job {
   bookAnalysisRun      BookAnalysisRun?
   podcastGenerationRun PodcastGenerationRun?
   audioGenerationRun   AudioGenerationRun?
+  shortVideoGenerationRun ShortVideoGenerationRun?
 
   @@index([userId])
   @@index([status])
