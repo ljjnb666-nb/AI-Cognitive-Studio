@@ -23,9 +23,20 @@ export async function resolveWebIdentity(): Promise<WebIdentityContext> {
     throw new Error("WEB_IDENTITY_REQUIRED");
   }
 
-  const member = await prisma.workspaceMember.findFirst({ orderBy: { createdAt: "asc" } });
-  if (!member) throw new Error("WEB_BOOTSTRAP_IDENTITY_UNAVAILABLE");
-  return { userId: member.userId, workspaceId: member.workspaceId };
+  const email = process.env.WEB_DEV_BOOTSTRAP_EMAIL ?? "local-product@ai-cognitive-studio.test";
+  const user = await prisma.user.upsert({
+    where: { email },
+    create: { email },
+    update: {},
+  });
+  const existing = await prisma.workspaceMember.findFirst({
+    where: { userId: user.id },
+    orderBy: { createdAt: "asc" },
+  });
+  if (existing) return { userId: existing.userId, workspaceId: existing.workspaceId };
+  const workspace = await prisma.workspace.create({ data: { name: "本地产品工作区" } });
+  await prisma.workspaceMember.create({ data: { workspaceId: workspace.id, userId: user.id, role: "OWNER" } });
+  return { userId: user.id, workspaceId: workspace.id };
 }
 
 export async function assertMembership(context: WebIdentityContext): Promise<WebIdentityContext> {
@@ -36,4 +47,3 @@ export async function assertMembership(context: WebIdentityContext): Promise<Web
   if (!member) throw new Error("WORKSPACE_ACCESS_DENIED");
   return context;
 }
-
