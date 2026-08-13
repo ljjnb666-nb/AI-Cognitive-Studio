@@ -19,7 +19,13 @@ export async function resolveWebIdentity(): Promise<WebIdentityContext> {
   const workspaceId = jar.get(WORKSPACE_COOKIE)?.value;
   if (userId && workspaceId) return assertMembership({ userId, workspaceId });
 
-  if (process.env.NODE_ENV === "production" || process.env.WEB_DEV_BOOTSTRAP_IDENTITY !== "true") {
+  // `next start` runs with NODE_ENV=production even in the isolated browser
+  // acceptance harness. The marker is set only by that test command; ordinary
+  // production deployments still require an upstream verified identity.
+  const phase6Acceptance = process.env.PHASE6_BROWSER_ACCEPTANCE === "true"
+    && process.env.WEB_DEV_BOOTSTRAP_IDENTITY === "true"
+    && process.env.DATABASE_URL?.includes("ai_cognitive_studio_phase6_test");
+  if ((process.env.NODE_ENV === "production" && !phase6Acceptance) || (process.env.NODE_ENV !== "production" && process.env.WEB_DEV_BOOTSTRAP_IDENTITY !== "true")) {
     throw new Error("WEB_IDENTITY_REQUIRED");
   }
 

@@ -51,6 +51,7 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
     where: { id: sourceDocumentId, workspaceId: identity.workspaceId },
     include: {
       source: true, ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1 },
+      analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, status: true, analysisStage: true, errorCode: true } },
       currentExtraction: { include: { extraction: { include: { structureNodes: { orderBy: { ordinal: "asc" } }, blocks: { orderBy: { ordinal: "asc" }, take: 40 } } } } },
       currentIntelligence: { include: { analysisRun: { include: { memoryItems: { include: { evidence: { include: { sourceBlock: true } } }, orderBy: { ordinal: "asc" }, take: 80 }, artifacts: { where: { scope: "BOOK" }, take: 1 } } } } },
     },
