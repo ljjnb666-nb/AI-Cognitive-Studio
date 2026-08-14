@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import { PageHeader, Status } from "@/components/app-shell";
 import { SourceProcessing } from "@/components/source-processing";
 import { sourceDetail, statusLabel } from "@/lib/product";
@@ -7,7 +8,9 @@ const names: Record<string, string> = { SUMMARY: "核心观点", CONCEPT: "关�
 
 export default async function SourcePage({ params }: { params: Promise<{ sourceDocumentId: string }> }) {
   const { sourceDocumentId } = await params;
-  const item = await sourceDetail(sourceDocumentId);
+  let item: Awaited<ReturnType<typeof sourceDetail>>;
+  try { item = await sourceDetail(sourceDocumentId); }
+  catch (error) { if (error instanceof Error && error.message === "SOURCE_DOCUMENT_ACCESS_DENIED") notFound(); throw error; }
   const memories = item.currentIntelligence?.analysisRun.memoryItems ?? [];
   const error = item.ingestionRuns[0]?.errorCode;
   const analysis = item.analysisRuns[0];
