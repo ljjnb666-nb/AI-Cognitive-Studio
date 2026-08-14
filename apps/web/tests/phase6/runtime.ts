@@ -8,7 +8,9 @@ async function main() {
   if (!readyFile) throw new Error("PHASE6_RUNTIME_READY_FILE_REQUIRED");
   await mkdir(join(readyFile, ".."), { recursive: true });
   await writeFile(readyFile, "ready", "utf8");
-  const shutdown = async () => { await runtime.close("phase6-runtime"); process.exit(0); };
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (signal = "phase6-runtime") => shutdownPromise ??= runtime.close(signal).then(() => { if (process.send) process.send({ type: "PHASE6_RUNTIME_SHUTDOWN_COMPLETE" }); process.exit(0); });
+  process.on("message", (message: unknown) => { if (typeof message === "object" && message !== null && "type" in message && message.type === "PHASE6_RUNTIME_SHUTDOWN") void shutdown("phase6-parent"); });
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());
 }

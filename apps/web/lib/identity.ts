@@ -50,7 +50,10 @@ async function resolveFixedBootstrapIdentity(email: string): Promise<WebIdentity
     return prisma.user.findUniqueOrThrow({ where: { email } });
   });
   const workspace = await prisma.workspace.upsert({ where: { id: DEVELOPMENT_WORKSPACE_ID }, create: { id: DEVELOPMENT_WORKSPACE_ID, name: "Local product workspace" }, update: {} });
-  await prisma.workspaceMember.upsert({ where: { workspaceId_userId: { workspaceId: workspace.id, userId: user.id } }, create: { workspaceId: workspace.id, userId: user.id, role: "OWNER" }, update: {} });
+  await prisma.workspaceMember.upsert({ where: { workspaceId_userId: { workspaceId: workspace.id, userId: user.id } }, create: { workspaceId: workspace.id, userId: user.id, role: "OWNER" }, update: {} }).catch(async (error: unknown) => {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "P2002") throw error;
+    return prisma.workspaceMember.findUniqueOrThrow({ where: { workspaceId_userId: { workspaceId: workspace.id, userId: user.id } } });
+  });
   return { userId: user.id, workspaceId: workspace.id };
 }
 
