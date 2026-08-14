@@ -33,6 +33,7 @@
     "test:phase4:e2e": "pnpm --filter @ai-cognitive/worker test:phase4:e2e",
     "test:phase5:e2e": "pnpm --filter @ai-cognitive/worker test:phase5:e2e",
     "test:phase6:e2e": "node scripts/run-phase6-e2e.mjs",
+    "test:phase7:e2e": "node scripts/run-phase7-e2e.mjs",
     "build": "pnpm -r --if-present build",
     "db:generate": "pnpm --filter @ai-cognitive/db prisma:generate:root",
     "db:migrate": "pnpm --filter @ai-cognitive/db prisma:migrate:root",
