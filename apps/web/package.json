@@ -19,6 +19,8 @@
     "@ai-cognitive/shared": "workspace:*",
     "@ai-cognitive/short-video-generation": "workspace:*",
     "@ai-cognitive/storage": "workspace:*",
+    "@better-auth/prisma-adapter": "1.6.5",
+    "better-auth": "1.6.5",
     "next": "^16.0.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -34,6 +36,7 @@
     "eslint": "^9.39.1",
     "eslint-config-next": "^16.0.1",
     "tailwindcss": "^4.1.16",
+    "tsx": "4.23.11",
     "typescript": "^5.9.3",
     "vitest": "^4.0.8"
   }
