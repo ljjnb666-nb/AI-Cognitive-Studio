@@ -164,6 +164,9 @@ importers:
       '@types/node':
         specifier: ^24.10.1
         version: 24.13.3
+      dotenv:
+        specifier: ^16.6.1
+        version: 16.6.1
       eslint:
         specifier: ^9.39.1
         version: 9.39.5(jiti@2.7.0)
@@ -309,6 +312,9 @@ importers:
       '@types/node':
         specifier: ^24.10.1
         version: 24.13.3
+      dotenv:
+        specifier: ^16.6.1
+        version: 16.6.1
       eslint:
         specifier: ^9.39.1
         version: 9.39.5(jiti@2.7.0)
