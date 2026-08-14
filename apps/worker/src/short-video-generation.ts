@@ -49,12 +49,13 @@ export function createShortVideoGenerationQueue(environment: Environment) {
     { connection: createRedisConnection(environment.REDIS_URL) },
   );
 }
+export function dispatchShortVideoGenerationWithQueue(queue: Queue<{ shortVideoGenerationRunId: string }>): Promise<number> { return dispatchPendingShortVideoGeneration(queue); }
 export async function dispatchShortVideoGeneration(
   environment: Environment,
 ): Promise<number> {
   const queue = createShortVideoGenerationQueue(environment);
   try {
-    return await dispatchPendingShortVideoGeneration(queue);
+    return await dispatchShortVideoGenerationWithQueue(queue);
   } finally {
     await queue.close();
   }
