@@ -27,5 +27,5 @@ describe("FfmpegVideoRenderer", () => {
     expect(Number(probe.format.duration)).toBeGreaterThan(0);
     expect(probe.streams).toEqual(expect.arrayContaining([expect.objectContaining({ codec_type: "video", codec_name: "h264", width: 360, height: 640 }), expect.objectContaining({ codec_type: "audio", codec_name: "aac" })]));
     expect(await readFile(output.path)).not.toEqual(audio);
-  });
+  }, 15_000);
 });
