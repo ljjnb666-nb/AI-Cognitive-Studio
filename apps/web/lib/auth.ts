@@ -4,6 +4,7 @@ import { prisma } from "@ai-cognitive/db";
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { nextCookies } from "better-auth/next-js";
+import { requiredAuthBaseUrl } from "./auth-config";
 
 function requiredSecret(): string {
   const secret = process.env.BETTER_AUTH_SECRET;
@@ -20,7 +21,7 @@ function trustedOrigins(): string[] {
 
 export const auth = betterAuth({
   appName: "AI Cognitive Studio",
-  baseURL: process.env.BETTER_AUTH_URL,
+  baseURL: requiredAuthBaseUrl(),
   secret: requiredSecret(),
   database: prismaAdapter(prisma, { provider: "postgresql" }),
   trustedOrigins: trustedOrigins(),

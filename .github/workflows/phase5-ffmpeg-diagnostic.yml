@@ -6,6 +6,7 @@ on:
       - ".github/workflows/phase5-ffmpeg-diagnostic.yml"
       - "packages/short-video-generation/tests/ffmpeg-crash-diagnostic.test.ts"
       - "packages/short-video-generation/tests/ffmpeg-repair-stress.test.ts"
+      - "packages/short-video-generation/tests/ffmpeg-production-envelope.test.ts"
       - "packages/short-video-generation/tests/ffmpeg-diagnostic.ts"
       - "packages/short-video-generation/src/index.ts"
       - "packages/short-video-generation/src/process-diagnostics.ts"
@@ -52,6 +53,11 @@ jobs:
           PHASE5_FFMPEG_CORE_DIRECTORY: ${{ runner.temp }}/phase5-drawtext-lifecycle
           PHASE5_SCENE_LOCAL_ATTEMPTS: "100"
           PHASE5_REPAIRED_FULL_ATTEMPTS: "50"
+      - name: Measure production-resolution renderer envelope
+        run: pnpm --filter @ai-cognitive/short-video-generation exec vitest run tests/ffmpeg-production-envelope.test.ts --reporter verbose
+        env:
+          NODE_ENV: test
+          PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-drawtext-lifecycle
       - name: Analyze an unexpected repaired-render core
         if: always()
         run: |
