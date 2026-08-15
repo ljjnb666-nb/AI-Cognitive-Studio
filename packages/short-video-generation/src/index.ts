@@ -1027,7 +1027,17 @@ export interface VideoRenderer {
     cleanup(): Promise<void>;
   }>;
 }
+export type FfmpegInvocationDiagnostic = {
+  /** Test-only capture point after renderer-owned inputs are written. */
+  onInvocation?: (value: {
+    directory: string;
+    args: readonly string[];
+    outputPath: string;
+    input: { durationMs: number; width: number; height: number; fps: number; sceneCount: number; captionCount: number };
+  }) => void | Promise<void>;
+};
 export class FfmpegVideoRenderer implements VideoRenderer {
+  constructor(private readonly diagnostic: FfmpegInvocationDiagnostic = {}) {}
   async render(input: {
     durationMs: number;
     width: number;
@@ -1072,22 +1082,15 @@ export class FfmpegVideoRenderer implements VideoRenderer {
       const videoInputs = ordered.map((_, index) => `[${index}:v]`).join("");
       const audioInputs = ordered.map((_, index) => `[${index + ordered.length}:a]`).join("");
       const escapedCaptions = captions.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+      const ffmpegArgs = [...args,
+        "-filter_complex", `${videoInputs}concat=n=${ordered.length}:v=1:a=0[v];${audioInputs}concat=n=${ordered.length}:v=0:a=1[a];[v]subtitles='${escapedCaptions}'[captioned]`,
+        "-map", "[captioned]", "-map", "[a]", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", output,
+      ];
       try {
+        await this.diagnostic.onInvocation?.({ directory, args: ffmpegArgs, outputPath: output, input: { durationMs: input.durationMs, width: input.width, height: input.height, fps: input.fps, sceneCount: ordered.length, captionCount: input.captions.length } });
         await execute(
           "ffmpeg",
-          [...args,
-            "-filter_complex", `${videoInputs}concat=n=${ordered.length}:v=1:a=0[v];${audioInputs}concat=n=${ordered.length}:v=0:a=1[a];[v]subtitles='${escapedCaptions}'[captioned]`,
-            "-map", "[captioned]", "-map", "[a]", "-shortest",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            output,
-          ],
+          ffmpegArgs,
           { timeout: 120_000, maxBuffer: 1_000_000, windowsHide: true },
         );
       } catch (error) {

@@ -5,6 +5,7 @@ import {
   videoRenderFailureDetails,
   type ShortVideoProvider,
   type ShortVideoTtsProvider,
+  type VideoRenderer,
 } from "@ai-cognitive/short-video-generation";
 import type { EmbeddingProvider } from "@ai-cognitive/book-intelligence";
 import { logger } from "@ai-cognitive/shared";
@@ -19,6 +20,7 @@ export type ShortVideoRuntimeAdapter = {
   provider: ShortVideoProvider;
   embeddingProvider: EmbeddingProvider;
   tts: ShortVideoTtsProvider;
+  renderer?: VideoRenderer;
   renderConfiguration?: { width: number; height: number; fps: number };
 };
 export function createShortVideoGenerationWorker(
