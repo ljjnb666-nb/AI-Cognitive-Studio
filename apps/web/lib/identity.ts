@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { prisma } from "@ai-cognitive/db";
 import { browserIdentityMode } from "./identity-policy";
 import { auth } from "./auth";
+import { ensurePersonalWorkspace } from "./onboarding";
 
 export type WebIdentityContext = { userId: string; workspaceId: string };
 
@@ -21,27 +22,12 @@ export async function resolveWebIdentity(): Promise<WebIdentityContext> {
     : (process.env.WEB_DEV_BOOTSTRAP_EMAIL ?? "local-product@ai-cognitive-studio.test"));
 }
 
-type UserWithMemberships = { id: string; name: string | null; defaultWorkspaceId: string | null; memberships: { workspaceId: string }[] };
-
 async function resolveAuthenticatedIdentity(userId: string, requestedWorkspaceId?: string): Promise<WebIdentityContext> {
   const user = await ensurePersonalWorkspace(userId);
   const validRequested = requestedWorkspaceId && user.memberships.some((membership) => membership.workspaceId === requestedWorkspaceId) ? requestedWorkspaceId : undefined;
   const workspaceId = validRequested ?? (user.defaultWorkspaceId && user.memberships.some((membership) => membership.workspaceId === user.defaultWorkspaceId) ? user.defaultWorkspaceId : user.memberships[0].workspaceId);
   if (workspaceId !== user.defaultWorkspaceId) await prisma.user.update({ where: { id: user.id }, data: { defaultWorkspaceId: workspaceId } });
   return { userId: user.id, workspaceId };
-}
-
-/** A locked User row makes interrupted/retried onboarding idempotent. */
-async function ensurePersonalWorkspace(userId: string): Promise<UserWithMemberships> {
-  return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
-    const user = await tx.user.findUnique({ where: { id: userId }, select: { id: true, name: true, defaultWorkspaceId: true, memberships: { select: { workspaceId: true }, orderBy: { createdAt: "asc" } } } });
-    if (!user) throw new Error("WEB_IDENTITY_REQUIRED");
-    if (user.memberships.length) return user;
-    const workspace = await tx.workspace.create({ data: { name: `${user.name?.trim() || "My"} workspace`, members: { create: { userId: user.id, role: "OWNER" } } } });
-    await tx.user.update({ where: { id: user.id }, data: { defaultWorkspaceId: workspace.id } });
-    return { ...user, defaultWorkspaceId: workspace.id, memberships: [{ workspaceId: workspace.id }] };
-  });
 }
 
 async function resolveFixedBootstrapIdentity(email: string): Promise<WebIdentityContext> {
