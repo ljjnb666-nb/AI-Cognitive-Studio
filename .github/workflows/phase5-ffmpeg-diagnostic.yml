@@ -43,6 +43,10 @@ jobs:
             cat /proc/sys/kernel/core_uses_pid || true
             sudo sysctl -w kernel.core_pattern="$RUNNER_TEMP/phase5-ffmpeg-diagnostic/core.%e.%p" || true
             ulimit -c unlimited
+            (bash -c 'kill -SEGV $$') || true
+            probe_core="$(find "$RUNNER_TEMP/phase5-ffmpeg-diagnostic" -maxdepth 1 -type f -name 'core.*' -print -quit)"
+            test -n "$probe_core"
+            mv "$probe_core" "$RUNNER_TEMP/phase5-ffmpeg-diagnostic/core-probe.dump"
             echo "ulimit_after=$(ulimit -c)"
             echo "core_pattern_after=$(cat /proc/sys/kernel/core_pattern)"
           } > "$RUNNER_TEMP/phase5-ffmpeg-diagnostic/core-configuration.txt" 2>&1
