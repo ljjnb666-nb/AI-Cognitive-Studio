@@ -19,14 +19,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with: { ref: ${{ inputs.ref }} }
+        with:
+          ref: ${{ inputs.ref }}
       - uses: pnpm/action-setup@v4
-        with: { version: 10.30.3 }
+        with:
+          version: 10.30.3
       - uses: actions/setup-node@v4
-        with: { node-version: 24, cache: pnpm }
+        with:
+          node-version: 24
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm db:generate
-        env: { DATABASE_URL: postgresql://diagnostic:diagnostic@127.0.0.1:5432/diagnostic?schema=public }
+        env:
+          DATABASE_URL: "postgresql://diagnostic:diagnostic@127.0.0.1:5432/diagnostic?schema=public"
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg gdb libc6-dbg
       - name: Configure and prove core capture
         run: |

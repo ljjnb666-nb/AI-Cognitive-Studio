@@ -18,25 +18,26 @@ type Attempt = { variant: string; attempt: number; pid: number | null; exitCode:
 
 function remap(captured: CapturedFfmpegInvocation) { const from = captured.directory.replace(/\\/g, "/"), to = captured.fixtureDirectory.replace(/\\/g, "/"); return captured.args.map((arg) => arg.replaceAll(captured.directory, captured.fixtureDirectory).replaceAll(from.replace(/:/g, "\\:"), to.replace(/:/g, "\\:")).replaceAll(from, to)); }
 function drawtextOnly(captured: CapturedFfmpegInvocation, output: string) { const args = remap(captured), at = args.indexOf("-filter_complex"); args[at + 1] = args[at + 1]!.replace(/;\[v\]subtitles='[^']+'\[captioned\]/, ";[v]null[captioned]"); args[args.length - 1] = output; return args; }
-function classify(code: number | null, signal: string | null, timedOut: boolean): Classification { if (signal === "SIGSEGV" || code === 139) return "SIGSEGV"; if (timedOut) return "TIMEOUT"; if (signal) return "OTHER_SIGNAL"; if (code === 0) return "SUCCESS"; if (typeof code === "number") return "FFMPEG_ERROR"; return "UNKNOWN"; }
+function classify(code: number | null, signal: string | null, timedOut: boolean, spawnError: boolean): Classification { if (spawnError) return "SPAWN_ERROR"; if (signal === "SIGSEGV" || code === 139) return "SIGSEGV"; if (timedOut) return "TIMEOUT"; if (signal) return "OTHER_SIGNAL"; if (code === 0) return "SUCCESS"; if (typeof code === "number") return "FFMPEG_ERROR"; return "UNKNOWN"; }
 async function invoke(command: string, args: string[], timeoutMs = 120_000) {
-  return await new Promise<{ pid: number | null; code: number | null; signal: string | null; stderr: string; timedOut: boolean }>((resolve) => {
-    let stderr = "", timedOut = false; const child = spawn(command, args, { cwd: root, windowsHide: true });
+  return await new Promise<{ pid: number | null; code: number | null; signal: string | null; stderr: string; stdout: string; timedOut: boolean; spawnError: boolean }>((resolve) => {
+    let stderr = "", stdout = "", timedOut = false, spawnError = false; const child = spawn(command, args, { cwd: root, windowsHide: true });
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
     child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-    child.once("error", (error) => { clearTimeout(timer); resolve({ pid: child.pid ?? null, code: null, signal: null, stderr: `${stderr}\n${error.message}`, timedOut }); });
-    child.once("close", (code, signal) => { clearTimeout(timer); resolve({ pid: child.pid ?? null, code, signal, stderr, timedOut }); });
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.once("error", (error) => { spawnError = true; clearTimeout(timer); resolve({ pid: child.pid ?? null, code: null, signal: null, stderr: `${stderr}\n${error.message}`, stdout, timedOut, spawnError }); });
+    child.once("close", (code, signal) => { clearTimeout(timer); resolve({ pid: child.pid ?? null, code, signal, stderr, stdout, timedOut, spawnError }); });
   });
 }
 async function execute(captured: CapturedFfmpegInvocation, variant: string, attempt: number, args: string[], filterComplex?: string): Promise<Attempt> {
   const commandFile = join(root!, `command-${variant}-${attempt}.json`), started = performance.now(); await writeFile(commandFile, `${JSON.stringify({ argv: args, filterComplex }, null, 2)}\n`);
-  const result = await invoke("ffmpeg", ["-loglevel", "error", ...args]), output = args.at(-1)!, classification = classify(result.code, result.signal, result.timedOut);
-  let final = classification, stderrTail = tail(result.stderr); if (classification === "SUCCESS") { const probe = await invoke("ffprobe", ["-v", "error", "-show_entries", "format=format_name", "-of", "json", output], 30_000); if (probe.code === 0) await rm(output, { force: true }); else { final = "UNKNOWN"; stderrTail = `ffprobe failed: ${tail(probe.stderr)}`; } }
+  const result = await invoke("ffmpeg", ["-loglevel", "error", ...args]), output = args.at(-1)!, classification = classify(result.code, result.signal, result.timedOut, result.spawnError);
+  let final = classification, stderrTail = tail(result.stderr); if (classification === "SUCCESS") { const probe = await invoke("ffprobe", ["-v", "error", "-show_entries", "format=format_name", "-of", "json", output], 30_000); if (probe.code === 0 && JSON.parse(probe.stdout).format?.format_name?.split(",").includes("mp4")) await rm(output, { force: true }); else { final = "UNKNOWN"; stderrTail = `ffprobe failed or non-MP4: ${tail(probe.stderr || probe.stdout)}`; } }
   const core = result.pid !== null && existsSync(join(process.env.PHASE5_FFMPEG_CORE_DIRECTORY ?? root!, `core.ffmpeg.${result.pid}`));
   const metadata: Attempt = { variant, attempt, pid: result.pid ?? null, exitCode: result.code, signal: result.signal, classification: final, elapsedMs: Math.round(performance.now() - started), coreDump: core, stderrTail, stderrFingerprint: final === "SUCCESS" ? undefined : sha(stderrTail.replaceAll(captured.fixtureDirectory, "<fixture>").replace(/0x[0-9a-f]+/gi, "<address>")), commandFile: commandFile.split(/[\\/]/).at(-1)!, filterComplex };
   await appendFile(join(root!, "attempts.jsonl"), `${JSON.stringify(metadata)}\n`); return metadata;
 }
-function summarize(items: Attempt[]) { const by = (kind: Classification) => items.filter((x) => x.classification === kind).length; return { attempts: items.length, success: by("SUCCESS"), sigsegv: by("SIGSEGV"), ffmpegError: by("FFMPEG_ERROR"), timeout: by("TIMEOUT"), otherSignal: by("OTHER_SIGNAL"), unknown: by("UNKNOWN"), errors: [...new Map(items.filter((x) => x.classification !== "SUCCESS").map((x) => [x.stderrFingerprint!, x])).entries()].map(([fingerprint, item]) => ({ fingerprint, classification: item.classification, stderr: item.stderrTail })) }; }
+function summarize(items: Attempt[]) { const by = (kind: Classification) => items.filter((x) => x.classification === kind).length, grouped = new Map<string, { count: number; item: Attempt }>(); for (const item of items.filter((x) => x.classification !== "SUCCESS")) { const existing = grouped.get(item.stderrFingerprint!); grouped.set(item.stderrFingerprint!, { count: (existing?.count ?? 0) + 1, item: existing?.item ?? item }); } return { attempts: items.length, success: by("SUCCESS"), sigsegv: by("SIGSEGV"), ffmpegError: by("FFMPEG_ERROR"), timeout: by("TIMEOUT"), otherSignal: by("OTHER_SIGNAL"), spawnError: by("SPAWN_ERROR"), unknown: by("UNKNOWN"), errors: [...grouped.entries()].map(([fingerprint, { count, item }]) => ({ fingerprint, count, classification: item.classification, stderr: item.stderrTail })) }; }
 
 describe("Phase 5 drawtext graph lifecycle confirmation", () => diagnosticIt("captures and classifies the exact drawtext-only topology", async () => {
   await mkdir(root!, { recursive: true }); let captured: CapturedFfmpegInvocation | undefined;
