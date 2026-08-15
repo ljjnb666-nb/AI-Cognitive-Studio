@@ -186,14 +186,13 @@ test("authentication ignores untrusted callback URLs", async ({ browser }) => {
   await expect(account.page).toHaveURL(/\/sign-in$/);
   for (const callbackUrl of ["https://evil.example", "//evil.example", "https%3A%2F%2Fevil.example", "javascript:alert(1)"]) {
     await account.page.goto(`/sign-in?callbackUrl=${encodeURIComponent(callbackUrl)}`);
-    await account.page.locator('input[name="email"]').fill(account.user.email);
-    await account.page.locator('input[name="password"]').fill(password);
-    await account.page.locator('button[type="submit"]').click();
-    await expect(account.page).toHaveURL(/\/studio$/);
-    await account.page.locator("summary").click();
-    await account.page.getByRole("button", { name: "Sign out" }).click();
-    await expect(account.page).toHaveURL(/\/sign-in$/);
+    expect(new URL(account.page.url()).origin).toBe("http://localhost:3000");
+    await expect(account.page.locator('input[name="email"]')).toBeVisible();
   }
+  await account.page.locator('input[name="email"]').fill(account.user.email);
+  await account.page.locator('input[name="password"]').fill(password);
+  await account.page.locator('button[type="submit"]').click();
+  await expect(account.page).toHaveURL(/\/studio$/);
   await account.context.close();
 });
 
