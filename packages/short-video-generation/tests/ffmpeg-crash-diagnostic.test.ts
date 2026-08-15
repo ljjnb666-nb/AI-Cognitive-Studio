@@ -44,10 +44,13 @@ function fullArgs(captured: CapturedFfmpegInvocation, outputName: string) {
 function filterArg(args: string[]) { return args[args.indexOf("-filter_complex") + 1]!; }
 function withFilter(args: string[], filter: string) { const copy = [...args]; copy[copy.indexOf("-filter_complex") + 1] = filter; return copy; }
 function sceneInputs(captured: CapturedFfmpegInvocation, count: number) {
-  const args = remap(captured, captured.args); return args.slice(1, 1 + count * 3);
+  const args = remap(captured, captured.args); return args.slice(1, 1 + count * 4);
 }
 function audioInputs(captured: CapturedFfmpegInvocation, count: number) {
-  const args = remap(captured, captured.args); const start = 1 + captured.input.sceneCount * 3; return args.slice(start, start + count * 2);
+  const args = remap(captured, captured.args); const start = 1 + captured.input.sceneCount * 4; return args.slice(start, start + count * 2);
+}
+function withoutDrawtext(inputs: string[]) {
+  return inputs.map((value, index) => index % 4 === 3 ? value.replace(/,drawtext=.*$/, "") : value);
 }
 function encodeArgs(output: string, map: string[]) { return [...map.flatMap((value) => ["-map", value]), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", output]; }
 
@@ -81,7 +84,7 @@ describe("Phase 5 FFmpeg crash diagnostic", () => diagnosticIt("runs the exact d
   const noDrawtext = noSubtitles.replace(/,drawtext=textfile='[^']+':fontcolor=white[^,]*/g, "").replace(/,drawtext=textfile='[^']+':fontcolor=0x94a3b8[^,]*/g, "");
   results.push(await run("E drawtext removed", withFilter(fullArgs(invocation, "variant-e.mp4"), noDrawtext)));
   const video = Array.from({ length: 6 }, (_, index) => `[${index}:v]`).join("");
-  results.push(await run("F video concat only", [...sceneInputs(invocation, 6), "-filter_complex", `${video}concat=n=6:v=1:a=0[v]`, "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", join(invocation.fixtureDirectory, "variant-f.mp4")]));
+  results.push(await run("F video concat only", [...withoutDrawtext(sceneInputs(invocation, 6)), "-filter_complex", `${video}concat=n=6:v=1:a=0[v]`, "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", join(invocation.fixtureDirectory, "variant-f.mp4")]));
   const audio = Array.from({ length: 6 }, (_, index) => `[${index}:a]`).join("");
   results.push(await run("G audio concat only", [...audioInputs(invocation, 6), "-filter_complex", `${audio}concat=n=6:v=0:a=1[a]`, "-map", "[a]", "-c:a", "aac", join(invocation.fixtureDirectory, "variant-g.m4a")]));
   for (let count = 1; count <= 6; count++) {
