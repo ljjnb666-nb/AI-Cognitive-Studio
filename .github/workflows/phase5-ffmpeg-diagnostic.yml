@@ -80,7 +80,7 @@ jobs:
         if: always()
         run: |
           diagnostic_dir="$RUNNER_TEMP/phase5-ffmpeg-diagnostic"
-          core_file="$(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core*' -print -quit)"
+          core_file="$(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.*' -print -quit)"
           if [ -z "$core_file" ]; then
             echo "CORE_DUMP_CONFIGURATION=NOT_WORKING" | tee "$diagnostic_dir/core-result.txt"
             exit 0
