@@ -9,4 +9,5 @@ export function createPodcastGenerationWorker(environment: Environment, dependen
   return new Worker<{ podcastGenerationRunId: string }>(PODCAST_GENERATION_QUEUE, async (job) => processPodcastGenerationRun(job.data.podcastGenerationRunId, dependencies), { connection: createRedisConnection(environment.REDIS_URL) });
 }
 export function createPodcastGenerationQueue(environment: Environment) { return new Queue<{ podcastGenerationRunId: string }>(PODCAST_GENERATION_QUEUE, { connection: createRedisConnection(environment.REDIS_URL) }); }
-export async function dispatchPodcastGeneration(environment: Environment): Promise<number> { const queue = createPodcastGenerationQueue(environment); try { return await dispatchPendingPodcastGeneration(queue); } finally { await queue.close(); } }
+export function dispatchPodcastGenerationWithQueue(queue: Queue<{ podcastGenerationRunId: string }>): Promise<number> { return dispatchPendingPodcastGeneration(queue); }
+export async function dispatchPodcastGeneration(environment: Environment): Promise<number> { const queue = createPodcastGenerationQueue(environment); try { return await dispatchPodcastGenerationWithQueue(queue); } finally { await queue.close(); } }

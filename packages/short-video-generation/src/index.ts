@@ -8,6 +8,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import {
+  VideoRenderProcessError,
+  videoRenderFailureDetails,
+} from "./process-diagnostics.js";
+export {
+  PROCESS_STDERR_EXCERPT_MAX_LENGTH,
+  VIDEO_RENDER_FFMPEG_FAILED,
+  VIDEO_RENDERING_STAGE,
+  VideoRenderProcessError,
+  sanitizeProcessStderr,
+  videoRenderFailureDetails,
+  type ExternalProcessDiagnostic,
+  type VideoRenderFailureDetails,
+} from "./process-diagnostics.js";
 import { prisma } from "@ai-cognitive/db";
 import {
   buildBookContextForIntelligence,
@@ -951,14 +965,15 @@ export async function processShortVideoGenerationRun(
     }
     return load(run.id);
   } catch (error) {
-    const code =
-      error instanceof Error
+    const diagnostic = videoRenderFailureDetails(error);
+    const code = diagnostic?.code ??
+      (error instanceof Error
         ? error.message.split(":")[0]!
-        : "SHORT_VIDEO_GENERATION_FAILED";
+        : "SHORT_VIDEO_GENERATION_FAILED");
     const failed = await prisma.$executeRaw`UPDATE "ShortVideoGenerationRun" SET "status"='FAILED'::"ShortVideoGenerationStatus", "errorCode"=${code}, "completedAt"=NOW(), "executionClaimToken"=NULL, "executionClaimedAt"=NULL, "executionLeaseUntil"=NULL WHERE "id"=${run.id} AND "executionClaimToken"=${token} AND "executionLeaseUntil">NOW() AND "status"='RUNNING'::"ShortVideoGenerationStatus"`;
     if (failed === 1) await prisma.job.update({
       where: { id: run.jobId },
-      data: { status: "FAILED", error: { code }, completedAt: new Date() },
+      data: { status: "FAILED", error: diagnostic ?? { code }, completedAt: new Date() },
     });
     throw error;
   }
@@ -1012,7 +1027,19 @@ export interface VideoRenderer {
     cleanup(): Promise<void>;
   }>;
 }
+export type FfmpegInvocationDiagnostic = {
+  /** Test-only capture point after renderer-owned inputs are written. */
+  onInvocation?: (value: {
+    directory: string;
+    args: readonly string[];
+    outputPath: string;
+    renderStep: "SCENE_VISUAL_RENDER" | "FINAL_COMPOSITION";
+    sceneOrdinal: number | null;
+    input: { durationMs: number; width: number; height: number; fps: number; sceneCount: number; captionCount: number };
+  }) => void | Promise<void>;
+};
 export class FfmpegVideoRenderer implements VideoRenderer {
+  constructor(private readonly diagnostic: FfmpegInvocationDiagnostic = {}) {}
   async render(input: {
     durationMs: number;
     width: number;
@@ -1039,7 +1066,7 @@ export class FfmpegVideoRenderer implements VideoRenderer {
       const audioByScene = new Map(input.narrationAudio.map((audio) => [audio.sceneId, audio]));
       if (ordered.some((scene) => !audioByScene.has(scene.id))) throw new Error("VIDEO_RENDER_NARRATION_MISSING");
       await writeFile(captions, input.captions.map((cue, index) => `${index + 1}\n${srtTime(cue.startMs)} --> ${srtTime(cue.endMs)}\n${cue.text.replace(/\r?\n/g, " ")}\n`).join("\n"), "utf8");
-      const args = ["-y"];
+      const sceneVideos: string[] = [];
       for (const [index, scene] of ordered.entries()) {
         const primary = join(directory, `scene-${index}-primary.txt`), secondary = join(directory, `scene-${index}-secondary.txt`);
         await writeFile(primary, scene.primaryText, "utf8"); await writeFile(secondary, scene.secondaryText ?? scene.sceneType, "utf8");
@@ -1047,8 +1074,13 @@ export class FfmpegVideoRenderer implements VideoRenderer {
         const palette = ["#0f172a", "#172554", "#1e1b4b", "#312e81", "#3f1d2e", "#134e4a"][index % 6]!;
         const escapePath = (path: string) => path.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
         const filter = `color=c=${palette}:s=${input.width}x${input.height}:r=${input.fps}:d=${duration},drawbox=x=70:y=250:w=${input.width - 140}:h=10:color=0x38bdf8@0.9:t=fill,drawtext=textfile='${escapePath(primary)}':fontcolor=white:fontsize=${Math.max(34, Math.floor(input.width / 11))}:x=(w-text_w)/2:y=h*0.32:line_spacing=12:enable='between(t,0.15,${duration})',drawtext=textfile='${escapePath(secondary)}':fontcolor=0x94a3b8:fontsize=${Math.max(22, Math.floor(input.width / 20))}:x=(w-text_w)/2:y=h*0.52:line_spacing=8`;
-        args.push("-f", "lavfi", "-i", filter);
+        const sceneVideo = join(directory, `scene-${String(index).padStart(3, "0")}.mkv`);
+        const sceneArgs = ["-y", "-loglevel", "error", "-f", "lavfi", "-i", filter, "-an", "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p", sceneVideo];
+        await this.runStep(directory, sceneArgs, sceneVideo, input, "SCENE_VISUAL_RENDER", scene.ordinal);
+        sceneVideos.push(sceneVideo);
       }
+      const args = ["-y", "-loglevel", "error"];
+      for (const sceneVideo of sceneVideos) args.push("-i", sceneVideo);
       for (const [index, scene] of ordered.entries()) {
         const audio = audioByScene.get(scene.id)!;
         const extension = audio.mediaType.includes("mpeg") ? "mp3" : audio.mediaType.includes("wav") ? "wav" : "m4a";
@@ -1057,23 +1089,11 @@ export class FfmpegVideoRenderer implements VideoRenderer {
       const videoInputs = ordered.map((_, index) => `[${index}:v]`).join("");
       const audioInputs = ordered.map((_, index) => `[${index + ordered.length}:a]`).join("");
       const escapedCaptions = captions.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
-      await execute(
-        "ffmpeg",
-        [...args,
-          "-filter_complex", `${videoInputs}concat=n=${ordered.length}:v=1:a=0[v];${audioInputs}concat=n=${ordered.length}:v=0:a=1[a];[v]subtitles='${escapedCaptions}'[captioned]`,
-          "-map", "[captioned]", "-map", "[a]", "-shortest",
-          "-c:v",
-          "libx264",
-          "-pix_fmt",
-          "yuv420p",
-          "-c:a",
-          "aac",
-          "-movflags",
-          "+faststart",
-          output,
-        ],
-        { timeout: 120_000, maxBuffer: 1_000_000, windowsHide: true },
-      );
+      const ffmpegArgs = [...args,
+        "-filter_complex", `${videoInputs}concat=n=${ordered.length}:v=1:a=0[v];${audioInputs}concat=n=${ordered.length}:v=0:a=1[a];[v]subtitles='${escapedCaptions}'[captioned]`,
+        "-map", "[captioned]", "-map", "[a]", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", output,
+      ];
+      await this.runStep(directory, ffmpegArgs, output, input, "FINAL_COMPOSITION", null);
       return {
         path: output,
         width: input.width,
@@ -1085,6 +1105,22 @@ export class FfmpegVideoRenderer implements VideoRenderer {
     } catch (error) {
       await rm(directory, { recursive: true, force: true });
       throw error;
+    }
+  }
+
+  private async runStep(
+    directory: string,
+    args: string[],
+    outputPath: string,
+    input: { durationMs: number; width: number; height: number; fps: number; scenes: unknown[]; captions: unknown[] },
+    renderStep: "SCENE_VISUAL_RENDER" | "FINAL_COMPOSITION",
+    sceneOrdinal: number | null,
+  ) {
+    await this.diagnostic.onInvocation?.({ directory, args, outputPath, renderStep, sceneOrdinal, input: { durationMs: input.durationMs, width: input.width, height: input.height, fps: input.fps, sceneCount: input.scenes.length, captionCount: input.captions.length } });
+    try {
+      await execute("ffmpeg", args, { timeout: 120_000, maxBuffer: 1_000_000, windowsHide: true });
+    } catch (error) {
+      throw new VideoRenderProcessError(error, directory, { renderStep, sceneOrdinal });
     }
   }
 }

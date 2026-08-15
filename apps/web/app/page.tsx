@@ -1,2 +1,3 @@
 import { redirect } from "next/navigation";
-export default function HomePage() { redirect("/studio"); }
+import { resolveWebIdentity } from "@/lib/identity";
+export default async function HomePage() { try { await resolveWebIdentity(); redirect("/studio"); } catch { redirect("/sign-in"); } }

@@ -1,10 +1,16 @@
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { JobStatus, prisma } from "../src/index.js";
 
-afterEach(async () => {
-  await prisma.job.deleteMany();
-  await prisma.user.deleteMany();
-});
+const fixtureJobKeys = ["user-job-key", "system-health-check-key"];
+const fixtureUserEmails = ["phase0@example.test"];
+
+async function cleanupFixtures() {
+  await prisma.job.deleteMany({ where: { idempotencyKey: { in: fixtureJobKeys } } });
+  await prisma.user.deleteMany({ where: { email: { in: fixtureUserEmails } } });
+}
+
+beforeEach(cleanupFixtures);
+afterEach(cleanupFixtures);
 
 afterAll(async () => {
   await prisma.$disconnect();
@@ -55,7 +61,7 @@ describe("database integration", () => {
       }),
     ).rejects.toMatchObject({ code: "P2002" });
 
-    const systemJob = await prisma.job.findFirstOrThrow({ where: { userId: null } });
+    const systemJob = await prisma.job.findUniqueOrThrow({ where: { idempotencyKey: "system-health-check-key" } });
     expect(systemJob.userId).toBeNull();
     expect(systemJob.workspaceId).toBeNull();
   });

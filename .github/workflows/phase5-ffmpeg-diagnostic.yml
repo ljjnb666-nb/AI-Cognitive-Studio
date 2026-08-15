@@ -1,0 +1,85 @@
+name: Phase 5 Drawtext Production Repair Stress
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/phase5-ffmpeg-diagnostic.yml"
+      - "packages/short-video-generation/tests/ffmpeg-crash-diagnostic.test.ts"
+      - "packages/short-video-generation/tests/ffmpeg-repair-stress.test.ts"
+      - "packages/short-video-generation/tests/ffmpeg-production-envelope.test.ts"
+      - "packages/short-video-generation/tests/ffmpeg-diagnostic.ts"
+      - "packages/short-video-generation/src/index.ts"
+      - "packages/short-video-generation/src/process-diagnostics.ts"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, branch, or tag to diagnose
+        required: true
+        default: feat/phase-7-production-auth
+
+jobs:
+  drawtext-repair-stress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+        env:
+          DATABASE_URL: "postgresql://diagnostic:diagnostic@127.0.0.1:5432/diagnostic?schema=public"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg gdb libc6-dbg
+      - name: Configure and prove core capture
+        run: |
+          diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"; mkdir -p "$diagnostic_dir"
+          { echo "ulimit_before=$(ulimit -c)"; cat /proc/sys/kernel/core_pattern; sudo sysctl -w kernel.core_pattern="$diagnostic_dir/core.%p"; ulimit -c unlimited; (bash -c 'kill -SEGV $$') || true; probe="$(find "$diagnostic_dir" -maxdepth 1 -name 'core.[0-9]*' -type f -print -quit)"; test -n "$probe"; mv "$probe" "$diagnostic_dir/core-probe.dump"; echo "ulimit_after=$(ulimit -c)"; } > "$diagnostic_dir/core-configuration.txt" 2>&1
+      - name: Record native environment
+        run: |
+          diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"
+          { uname -a; cat /etc/os-release; ffmpeg -version; ffprobe -version; ffmpeg -buildconf; ldd "$(command -v ffmpeg)"; dpkg-query -W ffmpeg libass9 'libavfilter*' 'libavcodec*' 'libavformat*' libfontconfig1 libfreetype6 libharfbuzz0b libfribidi0; fc-match sans; } > "$diagnostic_dir/native-stack.txt" 2>&1
+      - name: Stress repaired scene-local and complete production fixture
+        run: ulimit -c unlimited; pnpm --filter @ai-cognitive/short-video-generation exec vitest run tests/ffmpeg-repair-stress.test.ts --reporter verbose
+        env:
+          NODE_ENV: test
+          PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-drawtext-lifecycle
+          PHASE5_FFMPEG_CORE_DIRECTORY: ${{ runner.temp }}/phase5-drawtext-lifecycle
+          PHASE5_SCENE_LOCAL_ATTEMPTS: "100"
+          PHASE5_REPAIRED_FULL_ATTEMPTS: "50"
+      - name: Measure production-resolution renderer envelope
+        run: pnpm --filter @ai-cognitive/short-video-generation exec vitest run tests/ffmpeg-production-envelope.test.ts --reporter verbose
+        env:
+          NODE_ENV: test
+          PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-drawtext-lifecycle
+      - name: Analyze an unexpected repaired-render core
+        if: always()
+        run: |
+          diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"
+          core="$(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.[0-9]*' -print -quit)"
+          if [ -z "$core" ]; then echo "REPAIRED_RENDER_CORE=NOT_CAPTURED" > "$diagnostic_dir/core-result.txt"; exit 0; fi
+          sha256sum "$(command -v ffmpeg)" > "$diagnostic_dir/ffmpeg-sha256.txt"
+          gdb "$(command -v ffmpeg)" "$core" --batch -ex "set pagination off" -ex "info threads" -ex "thread apply all bt" -ex "thread apply all bt full" -ex "info sharedlibrary" -ex "info registers" -ex "frame 0" -ex "x/i \$pc" > "$diagnostic_dir/repaired-render-gdb.txt" 2>&1 || true
+          mv "$core" "$diagnostic_dir/repaired-render-core.dump"
+          find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.[0-9]*' -delete
+          echo "REPAIRED_RENDER_CORE=CAPTURED" > "$diagnostic_dir/core-result.txt"
+      - name: Validate bounded upload manifest
+        if: always()
+        run: |
+          diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"
+          find "$diagnostic_dir" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | head -200 | tee "$diagnostic_dir/upload-manifest.txt"
+          invalid="$(find "$diagnostic_dir" -maxdepth 1 -type f -printf '%f\n' | grep -E '[":<>|*?]' || true)"
+          test -z "$invalid" || { echo "Unsafe artifact filenames:"; echo "$invalid"; exit 1; }
+      - name: Upload bounded diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-drawtext-repair-stress
+          path: ${{ runner.temp }}/phase5-drawtext-lifecycle
+          if-no-files-found: error

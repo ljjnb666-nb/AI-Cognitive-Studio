@@ -2,6 +2,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 const environment = {
   NODE_ENV: "test",
+  BETTER_AUTH_SECRET: "phase6-test-secret-must-be-at-least-32-characters",
+  BETTER_AUTH_URL: "http://localhost:3000",
+  BETTER_AUTH_TRUSTED_ORIGINS: "http://localhost:3000",
   PHASE6_BROWSER_ACCEPTANCE: "true",
   DATABASE_URL: process.env.DATABASE_URL!,
   DATABASE_URL_TEST: process.env.DATABASE_URL_TEST!,

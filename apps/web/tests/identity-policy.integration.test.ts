@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { browserIdentityMode, developmentBootstrapAllowed, testHarnessCredentialValid } from "../lib/identity-policy";
+import { requiredAuthBaseUrl } from "../lib/auth-config";
 
 describe("developmentBootstrapAllowed", () => {
   it("permits only an explicit development bootstrap", () => {
@@ -24,5 +25,18 @@ describe("developmentBootstrapAllowed", () => {
     const environment: NodeJS.ProcessEnv = { NODE_ENV: "production", PHASE6_BROWSER_ACCEPTANCE: "true", DATABASE_URL: "postgresql://app:app@localhost:5433/ai_cognitive_studio_phase6_test", WEB_TEST_HARNESS_TOKEN: "trusted-token", WEB_TEST_HARNESS_EMAIL: "fixed@phase6.test" };
     expect(testHarnessCredentialValid("trusted-token", environment)).toBe(true);
     expect(browserIdentityMode("trusted-token", environment)).toBe("TEST_HARNESS");
+  });
+});
+
+describe("requiredAuthBaseUrl", () => {
+  it("fails fast for a missing or malformed canonical auth URL", () => {
+    expect(() => requiredAuthBaseUrl({ NODE_ENV: "production" })).toThrow("BETTER_AUTH_URL_REQUIRED");
+    expect(() => requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "not a url" })).toThrow("BETTER_AUTH_URL_INVALID");
+    expect(() => requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "http://studio.example" })).toThrow("BETTER_AUTH_URL_HTTPS_REQUIRED");
+  });
+
+  it("accepts an explicit HTTPS production URL and a local development URL", () => {
+    expect(requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "https://studio.example" })).toBe("https://studio.example");
+    expect(requiredAuthBaseUrl({ NODE_ENV: "development", BETTER_AUTH_URL: "http://localhost:3000" })).toBe("http://localhost:3000");
   });
 });

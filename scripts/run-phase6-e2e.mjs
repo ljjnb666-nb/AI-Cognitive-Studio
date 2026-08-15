@@ -3,14 +3,20 @@ import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 
 const database = "ai_cognitive_studio_phase6_test";
 const root = process.cwd();
+const require = createRequire(join(root, "apps", "web", "package.json"));
+const tsxCli = require.resolve("tsx/cli");
 const postgresPort = process.env.POSTGRES_HOST_PORT ?? "5433";
 const environment = {
   ...process.env,
   NODE_ENV: "test",
+  BETTER_AUTH_SECRET: "phase6-test-secret-must-be-at-least-32-characters",
+  BETTER_AUTH_URL: "http://localhost:3000",
+  BETTER_AUTH_TRUSTED_ORIGINS: "http://localhost:3000",
   PHASE6_BROWSER_ACCEPTANCE: "true",
   DATABASE_URL: `postgresql://app:app@localhost:${postgresPort}/${database}?schema=public`,
   DATABASE_URL_TEST: `postgresql://app:app@localhost:${postgresPort}/${database}?schema=public`,
@@ -55,11 +61,20 @@ function redis(argumentsList) {
 }
 
 let worker;
+let workerTermination;
+let stopWorkerPromise;
 async function stopWorker() {
-  if (!worker || worker.exitCode !== null) return;
-  const exited = once(worker, "exit");
-  worker.kill("SIGTERM");
-  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  if (!worker) return;
+  return stopWorkerPromise ??= (async () => {
+    if (worker.exitCode !== null || worker.signalCode !== null) return;
+    worker.send({ type: "PHASE6_RUNTIME_SHUTDOWN" });
+    const exited = await Promise.race([workerTermination, new Promise((resolve) => setTimeout(() => resolve(undefined), 5_000))]);
+    if (exited) return;
+    worker.kill();
+    const forced = await Promise.race([workerTermination, new Promise((resolve) => setTimeout(() => resolve(undefined), 5_000))]);
+    if (!forced) throw new Error("PHASE6_RUNTIME_TERMINATION_NOT_CONFIRMED");
+    throw new Error("PHASE6_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT");
+  })();
 }
 function minio(commandLine) {
   command("docker", ["compose", "exec", "-T", "minio", "sh", "-c", commandLine]);
@@ -73,7 +88,8 @@ try {
   command("pnpm", ["--filter", "@ai-cognitive/web", "build"]);
   const readyFile = join(root, "output", "playwright", "phase6-runtime.ready");
   await rm(readyFile, { force: true });
-  worker = spawn(process.execPath, [join(root, "node_modules", ".pnpm", "tsx@4.23.11", "node_modules", "tsx", "dist", "cli.mjs"), join(root, "apps", "web", "tests", "phase6", "runtime.ts")], { cwd: root, env: { ...environment, PHASE6_RUNTIME_READY_FILE: readyFile }, stdio: "inherit", shell: false });
+  worker = spawn(process.execPath, [tsxCli, join(root, "apps", "web", "tests", "phase6", "runtime.ts")], { cwd: root, env: { ...environment, PHASE6_RUNTIME_READY_FILE: readyFile }, stdio: ["inherit", "inherit", "inherit", "ipc"], shell: false });
+  workerTermination = new Promise((resolve) => { worker.once("exit", (code, signal) => resolve({ code, signal })); worker.once("error", (error) => resolve({ error })); });
   for (let attempt = 0; attempt < 100 && !existsSync(readyFile); attempt++) await new Promise((resolve) => setTimeout(resolve, 100));
   if (!existsSync(readyFile)) throw new Error("PHASE6_RUNTIME_START_TIMEOUT");
   command("pnpm", ["--filter", "@ai-cognitive/web", "exec", "playwright", "test", "--config", "playwright.phase6.config.ts"]);

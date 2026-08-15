@@ -88,9 +88,10 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
 
 test("mobile completed product view remains usable", async ({ browser }, testInfo) => {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await context.addCookies([{ name: "acs_phase6_harness", value: harnessToken, url: "http://localhost:3000", httpOnly: true, sameSite: "Lax" }]);
   const page = await context.newPage();
   await page.goto("/studio/videos");
-  await expect(page.getByRole("navigation", { name: "移动导航" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Mobile navigation" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("mobile-video-list.png"), fullPage: true });
   await context.close();

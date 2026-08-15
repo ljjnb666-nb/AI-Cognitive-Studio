@@ -10,9 +10,10 @@ export function createSourceIngestionWorker(environment: Environment) {
 }
 
 export function createSourceIngestionQueue(environment: Environment) { return new Queue<{ ingestionRunId: string }>(INGESTION_QUEUE, { connection: createRedisConnection(environment.REDIS_URL) }); }
+export function dispatchSourceIngestionWithQueue(queue: Queue<{ ingestionRunId: string }>, environment: Environment): Promise<number> { return dispatchPendingIngestion(queue, { leaseMs: environment.SOURCE_OUTBOX_LEASE_MS, maxAttempts: environment.SOURCE_OUTBOX_MAX_ATTEMPTS }); }
 export async function dispatchSourceIngestion(environment: Environment): Promise<number> {
   const queue = createSourceIngestionQueue(environment);
-  try { return await dispatchPendingIngestion(queue, { leaseMs: environment.SOURCE_OUTBOX_LEASE_MS, maxAttempts: environment.SOURCE_OUTBOX_MAX_ATTEMPTS }); }
+  try { return await dispatchSourceIngestionWithQueue(queue, environment); }
   finally { await queue.close(); }
 }
 export { INGESTION_JOB };
