@@ -12,6 +12,7 @@ const environment = {
 
 export default defineConfig({
   testDir: "./tests/phase7",
+  testMatch: "**/*.spec.ts",
   timeout: 90_000,
   expect: { timeout: 20_000 },
   outputDir: "../../output/playwright/phase7",
