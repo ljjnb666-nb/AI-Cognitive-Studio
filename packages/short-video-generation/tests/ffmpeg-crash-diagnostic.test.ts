@@ -71,7 +71,11 @@ describe("Phase 5 FFmpeg crash diagnostic", () => diagnosticIt("runs the exact d
   expect(captured, "renderer must expose its own final invocation").toBeDefined();
   const invocation = captured!;
   const results: Result[] = [direct];
-  if (direct.result === "SIGSEGV") results.push(await run("A standalone exact replay", fullArgs(invocation, "variant-a-replay.mp4")));
+  for (let attempt = 1; attempt <= 12; attempt++) {
+    const replay = await run(`A standalone exact replay ${attempt}`, fullArgs(invocation, `variant-a-replay-${attempt}.mp4`));
+    results.push(replay);
+    if (replay.result === "SIGSEGV") break;
+  }
   const base = fullArgs(invocation, "variant-a.mp4");
   const filter = filterArg(base);
   const productSrt = await readFile(join(invocation.fixtureDirectory, "captions.srt"), "utf8");
