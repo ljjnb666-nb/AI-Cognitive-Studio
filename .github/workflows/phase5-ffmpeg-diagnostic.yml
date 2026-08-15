@@ -91,6 +91,7 @@ jobs:
             -ex "set pagination off" -ex "info threads" -ex "thread apply all bt" \
             -ex "thread apply all bt full" -ex "info sharedlibrary" -ex "info registers" \
             -ex "frame 0" -ex "x/i \$pc" > "$diagnostic_dir/gdb-core.txt" 2>&1 || true
+          mv "$core_file" "$diagnostic_dir/core-ffmpeg.dump"
       - name: Upload bounded diagnostic artifacts
         if: always()
         uses: actions/upload-artifact@v4
