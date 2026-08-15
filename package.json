@@ -18,9 +18,9 @@
     ]
   },
   "scripts": {
-    "dev": "pnpm --parallel --filter @ai-cognitive/web --filter @ai-cognitive/worker dev",
-    "dev:web": "pnpm --filter @ai-cognitive/web dev",
-    "dev:worker": "pnpm --filter @ai-cognitive/worker dev",
+    "dev": "node --env-file=.env scripts/run-pnpm-with-root-env.mjs --parallel --filter @ai-cognitive/web --filter @ai-cognitive/worker dev",
+    "dev:web": "node --env-file=.env scripts/run-pnpm-with-root-env.mjs --filter @ai-cognitive/web dev",
+    "dev:worker": "node --env-file=.env scripts/run-pnpm-with-root-env.mjs --filter @ai-cognitive/worker dev",
     "lint": "pnpm -r --if-present lint",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm run test:unit && pnpm run test:integration && pnpm run test:e2e",

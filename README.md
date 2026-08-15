@@ -18,10 +18,17 @@ AI Cognitive Studio is a future platform for deep book understanding and content
 pnpm install
 docker compose up -d
 Copy-Item .env.example .env
+# Generate and set a value of at least 32 bytes for BETTER_AUTH_SECRET.
+# The repository-root .env is the only local-development environment file.
 pnpm db:generate
 pnpm db:migrate
 pnpm dev
 ```
+
+`pnpm dev`, `pnpm dev:web`, and `pnpm dev:worker` load the repository-root
+`.env`. Do not create duplicate `apps/web/.env.local` or `apps/worker/.env`
+files. CI and production supply configuration through their process environment;
+those explicit values take precedence over values in a local `.env` file.
 
 `pnpm db:migrate` is the local development command. It runs `prisma migrate dev`, which creates and applies a development migration when the Prisma schema changes. Do not use it in CI or deployment.
 
