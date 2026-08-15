@@ -33,7 +33,19 @@ jobs:
         env:
           DATABASE_URL: postgresql://diagnostic:diagnostic@127.0.0.1:5432/diagnostic?schema=public
       - name: Install FFmpeg debugging tools
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg gdb
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg gdb libc6-dbg
+      - name: Configure diagnostic core capture
+        run: |
+          mkdir -p "$RUNNER_TEMP/phase5-ffmpeg-diagnostic"
+          {
+            echo "ulimit_before=$(ulimit -c)"
+            cat /proc/sys/kernel/core_pattern
+            cat /proc/sys/kernel/core_uses_pid || true
+            sudo sysctl -w kernel.core_pattern="$RUNNER_TEMP/phase5-ffmpeg-diagnostic/core.%e.%p" || true
+            ulimit -c unlimited
+            echo "ulimit_after=$(ulimit -c)"
+            echo "core_pattern_after=$(cat /proc/sys/kernel/core_pattern)"
+          } > "$RUNNER_TEMP/phase5-ffmpeg-diagnostic/core-configuration.txt" 2>&1
       - name: Record bounded native media stack
         run: |
           mkdir -p "$RUNNER_TEMP/phase5-ffmpeg-diagnostic"
@@ -57,11 +69,28 @@ jobs:
           } > "$RUNNER_TEMP/phase5-ffmpeg-diagnostic/native-stack.txt" 2>&1
           sed -e "s|$RUNNER_TEMP|<tmp>|g" "$RUNNER_TEMP/phase5-ffmpeg-diagnostic/native-stack.txt"
       - name: Replay exact direct renderer fixture and reduction matrix
-        run: pnpm --filter @ai-cognitive/short-video-generation exec vitest run tests/ffmpeg-crash-diagnostic.test.ts --reporter verbose
+        run: |
+          ulimit -c unlimited
+          pnpm --filter @ai-cognitive/short-video-generation exec vitest run tests/ffmpeg-crash-diagnostic.test.ts --reporter verbose
         env:
           NODE_ENV: test
           PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-ffmpeg-diagnostic
-          PHASE5_FFMPEG_GDB: "1"
+          PHASE5_FFMPEG_MAX_ATTEMPTS: "50"
+      - name: Post-mortem native core analysis
+        if: always()
+        run: |
+          diagnostic_dir="$RUNNER_TEMP/phase5-ffmpeg-diagnostic"
+          core_file="$(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core*' -print -quit)"
+          if [ -z "$core_file" ]; then
+            echo "CORE_DUMP_CONFIGURATION=NOT_WORKING" | tee "$diagnostic_dir/core-result.txt"
+            exit 0
+          fi
+          echo "CORE_DUMP_CONFIGURATION=WORKING" | tee "$diagnostic_dir/core-result.txt"
+          sha256sum "$(command -v ffmpeg)" > "$diagnostic_dir/ffmpeg-sha256.txt"
+          gdb "$(command -v ffmpeg)" "$core_file" --batch \
+            -ex "set pagination off" -ex "info threads" -ex "thread apply all bt" \
+            -ex "thread apply all bt full" -ex "info sharedlibrary" -ex "info registers" \
+            -ex "frame 0" -ex "x/i \$pc" > "$diagnostic_dir/gdb-core.txt" 2>&1 || true
       - name: Upload bounded diagnostic artifacts
         if: always()
         uses: actions/upload-artifact@v4

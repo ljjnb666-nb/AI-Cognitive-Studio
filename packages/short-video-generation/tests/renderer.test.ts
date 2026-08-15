@@ -30,6 +30,12 @@ async function expectPortraitMp4(output: Awaited<ReturnType<FfmpegVideoRenderer[
 }
 
 describe("FfmpegVideoRenderer", () => {
+  it("does not misclassify a diagnostic callback failure as an ffmpeg failure", async () => {
+    await expect(new FfmpegVideoRenderer({ onInvocation: () => { throw new Error("DIAGNOSTIC_CALLBACK_FAILED"); } }).render({ durationMs: 2_000, width: 360, height: 640, fps: 30,
+      scenes: [{ id: "scene-1", ordinal: 1, sceneType: "HOOK", startMs: 0, endMs: 2_000, primaryText: "GPT-5", secondaryText: "Evidence", keywords: [], layoutTemplate: "QUESTION_CARD", transitionIntent: "FADE" }],
+      captions: [{ startMs: 0, endMs: 1_800, text: "GPT-5" }], narrationAudio: [{ sceneId: "scene-1", bytes: audio, mediaType: "audio/mp4", durationMs: 2_000 }],
+    })).rejects.toThrow("DIAGNOSTIC_CALLBACK_FAILED");
+  });
   it("creates a decodable H.264/AAC portrait MP4", async () => {
     const output = await new FfmpegVideoRenderer().render({ durationMs: 2_000, width: 360, height: 640, fps: 30,
       scenes: [{ id: "scene-1", ordinal: 1, sceneType: "HOOK", startMs: 0, endMs: 2_000, primaryText: "GPT-5 changes the question", secondaryText: "Evidence, not hype", keywords: ["GPT-5"], layoutTemplate: "QUESTION_CARD", transitionIntent: "FADE" }],

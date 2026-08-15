@@ -1086,8 +1086,8 @@ export class FfmpegVideoRenderer implements VideoRenderer {
         "-filter_complex", `${videoInputs}concat=n=${ordered.length}:v=1:a=0[v];${audioInputs}concat=n=${ordered.length}:v=0:a=1[a];[v]subtitles='${escapedCaptions}'[captioned]`,
         "-map", "[captioned]", "-map", "[a]", "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", output,
       ];
+      await this.diagnostic.onInvocation?.({ directory, args: ffmpegArgs, outputPath: output, input: { durationMs: input.durationMs, width: input.width, height: input.height, fps: input.fps, sceneCount: ordered.length, captionCount: input.captions.length } });
       try {
-        await this.diagnostic.onInvocation?.({ directory, args: ffmpegArgs, outputPath: output, input: { durationMs: input.durationMs, width: input.width, height: input.height, fps: input.fps, sceneCount: ordered.length, captionCount: input.captions.length } });
         await execute(
           "ffmpeg",
           ffmpegArgs,
