@@ -179,6 +179,24 @@ test("auth forms are responsive and labelled", async ({ browser }) => {
   await context.close();
 });
 
+test("authentication ignores untrusted callback URLs", async ({ browser }) => {
+  const account = await signedUp(browser, "Callback Safety", `phase7-callback-${Date.now()}@ai-cognitive-studio.test`);
+  await account.page.locator("summary").click();
+  await account.page.getByRole("button", { name: "Sign out" }).click();
+  await expect(account.page).toHaveURL(/\/sign-in$/);
+  for (const callbackUrl of ["https://evil.example", "//evil.example", "https%3A%2F%2Fevil.example", "javascript:alert(1)"]) {
+    await account.page.goto(`/sign-in?callbackUrl=${encodeURIComponent(callbackUrl)}`);
+    await account.page.locator('input[name="email"]').fill(account.user.email);
+    await account.page.locator('input[name="password"]').fill(password);
+    await account.page.locator('button[type="submit"]').click();
+    await expect(account.page).toHaveURL(/\/studio$/);
+    await account.page.locator("summary").click();
+    await account.page.getByRole("button", { name: "Sign out" }).click();
+    await expect(account.page).toHaveURL(/\/sign-in$/);
+  }
+  await account.context.close();
+});
+
 test("forged and random Better Auth cookies cannot pass protected boundaries", async ({ browser }) => {
   const context = await browser.newContext();
   await context.addCookies([{ name: "better-auth.session_token", value: "forged-session-token-that-is-not-persisted", url: "http://localhost:3000", httpOnly: true, sameSite: "Lax" }]);
