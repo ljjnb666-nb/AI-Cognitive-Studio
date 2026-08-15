@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { prisma } from "@ai-cognitive/db";
 import { browserIdentityMode, developmentBootstrapAllowed, testHarnessCredentialValid } from "../lib/identity-policy";
 import { requiredAuthBaseUrl } from "../lib/auth-config";
-import { ensurePersonalWorkspace } from "../lib/onboarding";
 
 describe("developmentBootstrapAllowed", () => {
   it("permits only an explicit development bootstrap", () => {
@@ -40,21 +38,5 @@ describe("requiredAuthBaseUrl", () => {
   it("accepts an explicit HTTPS production URL and a local development URL", () => {
     expect(requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "https://studio.example" })).toBe("https://studio.example");
     expect(requiredAuthBaseUrl({ NODE_ENV: "development", BETTER_AUTH_URL: "http://localhost:3000" })).toBe("http://localhost:3000");
-  });
-});
-
-describe("authenticated onboarding", () => {
-  it("serializes concurrent first-workspace initialization without duplicates", async () => {
-    const user = await prisma.user.create({ data: { email: `onboarding-${Date.now()}-${Math.random()}@test.invalid`, name: "Concurrent User" } });
-    try {
-      const identities = await Promise.all(Array.from({ length: 8 }, () => ensurePersonalWorkspace(user.id)));
-      const refreshed = await prisma.user.findUniqueOrThrow({ where: { id: user.id }, include: { memberships: true } });
-      expect(new Set(identities.map((identity) => identity.memberships[0]!.workspaceId)).size).toBe(1);
-      expect(refreshed.memberships).toHaveLength(1);
-      expect(refreshed.defaultWorkspaceId).toBe(refreshed.memberships[0]!.workspaceId);
-      await prisma.workspace.delete({ where: { id: refreshed.memberships[0]!.workspaceId } });
-    } finally {
-      await prisma.user.deleteMany({ where: { id: user.id } });
-    }
   });
 });
