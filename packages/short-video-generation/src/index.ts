@@ -8,6 +8,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import {
+  VideoRenderProcessError,
+  videoRenderFailureDetails,
+} from "./process-diagnostics.js";
+export {
+  PROCESS_STDERR_EXCERPT_MAX_LENGTH,
+  VIDEO_RENDER_FFMPEG_FAILED,
+  VIDEO_RENDERING_STAGE,
+  VideoRenderProcessError,
+  sanitizeProcessStderr,
+  videoRenderFailureDetails,
+  type ExternalProcessDiagnostic,
+  type VideoRenderFailureDetails,
+} from "./process-diagnostics.js";
 import { prisma } from "@ai-cognitive/db";
 import {
   buildBookContextForIntelligence,
@@ -951,14 +965,15 @@ export async function processShortVideoGenerationRun(
     }
     return load(run.id);
   } catch (error) {
-    const code =
-      error instanceof Error
+    const diagnostic = videoRenderFailureDetails(error);
+    const code = diagnostic?.code ??
+      (error instanceof Error
         ? error.message.split(":")[0]!
-        : "SHORT_VIDEO_GENERATION_FAILED";
+        : "SHORT_VIDEO_GENERATION_FAILED");
     const failed = await prisma.$executeRaw`UPDATE "ShortVideoGenerationRun" SET "status"='FAILED'::"ShortVideoGenerationStatus", "errorCode"=${code}, "completedAt"=NOW(), "executionClaimToken"=NULL, "executionClaimedAt"=NULL, "executionLeaseUntil"=NULL WHERE "id"=${run.id} AND "executionClaimToken"=${token} AND "executionLeaseUntil">NOW() AND "status"='RUNNING'::"ShortVideoGenerationStatus"`;
     if (failed === 1) await prisma.job.update({
       where: { id: run.jobId },
-      data: { status: "FAILED", error: { code }, completedAt: new Date() },
+      data: { status: "FAILED", error: diagnostic ?? { code }, completedAt: new Date() },
     });
     throw error;
   }
@@ -1057,23 +1072,27 @@ export class FfmpegVideoRenderer implements VideoRenderer {
       const videoInputs = ordered.map((_, index) => `[${index}:v]`).join("");
       const audioInputs = ordered.map((_, index) => `[${index + ordered.length}:a]`).join("");
       const escapedCaptions = captions.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
-      await execute(
-        "ffmpeg",
-        [...args,
-          "-filter_complex", `${videoInputs}concat=n=${ordered.length}:v=1:a=0[v];${audioInputs}concat=n=${ordered.length}:v=0:a=1[a];[v]subtitles='${escapedCaptions}'[captioned]`,
-          "-map", "[captioned]", "-map", "[a]", "-shortest",
-          "-c:v",
-          "libx264",
-          "-pix_fmt",
-          "yuv420p",
-          "-c:a",
-          "aac",
-          "-movflags",
-          "+faststart",
-          output,
-        ],
-        { timeout: 120_000, maxBuffer: 1_000_000, windowsHide: true },
-      );
+      try {
+        await execute(
+          "ffmpeg",
+          [...args,
+            "-filter_complex", `${videoInputs}concat=n=${ordered.length}:v=1:a=0[v];${audioInputs}concat=n=${ordered.length}:v=0:a=1[a];[v]subtitles='${escapedCaptions}'[captioned]`,
+            "-map", "[captioned]", "-map", "[a]", "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            output,
+          ],
+          { timeout: 120_000, maxBuffer: 1_000_000, windowsHide: true },
+        );
+      } catch (error) {
+        throw new VideoRenderProcessError(error, directory);
+      }
       return {
         path: output,
         width: input.width,

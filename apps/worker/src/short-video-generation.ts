@@ -2,10 +2,12 @@ import { Queue, Worker } from "bullmq";
 import {
   dispatchPendingShortVideoGeneration,
   processShortVideoGenerationRun,
+  videoRenderFailureDetails,
   type ShortVideoProvider,
   type ShortVideoTtsProvider,
 } from "@ai-cognitive/short-video-generation";
 import type { EmbeddingProvider } from "@ai-cognitive/book-intelligence";
+import { logger } from "@ai-cognitive/shared";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import {
   createRedisConnection,
@@ -35,11 +37,24 @@ export function createShortVideoGenerationWorker(
   });
   return new Worker<{ shortVideoGenerationRunId: string }>(
     SHORT_VIDEO_GENERATION_QUEUE,
-    (job) =>
-      processShortVideoGenerationRun(job.data.shortVideoGenerationRunId, {
-        ...dependencies,
-        storage,
-      }),
+    async (job) => {
+      try {
+        return await processShortVideoGenerationRun(job.data.shortVideoGenerationRunId, {
+          ...dependencies,
+          storage,
+        });
+      } catch (error) {
+        const diagnostic = videoRenderFailureDetails(error);
+        logger.error("short_video.worker.failed", {
+          shortVideoGenerationRunId: job.data.shortVideoGenerationRunId,
+          queueJobId: job.id,
+          ...(diagnostic ?? {
+            code: error instanceof Error ? error.message.split(":")[0] : "SHORT_VIDEO_GENERATION_FAILED",
+          }),
+        });
+        throw error;
+      }
+    },
     { connection: createRedisConnection(environment.REDIS_URL) },
   );
 }
