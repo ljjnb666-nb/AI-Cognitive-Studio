@@ -1,4 +1,4 @@
-import { appendFile, mkdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FfmpegVideoRenderer, videoRenderFailureDetails } from "../src/index.js";
@@ -7,7 +7,7 @@ import { diagnosticOutputDirectory, phase5ProductRenderInput } from "./ffmpeg-di
 const root = diagnosticOutputDirectory(), diagnosticIt = root ? it : it.skip;
 const sceneAttempts = Number(process.env.PHASE5_SCENE_LOCAL_ATTEMPTS ?? 100);
 const fullAttempts = Number(process.env.PHASE5_REPAIRED_FULL_ATTEMPTS ?? 50);
-type Result = { variant: "SCENE_LOCAL" | "FULL_REPAIRED"; attempt: number; classification: "SUCCESS" | "SIGSEGV" | "SIGABRT" | "OTHER_SIGNAL" | "FFMPEG_ERROR" | "UNKNOWN"; signal: string | null; stderr: string; elapsedMs: number; finalDrawtextCount: number | null };
+type Result = { variant: "SCENE_LOCAL" | "FULL_REPAIRED"; attempt: number; classification: "SUCCESS" | "SIGSEGV" | "SIGABRT" | "OTHER_SIGNAL" | "FFMPEG_ERROR" | "UNKNOWN"; signal: string | null; stderr: string; elapsedMs: number; finalDrawtextCount: number | null; intermediateBytes: number | null };
 
 function classify(error: unknown): Result["classification"] {
   const diagnostic = videoRenderFailureDetails(error);
@@ -23,19 +23,21 @@ describe("Phase 5 repaired drawtext renderer stress", () => diagnosticIt("isolat
   await mkdir(root!, { recursive: true });
   const results: Result[] = [];
   const execute = async (variant: Result["variant"], attempt: number, input: ReturnType<typeof phase5ProductRenderInput>) => {
-    let finalDrawtextCount: number | null = null, started = performance.now();
+    let finalDrawtextCount: number | null = null, started = performance.now(); const intermediates: string[] = [];
     try {
       const output = await new FfmpegVideoRenderer({ onInvocation: (value) => {
+        if (value.renderStep === "SCENE_VISUAL_RENDER") intermediates.push(value.outputPath);
         if (value.renderStep !== "FINAL_COMPOSITION") return;
         finalDrawtextCount = value.args.join(" ").match(/drawtext=/g)?.length ?? 0;
         expect(finalDrawtextCount).toBe(0);
         expect(value.args.join(" ")).toContain("subtitles=");
       } }).render(input);
+      const intermediateBytes = (await Promise.all(intermediates.map((path) => stat(path)))).reduce((total, value) => total + value.size, 0);
       await output.cleanup();
-      results.push({ variant, attempt, classification: "SUCCESS", signal: null, stderr: "", elapsedMs: Math.round(performance.now() - started), finalDrawtextCount });
+      results.push({ variant, attempt, classification: "SUCCESS", signal: null, stderr: "", elapsedMs: Math.round(performance.now() - started), finalDrawtextCount, intermediateBytes });
     } catch (error) {
       const diagnostic = videoRenderFailureDetails(error);
-      results.push({ variant, attempt, classification: classify(error), signal: diagnostic?.signal ?? null, stderr: diagnostic?.stderrExcerpt ?? String(error), elapsedMs: Math.round(performance.now() - started), finalDrawtextCount });
+      results.push({ variant, attempt, classification: classify(error), signal: diagnostic?.signal ?? null, stderr: diagnostic?.stderrExcerpt ?? String(error), elapsedMs: Math.round(performance.now() - started), finalDrawtextCount, intermediateBytes: null });
     }
     await appendFile(join(root!, "repair-attempts.jsonl"), `${JSON.stringify(results.at(-1))}\n`);
   };
