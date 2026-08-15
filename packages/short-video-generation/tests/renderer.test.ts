@@ -48,7 +48,8 @@ describe("FfmpegVideoRenderer", () => {
 
   it("renders the six-scene Chinese WAV product shape", async () => {
     const sceneTypes = ["HOOK", "QUESTION", "EVIDENCE", "CONCEPT", "REFRAME", "ENDING"];
-    const output = await new FfmpegVideoRenderer().render({
+    const invocations: Array<{ args: readonly string[]; outputPath: string; renderStep: string; sceneOrdinal: number | null }> = [];
+    const output = await new FfmpegVideoRenderer({ onInvocation: (value) => { invocations.push(value); } }).render({
       durationMs: 15_000,
       width: 360,
       height: 640,
@@ -58,5 +59,15 @@ describe("FfmpegVideoRenderer", () => {
       narrationAudio: sceneTypes.map((_, index) => ({ sceneId: `scene-${index + 1}`, bytes: wavAudio, mediaType: "audio/wav", durationMs: 2_500 })),
     });
     await expectPortraitMp4(output);
+    const scenes = invocations.filter((value) => value.renderStep === "SCENE_VISUAL_RENDER"), final = invocations.find((value) => value.renderStep === "FINAL_COMPOSITION");
+    expect(scenes).toHaveLength(6);
+    expect(scenes.map((value) => value.sceneOrdinal)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(scenes.every((value) => value.args.join(" ").includes("drawtext=") && value.args.includes("ffv1") && value.outputPath.endsWith(".mkv"))).toBe(true);
+    expect(final?.args.join(" ")).not.toContain("drawtext=");
+    expect(final?.args.join(" ")).toContain("subtitles=");
+    const intermediate = await execute("ffprobe", ["-v", "error", "-show_entries", "format=format_name:stream=codec_name,codec_type", "-of", "json", scenes[0]!.outputPath], { windowsHide: true });
+    const intermediateProbe = JSON.parse(intermediate.stdout) as { format: { format_name: string }; streams: Array<{ codec_type: string; codec_name: string }> };
+    expect(intermediateProbe.format.format_name).toContain("matroska");
+    expect(intermediateProbe.streams).toEqual([expect.objectContaining({ codec_type: "video", codec_name: "ffv1" })]);
   }, 30_000);
 });

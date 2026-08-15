@@ -10,6 +10,9 @@ export type ExternalProcessDiagnostic = {
   signal: string | null;
   killed: boolean;
   stderrExcerpt: string;
+  /** Optional context for a renderer with multiple FFmpeg subprocesses. */
+  renderStep?: "SCENE_VISUAL_RENDER" | "FINAL_COMPOSITION";
+  sceneOrdinal?: number | null;
 };
 
 export type VideoRenderFailureDetails = ExternalProcessDiagnostic & {
@@ -54,7 +57,7 @@ export class VideoRenderProcessError extends Error {
   readonly stage = VIDEO_RENDERING_STAGE;
   readonly diagnostic: ExternalProcessDiagnostic;
 
-  constructor(error: unknown, temporaryDirectory: string) {
+  constructor(error: unknown, temporaryDirectory: string, context?: Pick<ExternalProcessDiagnostic, "renderStep" | "sceneOrdinal">) {
     super(VIDEO_RENDER_FFMPEG_FAILED);
     this.name = "VideoRenderProcessError";
     const failure = processFailure(error);
@@ -68,6 +71,7 @@ export class VideoRenderProcessError extends Error {
         typeof failure.stderr === "string" ? failure.stderr : "",
         temporaryDirectory,
       ),
+      ...(context?.renderStep ? { renderStep: context.renderStep, sceneOrdinal: context.sceneOrdinal ?? null } : {}),
     };
   }
 }
