@@ -26,11 +26,13 @@ async function run(name: string, args: string[], timeout = 120_000): Promise<Res
     const timeoutHit = error?.killed === true && signal === "SIGTERM";
     const result = signal === "SIGSEGV" ? "SIGSEGV" : timeoutHit ? "timeout" : "ordinary FFmpeg error";
     if (result === "SIGSEGV" && process.env.PHASE5_FFMPEG_GDB === "1" && root) {
-      try {
-        await execute("gdb", ["--batch", "-ex", "set pagination off", "-ex", "run", "-ex", "thread apply all bt", "-ex", "bt full", "-ex", "info sharedlibrary", "--args", "ffmpeg", ...args], { timeout: 180_000, maxBuffer: 1_000_000, windowsHide: true });
-      } catch (gdbError: any) {
-        await writeFile(join(root, `gdb-${name.replace(/[^a-z0-9]/gi, "-")}.log`), excerpt(`${gdbError?.stdout ?? ""}\n${gdbError?.stderr ?? ""}`), "utf8");
+      let report = "";
+      for (let attempt = 1; attempt <= 12; attempt++) {
+        try { const output = await execute("gdb", ["--batch", "-ex", "set pagination off", "-ex", "run", "-ex", "thread apply all bt", "-ex", "bt full", "-ex", "info sharedlibrary", "--args", "ffmpeg", ...args], { timeout: 180_000, maxBuffer: 1_000_000, windowsHide: true }); report += `\n--- gdb attempt ${attempt} ---\n${output.stdout}\n${output.stderr}`; }
+        catch (gdbError: any) { report += `\n--- gdb attempt ${attempt} ---\n${gdbError?.stdout ?? ""}\n${gdbError?.stderr ?? ""}`; }
+        if (report.includes("Program received signal SIGSEGV")) break;
       }
+      await writeFile(join(root, `gdb-${name.replace(/[^a-z0-9]/gi, "-")}.log`), report.replace(/\r\n?/g, "\n").slice(-60_000), "utf8");
     }
     return { name, result, exitCode: typeof error?.code === "number" ? error.code : null, signal, elapsedMs: Math.round(performance.now() - started), stderrExcerpt: excerpt(error?.stderr) };
   }
