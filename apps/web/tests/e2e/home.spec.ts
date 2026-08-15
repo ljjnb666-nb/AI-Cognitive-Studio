@@ -1,11 +1,12 @@
 import { expect, test } from "@playwright/test";
 
-test("opens the workspace-scoped product shell", async ({ page }) => {
+test("requires authentication for Studio", async ({ page }) => {
   await page.goto("/studio");
 
-  await expect(page.getByRole("heading", { name: "让一本书，成为可聆听、可观看的理解" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "知识库" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "上传一本书" })).toBeVisible();
+  await expect(page).toHaveURL(/\/sign-in\?callbackUrl=%2Fstudio$/);
+  await expect(page.locator('input[name="email"]')).toBeVisible();
+  await expect(page.locator('input[name="password"]')).toBeVisible();
+  expect((await page.request.post("/api/studio/upload", { data: { filename: "unauthenticated.md", mediaType: "text/markdown", sizeBytes: 1 } })).status()).toBe(403);
 });
 
 test("serves the health contract over HTTP", async ({ request }) => {
