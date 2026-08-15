@@ -18,7 +18,10 @@ describe("Phase 7 production renderer envelope", () => diagnosticIt("measures re
       const intermediates = starts.filter((item) => item.step === "SCENE_VISUAL_RENDER").map((item) => item.output);
       const totalIntermediateBytes = (await Promise.all(intermediates.map((path) => stat(path)))).reduce((total, value) => total + value.size, 0);
       const finalBytes = (await stat(output.path)).size, finalStart = starts.find((item) => item.step === "FINAL_COMPOSITION")!.at;
-      measurements.push({ durationMs, width: input.width, height: input.height, fps: input.fps, wallMs: Math.round(performance.now() - began), scenePreRenderMs: Math.round(finalStart - starts[0]!.at), finalCompositionMs: Math.round(performance.now() - finalStart), totalIntermediateBytes, finalBytes, drawtextCount: 0, sceneCount: intermediates.length });
+      const sceneStarts = starts.filter((item) => item.step === "SCENE_VISUAL_RENDER");
+      const slowestSceneVisualMs = Math.round(Math.max(...sceneStarts.map((item, index) => (index + 1 < sceneStarts.length ? sceneStarts[index + 1]!.at : finalStart) - item.at)));
+      const finalCompositionMs = Math.round(performance.now() - finalStart);
+      measurements.push({ durationMs, width: input.width, height: input.height, fps: input.fps, wallMs: Math.round(performance.now() - began), scenePreRenderMs: Math.round(finalStart - starts[0]!.at), slowestSceneVisualMs, finalCompositionMs, slowestSubprocessMs: Math.max(slowestSceneVisualMs, finalCompositionMs), totalIntermediateBytes, finalBytes, drawtextCount: 0, sceneCount: intermediates.length });
     } finally { await output.cleanup(); }
   }
   await writeFile(join(root!, "production-envelope-summary.json"), `${JSON.stringify(measurements, null, 2)}\n`);

@@ -1075,11 +1075,11 @@ export class FfmpegVideoRenderer implements VideoRenderer {
         const escapePath = (path: string) => path.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
         const filter = `color=c=${palette}:s=${input.width}x${input.height}:r=${input.fps}:d=${duration},drawbox=x=70:y=250:w=${input.width - 140}:h=10:color=0x38bdf8@0.9:t=fill,drawtext=textfile='${escapePath(primary)}':fontcolor=white:fontsize=${Math.max(34, Math.floor(input.width / 11))}:x=(w-text_w)/2:y=h*0.32:line_spacing=12:enable='between(t,0.15,${duration})',drawtext=textfile='${escapePath(secondary)}':fontcolor=0x94a3b8:fontsize=${Math.max(22, Math.floor(input.width / 20))}:x=(w-text_w)/2:y=h*0.52:line_spacing=8`;
         const sceneVideo = join(directory, `scene-${String(index).padStart(3, "0")}.mkv`);
-        const sceneArgs = ["-y", "-f", "lavfi", "-i", filter, "-an", "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p", sceneVideo];
+        const sceneArgs = ["-y", "-loglevel", "error", "-f", "lavfi", "-i", filter, "-an", "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p", sceneVideo];
         await this.runStep(directory, sceneArgs, sceneVideo, input, "SCENE_VISUAL_RENDER", scene.ordinal);
         sceneVideos.push(sceneVideo);
       }
-      const args = ["-y"];
+      const args = ["-y", "-loglevel", "error"];
       for (const sceneVideo of sceneVideos) args.push("-i", sceneVideo);
       for (const [index, scene] of ordered.entries()) {
         const audio = audioByScene.get(scene.id)!;
