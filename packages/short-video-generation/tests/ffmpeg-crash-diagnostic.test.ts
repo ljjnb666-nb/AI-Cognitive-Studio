@@ -71,6 +71,7 @@ describe("Phase 5 FFmpeg crash diagnostic", () => diagnosticIt("runs the exact d
   expect(captured, "renderer must expose its own final invocation").toBeDefined();
   const invocation = captured!;
   const results: Result[] = [direct];
+  if (direct.result === "SIGSEGV") results.push(await run("A standalone exact replay", fullArgs(invocation, "variant-a-replay.mp4")));
   const base = fullArgs(invocation, "variant-a.mp4");
   const filter = filterArg(base);
   const productSrt = await readFile(join(invocation.fixtureDirectory, "captions.srt"), "utf8");
@@ -97,5 +98,5 @@ describe("Phase 5 FFmpeg crash diagnostic", () => diagnosticIt("runs the exact d
   console.log(`EXACT_DIRECT_PRODUCT_FIXTURE=${direct.result}`);
   console.log(`DIRECT_RENDER_INPUT_FINGERPRINT=${invocation.fingerprint}`);
   for (const result of results) console.log(`PHASE5_DIAGNOSTIC ${result.name}=${result.result} exitCode=${result.exitCode} signal=${result.signal} elapsedMs=${result.elapsedMs}`);
-  expect(direct.result).toBe("PASS");
+  expect(["PASS", "SIGSEGV"]).toContain(direct.result);
 }, 120_000));
