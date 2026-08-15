@@ -33,7 +33,7 @@ async function execute(captured: CapturedFfmpegInvocation, variant: string, atte
   const commandFile = join(root!, `command-${variant}-${attempt}.json`), started = performance.now(); await writeFile(commandFile, `${JSON.stringify({ argv: args, filterComplex }, null, 2)}\n`);
   const result = await invoke("ffmpeg", ["-loglevel", "error", ...args]), output = args.at(-1)!, classification = classify(result.code, result.signal, result.timedOut, result.spawnError);
   let final = classification, stderrTail = tail(result.stderr); if (classification === "SUCCESS") { const probe = await invoke("ffprobe", ["-v", "error", "-show_entries", "format=format_name", "-of", "json", output], 30_000); if (probe.code === 0 && JSON.parse(probe.stdout).format?.format_name?.split(",").includes("mp4")) await rm(output, { force: true }); else { final = "UNKNOWN"; stderrTail = `ffprobe failed or non-MP4: ${tail(probe.stderr || probe.stdout)}`; } }
-  const core = result.pid !== null && existsSync(join(process.env.PHASE5_FFMPEG_CORE_DIRECTORY ?? root!, `core.ffmpeg.${result.pid}`));
+  const core = result.pid !== null && existsSync(join(process.env.PHASE5_FFMPEG_CORE_DIRECTORY ?? root!, `core.${result.pid}`));
   const metadata: Attempt = { variant, attempt, pid: result.pid ?? null, exitCode: result.code, signal: result.signal, classification: final, elapsedMs: Math.round(performance.now() - started), coreDump: core, stderrTail, stderrFingerprint: final === "SUCCESS" ? undefined : sha(stderrTail.replaceAll(captured.fixtureDirectory, "<fixture>").replace(/0x[0-9a-f]+/gi, "<address>")), commandFile: commandFile.split(/[\\/]/).at(-1)!, filterComplex };
   await appendFile(join(root!, "attempts.jsonl"), `${JSON.stringify(metadata)}\n`); return metadata;
 }

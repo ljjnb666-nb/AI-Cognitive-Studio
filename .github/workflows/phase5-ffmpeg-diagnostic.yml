@@ -36,7 +36,7 @@ jobs:
       - name: Configure and prove core capture
         run: |
           diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"; mkdir -p "$diagnostic_dir"
-          { echo "ulimit_before=$(ulimit -c)"; cat /proc/sys/kernel/core_pattern; sudo sysctl -w kernel.core_pattern="$diagnostic_dir/core.%e.%p"; ulimit -c unlimited; (bash -c 'kill -SEGV $$') || true; probe="$(find "$diagnostic_dir" -maxdepth 1 -name 'core.*' -type f -print -quit)"; test -n "$probe"; mv "$probe" "$diagnostic_dir/core-probe.dump"; echo "ulimit_after=$(ulimit -c)"; } > "$diagnostic_dir/core-configuration.txt" 2>&1
+          { echo "ulimit_before=$(ulimit -c)"; cat /proc/sys/kernel/core_pattern; sudo sysctl -w kernel.core_pattern="$diagnostic_dir/core.%p"; ulimit -c unlimited; (bash -c 'kill -SEGV $$') || true; probe="$(find "$diagnostic_dir" -maxdepth 1 -name 'core.[0-9]*' -type f -print -quit)"; test -n "$probe"; mv "$probe" "$diagnostic_dir/core-probe.dump"; echo "ulimit_after=$(ulimit -c)"; } > "$diagnostic_dir/core-configuration.txt" 2>&1
       - name: Record native environment
         run: |
           diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"
@@ -53,13 +53,20 @@ jobs:
         if: always()
         run: |
           diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"
-          core="$(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.ffmpeg.*' -print -quit)"
+          core="$(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.[0-9]*' -print -quit)"
           if [ -z "$core" ]; then echo "DRAWTEXT_ONLY_CORE=NOT_CAPTURED" > "$diagnostic_dir/core-result.txt"; exit 0; fi
           sha256sum "$(command -v ffmpeg)" > "$diagnostic_dir/ffmpeg-sha256.txt"
           gdb "$(command -v ffmpeg)" "$core" --batch -ex "set pagination off" -ex "info threads" -ex "thread apply all bt" -ex "thread apply all bt full" -ex "info sharedlibrary" -ex "info registers" -ex "frame 0" -ex "x/i \$pc" > "$diagnostic_dir/drawtext-only-gdb.txt" 2>&1 || true
           mv "$core" "$diagnostic_dir/drawtext-only-core.dump"
-          find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.ffmpeg.*' -delete
+          find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.[0-9]*' -delete
           echo "DRAWTEXT_ONLY_CORE=CAPTURED" > "$diagnostic_dir/core-result.txt"
+      - name: Validate bounded upload manifest
+        if: always()
+        run: |
+          diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"
+          find "$diagnostic_dir" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | head -200 | tee "$diagnostic_dir/upload-manifest.txt"
+          invalid="$(find "$diagnostic_dir" -maxdepth 1 -type f -printf '%f\n' | grep -E '[":<>|*?]' || true)"
+          test -z "$invalid" || { echo "Unsafe artifact filenames:"; echo "$invalid"; exit 1; }
       - name: Upload bounded diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
