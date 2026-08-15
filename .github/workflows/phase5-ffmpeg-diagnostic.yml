@@ -30,6 +30,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Generate Prisma client for package import graph
         run: pnpm db:generate
+        env:
+          DATABASE_URL: postgresql://diagnostic:diagnostic@127.0.0.1:5432/diagnostic?schema=public
       - name: Install FFmpeg debugging tools
         run: sudo apt-get update && sudo apt-get install -y ffmpeg gdb
       - name: Record bounded native media stack
