@@ -1,4 +1,4 @@
-name: Phase 5 FFmpeg diagnostic
+name: Phase 5 Drawtext Lifecycle Confirmation
 
 on:
   pull_request:
@@ -14,152 +14,51 @@ on:
         default: feat/phase-7-production-auth
 
 jobs:
-  diagnose:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+  drawtext-lifecycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
+        with: { ref: ${{ inputs.ref }} }
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.30.3
+        with: { version: 10.30.3 }
       - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - name: Install workspace dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Generate Prisma client for package import graph
-        run: pnpm db:generate
-        env:
-          DATABASE_URL: postgresql://diagnostic:diagnostic@127.0.0.1:5432/diagnostic?schema=public
-      - name: Install FFmpeg debugging tools
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg gdb libc6-dbg
-      - name: Configure diagnostic core capture
+        with: { node-version: 24, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+        env: { DATABASE_URL: postgresql://diagnostic:diagnostic@127.0.0.1:5432/diagnostic?schema=public }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg gdb libc6-dbg
+      - name: Configure and prove core capture
         run: |
-          mkdir -p "$RUNNER_TEMP/phase5-ffmpeg-diagnostic"
-          {
-            echo "ulimit_before=$(ulimit -c)"
-            cat /proc/sys/kernel/core_pattern
-            cat /proc/sys/kernel/core_uses_pid || true
-            sudo sysctl -w kernel.core_pattern="$RUNNER_TEMP/phase5-ffmpeg-diagnostic/core.%e.%p" || true
-            ulimit -c unlimited
-            (bash -c 'kill -SEGV $$') || true
-            probe_core="$(find "$RUNNER_TEMP/phase5-ffmpeg-diagnostic" -maxdepth 1 -type f -name 'core.*' -print -quit)"
-            test -n "$probe_core"
-            mv "$probe_core" "$RUNNER_TEMP/phase5-ffmpeg-diagnostic/core-probe.dump"
-            echo "ulimit_after=$(ulimit -c)"
-            echo "core_pattern_after=$(cat /proc/sys/kernel/core_pattern)"
-          } > "$RUNNER_TEMP/phase5-ffmpeg-diagnostic/core-configuration.txt" 2>&1
-      - name: Record bounded native media stack
+          diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"; mkdir -p "$diagnostic_dir"
+          { echo "ulimit_before=$(ulimit -c)"; cat /proc/sys/kernel/core_pattern; sudo sysctl -w kernel.core_pattern="$diagnostic_dir/core.%e.%p"; ulimit -c unlimited; (bash -c 'kill -SEGV $$') || true; probe="$(find "$diagnostic_dir" -maxdepth 1 -name 'core.*' -type f -print -quit)"; test -n "$probe"; mv "$probe" "$diagnostic_dir/core-probe.dump"; echo "ulimit_after=$(ulimit -c)"; } > "$diagnostic_dir/core-configuration.txt" 2>&1
+      - name: Record native environment
         run: |
-          mkdir -p "$RUNNER_TEMP/phase5-ffmpeg-diagnostic"
-          {
-            uname -a
-            cat /etc/os-release
-            ffmpeg -version
-            ffprobe -version
-            ffmpeg -buildconf
-            ffmpeg -filters
-            ffmpeg -encoders
-            ffmpeg -decoders
-            ldd "$(command -v ffmpeg)"
-            dpkg-query -W ffmpeg libass9 'libavfilter*' 'libavcodec*' 'libavformat*' libfontconfig1 libfreetype6 libharfbuzz0b libfribidi0 || true
-            fc-match sans
-            fc-match "DejaVu Sans"
-            fc-list | head -n 50
-            ulimit -a
-            free -h
-            df -h
-          } > "$RUNNER_TEMP/phase5-ffmpeg-diagnostic/native-stack.txt" 2>&1
-          sed -e "s|$RUNNER_TEMP|<tmp>|g" "$RUNNER_TEMP/phase5-ffmpeg-diagnostic/native-stack.txt"
-      - name: Replay exact direct renderer fixture and reduction matrix
-        run: |
-          ulimit -c unlimited
-          pnpm --filter @ai-cognitive/short-video-generation exec vitest run tests/ffmpeg-crash-diagnostic.test.ts --reporter verbose
+          diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"
+          { uname -a; cat /etc/os-release; ffmpeg -version; ffprobe -version; ffmpeg -buildconf; ldd "$(command -v ffmpeg)"; dpkg-query -W ffmpeg libass9 'libavfilter*' 'libavcodec*' 'libavformat*' libfontconfig1 libfreetype6 libharfbuzz0b libfribidi0; fc-match sans; } > "$diagnostic_dir/native-stack.txt" 2>&1
+      - name: Confirm drawtext-only lifecycle and classify every attempt
+        run: ulimit -c unlimited; pnpm --filter @ai-cognitive/short-video-generation exec vitest run tests/ffmpeg-crash-diagnostic.test.ts --reporter verbose
         env:
           NODE_ENV: test
-          PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-ffmpeg-diagnostic
-          PHASE5_FFMPEG_MATRIX_ATTEMPTS: "30"
-          PHASE5_FFMPEG_FONTLESS_ATTEMPTS: "50"
-      - name: Post-mortem native core analysis
+          PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-drawtext-lifecycle
+          PHASE5_FFMPEG_CORE_DIRECTORY: ${{ runner.temp }}/phase5-drawtext-lifecycle
+          PHASE5_DRAWTEXT_ATTEMPTS: "50"
+          PHASE5_MINIMAL_DRAWTEXT_ATTEMPTS: "30"
+      - name: Analyze the representative drawtext-only core
         if: always()
         run: |
-          diagnostic_dir="$RUNNER_TEMP/phase5-ffmpeg-diagnostic"
-          core_file="$(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.*' -print -quit)"
-          if [ -z "$core_file" ]; then
-            echo "CORE_DUMP_CONFIGURATION=NOT_WORKING" | tee "$diagnostic_dir/core-result.txt"
-            exit 0
-          fi
-          echo "CORE_DUMP_CONFIGURATION=WORKING" | tee "$diagnostic_dir/core-result.txt"
+          diagnostic_dir="$RUNNER_TEMP/phase5-drawtext-lifecycle"
+          core="$(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.ffmpeg.*' -print -quit)"
+          if [ -z "$core" ]; then echo "DRAWTEXT_ONLY_CORE=NOT_CAPTURED" > "$diagnostic_dir/core-result.txt"; exit 0; fi
           sha256sum "$(command -v ffmpeg)" > "$diagnostic_dir/ffmpeg-sha256.txt"
-          gdb "$(command -v ffmpeg)" "$core_file" --batch \
-            -ex "set pagination off" -ex "info threads" -ex "thread apply all bt" \
-            -ex "thread apply all bt full" -ex "info sharedlibrary" -ex "info registers" \
-            -ex "frame 0" -ex "x/i \$pc" > "$diagnostic_dir/gdb-core.txt" 2>&1 || true
-          mv "$core_file" "$diagnostic_dir/core-ffmpeg.dump"
-          while IFS= read -r extra_core; do
-            rm -f "$extra_core"
-          done < <(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.*' -print)
-      - name: Upload bounded diagnostic artifacts
+          gdb "$(command -v ffmpeg)" "$core" --batch -ex "set pagination off" -ex "info threads" -ex "thread apply all bt" -ex "thread apply all bt full" -ex "info sharedlibrary" -ex "info registers" -ex "frame 0" -ex "x/i \$pc" > "$diagnostic_dir/drawtext-only-gdb.txt" 2>&1 || true
+          mv "$core" "$diagnostic_dir/drawtext-only-core.dump"
+          find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.ffmpeg.*' -delete
+          echo "DRAWTEXT_ONLY_CORE=CAPTURED" > "$diagnostic_dir/core-result.txt"
+      - name: Upload bounded diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: phase5-ffmpeg-diagnostic
-          path: ${{ runner.temp }}/phase5-ffmpeg-diagnostic
-          if-no-files-found: warn
-
-  diagnose-new-stack:
-    # Isolated comparison only; it does not alter the hosted runner's FFmpeg packages.
-    runs-on: ubuntu-latest
-    container: ubuntu:25.10
-    timeout-minutes: 45
-    steps:
-      - name: Install base tools
-        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git ffmpeg fontconfig fonts-dejavu-core
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.30.3
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - name: Install workspace dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Generate Prisma client for package import graph
-        run: pnpm db:generate
-        env:
-          DATABASE_URL: postgresql://diagnostic:diagnostic@127.0.0.1:5432/diagnostic?schema=public
-      - name: Record isolated native media stack
-        run: |
-          mkdir -p "$RUNNER_TEMP/phase5-ffmpeg-new-stack"
-          {
-            uname -a
-            cat /etc/os-release
-            ffmpeg -version
-            ffprobe -version
-            ffmpeg -buildconf
-            ldd "$(command -v ffmpeg)"
-            dpkg-query -W ffmpeg libass9 'libavfilter*' 'libavcodec*' 'libavformat*' libfontconfig1 libfreetype6 libharfbuzz0b libfribidi0 || true
-            fc-match sans
-            fc-match "DejaVu Sans"
-          } > "$RUNNER_TEMP/phase5-ffmpeg-new-stack/native-stack.txt" 2>&1
-          cat "$RUNNER_TEMP/phase5-ffmpeg-new-stack/native-stack.txt"
-      - name: Replay identical deterministic matrix on isolated stack
-        run: pnpm --filter @ai-cognitive/short-video-generation exec vitest run tests/ffmpeg-crash-diagnostic.test.ts --reporter verbose
-        env:
-          NODE_ENV: test
-          PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-ffmpeg-new-stack
-          PHASE5_FFMPEG_MATRIX_ATTEMPTS: "30"
-          PHASE5_FFMPEG_FONTLESS_ATTEMPTS: "50"
-      - name: Upload isolated-stack artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase5-ffmpeg-new-stack
-          path: ${{ runner.temp }}/phase5-ffmpeg-new-stack
-          if-no-files-found: warn
+          name: phase5-drawtext-lifecycle
+          path: ${{ runner.temp }}/phase5-drawtext-lifecycle
+          if-no-files-found: error
