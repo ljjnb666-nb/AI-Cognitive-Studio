@@ -1,6 +1,9 @@
 name: Phase 5 FFmpeg diagnostic
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/phase5-ffmpeg-diagnostic.yml"
   workflow_dispatch:
     inputs:
       ref:
