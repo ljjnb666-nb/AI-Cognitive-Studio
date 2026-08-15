@@ -16,7 +16,7 @@ on:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,6 +82,7 @@ jobs:
           NODE_ENV: test
           PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-ffmpeg-diagnostic
           PHASE5_FFMPEG_MATRIX_ATTEMPTS: "30"
+          PHASE5_FFMPEG_FONTLESS_ATTEMPTS: "50"
       - name: Post-mortem native core analysis
         if: always()
         run: |
@@ -98,10 +99,8 @@ jobs:
             -ex "thread apply all bt full" -ex "info sharedlibrary" -ex "info registers" \
             -ex "frame 0" -ex "x/i \$pc" > "$diagnostic_dir/gdb-core.txt" 2>&1 || true
           mv "$core_file" "$diagnostic_dir/core-ffmpeg.dump"
-          index=0
           while IFS= read -r extra_core; do
-            index=$((index + 1))
-            mv "$extra_core" "$diagnostic_dir/core-ffmpeg-extra-$index.dump"
+            rm -f "$extra_core"
           done < <(find "$diagnostic_dir" -maxdepth 1 -type f -name 'core.*' -print)
       - name: Upload bounded diagnostic artifacts
         if: always()
@@ -115,7 +114,7 @@ jobs:
     # Isolated comparison only; it does not alter the hosted runner's FFmpeg packages.
     runs-on: ubuntu-latest
     container: ubuntu:25.10
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - name: Install base tools
         run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git ffmpeg fontconfig fonts-dejavu-core
@@ -156,6 +155,7 @@ jobs:
           NODE_ENV: test
           PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-ffmpeg-new-stack
           PHASE5_FFMPEG_MATRIX_ATTEMPTS: "30"
+          PHASE5_FFMPEG_FONTLESS_ATTEMPTS: "50"
       - name: Upload isolated-stack artifacts
         if: always()
         uses: actions/upload-artifact@v4
