@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/phase5-ffmpeg-diagnostic.yml"
+      - "packages/short-video-generation/tests/ffmpeg-crash-diagnostic.test.ts"
+      - "packages/short-video-generation/tests/ffmpeg-diagnostic.ts"
   workflow_dispatch:
     inputs:
       ref:
@@ -79,7 +81,7 @@ jobs:
         env:
           NODE_ENV: test
           PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-ffmpeg-diagnostic
-          PHASE5_FFMPEG_MAX_ATTEMPTS: "50"
+          PHASE5_FFMPEG_MATRIX_ATTEMPTS: "30"
       - name: Post-mortem native core analysis
         if: always()
         run: |
@@ -107,4 +109,57 @@ jobs:
         with:
           name: phase5-ffmpeg-diagnostic
           path: ${{ runner.temp }}/phase5-ffmpeg-diagnostic
+          if-no-files-found: warn
+
+  diagnose-new-stack:
+    # Isolated comparison only; it does not alter the hosted runner's FFmpeg packages.
+    runs-on: ubuntu-latest
+    container: ubuntu:25.10
+    timeout-minutes: 25
+    steps:
+      - name: Install base tools
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git ffmpeg fontconfig fonts-dejavu-core
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Generate Prisma client for package import graph
+        run: pnpm db:generate
+        env:
+          DATABASE_URL: postgresql://diagnostic:diagnostic@127.0.0.1:5432/diagnostic?schema=public
+      - name: Record isolated native media stack
+        run: |
+          mkdir -p "$RUNNER_TEMP/phase5-ffmpeg-new-stack"
+          {
+            uname -a
+            cat /etc/os-release
+            ffmpeg -version
+            ffprobe -version
+            ffmpeg -buildconf
+            ldd "$(command -v ffmpeg)"
+            dpkg-query -W ffmpeg libass9 'libavfilter*' 'libavcodec*' 'libavformat*' libfontconfig1 libfreetype6 libharfbuzz0b libfribidi0 || true
+            fc-match sans
+            fc-match "DejaVu Sans"
+          } > "$RUNNER_TEMP/phase5-ffmpeg-new-stack/native-stack.txt" 2>&1
+          cat "$RUNNER_TEMP/phase5-ffmpeg-new-stack/native-stack.txt"
+      - name: Replay identical deterministic matrix on isolated stack
+        run: pnpm --filter @ai-cognitive/short-video-generation exec vitest run tests/ffmpeg-crash-diagnostic.test.ts --reporter verbose
+        env:
+          NODE_ENV: test
+          PHASE5_FFMPEG_DIAGNOSTIC_DIR: ${{ runner.temp }}/phase5-ffmpeg-new-stack
+          PHASE5_FFMPEG_MATRIX_ATTEMPTS: "30"
+      - name: Upload isolated-stack artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-ffmpeg-new-stack
+          path: ${{ runner.temp }}/phase5-ffmpeg-new-stack
           if-no-files-found: warn
