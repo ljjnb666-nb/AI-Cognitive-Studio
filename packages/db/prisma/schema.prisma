@@ -43,9 +43,11 @@ enum ProviderCredentialStatus {
 
 enum ProviderInvocationStatus {
   PENDING
+  RUNNING
   SUCCEEDED
   FAILED
   BLOCKED
+  RECONCILIATION_REQUIRED
 }
 
 enum ProviderInvocationAttemptStatus {
@@ -54,6 +56,7 @@ enum ProviderInvocationAttemptStatus {
   REMOTE_FAILURE
   TIMEOUT
   CANCELLED_AFTER_REQUEST
+  REMOTE_OUTCOME_UNKNOWN
 }
 
 enum ProviderUsageStatus {
@@ -332,37 +335,37 @@ model User {
 }
 
 model Workspace {
-  id                       String                      @id @default(cuid())
-  name                     String
-  createdAt                DateTime                    @default(now())
-  updatedAt                DateTime                    @updatedAt
-  members                  WorkspaceMember[]
-  projects                 Project[]
-  works                    Work[]
-  sources                  Source[]
-  sourceBlobs              SourceBlob[]
-  uploadSessions           UploadSession[]
-  jobs                     Job[]
-  chunkSets                ChunkSet[]
-  analysisRuns             BookAnalysisRun[]
-  memoryItems              BookMemoryItem[]
-  podcastProjects          PodcastProject[]
-  podcastEpisodes          PodcastEpisode[]
-  podcastGenerationRuns    PodcastGenerationRun[]
-  podcastVoiceProfiles     PodcastVoiceProfile[]
-  audioGenerationRuns      AudioGenerationRun[]
-  podcastAudioRevisions    PodcastAudioRevision[]
-  shortVideoProjects       ShortVideoProject[]
-  shortVideoGenerationRuns ShortVideoGenerationRun[]
-  shortVideoRevisions      ShortVideoRevision[]
-  providerConnections      ProviderConnection[]
-  providerRoutes           ProviderRouteBinding[]
-  providerSnapshots        ProviderExecutionSnapshot[]
-  providerInvocations      ProviderInvocation[]
+  id                         String                      @id @default(cuid())
+  name                       String
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  members                    WorkspaceMember[]
+  projects                   Project[]
+  works                      Work[]
+  sources                    Source[]
+  sourceBlobs                SourceBlob[]
+  uploadSessions             UploadSession[]
+  jobs                       Job[]
+  chunkSets                  ChunkSet[]
+  analysisRuns               BookAnalysisRun[]
+  memoryItems                BookMemoryItem[]
+  podcastProjects            PodcastProject[]
+  podcastEpisodes            PodcastEpisode[]
+  podcastGenerationRuns      PodcastGenerationRun[]
+  podcastVoiceProfiles       PodcastVoiceProfile[]
+  audioGenerationRuns        AudioGenerationRun[]
+  podcastAudioRevisions      PodcastAudioRevision[]
+  shortVideoProjects         ShortVideoProject[]
+  shortVideoGenerationRuns   ShortVideoGenerationRun[]
+  shortVideoRevisions        ShortVideoRevision[]
+  providerConnections        ProviderConnection[]
+  providerRoutes             ProviderRouteBinding[]
+  providerSnapshots          ProviderExecutionSnapshot[]
+  providerInvocations        ProviderInvocation[]
   providerInvocationAttempts ProviderInvocationAttempt[]
-  providerUsageEvents      ProviderUsageEvent[]
-  providerAuditEvents      ProviderAuditEvent[]
-  defaultForUsers          User[]                      @relation("DefaultWorkspace")
+  providerUsageEvents        ProviderUsageEvent[]
+  providerAuditEvents        ProviderAuditEvent[]
+  defaultForUsers            User[]                      @relation("DefaultWorkspace")
 }
 
 model ProviderConnection {
@@ -458,7 +461,7 @@ model ProviderExecutionSnapshot {
 }
 
 model ProviderInvocation {
-  id                  String                     @id @default(cuid())
+  id                  String                      @id @default(cuid())
   workspaceId         String
   snapshotId          String
   connectionId        String?
@@ -470,43 +473,48 @@ model ProviderInvocation {
   idempotencyKey      String
   requestFingerprint  String
   correlationId       String
-  status              ProviderInvocationStatus   @default(PENDING)
-  createdAt           DateTime                   @default(now())
+  status              ProviderInvocationStatus    @default(PENDING)
+  claimToken          String?
+  claimOwner          String?
+  claimExpiresAt      DateTime?
+  createdAt           DateTime                    @default(now())
   completedAt         DateTime?
-  workspace           Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  snapshot            ProviderExecutionSnapshot  @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  connection          ProviderConnection?        @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  credentialVersion   ProviderCredentialVersion? @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
+  workspace           Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  snapshot            ProviderExecutionSnapshot   @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  connection          ProviderConnection?         @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  credentialVersion   ProviderCredentialVersion?  @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
   usageEvents         ProviderUsageEvent[]
   attempts            ProviderInvocationAttempt[]
 
   @@unique([workspaceId, idempotencyKey])
   @@unique([id, workspaceId])
   @@index([workspaceId, createdAt])
+  @@index([workspaceId, status, claimExpiresAt])
 }
 
 model ProviderInvocationAttempt {
-  id String @id @default(cuid())
-  workspaceId String
-  invocationId String
-  attemptNumber Int
-  status ProviderInvocationAttemptStatus @default(RUNNING)
-  failureCode String?
+  id              String                          @id @default(cuid())
+  workspaceId     String
+  invocationId    String
+  attemptNumber   Int
+  status          ProviderInvocationAttemptStatus @default(RUNNING)
+  failureCode     String?
   remoteRequestId String?
-  latencyMs Int?
-  createdAt DateTime @default(now())
-  startedAt DateTime @default(now())
-  completedAt DateTime?
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  invocation ProviderInvocation @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  usageEvents ProviderUsageEvent[]
+  latencyMs       Int?
+  createdAt       DateTime                        @default(now())
+  startedAt       DateTime                        @default(now())
+  completedAt     DateTime?
+  workspace       Workspace                       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invocation      ProviderInvocation              @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  usageEvents     ProviderUsageEvent[]
+
   @@unique([id, invocationId, workspaceId])
   @@unique([invocationId, attemptNumber])
   @@index([workspaceId, invocationId])
 }
 
 model ProviderUsageEvent {
-  id                    String              @id @default(cuid())
+  id                    String                    @id @default(cuid())
   workspaceId           String
   invocationId          String
   attemptId             String
@@ -525,11 +533,11 @@ model ProviderUsageEvent {
   latencyMs             Int?
   remoteRequestId       String?
   metadata              Json?
-  createdAt             DateTime            @default(now())
-  workspace             Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  invocation            ProviderInvocation  @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  createdAt             DateTime                  @default(now())
+  workspace             Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invocation            ProviderInvocation        @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   attempt               ProviderInvocationAttempt @relation(fields: [attemptId, invocationId, workspaceId], references: [id, invocationId, workspaceId], onDelete: Restrict)
-  connection            ProviderConnection? @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  connection            ProviderConnection?       @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
 
   @@index([workspaceId, invocationId, createdAt])
 }

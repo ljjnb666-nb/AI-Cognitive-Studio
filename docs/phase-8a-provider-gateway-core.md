@@ -20,6 +20,16 @@ Credential states are `ACTIVE`, `RETIRED`, and `REVOKED`. Rotation retires the p
 
 Custom endpoints are validated before a future transport can use them: canonical HTTPS only, no credentials/fragments/query, and DNS answers are captured in a validated endpoint object. Public deployments reject loopback, private, link-local, shared, multicast/reserved, and IPv4-mapped private targets. `ALLOW_PRIVATE_PROVIDER_ENDPOINTS=true` only permits private endpoints outside production; production always rejects them.
 
+## Durable execution
+
+The public gateway request requires a canonical lowercase SHA-256 `inputHash`; callers cannot provide the final request fingerprint. The gateway computes that fingerprint from the resolved route, pinned provider configuration and credential lineage, capability/version metadata, and input identity.
+
+PostgreSQL is the source of execution ownership. A new claim creates the immutable snapshot and logical invocation in one transaction and records a bounded claim token, worker identity, and expiry. A matching completed invocation returns `ALREADY_PROCESSED`; an active invocation returns `IN_PROGRESS`; a matching stale invocation with no durable attempt can be reclaimed. A stale owner cannot start an attempt or finalize a newer owner. Invocations that may have crossed the remote boundary are never reclaimed automatically.
+
+Each remote call has its own durable attempt row. Before every attempt the gateway revalidates ownership and the pinned connection/credential, applies circuit, rate, and concurrency controls, then creates the running attempt immediately before calling the adapter. It records normalized outcome, bounded request ID and latency, and reported append-only usage. A known remote success whose local persistence cannot finish is marked `RECONCILIATION_REQUIRED` rather than replayed. This is duplicate suppression and durable local ownership, not a claim of provider-side exactly-once execution.
+
+Workspace credentials are selected only when `ACTIVE`; a snapshot can continue using an exact pinned `RETIRED` credential, but `REVOKED`, disabled, and revoked connection states block execution. `REVOKED` connections are terminal and cannot be re-enabled, rotated, or newly routed.
+
 ## Persistence and deferred work
 
 The additive `phase_8a_provider_gateway_core` migration adds provider connections, encrypted credential versions, route bindings, immutable execution snapshots, invocation provenance, append-only usage events, and append-only audit events. Workspace-owned references use composite tenant relations where provider objects cross boundaries.

@@ -11,4 +11,5 @@ export * from "./runtime/gateway.js";
 export * from "./authorization.js";
 export * from "./runtime/redis-controls.js";
 export * from "./persistence.js";
+export * from "./execution-repository.js";
 export * from "./testing/fake-adapter.js";
