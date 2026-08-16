@@ -5,7 +5,7 @@ import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { readEnvironment } from "@ai-cognitive/shared/server";
 import { DeterministicFakeEmbeddingProvider, buildBookContext, estimateAnalysisTokens, materializeChunkSet, requestBookAnalysis, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "../../../packages/book-intelligence/src/index.js";
 import { createBookAnalysisWorker, dispatchBookAnalysis } from "../src/book-analysis.js";
-import { createSourceIngestionWorker, dispatchSourceIngestion } from "../src/source-ingestion.js";
+import { createSourceIngestionQueue, createSourceIngestionWorker, dispatchSourceIngestionWithQueue } from "../src/source-ingestion.js";
 
 const environment = readEnvironment();
 const storage = () => new S3CompatibleStorageProvider({ endpoint: environment.S3_ENDPOINT, publicEndpoint: environment.S3_PUBLIC_ENDPOINT, region: environment.S3_REGION, bucket: environment.S3_BUCKET, accessKey: environment.S3_ACCESS_KEY, secretKey: environment.S3_SECRET_KEY, forcePathStyle: environment.S3_FORCE_PATH_STYLE });
@@ -58,10 +58,10 @@ describe("real Phase 2 book intelligence infrastructure", () => {
     expect((await fetch(intent.upload.url, { method: "PUT", headers: intent.upload.headers, body: text })).ok).toBe(true);
     const document = await service.completeUpload({ userId: user.id, workspaceId: workspace.id }, intent.session.id);
     const ingestion = await prisma.ingestionRun.findFirstOrThrow({ where: { sourceDocumentId: document.id } });
-    const sourceWorker = createSourceIngestionWorker(environment), provider = new E2EProvider(), embeddings = new DeterministicFakeEmbeddingProvider(), bookWorker = createBookAnalysisWorker(environment, { analysisProvider: provider, embeddingProvider: embeddings });
+    const sourcePrefix = `phase2-e2e-${crypto.randomUUID().replaceAll("-", "")}`, sourceQueue = createSourceIngestionQueue(environment, { prefix: sourcePrefix }), sourceWorker = createSourceIngestionWorker(environment, { prefix: sourcePrefix }), provider = new E2EProvider(), embeddings = new DeterministicFakeEmbeddingProvider(), bookWorker = createBookAnalysisWorker(environment, { analysisProvider: provider, embeddingProvider: embeddings });
     try {
       await Promise.all([sourceWorker.waitUntilReady(), bookWorker.waitUntilReady()]);
-      await dispatchSourceIngestion(environment);
+      await dispatchSourceIngestionWithQueue(sourceQueue, environment);
       await expect.poll(async () => (await prisma.ingestionRun.findUniqueOrThrow({ where: { id: ingestion.id } })).status, { timeout: 20_000 }).toBe("SUCCEEDED");
       const currentExtraction = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
       const chunkSet = await materializeChunkSet({ workspaceId: workspace.id, sourceDocumentId: document.id, configuration: { targetSize: 55, hardMax: 70 } });
@@ -96,6 +96,7 @@ describe("real Phase 2 book intelligence infrastructure", () => {
       expect(provider.requests.every((request) => !request.systemInstructions.includes("send secrets"))).toBe(true);
     } finally {
       await sourceWorker.close();
+      await sourceQueue.close();
       await bookWorker.close();
       await cleanup(workspace.id, user.id).catch(() => undefined);
     }

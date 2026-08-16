@@ -40,8 +40,13 @@ export class ProviderExecutionRepository {
     if (existing.attempts.some(attempt => attempt.status === "SUCCEEDED")) return { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id };
     if (existing.attempts.length > 0) return { kind: existing.attempts.every(attempt => attempt.status === "REMOTE_FAILURE") ? "TERMINAL_FAILED" : "RECONCILIATION_REQUIRED", invocationId: existing.id };
     if (existing.attempts.length === 0 && (existing.status === "PENDING" || (existing.claimExpiresAt && existing.claimExpiresAt <= now))) {
-      const reclaimed = await this.db.providerInvocation.updateMany({ where: { id: existing.id, workspaceId: snapshot.workspaceId, claimToken: existing.claimToken ?? undefined, status: existing.status, OR: [{ claimExpiresAt: null }, { claimExpiresAt: { lte: now } }] }, data: { status: "RUNNING", claimToken, claimOwner: this.workerId, claimExpiresAt: expiresAt, completedAt: null } });
-      if (reclaimed.count === 1) return { kind: "OWNER", invocationId: existing.id, claimToken };
+      if (this.testClock) {
+        const reclaimed = await this.db.providerInvocation.updateMany({ where: { id: existing.id, workspaceId: snapshot.workspaceId, claimToken: existing.claimToken ?? undefined, status: existing.status, OR: [{ claimExpiresAt: null }, { claimExpiresAt: { lte: now } }] }, data: { status: "RUNNING", claimToken, claimOwner: this.workerId, claimExpiresAt: expiresAt, completedAt: null } });
+        if (reclaimed.count === 1) return { kind: "OWNER", invocationId: existing.id, claimToken };
+      } else {
+        const reclaimed = await this.db.$executeRaw`UPDATE "ProviderInvocation" SET "status" = 'RUNNING', "claimToken" = ${claimToken}, "claimOwner" = ${this.workerId}, "claimExpiresAt" = CURRENT_TIMESTAMP + (${this.leaseMs} * INTERVAL '1 millisecond'), "completedAt" = NULL WHERE "id" = ${existing.id} AND "workspaceId" = ${snapshot.workspaceId} AND NOT EXISTS (SELECT 1 FROM "ProviderInvocationAttempt" WHERE "invocationId" = "ProviderInvocation"."id") AND ("status" = 'PENDING' OR ("status" = 'RUNNING' AND "claimExpiresAt" <= CURRENT_TIMESTAMP))`;
+        if (reclaimed === 1) return { kind: "OWNER", invocationId: existing.id, claimToken };
+      }
     }
     return { kind: "IN_PROGRESS", invocationId: existing.id };
   }
@@ -51,13 +56,21 @@ export class ProviderExecutionRepository {
     if (!owned) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost");
   }
 
-  async renewClaim(workspaceId: string, invocationId: string, claimToken: string): Promise<void> { const now = await this.databaseNow(); const updated = await this.db.providerInvocation.updateMany({ where: { id: invocationId, workspaceId, claimToken, status: "RUNNING", claimExpiresAt: { gt: now } }, data: { claimExpiresAt: new Date(now.getTime() + this.leaseMs) } }); if (updated.count !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost"); }
+  async renewClaim(workspaceId: string, invocationId: string, claimToken: string): Promise<void> {
+    if (this.testClock) {
+      const now = this.testClock();
+      const updated = await this.db.providerInvocation.updateMany({ where: { id: invocationId, workspaceId, claimToken, status: "RUNNING", claimExpiresAt: { gt: now } }, data: { claimExpiresAt: new Date(now.getTime() + this.leaseMs) } });
+      if (updated.count !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost");
+      return;
+    }
+    const updated = await this.db.$executeRaw`UPDATE "ProviderInvocation" SET "claimExpiresAt" = CURRENT_TIMESTAMP + (${this.leaseMs} * INTERVAL '1 millisecond') WHERE "id" = ${invocationId} AND "workspaceId" = ${workspaceId} AND "claimToken" = ${claimToken} AND "status" = 'RUNNING' AND "claimExpiresAt" > CURRENT_TIMESTAMP`;
+    if (updated !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost");
+  }
   async releasePreRemoteClaim(workspaceId: string, invocationId: string, claimToken: string): Promise<void> { const updated = await this.db.providerInvocation.updateMany({ where: { id: invocationId, workspaceId, claimToken, status: "RUNNING", attempts: { none: {} } }, data: { status: "PENDING", claimToken: null, claimOwner: null, claimExpiresAt: null } }); if (updated.count !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost"); }
   async markStaleAttemptUnknown(workspaceId: string, invocationId: string): Promise<{ kind: "RECOVERED_TO_RECONCILIATION" | "ACTIVE_OWNER" | "NOT_APPLICABLE" }> { return this.db.$transaction(async tx => { const rows = await tx.$queryRaw<{ status: string; claimExpiresAt: Date | null }[]>`SELECT "status", "claimExpiresAt" FROM "ProviderInvocation" WHERE "id" = ${invocationId} AND "workspaceId" = ${workspaceId} FOR UPDATE`; const current = rows[0]; const clockRows = await tx.$queryRaw<{ now: Date }[]>`SELECT CURRENT_TIMESTAMP AS "now"`; const now = this.testClock ? this.testClock() : clockRows[0]?.now; if (!current || !now || current.status !== "RUNNING") return { kind: "NOT_APPLICABLE" }; if (!current.claimExpiresAt || current.claimExpiresAt > now) return { kind: "ACTIVE_OWNER" }; await tx.providerInvocationAttempt.updateMany({ where: { workspaceId, invocationId, status: "RUNNING" }, data: { status: "REMOTE_OUTCOME_UNKNOWN", completedAt: now, failureCode: "REMOTE_OUTCOME_UNKNOWN" } }); await tx.providerInvocation.update({ where: { id_workspaceId: { id: invocationId, workspaceId } }, data: { status: "RECONCILIATION_REQUIRED", claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } }); return { kind: "RECOVERED_TO_RECONCILIATION" }; }); }
   async startAttempt(workspaceId: string, invocationId: string, claimToken: string): Promise<StartedAttempt> {
     return this.db.$transaction(async tx => {
-      const now = await this.databaseNow(); const invocation = await tx.providerInvocation.findFirst({ where: { id: invocationId, workspaceId, claimToken, status: "RUNNING", claimExpiresAt: { gt: now } }, select: { id: true } });
-      if (!invocation) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost");
+      await this.assertOwnershipInTransaction(tx, workspaceId, invocationId, claimToken);
       const latest = await tx.providerInvocationAttempt.aggregate({ where: { invocationId, workspaceId }, _max: { attemptNumber: true } });
       return tx.providerInvocationAttempt.create({ data: { id: randomUUID(), workspaceId, invocationId, attemptNumber: (latest._max.attemptNumber ?? 0) + 1, status: "RUNNING" }, select: { id: true, attemptNumber: true } });
     });
@@ -76,21 +89,36 @@ export class ProviderExecutionRepository {
   }
 
   async completeAttempt(workspaceId: string, invocationId: string, claimToken: string, attemptId: string, status: "SUCCEEDED" | "REMOTE_FAILURE" | "TIMEOUT" | "CANCELLED_AFTER_REQUEST" | "REMOTE_OUTCOME_UNKNOWN", input: { failureCode?: string; remoteRequestId?: string; latencyMs: number }): Promise<void> {
-    const now = await this.databaseNow();
-    const updated = await this.db.providerInvocationAttempt.updateMany({ where: { id: attemptId, invocationId, workspaceId, status: "RUNNING", invocation: { is: { claimToken, status: "RUNNING", claimExpiresAt: { gt: now } } } }, data: { status, failureCode: bounded(input.failureCode), remoteRequestId: bounded(input.remoteRequestId), latencyMs: Math.max(0, Math.min(Math.round(input.latencyMs), 86_400_000)), completedAt: now } });
-    if (updated.count !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Attempt finalization was not owned");
+    await this.recordAttemptOutcome(workspaceId, invocationId, claimToken, attemptId, status, input);
+  }
+
+  async recordAttemptOutcome(workspaceId: string, invocationId: string, claimToken: string, attemptId: string, status: "SUCCEEDED" | "REMOTE_FAILURE" | "TIMEOUT" | "CANCELLED_AFTER_REQUEST" | "REMOTE_OUTCOME_UNKNOWN", input: { failureCode?: string; remoteRequestId?: string; latencyMs: number }, usage?: { snapshot: ExecutionSnapshot; attempt: StartedAttempt; status: "SUCCEEDED" | "FAILED"; usage?: ProviderUsage; exactSecret?: string }): Promise<void> {
+    await this.db.$transaction(async tx => {
+      await this.assertOwnershipInTransaction(tx, workspaceId, invocationId, claimToken);
+      const now = await this.databaseNow();
+      const updated = await tx.providerInvocationAttempt.updateMany({ where: { id: attemptId, invocationId, workspaceId, status: "RUNNING" }, data: { status, failureCode: bounded(input.failureCode), remoteRequestId: bounded(input.remoteRequestId), latencyMs: Math.max(0, Math.min(Math.round(input.latencyMs), 86_400_000)), completedAt: now } });
+      if (updated.count !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Attempt finalization was not owned");
+      if (usage?.usage) await this.appendUsageWithClient(tx, { workspaceId, invocationId, attempt: usage.attempt, snapshot: usage.snapshot, status: usage.status, usage: usage.usage, remoteRequestId: input.remoteRequestId, latencyMs: input.latencyMs, exactSecret: usage.exactSecret });
+    });
   }
 
   async appendUsage(input: { workspaceId: string; invocationId: string; attempt: StartedAttempt; snapshot: ExecutionSnapshot; status: "SUCCEEDED" | "FAILED"; usage?: ProviderUsage; remoteRequestId?: string; latencyMs: number; exactSecret?: string }): Promise<void> {
+    await this.appendUsageWithClient(this.db, input);
+  }
+  private async appendUsageWithClient(db: Pick<Db, "providerUsageEvent">, input: { workspaceId: string; invocationId: string; attempt: StartedAttempt; snapshot: ExecutionSnapshot; status: "SUCCEEDED" | "FAILED"; usage?: ProviderUsage; remoteRequestId?: string; latencyMs: number; exactSecret?: string }): Promise<void> {
     if (!input.usage) return;
     const metadata = input.usage.extra ? redactSecrets(input.usage.extra, { exactSecrets: input.exactSecret ? [input.exactSecret] : [] }) : undefined;
     if (metadata && JSON.stringify(metadata).length > 8_192) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Provider usage metadata exceeds its safety bound");
-    await this.db.providerUsageEvent.create({ data: { workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: input.attempt.id, attemptNumber: input.attempt.attemptNumber, providerKey: input.snapshot.providerKey, connectionId: input.snapshot.connectionId, modelId: input.snapshot.modelId, capability: input.snapshot.capability.families.join(","), routeSlot: input.snapshot.routeSlot, status: input.status, inputTokens: input.usage.inputTokens, outputTokens: input.usage.outputTokens, embeddingInputTokens: input.usage.embeddingInputTokens, speechInputCharacters: input.usage.speechInputCharacters, audioDurationMs: input.usage.audioDurationMs, latencyMs: input.usage.latencyMs ?? Math.max(0, Math.round(input.latencyMs)), remoteRequestId: bounded(input.remoteRequestId), metadata: metadata as never } });
+    await db.providerUsageEvent.create({ data: { workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: input.attempt.id, attemptNumber: input.attempt.attemptNumber, providerKey: input.snapshot.providerKey, connectionId: input.snapshot.connectionId, modelId: input.snapshot.modelId, capability: input.snapshot.capability.families.join(","), routeSlot: input.snapshot.routeSlot, status: input.status, inputTokens: input.usage.inputTokens, outputTokens: input.usage.outputTokens, embeddingInputTokens: input.usage.embeddingInputTokens, speechInputCharacters: input.usage.speechInputCharacters, audioDurationMs: input.usage.audioDurationMs, latencyMs: input.usage.latencyMs ?? Math.max(0, Math.round(input.latencyMs)), remoteRequestId: bounded(input.remoteRequestId), metadata: metadata as never } });
   }
 
   async completeInvocation(workspaceId: string, invocationId: string, claimToken: string, status: "SUCCEEDED" | "FAILED" | "BLOCKED" | "RECONCILIATION_REQUIRED"): Promise<void> {
-    const now = await this.databaseNow(); const updated = await this.db.providerInvocation.updateMany({ where: { id: invocationId, workspaceId, claimToken, status: "RUNNING", claimExpiresAt: { gt: now } }, data: { status, claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } });
-    if (updated.count !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Invocation finalization was not owned");
+    await this.db.$transaction(async tx => { await this.assertOwnershipInTransaction(tx, workspaceId, invocationId, claimToken); const now = await this.databaseNow(); await tx.providerInvocation.update({ where: { id_workspaceId: { id: invocationId, workspaceId } }, data: { status, claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } }); });
+  }
+  private async assertOwnershipInTransaction(tx: Pick<Db, "$queryRaw">, workspaceId: string, invocationId: string, claimToken: string): Promise<void> {
+    if (this.testClock) { const owned = await (tx as Db).providerInvocation.findFirst({ where: { id: invocationId, workspaceId, claimToken, status: "RUNNING", claimExpiresAt: { gt: this.testClock() } }, select: { id: true } }); if (!owned) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost"); return; }
+    const rows = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "ProviderInvocation" WHERE "id" = ${invocationId} AND "workspaceId" = ${workspaceId} AND "claimToken" = ${claimToken} AND "status" = 'RUNNING' AND "claimExpiresAt" > CURRENT_TIMESTAMP FOR UPDATE`;
+    if (rows.length !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost");
   }
 }
 
