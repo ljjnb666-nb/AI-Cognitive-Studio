@@ -48,6 +48,14 @@ enum ProviderInvocationStatus {
   BLOCKED
 }
 
+enum ProviderInvocationAttemptStatus {
+  RUNNING
+  SUCCEEDED
+  REMOTE_FAILURE
+  TIMEOUT
+  CANCELLED_AFTER_REQUEST
+}
+
 enum ProviderUsageStatus {
   SUCCEEDED
   FAILED
@@ -351,6 +359,7 @@ model Workspace {
   providerRoutes           ProviderRouteBinding[]
   providerSnapshots        ProviderExecutionSnapshot[]
   providerInvocations      ProviderInvocation[]
+  providerInvocationAttempts ProviderInvocationAttempt[]
   providerUsageEvents      ProviderUsageEvent[]
   providerAuditEvents      ProviderAuditEvent[]
   defaultForUsers          User[]                      @relation("DefaultWorkspace")
@@ -458,13 +467,10 @@ model ProviderInvocation {
   protocol            String
   modelId             String
   routeSlot           String
-  attemptNumber       Int
   idempotencyKey      String
   requestFingerprint  String
   correlationId       String
   status              ProviderInvocationStatus   @default(PENDING)
-  failureCode         String?
-  remoteRequestId     String?
   createdAt           DateTime                   @default(now())
   completedAt         DateTime?
   workspace           Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -472,16 +478,38 @@ model ProviderInvocation {
   connection          ProviderConnection?        @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   credentialVersion   ProviderCredentialVersion? @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
   usageEvents         ProviderUsageEvent[]
+  attempts            ProviderInvocationAttempt[]
 
   @@unique([workspaceId, idempotencyKey])
   @@unique([id, workspaceId])
   @@index([workspaceId, createdAt])
 }
 
+model ProviderInvocationAttempt {
+  id String @id @default(cuid())
+  workspaceId String
+  invocationId String
+  attemptNumber Int
+  status ProviderInvocationAttemptStatus @default(RUNNING)
+  failureCode String?
+  remoteRequestId String?
+  latencyMs Int?
+  createdAt DateTime @default(now())
+  startedAt DateTime @default(now())
+  completedAt DateTime?
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invocation ProviderInvocation @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  usageEvents ProviderUsageEvent[]
+  @@unique([id, invocationId, workspaceId])
+  @@unique([invocationId, attemptNumber])
+  @@index([workspaceId, invocationId])
+}
+
 model ProviderUsageEvent {
   id                    String              @id @default(cuid())
   workspaceId           String
   invocationId          String
+  attemptId             String
   attemptNumber         Int
   providerKey           String
   connectionId          String?
@@ -500,6 +528,7 @@ model ProviderUsageEvent {
   createdAt             DateTime            @default(now())
   workspace             Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   invocation            ProviderInvocation  @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  attempt               ProviderInvocationAttempt @relation(fields: [attemptId, invocationId, workspaceId], references: [id, invocationId, workspaceId], onDelete: Restrict)
   connection            ProviderConnection? @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
 
   @@index([workspaceId, invocationId, createdAt])

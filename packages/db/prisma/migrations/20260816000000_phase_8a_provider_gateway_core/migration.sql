@@ -3,6 +3,7 @@ CREATE TYPE "ProviderConnectionStatus" AS ENUM ('ACTIVE', 'DISABLED', 'REVOKED')
 CREATE TYPE "ProviderConnectionHealth" AS ENUM ('UNKNOWN', 'HEALTHY', 'DEGRADED', 'RATE_LIMITED', 'AUTH_FAILED');
 CREATE TYPE "ProviderCredentialStatus" AS ENUM ('ACTIVE', 'RETIRED', 'REVOKED');
 CREATE TYPE "ProviderInvocationStatus" AS ENUM ('PENDING', 'SUCCEEDED', 'FAILED', 'BLOCKED');
+CREATE TYPE "ProviderInvocationAttemptStatus" AS ENUM ('RUNNING', 'SUCCEEDED', 'REMOTE_FAILURE', 'TIMEOUT', 'CANCELLED_AFTER_REQUEST');
 CREATE TYPE "ProviderUsageStatus" AS ENUM ('SUCCEEDED', 'FAILED');
 CREATE TYPE "ProviderAuditAction" AS ENUM ('CONNECTION_CREATED', 'CONNECTION_UPDATED', 'CONNECTION_DISABLED', 'CONNECTION_ENABLED', 'CREDENTIAL_CREATED', 'CREDENTIAL_ROTATED', 'CREDENTIAL_REVOKED', 'ROUTING_UPDATED');
 
@@ -33,13 +34,19 @@ CREATE TABLE "ProviderExecutionSnapshot" (
 );
 CREATE TABLE "ProviderInvocation" (
   "id" TEXT NOT NULL, "workspaceId" TEXT NOT NULL, "snapshotId" TEXT NOT NULL, "connectionId" TEXT, "credentialVersionId" TEXT,
-  "providerKey" TEXT NOT NULL, "protocol" TEXT NOT NULL, "modelId" TEXT NOT NULL, "routeSlot" TEXT NOT NULL, "attemptNumber" INTEGER NOT NULL,
+  "providerKey" TEXT NOT NULL, "protocol" TEXT NOT NULL, "modelId" TEXT NOT NULL, "routeSlot" TEXT NOT NULL,
   "idempotencyKey" TEXT NOT NULL, "requestFingerprint" TEXT NOT NULL, "correlationId" TEXT NOT NULL,
-  "status" "ProviderInvocationStatus" NOT NULL DEFAULT 'PENDING', "failureCode" TEXT, "remoteRequestId" TEXT,
+  "status" "ProviderInvocationStatus" NOT NULL DEFAULT 'PENDING',
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, "completedAt" TIMESTAMP(3), CONSTRAINT "ProviderInvocation_pkey" PRIMARY KEY ("id")
 );
-CREATE TABLE "ProviderUsageEvent" (
+CREATE TABLE "ProviderInvocationAttempt" (
   "id" TEXT NOT NULL, "workspaceId" TEXT NOT NULL, "invocationId" TEXT NOT NULL, "attemptNumber" INTEGER NOT NULL,
+  "status" "ProviderInvocationAttemptStatus" NOT NULL DEFAULT 'RUNNING', "failureCode" TEXT, "remoteRequestId" TEXT, "latencyMs" INTEGER,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, "completedAt" TIMESTAMP(3),
+  CONSTRAINT "ProviderInvocationAttempt_pkey" PRIMARY KEY ("id")
+);
+CREATE TABLE "ProviderUsageEvent" (
+  "id" TEXT NOT NULL, "workspaceId" TEXT NOT NULL, "invocationId" TEXT NOT NULL, "attemptId" TEXT NOT NULL, "attemptNumber" INTEGER NOT NULL,
   "providerKey" TEXT NOT NULL, "connectionId" TEXT, "modelId" TEXT NOT NULL, "capability" TEXT NOT NULL, "routeSlot" TEXT NOT NULL,
   "status" "ProviderUsageStatus" NOT NULL, "inputTokens" INTEGER, "outputTokens" INTEGER, "embeddingInputTokens" INTEGER,
   "speechInputCharacters" INTEGER, "audioDurationMs" INTEGER, "latencyMs" INTEGER, "remoteRequestId" TEXT, "metadata" JSONB,
@@ -65,6 +72,9 @@ CREATE INDEX "ProviderExecutionSnapshot_workspaceId_routeSlot_createdAt_idx" ON 
 CREATE UNIQUE INDEX "ProviderInvocation_workspaceId_idempotencyKey_key" ON "ProviderInvocation"("workspaceId", "idempotencyKey");
 CREATE UNIQUE INDEX "ProviderInvocation_id_workspaceId_key" ON "ProviderInvocation"("id", "workspaceId");
 CREATE INDEX "ProviderInvocation_workspaceId_createdAt_idx" ON "ProviderInvocation"("workspaceId", "createdAt");
+CREATE UNIQUE INDEX "ProviderInvocationAttempt_id_invocationId_workspaceId_key" ON "ProviderInvocationAttempt"("id", "invocationId", "workspaceId");
+CREATE UNIQUE INDEX "ProviderInvocationAttempt_invocationId_attemptNumber_key" ON "ProviderInvocationAttempt"("invocationId", "attemptNumber");
+CREATE INDEX "ProviderInvocationAttempt_workspaceId_invocationId_idx" ON "ProviderInvocationAttempt"("workspaceId", "invocationId");
 CREATE INDEX "ProviderUsageEvent_workspaceId_invocationId_createdAt_idx" ON "ProviderUsageEvent"("workspaceId", "invocationId", "createdAt");
 CREATE INDEX "ProviderAuditEvent_workspaceId_createdAt_idx" ON "ProviderAuditEvent"("workspaceId", "createdAt");
 
@@ -79,7 +89,10 @@ ALTER TABLE "ProviderInvocation" ADD CONSTRAINT "ProviderInvocation_workspaceId_
 ALTER TABLE "ProviderInvocation" ADD CONSTRAINT "ProviderInvocation_snapshotId_workspaceId_fkey" FOREIGN KEY ("snapshotId", "workspaceId") REFERENCES "ProviderExecutionSnapshot"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderInvocation" ADD CONSTRAINT "ProviderInvocation_connectionId_workspaceId_fkey" FOREIGN KEY ("connectionId", "workspaceId") REFERENCES "ProviderConnection"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderInvocation" ADD CONSTRAINT "ProviderInvocation_credentialVersionId_connectionId_workspaceId_fkey" FOREIGN KEY ("credentialVersionId", "connectionId", "workspaceId") REFERENCES "ProviderCredentialVersion"("id", "connectionId", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderInvocationAttempt" ADD CONSTRAINT "ProviderInvocationAttempt_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ProviderInvocationAttempt" ADD CONSTRAINT "ProviderInvocationAttempt_invocationId_workspaceId_fkey" FOREIGN KEY ("invocationId", "workspaceId") REFERENCES "ProviderInvocation"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderUsageEvent" ADD CONSTRAINT "ProviderUsageEvent_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "ProviderUsageEvent" ADD CONSTRAINT "ProviderUsageEvent_invocationId_workspaceId_fkey" FOREIGN KEY ("invocationId", "workspaceId") REFERENCES "ProviderInvocation"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderUsageEvent" ADD CONSTRAINT "ProviderUsageEvent_connectionId_workspaceId_fkey" FOREIGN KEY ("connectionId", "workspaceId") REFERENCES "ProviderConnection"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderUsageEvent" ADD CONSTRAINT "ProviderUsageEvent_attemptId_invocationId_workspaceId_fkey" FOREIGN KEY ("attemptId", "invocationId", "workspaceId") REFERENCES "ProviderInvocationAttempt"("id", "invocationId", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderAuditEvent" ADD CONSTRAINT "ProviderAuditEvent_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
