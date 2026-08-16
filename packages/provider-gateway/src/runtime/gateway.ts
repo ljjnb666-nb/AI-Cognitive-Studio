@@ -2,10 +2,10 @@ import { ProviderGatewayError } from "../errors.js";
 import { ProviderRegistry } from "../registry.js";
 import { resolveRoute, type WorkspaceRouteResolver } from "../routing/resolver.js";
 import { createExecutionSnapshot, stableHash } from "../routing/snapshot.js";
-import type { ExecutionSnapshot, GatewayRequest, PlatformDefaultResolver, ProviderAdapter, TrustedExecutionContext } from "../types.js";
+import type { ExecutionPrincipal, ExecutionSnapshot, GatewayRequest, PlatformDefaultResolver, ProviderAdapter } from "../types.js";
 
 export type GatewayExecutionDependencies = {
-  authorize?: (context: TrustedExecutionContext, request: GatewayRequest) => Promise<void>;
+  authorize?: (principal: ExecutionPrincipal, request: GatewayRequest) => Promise<void>;
   assertRouteUsable?: (snapshot: ExecutionSnapshot) => Promise<{ credential?: string }>;
   validateEndpoint?: (snapshot: ExecutionSnapshot) => Promise<void>;
   assertBudget?: (request: GatewayRequest) => void;
@@ -24,9 +24,9 @@ async function deadline<T>(work: (signal: AbortSignal) => Promise<T>, caller: Ab
 class ProviderGatewayCore {
   constructor(private readonly registry: ProviderRegistry, private readonly workspaceRoutes: WorkspaceRouteResolver, private readonly platformDefaults: PlatformDefaultResolver, private readonly adapterResolver: (providerKey: string) => ProviderAdapter | undefined, private readonly execution: GatewayExecutionDependencies = {}) {}
   async resolveSnapshot(request: GatewayRequest) { if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); const route = await resolveRoute(request, this.workspaceRoutes, this.platformDefaults); const capability = this.registry.resolveCapability(route.providerKey, route.modelId, request.capability); return createExecutionSnapshot(request, { ...route, capability }); }
-  async execute(request: GatewayRequest, context?: TrustedExecutionContext) {
-    if (!context || context.trusted !== true || context.workspaceId !== request.workspaceId) throw new ProviderGatewayError("AUTHORIZATION_FAILED");
-    await this.execution.authorize?.(context, request); if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED");
+  async execute(request: GatewayRequest, principal?: ExecutionPrincipal) {
+    if (!principal) throw new ProviderGatewayError("AUTHORIZATION_FAILED");
+    await this.execution.authorize?.(principal, request); if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED");
     const snapshot = await this.resolveSnapshot(request); assertBudget(request); this.execution.assertBudget?.(request); await this.execution.validateEndpoint?.(snapshot);
     const fingerprint = stableHash({ routeSlot: snapshot.routeSlot, providerKey: snapshot.providerKey, protocol: snapshot.protocol, modelId: snapshot.modelId, connectionId: snapshot.connectionId, credentialVersionId: snapshot.credentialVersionId, configuration: snapshot.configuration, capability: request.capability, promptVersion: request.promptVersion, schemaVersion: request.schemaVersion, pipelineVersion: request.pipelineVersion, inputHash: request.inputHash });
     const reservation = await this.execution.reserveIdempotency?.({ workspaceId: request.workspaceId, idempotencyKey: request.idempotencyKey, fingerprint });
@@ -40,7 +40,7 @@ class ProviderGatewayCore {
   }
 }
 
-export type ProviderGateway = { resolveSnapshot(request: GatewayRequest): Promise<ExecutionSnapshot>; execute(request: GatewayRequest, context?: TrustedExecutionContext): Promise<unknown> };
+export type ProviderGateway = { resolveSnapshot(request: GatewayRequest): Promise<ExecutionSnapshot>; execute(request: GatewayRequest, principal?: ExecutionPrincipal): Promise<unknown> };
 export function createTestProviderGateway(registry: ProviderRegistry, workspaceRoutes: WorkspaceRouteResolver, platformDefaults: PlatformDefaultResolver, adapterResolver: (providerKey: string) => ProviderAdapter | undefined, execution: GatewayExecutionDependencies = {}): ProviderGateway { return new ProviderGatewayCore(registry, workspaceRoutes, platformDefaults, adapterResolver, execution); }
 export function createProductionProviderGateway(registry: ProviderRegistry, workspaceRoutes: WorkspaceRouteResolver, platformDefaults: PlatformDefaultResolver, adapterResolver: (providerKey: string) => ProviderAdapter | undefined, execution: GatewayExecutionDependencies): ProviderGateway {
   const required: (keyof GatewayExecutionDependencies)[] = ["authorize", "assertRouteUsable", "validateEndpoint", "assertBudget", "reserveIdempotency", "beforeAttempt", "circuit", "rate", "concurrency"];

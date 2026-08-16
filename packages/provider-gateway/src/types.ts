@@ -31,4 +31,4 @@ export type ExecutionSnapshot = ResolvedRoute & { id: string; workspaceId: strin
 export type PlatformDefaultResolver = { resolve(input: Pick<GatewayRequest, "workspaceId" | "routeSlot" | "capability">): Promise<ResolvedRoute | undefined> };
 export type ProviderAdapter = { execute(input: { snapshot: ExecutionSnapshot; request: GatewayRequest; signal: AbortSignal; credential?: string }): Promise<{ usage?: ProviderUsage; remoteRequestId?: string; response?: unknown }> };
 export type ProviderUsage = { inputTokens?: number; outputTokens?: number; embeddingInputTokens?: number; speechInputCharacters?: number; audioDurationMs?: number; extra?: Record<string, unknown> };
-export type TrustedExecutionContext = { workspaceId: string; userId: string; trusted: true };
+export type ExecutionPrincipal = { userId: string };
