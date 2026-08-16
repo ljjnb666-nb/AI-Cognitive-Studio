@@ -8,7 +8,8 @@
     "lint": "eslint src tests",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test:phase8a": "vitest run"
+    "test:phase8a": "vitest run",
+    "test:phase8b": "vitest run tests/phase8b.test.ts"
   },
   "dependencies": {
     "@ai-cognitive/db": "workspace:*",
