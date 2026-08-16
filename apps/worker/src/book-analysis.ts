@@ -3,11 +3,12 @@ import { BOOK_ANALYSIS_JOB, dispatchPendingBookAnalysis, processBookAnalysisRun,
 import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
 
 export const BOOK_ANALYSIS_QUEUE = "book.analysis";
-export function createBookAnalysisWorker(environment: Environment, dependencies?: { analysisProvider: AnalysisProvider; embeddingProvider: EmbeddingProvider }) {
+export type BookAnalysisQueueOptions = { prefix?: string };
+export function createBookAnalysisWorker(environment: Environment, dependencies?: { analysisProvider: AnalysisProvider; embeddingProvider: EmbeddingProvider }, options: BookAnalysisQueueOptions = {}) {
   if (!dependencies) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED"); const { analysisProvider, embeddingProvider } = dependencies;
-  return new Worker<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, async (job) => processBookAnalysisRun(job.data.analysisRunId, { analysisProvider, embeddingProvider }), { connection: createRedisConnection(environment.REDIS_URL) });
+  return new Worker<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, async (job) => processBookAnalysisRun(job.data.analysisRunId, { analysisProvider, embeddingProvider }), { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) });
 }
-export function createBookAnalysisQueue(environment: Environment) { return new Queue<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, { connection: createRedisConnection(environment.REDIS_URL) }); }
-export function dispatchBookAnalysisWithQueue(queue: Queue<{ analysisRunId: string }>): Promise<number> { return dispatchPendingBookAnalysis(queue); }
+export function createBookAnalysisQueue(environment: Environment, options: BookAnalysisQueueOptions = {}) { return new Queue<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) }); }
+export function dispatchBookAnalysisWithQueue(queue: Queue<{ analysisRunId: string }>, options?: Parameters<typeof dispatchPendingBookAnalysis>[1]): Promise<number> { return dispatchPendingBookAnalysis(queue, options); }
 export async function dispatchBookAnalysis(environment: Environment): Promise<number> { const queue = createBookAnalysisQueue(environment); try { return await dispatchBookAnalysisWithQueue(queue); } finally { await queue.close(); } }
 export { BOOK_ANALYSIS_JOB };

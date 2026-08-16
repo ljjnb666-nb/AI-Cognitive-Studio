@@ -12,7 +12,7 @@ import { createHealthCheckWorker } from "./worker.js";
 
 export type PodcastRuntimeAdapter = { provider: PodcastGenerationProvider; embeddingProvider: EmbeddingProvider };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
-export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: { analysisProvider: AnalysisProvider; embeddingProvider: EmbeddingProvider }; dispatchIntervalMs?: number };
+export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: { analysisProvider: AnalysisProvider; embeddingProvider: EmbeddingProvider }; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
 
 export function resolvePodcastRuntimeAdapter(source: NodeJS.ProcessEnv, injected?: PodcastRuntimeAdapter): PodcastRuntimeAdapter | undefined {
   const configured = source.PODCAST_GENERATION_PROVIDER?.trim();
@@ -29,17 +29,18 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   if (audioConfigured && (!options.audioAdapter || options.audioAdapter.provider.identity.provider !== audioConfigured)) throw new Error(`AUDIO_GENERATION_PROVIDER_UNSUPPORTED:${audioConfigured}`);
   if (shortVideoConfigured && (!options.shortVideoAdapter || options.shortVideoAdapter.provider.identity.provider !== shortVideoConfigured)) throw new Error(`SHORT_VIDEO_GENERATION_PROVIDER_UNSUPPORTED:${shortVideoConfigured}`);
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);
-  const ingestionWorker = createSourceIngestionWorker(environment);
-  const bookWorker = source.BOOK_ANALYSIS_PROVIDER ? createBookAnalysisWorker(environment, options.bookDependencies) : undefined;
+  const queueOptions = options.bullmqPrefix ? { prefix: options.bullmqPrefix } : undefined;
+  const ingestionWorker = createSourceIngestionWorker(environment, queueOptions);
+  const bookWorker = source.BOOK_ANALYSIS_PROVIDER ? createBookAnalysisWorker(environment, options.bookDependencies, queueOptions) : undefined;
   if (!bookWorker) logger.info("worker.book_analysis.disabled", { reason: "BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED" });
-  const podcastWorker = podcastAdapter ? createPodcastGenerationWorker(environment, podcastAdapter) : undefined;
-  const audioWorker = audioConfigured ? createPodcastAudioWorker(environment, options.audioAdapter) : undefined;
-  const shortVideoWorker = shortVideoConfigured ? createShortVideoGenerationWorker(environment, options.shortVideoAdapter) : undefined;
-  const ingestionQueue = createSourceIngestionQueue(environment);
-  const bookQueue = bookWorker ? createBookAnalysisQueue(environment) : undefined;
-  const podcastQueue = podcastWorker ? createPodcastGenerationQueue(environment) : undefined;
-  const audioQueue = audioWorker ? createPodcastAudioQueue(environment) : undefined;
-  const shortVideoQueue = shortVideoWorker ? createShortVideoGenerationQueue(environment) : undefined;
+  const podcastWorker = podcastAdapter ? createPodcastGenerationWorker(environment, podcastAdapter, queueOptions) : undefined;
+  const audioWorker = audioConfigured ? createPodcastAudioWorker(environment, options.audioAdapter, queueOptions) : undefined;
+  const shortVideoWorker = shortVideoConfigured ? createShortVideoGenerationWorker(environment, options.shortVideoAdapter, queueOptions) : undefined;
+  const ingestionQueue = createSourceIngestionQueue(environment, queueOptions);
+  const bookQueue = bookWorker ? createBookAnalysisQueue(environment, queueOptions) : undefined;
+  const podcastQueue = podcastWorker ? createPodcastGenerationQueue(environment, queueOptions) : undefined;
+  const audioQueue = audioWorker ? createPodcastAudioQueue(environment, queueOptions) : undefined;
+  const shortVideoQueue = shortVideoWorker ? createShortVideoGenerationQueue(environment, queueOptions) : undefined;
   if (!podcastWorker) logger.info("worker.podcast_generation.disabled", { reason: "PODCAST_GENERATION_PROVIDER_NOT_CONFIGURED" });
   if (!audioWorker) logger.info("worker.audio_generation.disabled", { reason: "AUDIO_GENERATION_PROVIDER_NOT_CONFIGURED" });
   if (!shortVideoWorker) logger.info("worker.short_video_generation.disabled", { reason: "SHORT_VIDEO_GENERATION_PROVIDER_NOT_CONFIGURED" });
@@ -61,11 +62,11 @@ export async function startWorkerRuntime(environment: Environment, options: Work
     schedules.push(setInterval(() => { void run(); }, interval));
     return run;
   };
-  const initial = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment))];
-  if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue)));
-  if (podcastQueue) initial.push(dispatch("podcast-generation", () => dispatchPodcastGenerationWithQueue(podcastQueue)));
-  if (audioQueue) initial.push(dispatch("podcast-audio", () => dispatchPodcastAudioGenerationWithQueue(audioQueue)));
-  if (shortVideoQueue) initial.push(dispatch("short-video-generation", () => dispatchShortVideoGenerationWithQueue(shortVideoQueue)));
+  const initial = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {}))];
+  if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : undefined)));
+  if (podcastQueue) initial.push(dispatch("podcast-generation", () => dispatchPodcastGenerationWithQueue(podcastQueue, options.outboxTopics?.podcastGeneration ? { topic: options.outboxTopics.podcastGeneration } : undefined)));
+  if (audioQueue) initial.push(dispatch("podcast-audio", () => dispatchPodcastAudioGenerationWithQueue(audioQueue, options.outboxTopics?.podcastAudio ? { topic: options.outboxTopics.podcastAudio } : undefined)));
+  if (shortVideoQueue) initial.push(dispatch("short-video-generation", () => dispatchShortVideoGenerationWithQueue(shortVideoQueue, options.outboxTopics?.shortVideo ? { topic: options.outboxTopics.shortVideo } : undefined)));
   await Promise.all(initial.map((run) => run()));
   logger.info("worker.started", { queue: "system.health-check", podcastGenerationEnabled: Boolean(podcastWorker) });
   let closePromise: Promise<void> | undefined;

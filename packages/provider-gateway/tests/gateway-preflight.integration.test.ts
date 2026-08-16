@@ -1,0 +1,19 @@
+import { describe, expect, it } from "vitest";
+import { createProductionProviderGateway, DeterministicFakeProviderAdapter, ProviderExecutionRepository, ProviderRegistry, validateProviderEndpoint } from "../src/index.js";
+
+describe("gateway preflight zero-call matrix", () => {
+  it.each([
+    ["missing principal", undefined, "AUTHORIZATION_FAILED"],
+    ["invalid input hash", { inputHash: "invalid" }, "INVALID_PROVIDER_RESPONSE"],
+    ["budget exceeded", { budget: { maxInputTokens: 1 }, estimates: { inputTokens: 2 } }, "BUDGET_EXCEEDED"],
+  ])("rejects %s before provider execution", async (_name, overrides, code) => {
+    const registry = new ProviderRegistry(); const capability = { modelId: "fixture-1", families: ["TEXT_GENERATION"] as const, confidence: "VERIFIED" as const }; registry.register({ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "test", models: [capability] }); const adapter = new DeterministicFakeProviderAdapter();
+    const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: async () => undefined }, { resolve: async () => ({ source: "PLATFORM" as const, providerKey: "fixture", protocol: "TEST" as const, modelId: "fixture-1", adapterVersion: "test", capability, configuration: {} }) }, () => adapter, { authorize: async () => undefined, assertRouteUsable: async () => undefined, validateEndpoint: async () => undefined, assertBudget: () => undefined, repository: new ProviderExecutionRepository(), circuit: { admit: async () => undefined, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => undefined }, concurrency: { acquire: async key => ({ key, token: "lease" }), release: async () => true } });
+    await expect(gateway.execute({ workspaceId: "missing-preflight-workspace", routeSlot: "BOOK_CHUNK_ANALYSIS", correlationId: "preflight", idempotencyKey: _name, inputHash: "a".repeat(64), capability: { family: "TEXT_GENERATION" }, ...overrides }, _name === "missing principal" ? undefined : { userId: "principal" })).rejects.toMatchObject({ code }); expect(adapter.calls).toBe(0);
+  });
+  it("runs unsafe endpoint validation through execute before any adapter call", async () => {
+    const registry = new ProviderRegistry(); const capability = { modelId: "fixture-1", families: ["TEXT_GENERATION"] as const, confidence: "VERIFIED" as const }; registry.register({ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "test", models: [capability] }); const adapter = new DeterministicFakeProviderAdapter();
+    const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: async () => undefined }, { resolve: async () => ({ source: "PLATFORM" as const, providerKey: "fixture", protocol: "TEST" as const, modelId: "fixture-1", adapterVersion: "test", capability, endpoint: "https://unsafe.test", configuration: {} }) }, () => adapter, { authorize: async () => undefined, assertRouteUsable: async () => undefined, validateEndpoint: async snapshot => { await validateProviderEndpoint(snapshot.endpoint!, { environment: "production", dns: { lookup: async () => ["127.0.0.1"] } }); }, assertBudget: () => undefined, repository: new ProviderExecutionRepository(), circuit: { admit: async () => undefined, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => undefined }, concurrency: { acquire: async key => ({ key, token: "lease" }), release: async () => true } });
+    await expect(gateway.execute({ workspaceId: "unsafe-preflight-workspace", routeSlot: "BOOK_CHUNK_ANALYSIS", correlationId: "unsafe", idempotencyKey: "unsafe", inputHash: "a".repeat(64), capability: { family: "TEXT_GENERATION" } }, { userId: "principal" })).rejects.toMatchObject({ code: "NETWORK_POLICY_REJECTED" }); expect(adapter.calls).toBe(0);
+  });
+});

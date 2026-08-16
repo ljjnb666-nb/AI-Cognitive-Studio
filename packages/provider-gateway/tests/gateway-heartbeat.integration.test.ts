@@ -1,0 +1,27 @@
+import { prisma } from "@ai-cognitive/db";
+import { randomUUID } from "node:crypto";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { ProviderAdapterFailure, createProductionProviderGateway, ProviderExecutionRepository, ProviderRegistry } from "../src/index.js";
+
+const workspaces: string[] = [];
+afterEach(async () => { vi.restoreAllMocks(); for (const id of workspaces.splice(0)) { await prisma.providerUsageEvent.deleteMany({ where: { workspaceId: id } }); await prisma.providerInvocationAttempt.deleteMany({ where: { workspaceId: id } }); await prisma.providerInvocation.deleteMany({ where: { workspaceId: id } }); await prisma.providerExecutionSnapshot.deleteMany({ where: { workspaceId: id } }); await prisma.workspace.delete({ where: { id } }); } });
+afterAll(async () => prisma.$disconnect());
+
+describe("gateway claim heartbeat drain", () => {
+  it("waits for an in-flight renewal before recording a completed remote attempt", async () => {
+    const workspaceId = randomUUID(); workspaces.push(workspaceId); await prisma.workspace.create({ data: { id: workspaceId, name: "heartbeat" } });
+    const registry = new ProviderRegistry(); const capability = { modelId: "fixture-1", families: ["TEXT_GENERATION"] as const, confidence: "VERIFIED" as const }; registry.register({ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "test", models: [capability] });
+    const repository = new ProviderExecutionRepository(prisma, undefined, () => new Date("2026-08-16T00:00:00.000Z"), "heartbeat", 6); let renewCalls = 0; let heartbeatEntered!: () => void, releaseRenewal!: () => void; const entered = new Promise<void>(resolve => heartbeatEntered = resolve), release = new Promise<void>(resolve => releaseRenewal = resolve); const originalRenew = repository.renewClaim.bind(repository);
+    vi.spyOn(repository, "renewClaim").mockImplementation(async (...args) => { renewCalls++; if (renewCalls === 1) return originalRenew(...args); heartbeatEntered(); await release; return originalRenew(...args); }); const outcome = vi.spyOn(repository, "recordAttemptOutcome");
+    const adapter = { execute: async () => { await entered; return { response: { ok: true } }; } };
+    const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: async () => undefined }, { resolve: async () => ({ source: "PLATFORM" as const, providerKey: "fixture", protocol: "TEST" as const, modelId: "fixture-1", adapterVersion: "test", capability, configuration: {} }) }, () => adapter, { authorize: async () => undefined, assertRouteUsable: async () => undefined, validateEndpoint: async () => undefined, assertBudget: () => undefined, repository, circuit: { admit: async () => undefined, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => undefined }, concurrency: { acquire: async key => ({ key, token: "lease" }), release: async () => true } });
+    const execution = gateway.execute({ workspaceId, routeSlot: "BOOK_CHUNK_ANALYSIS", correlationId: "heartbeat", idempotencyKey: "heartbeat", inputHash: "a".repeat(64), capability: { family: "TEXT_GENERATION" } }, { userId: "owner" }); await entered; await Promise.resolve(); expect(outcome).not.toHaveBeenCalled(); releaseRenewal(); await expect(execution).resolves.toMatchObject({ status: "SUCCEEDED" }); expect(outcome).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-admits every distributed gate before a retrying remote attempt", async () => {
+    const workspaceId = randomUUID(); workspaces.push(workspaceId); await prisma.workspace.create({ data: { id: workspaceId, name: "retry-admission" } }); const registry = new ProviderRegistry(); const capability = { modelId: "fixture-1", families: ["TEXT_GENERATION"] as const, confidence: "VERIFIED" as const }; registry.register({ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "test", models: [capability] });
+    const calls = { adapter: 0, circuit: 0, rate: 0, acquire: 0, release: 0 }; const adapter = { execute: async () => { calls.adapter++; if (calls.adapter === 1) throw new ProviderAdapterFailure("TRANSIENT_UPSTREAM", { retryable: true }); return { response: { ok: true } }; } };
+    const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: async () => undefined }, { resolve: async () => ({ source: "PLATFORM" as const, providerKey: "fixture", protocol: "TEST" as const, modelId: "fixture-1", adapterVersion: "test", capability, configuration: {} }) }, () => adapter, { authorize: async () => undefined, assertRouteUsable: async () => undefined, validateEndpoint: async () => undefined, assertBudget: () => undefined, repository: new ProviderExecutionRepository(), circuit: { admit: async () => { calls.circuit++; }, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => { calls.rate++; } }, concurrency: { acquire: async key => { calls.acquire++; return { key, token: `${calls.acquire}` }; }, release: async () => { calls.release++; return true; } }, maxAttempts: 2, sleep: async () => undefined });
+    await expect(gateway.execute({ workspaceId, routeSlot: "BOOK_CHUNK_ANALYSIS", correlationId: "retry-admission", idempotencyKey: "retry-admission", inputHash: "b".repeat(64), capability: { family: "TEXT_GENERATION" } }, { userId: "owner" })).resolves.toMatchObject({ status: "SUCCEEDED", attempt: 2 }); expect(calls).toEqual({ adapter: 2, circuit: 2, rate: 2, acquire: 2, release: 2 });
+  });
+});

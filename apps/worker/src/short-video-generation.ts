@@ -16,6 +16,7 @@ import {
 } from "@ai-cognitive/shared/server";
 
 export const SHORT_VIDEO_GENERATION_QUEUE = "short-video.generation";
+export type ShortVideoGenerationQueueOptions = { prefix?: string };
 export type ShortVideoRuntimeAdapter = {
   provider: ShortVideoProvider;
   embeddingProvider: EmbeddingProvider;
@@ -26,6 +27,7 @@ export type ShortVideoRuntimeAdapter = {
 export function createShortVideoGenerationWorker(
   environment: Environment,
   dependencies?: ShortVideoRuntimeAdapter,
+  options: ShortVideoGenerationQueueOptions = {},
 ) {
   if (!dependencies)
     throw new Error("SHORT_VIDEO_GENERATION_PROVIDER_NOT_CONFIGURED");
@@ -57,16 +59,16 @@ export function createShortVideoGenerationWorker(
         throw error;
       }
     },
-    { connection: createRedisConnection(environment.REDIS_URL) },
+    { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) },
   );
 }
-export function createShortVideoGenerationQueue(environment: Environment) {
+export function createShortVideoGenerationQueue(environment: Environment, options: ShortVideoGenerationQueueOptions = {}) {
   return new Queue<{ shortVideoGenerationRunId: string }>(
     SHORT_VIDEO_GENERATION_QUEUE,
-    { connection: createRedisConnection(environment.REDIS_URL) },
+    { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) },
   );
 }
-export function dispatchShortVideoGenerationWithQueue(queue: Queue<{ shortVideoGenerationRunId: string }>): Promise<number> { return dispatchPendingShortVideoGeneration(queue); }
+export function dispatchShortVideoGenerationWithQueue(queue: Queue<{ shortVideoGenerationRunId: string }>, options?: Parameters<typeof dispatchPendingShortVideoGeneration>[1]): Promise<number> { return dispatchPendingShortVideoGeneration(queue, options); }
 export async function dispatchShortVideoGeneration(
   environment: Environment,
 ): Promise<number> {

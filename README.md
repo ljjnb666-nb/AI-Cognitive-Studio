@@ -1,5 +1,7 @@
 # AI Cognitive Studio
 
+Provider Gateway Phase 8A is a provider-independent core with no real AI vendor integrations. See [Phase 8A architecture](docs/phase-8a-provider-gateway-core.md).
+
 AI Cognitive Studio is a future platform for deep book understanding and content creation. Phase 1 establishes the server-only source ingestion foundation; AI and product workflows remain out of scope.
 
 ## Architecture

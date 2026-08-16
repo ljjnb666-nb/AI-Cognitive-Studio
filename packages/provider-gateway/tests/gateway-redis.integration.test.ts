@@ -1,0 +1,13 @@
+import { randomUUID } from "node:crypto";
+import { Redis } from "ioredis";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter } from "../src/index.js";
+
+const key = `phase8a-${randomUUID()}`; let redisA: Redis; let redisB: Redis;
+beforeAll(() => { redisA = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379"); redisB = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379"); });
+afterAll(async () => { const keys = await redisA.keys(`provider-gateway:*:${key}:*`); if (keys.length) await redisA.del(...keys); await Promise.all([redisA.quit(), redisB.quit()]); });
+describe("gateway Redis controls (independent clients, shared server)", () => {
+  it("shares rate allowance while retaining workspace-key isolation", async () => { const a = new RedisRateLimiter(redisA); const b = new RedisRateLimiter(redisB); await a.admit(`${key}:workspace-a`, 1, 60); await expect(b.admit(`${key}:workspace-a`, 1, 60)).rejects.toMatchObject({ code: "RATE_LIMITED" }); await expect(b.admit(`${key}:workspace-b`, 1, 60)).resolves.toBeUndefined(); });
+  it("shares concurrency and releases it across clients", async () => { const a = new RedisConcurrencyLimiter(redisA); const b = new RedisConcurrencyLimiter(redisB); const lease = await a.acquire(`${key}:concurrency`, 1, 30_000); await expect(b.acquire(`${key}:concurrency`, 1, 30_000)).rejects.toMatchObject({ code: "RATE_LIMITED" }); await a.release(lease); await expect(b.acquire(`${key}:concurrency`, 1, 30_000)).resolves.toMatchObject({ key: `${key}:concurrency` }); });
+  it("allows exactly one Redis-authoritative HALF_OPEN probe and closes or reopens from its result", async () => { const a = new RedisCircuitBreaker(redisA); const b = new RedisCircuitBreaker(redisB); const circuitKey = `${key}:circuit`; await a.recordRetryableFailure(circuitKey, 1, 50, 1_000); await expect(b.admit(circuitKey, 50)).rejects.toMatchObject({ code: "CIRCUIT_OPEN" }); await new Promise(resolve => setTimeout(resolve, 75)); const outcomes = await Promise.allSettled([a.admit(circuitKey, 100), b.admit(circuitKey, 100)]); expect(outcomes.filter(result => result.status === "fulfilled")).toHaveLength(1); await a.recordRetryableFailure(circuitKey, 1, 50, 1_000); await expect(b.admit(circuitKey, 50)).rejects.toMatchObject({ code: "CIRCUIT_OPEN" }); await new Promise(resolve => setTimeout(resolve, 75)); await expect(a.admit(circuitKey, 100)).resolves.toBeUndefined(); await a.recordSuccess(circuitKey); await expect(b.admit(circuitKey, 100)).resolves.toBeUndefined(); });
+});
