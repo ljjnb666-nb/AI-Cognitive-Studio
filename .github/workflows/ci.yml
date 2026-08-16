@@ -81,6 +81,8 @@ jobs:
         run: pnpm test:integration
       - name: Phase 8A provider gateway core (no external AI calls)
         run: pnpm test:phase8a
+      - name: Phase 8B text provider adapters (no external AI calls)
+        run: pnpm test:phase8b
       - name: Phase 1 real infrastructure ingestion
         run: pnpm test:phase1:e2e
       - name: Phase 2 book intelligence evaluation

@@ -3,15 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "lint": "eslint src tests",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test:phase8a": "vitest run"
+    "test:phase8a": "vitest run tests/phase8a.test.ts tests/execution-repository.integration.test.ts tests/gateway-accounting.integration.test.ts tests/gateway-admin.integration.test.ts tests/gateway-auth.integration.test.ts tests/gateway-heartbeat.integration.test.ts tests/gateway-ownership.integration.test.ts tests/gateway-preflight.integration.test.ts tests/gateway-recovery.integration.test.ts tests/gateway-redis.integration.test.ts tests/gateway-v17-acceptance.integration.test.ts tests/gateway-zero-call.integration.test.ts",
+    "test:phase8b": "vitest run tests/phase8b.test.ts tests/phase8b-gateway.integration.test.ts tests/phase8b-evidence.integration.test.ts"
   },
   "dependencies": {
     "@ai-cognitive/db": "workspace:*",
+    "ajv": "^8.20.0",
     "ioredis": "^5.8.2"
   },
   "devDependencies": {
