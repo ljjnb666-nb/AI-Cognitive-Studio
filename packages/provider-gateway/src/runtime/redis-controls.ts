@@ -2,24 +2,15 @@ import type { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
 import { ProviderGatewayError } from "../errors.js";
 
-export class RedisRateLimiter {
-  constructor(private readonly redis: Redis) {}
-  async admit(key: string, limit: number, windowSeconds: number): Promise<void> { const bucket = `provider-gateway:rate:${key}:${Math.floor(Date.now() / (windowSeconds * 1_000))}`; const count = await this.redis.incr(bucket); if (count === 1) await this.redis.expire(bucket, windowSeconds); if (count > limit) throw new ProviderGatewayError("RATE_LIMITED"); }
-}
+const rateLua = "local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('EXPIRE',KEYS[1],ARGV[2]) end; if n>tonumber(ARGV[1]) then return 0 end; return 1";
+export class RedisRateLimiter { constructor(private readonly redis: Redis, private readonly now = () => Date.now()) {} async admit(key: string, limit: number, windowSeconds: number): Promise<void> { const bucket = `provider-gateway:rate:${key}:${Math.floor(this.now() / (windowSeconds * 1_000))}`; if (await this.redis.eval(rateLua, 1, bucket, limit, windowSeconds) !== 1) throw new ProviderGatewayError("RATE_LIMITED", "Provider rate limit reached", { retryable: true }); } }
 
 export type ConcurrencyLease = { key: string; token: string };
-const acquireLua = "local c=redis.call('GET',KEYS[1]); if c then local n=tonumber(c); if n>=tonumber(ARGV[1]) then return 0 end end; redis.call('INCR',KEYS[1]); redis.call('PEXPIRE',KEYS[1],ARGV[2]); redis.call('SET',KEYS[2],ARGV[3],'PX',ARGV[2],'NX'); return 1";
-const releaseLua = "if redis.call('GET',KEYS[2])==ARGV[1] then redis.call('DEL',KEYS[2]); local c=redis.call('GET',KEYS[1]); if c and tonumber(c)>0 then redis.call('DECR',KEYS[1]) end return 1 end return 0";
-export class RedisConcurrencyLimiter {
-  constructor(private readonly redis: Redis) {}
-  async acquire(key: string, limit: number, leaseMs: number): Promise<ConcurrencyLease> { const token = randomUUID(); const admitted = await this.redis.eval(acquireLua, 2, `provider-gateway:concurrency:${key}`, `provider-gateway:concurrency-lease:${key}:${token}`, limit, leaseMs, token); if (admitted !== 1) throw new ProviderGatewayError("RATE_LIMITED", "Provider concurrency limit reached"); return { key, token }; }
-  async release(lease: ConcurrencyLease): Promise<boolean> { return (await this.redis.eval(releaseLua, 2, `provider-gateway:concurrency:${lease.key}`, `provider-gateway:concurrency-lease:${lease.key}:${lease.token}`, lease.token)) === 1; }
-}
+const concurrencyAcquireLua = "redis.call('ZREMRANGEBYSCORE',KEYS[1],'-inf',ARGV[1]); if redis.call('ZCARD',KEYS[1])>=tonumber(ARGV[2]) then return 0 end; redis.call('ZADD',KEYS[1],ARGV[3],ARGV[4]); redis.call('PEXPIRE',KEYS[1],ARGV[5]); return 1";
+const concurrencyReleaseLua = "return redis.call('ZREM',KEYS[1],ARGV[1])";
+export class RedisConcurrencyLimiter { constructor(private readonly redis: Redis, private readonly now = () => Date.now()) {} async acquire(key: string, limit: number, leaseMs: number): Promise<ConcurrencyLease> { const token = randomUUID(); const now = this.now(); if (await this.redis.eval(concurrencyAcquireLua, 1, `provider-gateway:concurrency:${key}`, now, limit, now + leaseMs, token, leaseMs) !== 1) throw new ProviderGatewayError("RATE_LIMITED", "Provider concurrency limit reached"); return { key, token }; } async release(lease: ConcurrencyLease): Promise<boolean> { return (await this.redis.eval(concurrencyReleaseLua, 1, `provider-gateway:concurrency:${lease.key}`, lease.token)) === 1; } }
 
-type CircuitState = { failures: number; openedUntil: number };
-export class RedisCircuitBreaker {
-  constructor(private readonly redis: Redis) {}
-  async admit(key: string, threshold: number, cooldownMs: number): Promise<void> { const state = JSON.parse((await this.redis.get(`provider-gateway:circuit:${key}`)) ?? "{\"failures\":0,\"openedUntil\":0}") as CircuitState; if (state.openedUntil > Date.now()) throw new ProviderGatewayError("CIRCUIT_OPEN"); if (state.openedUntil !== 0) { const probe = await this.redis.set(`provider-gateway:circuit-probe:${key}`, "1", "PX", cooldownMs, "NX"); if (probe !== "OK") throw new ProviderGatewayError("CIRCUIT_OPEN"); } await this.redis.set(`provider-gateway:circuit-threshold:${key}`, String(threshold), "PX", cooldownMs); }
-  async recordSuccess(key: string): Promise<void> { await this.redis.del(`provider-gateway:circuit:${key}`, `provider-gateway:circuit-probe:${key}`); }
-  async recordRetryableFailure(key: string, threshold: number, cooldownMs: number): Promise<void> { const current = JSON.parse((await this.redis.get(`provider-gateway:circuit:${key}`)) ?? "{\"failures\":0,\"openedUntil\":0}") as CircuitState; const failures = current.failures + 1; const state: CircuitState = { failures, openedUntil: failures >= threshold ? Date.now() + cooldownMs : 0 }; await this.redis.set(`provider-gateway:circuit:${key}`, JSON.stringify(state), "PX", Math.max(cooldownMs, 60_000)); }
-}
+const admitLua = "local s=redis.call('HMGET',KEYS[1],'state','openedUntil'); local state=s[1] or 'CLOSED'; if state=='OPEN' and tonumber(s[2] or '0')>tonumber(ARGV[1]) then return 0 end; if state=='OPEN' then if not redis.call('SET',KEYS[2],'1','PX',ARGV[2],'NX') then return 0 end; redis.call('HSET',KEYS[1],'state','HALF_OPEN'); return 1 end; if state=='HALF_OPEN' then return 0 end; return 1";
+const failureLua = "local n=redis.call('HINCRBY',KEYS[1],'failures',1); if n>=tonumber(ARGV[1]) then local t=redis.call('TIME'); redis.call('HSET',KEYS[1],'state','OPEN','openedUntil',tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)+tonumber(ARGV[2])); end; redis.call('PEXPIRE',KEYS[1],ARGV[3]); return n";
+const successLua = "redis.call('DEL',KEYS[2]); redis.call('HSET',KEYS[1],'state','CLOSED','failures',0,'openedUntil',0); redis.call('PEXPIRE',KEYS[1],ARGV[1]); return 1";
+export class RedisCircuitBreaker { constructor(private readonly redis: Redis) {} async admit(key: string, cooldownMs: number): Promise<void> { if (await this.redis.eval(admitLua, 2, `provider-gateway:circuit:${key}`, `provider-gateway:circuit-probe:${key}`, Date.now(), cooldownMs) !== 1) throw new ProviderGatewayError("CIRCUIT_OPEN"); } async recordSuccess(key: string, retentionMs = 60_000): Promise<void> { await this.redis.eval(successLua, 2, `provider-gateway:circuit:${key}`, `provider-gateway:circuit-probe:${key}`, retentionMs); } async recordRetryableFailure(key: string, threshold: number, cooldownMs: number, retentionMs = 60_000): Promise<void> { await this.redis.eval(failureLua, 1, `provider-gateway:circuit:${key}`, threshold, cooldownMs, Math.max(cooldownMs, retentionMs)); } }

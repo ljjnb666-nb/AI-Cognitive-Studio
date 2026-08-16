@@ -55,6 +55,7 @@ CREATE UNIQUE INDEX "ProviderConnection_id_workspaceId_key" ON "ProviderConnecti
 CREATE UNIQUE INDEX "ProviderConnection_workspaceId_displayName_key" ON "ProviderConnection"("workspaceId", "displayName");
 CREATE INDEX "ProviderConnection_workspaceId_status_idx" ON "ProviderConnection"("workspaceId", "status");
 CREATE UNIQUE INDEX "ProviderCredentialVersion_id_workspaceId_key" ON "ProviderCredentialVersion"("id", "workspaceId");
+CREATE UNIQUE INDEX "ProviderCredentialVersion_id_connectionId_workspaceId_key" ON "ProviderCredentialVersion"("id", "connectionId", "workspaceId");
 CREATE UNIQUE INDEX "ProviderCredentialVersion_connectionId_credentialVersion_key" ON "ProviderCredentialVersion"("connectionId", "credentialVersion");
 CREATE INDEX "ProviderCredentialVersion_workspaceId_connectionId_status_idx" ON "ProviderCredentialVersion"("workspaceId", "connectionId", "status");
 CREATE UNIQUE INDEX "ProviderRouteBinding_workspaceId_routeSlot_key" ON "ProviderRouteBinding"("workspaceId", "routeSlot");
@@ -62,6 +63,7 @@ CREATE INDEX "ProviderRouteBinding_connectionId_idx" ON "ProviderRouteBinding"("
 CREATE UNIQUE INDEX "ProviderExecutionSnapshot_id_workspaceId_key" ON "ProviderExecutionSnapshot"("id", "workspaceId");
 CREATE INDEX "ProviderExecutionSnapshot_workspaceId_routeSlot_createdAt_idx" ON "ProviderExecutionSnapshot"("workspaceId", "routeSlot", "createdAt");
 CREATE UNIQUE INDEX "ProviderInvocation_workspaceId_idempotencyKey_key" ON "ProviderInvocation"("workspaceId", "idempotencyKey");
+CREATE UNIQUE INDEX "ProviderInvocation_id_workspaceId_key" ON "ProviderInvocation"("id", "workspaceId");
 CREATE INDEX "ProviderInvocation_workspaceId_createdAt_idx" ON "ProviderInvocation"("workspaceId", "createdAt");
 CREATE INDEX "ProviderUsageEvent_workspaceId_invocationId_createdAt_idx" ON "ProviderUsageEvent"("workspaceId", "invocationId", "createdAt");
 CREATE INDEX "ProviderAuditEvent_workspaceId_createdAt_idx" ON "ProviderAuditEvent"("workspaceId", "createdAt");
@@ -72,11 +74,12 @@ ALTER TABLE "ProviderRouteBinding" ADD CONSTRAINT "ProviderRouteBinding_workspac
 ALTER TABLE "ProviderRouteBinding" ADD CONSTRAINT "ProviderRouteBinding_connectionId_workspaceId_fkey" FOREIGN KEY ("connectionId", "workspaceId") REFERENCES "ProviderConnection"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderExecutionSnapshot" ADD CONSTRAINT "ProviderExecutionSnapshot_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "ProviderExecutionSnapshot" ADD CONSTRAINT "ProviderExecutionSnapshot_connectionId_workspaceId_fkey" FOREIGN KEY ("connectionId", "workspaceId") REFERENCES "ProviderConnection"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
-ALTER TABLE "ProviderExecutionSnapshot" ADD CONSTRAINT "ProviderExecutionSnapshot_credentialVersionId_workspaceId_fkey" FOREIGN KEY ("credentialVersionId", "workspaceId") REFERENCES "ProviderCredentialVersion"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderExecutionSnapshot" ADD CONSTRAINT "ProviderExecutionSnapshot_credentialVersionId_connectionId_workspaceId_fkey" FOREIGN KEY ("credentialVersionId", "connectionId", "workspaceId") REFERENCES "ProviderCredentialVersion"("id", "connectionId", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderInvocation" ADD CONSTRAINT "ProviderInvocation_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "ProviderInvocation" ADD CONSTRAINT "ProviderInvocation_snapshotId_workspaceId_fkey" FOREIGN KEY ("snapshotId", "workspaceId") REFERENCES "ProviderExecutionSnapshot"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderInvocation" ADD CONSTRAINT "ProviderInvocation_connectionId_workspaceId_fkey" FOREIGN KEY ("connectionId", "workspaceId") REFERENCES "ProviderConnection"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
-ALTER TABLE "ProviderInvocation" ADD CONSTRAINT "ProviderInvocation_credentialVersionId_workspaceId_fkey" FOREIGN KEY ("credentialVersionId", "workspaceId") REFERENCES "ProviderCredentialVersion"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderInvocation" ADD CONSTRAINT "ProviderInvocation_credentialVersionId_connectionId_workspaceId_fkey" FOREIGN KEY ("credentialVersionId", "connectionId", "workspaceId") REFERENCES "ProviderCredentialVersion"("id", "connectionId", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderUsageEvent" ADD CONSTRAINT "ProviderUsageEvent_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-ALTER TABLE "ProviderUsageEvent" ADD CONSTRAINT "ProviderUsageEvent_invocationId_fkey" FOREIGN KEY ("invocationId") REFERENCES "ProviderInvocation"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderUsageEvent" ADD CONSTRAINT "ProviderUsageEvent_invocationId_workspaceId_fkey" FOREIGN KEY ("invocationId", "workspaceId") REFERENCES "ProviderInvocation"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProviderUsageEvent" ADD CONSTRAINT "ProviderUsageEvent_connectionId_workspaceId_fkey" FOREIGN KEY ("connectionId", "workspaceId") REFERENCES "ProviderConnection"("id", "workspaceId") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "ProviderAuditEvent" ADD CONSTRAINT "ProviderAuditEvent_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;

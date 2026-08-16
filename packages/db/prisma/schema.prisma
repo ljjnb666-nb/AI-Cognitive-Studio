@@ -374,6 +374,7 @@ model ProviderConnection {
   routeBindings      ProviderRouteBinding[]
   snapshots          ProviderExecutionSnapshot[]
   invocations        ProviderInvocation[]
+  usageEvents        ProviderUsageEvent[]
 
   @@unique([id, workspaceId])
   @@unique([workspaceId, displayName])
@@ -397,6 +398,7 @@ model ProviderCredentialVersion {
   invocations       ProviderInvocation[]
 
   @@unique([id, workspaceId])
+  @@unique([id, connectionId, workspaceId])
   @@unique([connectionId, credentialVersion])
   @@index([workspaceId, connectionId, status])
 }
@@ -439,7 +441,7 @@ model ProviderExecutionSnapshot {
   createdAt           DateTime                   @default(now())
   workspace           Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   connection          ProviderConnection?        @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  credentialVersion   ProviderCredentialVersion? @relation(fields: [credentialVersionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  credentialVersion   ProviderCredentialVersion? @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
   invocations         ProviderInvocation[]
 
   @@unique([id, workspaceId])
@@ -468,10 +470,11 @@ model ProviderInvocation {
   workspace           Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   snapshot            ProviderExecutionSnapshot  @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   connection          ProviderConnection?        @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  credentialVersion   ProviderCredentialVersion? @relation(fields: [credentialVersionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  credentialVersion   ProviderCredentialVersion? @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
   usageEvents         ProviderUsageEvent[]
 
   @@unique([workspaceId, idempotencyKey])
+  @@unique([id, workspaceId])
   @@index([workspaceId, createdAt])
 }
 
@@ -496,7 +499,8 @@ model ProviderUsageEvent {
   metadata              Json?
   createdAt             DateTime            @default(now())
   workspace             Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  invocation            ProviderInvocation  @relation(fields: [invocationId], references: [id], onDelete: Restrict)
+  invocation            ProviderInvocation  @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  connection            ProviderConnection? @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
 
   @@index([workspaceId, invocationId, createdAt])
 }
