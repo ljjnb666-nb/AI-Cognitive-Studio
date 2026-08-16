@@ -39,3 +39,9 @@ export class ProviderGateway {
     } finally { if (lease) await this.execution.concurrency?.release(lease); }
   }
 }
+
+export function createProductionProviderGateway(registry: ProviderRegistry, workspaceRoutes: WorkspaceRouteResolver, platformDefaults: PlatformDefaultResolver, adapterResolver: (providerKey: string) => ProviderAdapter | undefined, execution: GatewayExecutionDependencies): ProviderGateway {
+  const required: (keyof GatewayExecutionDependencies)[] = ["authorize", "assertRouteUsable", "validateEndpoint", "assertBudget", "reserveIdempotency", "beforeAttempt", "circuit", "rate", "concurrency"];
+  for (const key of required) if (!execution[key]) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", `Missing mandatory production gateway dependency: ${key}`);
+  return new ProviderGateway(registry, workspaceRoutes, platformDefaults, adapterResolver, execution);
+}
