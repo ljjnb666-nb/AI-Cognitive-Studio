@@ -11,5 +11,12 @@ export const builtInProviderProfiles: readonly ProviderProfile[] = [
   { providerKey: "qwen", protocol: "OPENAI_COMPATIBLE", endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", authScheme: "BEARER" },
   { providerKey: "minimax", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.minimax.io/v1/chat/completions", authScheme: "BEARER" },
 ];
-export function approvedProfile(providerKey: string, endpoint: string | undefined): ProviderProfile | undefined { const profile = builtInProviderProfiles.find(item => item.providerKey === providerKey); return profile && (!endpoint || endpoint === profile.endpoint) ? profile : undefined; }
+type QwenRegion = "BEIJING" | "SINGAPORE" | "US_VIRGINIA";
+function qwenProfile(configuration: Readonly<Record<string, unknown>>): ProviderProfile | undefined {
+  const region = configuration.qwenRegion as QwenRegion | undefined; const workspaceId = configuration.qwenWorkspaceId;
+  if (region === "US_VIRGINIA") return { providerKey: "qwen", protocol: "OPENAI_COMPATIBLE", endpoint: "https://dashscope-us.aliyuncs.com/compatible-mode/v1/chat/completions", authScheme: "BEARER" };
+  if ((region === "BEIJING" || region === "SINGAPORE") && typeof workspaceId === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(workspaceId)) { const location = region === "BEIJING" ? "cn-beijing" : "ap-southeast-1"; return { providerKey: "qwen", protocol: "OPENAI_COMPATIBLE", endpoint: `https://${workspaceId}.${location}.maas.aliyuncs.com/compatible-mode/v1/chat/completions`, authScheme: "BEARER" }; }
+  return undefined;
+}
+export function approvedProfile(providerKey: string, endpoint: string | undefined, configuration: Readonly<Record<string, unknown>> = {}): ProviderProfile | undefined { const profile = providerKey === "qwen" ? qwenProfile(configuration) : builtInProviderProfiles.find(item => item.providerKey === providerKey); return profile && (!endpoint || endpoint === profile.endpoint) ? profile : undefined; }
 export function authHeaders(scheme: AuthScheme, credential: string | undefined): Record<string, string> { if (!credential) throw new ProviderGatewayError("AUTHENTICATION_FAILED"); return scheme === "BEARER" ? { authorization: `Bearer ${credential}` } : scheme === "X_API_KEY" ? { "x-api-key": credential } : { "x-goog-api-key": credential }; }

@@ -5,6 +5,7 @@ import { resolveRoute, type WorkspaceRouteResolver } from "../routing/resolver.j
 import { createExecutionSnapshot, stableHash } from "../routing/snapshot.js";
 import { canonicalTextInputHash } from "../text/canonical-input.js";
 import { validateTextGenerationInput } from "../text/validation.js";
+import { resolvePlatformCredential, type PlatformCredentialResolver } from "./platform-credentials.js";
 import type { ExecutionPrincipal, ExecutionSnapshot, GatewayRequest, PlatformDefaultResolver, ProviderAdapter } from "../types.js";
 
 export type GatewayExecutionDependencies = {
@@ -13,6 +14,7 @@ export type GatewayExecutionDependencies = {
   validateEndpoint?: (snapshot: ExecutionSnapshot) => Promise<void>;
   assertBudget?: (request: GatewayRequest) => void;
   beforeAttempt?: (snapshot: ExecutionSnapshot) => Promise<{ credential?: string }>;
+  platformCredentials?: PlatformCredentialResolver;
   repository?: ProviderExecutionRepository;
   circuit?: { admit(key: string, cooldownMs: number): Promise<void>; recordSuccess(key: string): Promise<void>; recordRetryableFailure(key: string, threshold: number, cooldownMs: number): Promise<void> };
   rate?: { admit(key: string, limit: number, windowSeconds: number): Promise<void> };
@@ -65,7 +67,7 @@ class ProviderGatewayCore {
       let remoteStarted = false;
       try {
         if (claim.invocationId && claim.claimToken) { await this.execution.repository!.renewClaim(snapshot.workspaceId, claim.invocationId, claim.claimToken); await this.execution.repository!.assertExecutionOwnership(snapshot.workspaceId, claim.invocationId, claim.claimToken); }
-        const state = this.execution.repository ? await this.execution.repository.loadPinnedRuntimeState(snapshot.workspaceId, snapshot.id) : await this.execution.beforeAttempt?.(snapshot);
+        const state = snapshot.connectionId ? this.execution.repository ? await this.execution.repository.loadPinnedRuntimeState(snapshot.workspaceId, snapshot.id) : await this.execution.beforeAttempt?.(snapshot) : snapshot.source === "PLATFORM" ? snapshot.protocol === "TEST" ? {} : this.execution.repository ? { credential: await resolvePlatformCredential(this.execution.platformCredentials, snapshot) } : await this.execution.beforeAttempt?.(snapshot) : await this.execution.beforeAttempt?.(snapshot);
         await this.execution.circuit?.admit(key, this.execution.circuitCooldownMs ?? 1_000);
         await this.execution.rate?.admit(key, this.execution.rateLimit ?? 60, this.execution.rateWindowSeconds ?? 60);
         const lease = await this.execution.concurrency?.acquire(key, this.execution.concurrencyLimit ?? 4, this.execution.concurrencyLeaseMs ?? 30_000);
