@@ -7,4 +7,8 @@ export class ProviderGatewayError extends Error {
   readonly retryAfterMs?: number;
   constructor(readonly code: ProviderErrorCode, message: string = code, options: { retryable?: boolean; correlationId?: string; remoteRequestId?: string; retryAfterMs?: number } = {}) { super(message); this.name = "ProviderGatewayError"; this.retryable = options.retryable ?? (code === "TRANSIENT_UPSTREAM" || code === "RATE_LIMITED" || code === "TIMEOUT"); this.correlationId = bounded(options.correlationId, 256); this.remoteRequestId = bounded(options.remoteRequestId, 256); this.retryAfterMs = options.retryAfterMs !== undefined && Number.isSafeInteger(options.retryAfterMs) && options.retryAfterMs >= 0 && options.retryAfterMs <= 86_400_000 ? options.retryAfterMs : undefined; }
 }
+export class ProviderAdapterFailure extends ProviderGatewayError {
+  constructor(code: ProviderErrorCode, options: { message?: string; retryable?: boolean; usage?: import("./types.js").ProviderUsage; correlationId?: string; remoteRequestId?: string; retryAfterMs?: number } = {}) { super(code, options.message ?? code, options); this.usage = options.usage; }
+  readonly usage?: import("./types.js").ProviderUsage;
+}
 function bounded(value: string | undefined, limit: number): string | undefined { return value && value.length <= limit ? value : undefined; }
