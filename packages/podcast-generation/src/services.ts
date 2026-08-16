@@ -55,7 +55,7 @@ export async function createEpisode(context: TrustedRequestContext, input: { pod
   return prisma.podcastEpisode.create({ data: { workspaceId: context.workspaceId, podcastProjectId: project.id, styleProfileId: style.id, title: input.title, description: input.description, language: input.language ?? style.language, targetDurationMinutes: input.targetDurationMinutes ?? style.targetDurationMinutes } });
 }
 
-export async function requestPodcastGeneration(context: TrustedRequestContext, input: { episodeId: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; correlationId?: string }) {
+export async function requestPodcastGeneration(context: TrustedRequestContext, input: { episodeId: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; correlationId?: string; outboxTopic?: string }) {
   await assertMembership(context);
   const episode = await prisma.podcastEpisode.findFirstOrThrow({ where: { id: input.episodeId, workspaceId: context.workspaceId }, include: { project: { include: { sources: true } }, styleProfile: true } });
   const latestHosts = await prisma.podcastHost.aggregate({ where: { podcastProjectId: episode.podcastProjectId, workspaceId: context.workspaceId }, _max: { configurationVersion: true } });
@@ -78,7 +78,7 @@ export async function requestPodcastGeneration(context: TrustedRequestContext, i
       const job = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: PODCAST_GENERATION_JOB, payload: { episodeId: episode.id }, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.podcastGenerationRun.create({ data: { workspaceId: context.workspaceId, podcastProjectId: episode.podcastProjectId, episodeId: episode.id, styleProfileId: episode.styleProfileId, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersion: input.modelVersion, modelVersionKey, hostConfigurationHash, hostConfigurationVersion, generationIdentityHash, idempotencyKey, correlationId: input.correlationId } });
       await tx.podcastGenerationSource.createMany({ data: current.map((item) => ({ podcastGenerationRunId: run.id, workspaceId: context.workspaceId, episodeId: episode.id, sourceDocumentId: item.sourceDocumentId, extractionId: item.extractionId, chunkSetId: item.chunkSetId, analysisRunId: item.analysisRunId })) });
-      await tx.outboxEvent.create({ data: { topic: PODCAST_GENERATION_TOPIC, aggregateId: run.id, payload: { podcastGenerationRunId: run.id } } });
+      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? PODCAST_GENERATION_TOPIC, aggregateId: run.id, payload: { podcastGenerationRunId: run.id } } });
       return { run, job };
     });
   } catch (error) {

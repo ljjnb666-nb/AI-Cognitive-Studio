@@ -43,7 +43,7 @@ export type ProcessBookAnalysisDependencies = {
   correlationId?: string;
   faultInjector?: AnalysisFaultInjector;
 };
-type RequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; correlationId?: string };
+type RequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; correlationId?: string; outboxTopic?: string };
 type StageContext = { blocks: SourceBlockInput[]; blockMap: Map<string, SourceBlockInput>; chunks: any[]; nodes: any[] };
 
 const asBlocks = (blocks: Array<{ id: string; ordinal: number; text: string; kind: string; metadata: unknown }>): SourceBlockInput[] => blocks.map((block) => ({ ...block, kind: block.kind as SourceBlockInput["kind"], metadata: block.metadata as SourceBlockInput["metadata"] }));
@@ -65,7 +65,7 @@ export async function requestBookAnalysis(input: RequestInput) {
     return await prisma.$transaction(async (tx) => {
       const job = await tx.job.create({ data: { workspaceId: input.workspaceId, type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersion: input.modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash } });
-      await tx.outboxEvent.create({ data: { topic: BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id } } });
+      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id } } });
       logger.info("book.analysis.requested", { ...logFields(run, input.correlationId), extractionId: current.extractionId, jobId: job.id, provider: input.provider, model: input.model });
       return { run, job };
     });
@@ -457,8 +457,9 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
   }
 }
 
-export async function dispatchPendingBookAnalysis(queue: { add(name: string, payload: { analysisRunId: string }, options: { jobId: string }): Promise<unknown> }, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; beforeFinalize?: (eventId: string) => Promise<void> | void } = {}) {
-  return dispatchPendingOutbox({ topic: BOOK_ANALYSIS_TOPIC, queue, jobName: BOOK_ANALYSIS_JOB, parse: (payload) => payload as { analysisRunId: string }, jobId: (payload) => payload.analysisRunId, afterDispatch: async (tx, payload, jobId) => { const run = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: payload.analysisRunId } }); await tx.job.update({ where: { id: run.jobId }, data: { queueJobId: jobId } }); }, ...options });
+export async function dispatchPendingBookAnalysis(queue: { add(name: string, payload: { analysisRunId: string }, options: { jobId: string }): Promise<unknown> }, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; beforeFinalize?: (eventId: string) => Promise<void> | void; topic?: string } = {}) {
+  const { topic = BOOK_ANALYSIS_TOPIC, ...dispatchOptions } = options;
+  return dispatchPendingOutbox({ topic, queue, jobName: BOOK_ANALYSIS_JOB, parse: (payload) => payload as { analysisRunId: string }, jobId: (payload) => payload.analysisRunId, afterDispatch: async (tx, payload, jobId) => { const run = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: payload.analysisRunId } }); await tx.job.update({ where: { id: run.jobId }, data: { queueJobId: jobId } }); }, ...dispatchOptions });
 }
 
 export async function retrieveBookKnowledge(input: { workspaceId: string; sourceDocumentId: string; query: string; limit: number; embeddingProvider: EmbeddingProvider }) {

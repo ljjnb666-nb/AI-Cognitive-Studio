@@ -235,6 +235,7 @@ export async function requestShortVideoGeneration(
     captionVersion: string;
     audioVersion: string;
     renderVersion: string;
+    outboxTopic?: string;
     styleProfileId?: string;
     correlationId?: string;
   },
@@ -348,7 +349,7 @@ export async function requestShortVideoGeneration(
       });
       await tx.outboxEvent.create({
         data: {
-          topic: SHORT_VIDEO_GENERATION_TOPIC,
+          topic: input.outboxTopic ?? SHORT_VIDEO_GENERATION_TOPIC,
           aggregateId: run.id,
           payload: { shortVideoGenerationRunId: run.id },
         },
@@ -986,10 +987,10 @@ export async function dispatchPendingShortVideoGeneration(
       options: { jobId: string },
     ): Promise<unknown>;
   },
-  aggregateIds?: string[],
+  options: { aggregateIds?: string[]; topic?: string } = {},
 ) {
   return dispatchPendingOutbox<{ shortVideoGenerationRunId: string }>({
-    topic: SHORT_VIDEO_GENERATION_TOPIC,
+    topic: options.topic ?? SHORT_VIDEO_GENERATION_TOPIC,
     queue,
     jobName: SHORT_VIDEO_GENERATION_JOB,
     parse: (payload) => {
@@ -1000,7 +1001,7 @@ export async function dispatchPendingShortVideoGeneration(
       return { shortVideoGenerationRunId: id };
     },
     jobId: (payload) => payload.shortVideoGenerationRunId,
-    aggregateIds,
+    aggregateIds: options.aggregateIds,
     afterDispatch: async (tx, payload, queueJobId) => {
       const run = await prisma.shortVideoGenerationRun.findUniqueOrThrow({
         where: { id: payload.shortVideoGenerationRunId },

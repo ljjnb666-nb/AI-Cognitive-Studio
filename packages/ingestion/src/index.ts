@@ -16,6 +16,7 @@ export { parseDocument, DEFAULT_PARSER_LIMITS } from "./document-parsers.js";
 
 export type TrustedRequestContext = { userId: string; workspaceId: string };
 export const INGESTION_QUEUE = "source.ingestion";
+export const INGESTION_TOPIC = "source.ingestion.requested";
 export const INGESTION_JOB = "source.ingest";
 const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").map((character) => character.charCodeAt(0) < 32 ? "_" : character).join("").slice(0, 180) || "source";
 
@@ -41,7 +42,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
       const session = await prisma.uploadSession.create({ data: { id, workspaceId: context.workspaceId, originalFilename: safeFilename(input.filename), declaredMediaType: input.mediaType, declaredSizeBytes: input.sizeBytes, temporaryStorageKey, expiresAt } });
       const upload = await storage.createPresignedUpload({ key: temporaryStorageKey, contentType: input.mediaType, expiresInSeconds: options.uploadTtlSeconds }); return { session, upload };
     },
-    async completeUpload(context: TrustedRequestContext, sessionId: string) {
+    async completeUpload(context: TrustedRequestContext, sessionId: string, completion: { outboxTopic?: string } = {}) {
       await assertMembership(context); const session = await prisma.uploadSession.findFirstOrThrow({ where: { id: sessionId, workspaceId: context.workspaceId } });
       if (session.status === "COMPLETED") {
         const completion = await prisma.uploadCompletion.findUniqueOrThrow({
@@ -92,7 +93,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
           if (owned !== 1) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST");
           await tx.sourceBlob.createMany({ data: [{ workspaceId: context.workspaceId, sha256: digest, sizeBytes: inspected.sizeBytes, mediaType, storageKey }], skipDuplicates: true });
           const blob = await tx.sourceBlob.findUniqueOrThrow({ where: { workspaceId_sha256: { workspaceId: context.workspaceId, sha256: digest } } });
-          const source = await tx.source.create({ data: { workspaceId: context.workspaceId, kind: "FILE", displayName: session.originalFilename } }); const document = await tx.sourceDocument.create({ data: { sourceId: source.id, sourceBlobId: blob.id, workspaceId: context.workspaceId, version: 1, sha256: blob.sha256, sizeBytes: blob.sizeBytes, mediaType, storageKey: blob.storageKey } }); const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId: document.id }, idempotencyKey: `ingest:${document.id}` } }); const run = await tx.ingestionRun.create({ data: { sourceDocumentId: document.id, workspaceId: context.workspaceId, jobId: job.id, parserVersion: parser.version, normalizationVersion: CANONICAL_NORMALIZATION_VERSION } }); await tx.uploadCompletion.create({ data: { uploadSessionId: session.id, sourceDocumentId: document.id, workspaceId: context.workspaceId } }); await tx.outboxEvent.create({ data: { topic: "source.ingestion.requested", aggregateId: run.id, payload: { ingestionRunId: run.id } } });
+          const source = await tx.source.create({ data: { workspaceId: context.workspaceId, kind: "FILE", displayName: session.originalFilename } }); const document = await tx.sourceDocument.create({ data: { sourceId: source.id, sourceBlobId: blob.id, workspaceId: context.workspaceId, version: 1, sha256: blob.sha256, sizeBytes: blob.sizeBytes, mediaType, storageKey: blob.storageKey } }); const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId: document.id }, idempotencyKey: `ingest:${document.id}` } }); const run = await tx.ingestionRun.create({ data: { sourceDocumentId: document.id, workspaceId: context.workspaceId, jobId: job.id, parserVersion: parser.version, normalizationVersion: CANONICAL_NORMALIZATION_VERSION } }); await tx.uploadCompletion.create({ data: { uploadSessionId: session.id, sourceDocumentId: document.id, workspaceId: context.workspaceId } }); await tx.outboxEvent.create({ data: { topic: completion.outboxTopic ?? INGESTION_TOPIC, aggregateId: run.id, payload: { ingestionRunId: run.id } } });
           const completed = await tx.$executeRaw`UPDATE "UploadSession" SET "status" = 'COMPLETED'::"UploadSessionStatus", "completionClaimToken" = NULL, "completionClaimedAt" = NULL, "completionLeaseUntil" = NULL, "completedAt" = NOW(), "updatedAt" = NOW() WHERE "id" = ${session.id} AND "workspaceId" = ${context.workspaceId} AND "status" = 'COMPLETING'::"UploadSessionStatus" AND "completionClaimToken" = ${claim.token}`;
           if (completed !== 1) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST"); return document;
         });
@@ -163,9 +164,10 @@ export function createIngestionService(storage: StorageProvider, options = { max
 }
 
 type IngestionQueue = { add(name: string, payload: { ingestionRunId: string }, options: { jobId: string }): Promise<unknown> };
-export type IngestionDispatchOptions = { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; /** Test-only fault seam; runs after queue acceptance and before the DB finalize transaction. */ beforeFinalize?: (eventId: string) => Promise<void> | void };
+export type IngestionDispatchOptions = { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; topic?: string; /** Test-only fault seam; runs after queue acceptance and before the DB finalize transaction. */ beforeFinalize?: (eventId: string) => Promise<void> | void };
 export async function dispatchPendingIngestion(queue: IngestionQueue, options: IngestionDispatchOptions = {}): Promise<number> {
-  return dispatchPendingOutbox({ topic: "source.ingestion.requested", queue, jobName: INGESTION_JOB, parse: (payload) => payload as { ingestionRunId: string }, jobId: (payload) => payload.ingestionRunId, afterDispatch: async (tx, payload, jobId) => { await tx.ingestionRun.update({ where: { id: payload.ingestionRunId }, data: { job: { update: { queueJobId: jobId } } } }); }, ...options });
+  const { topic = INGESTION_TOPIC, ...dispatchOptions } = options;
+  return dispatchPendingOutbox({ topic, queue, jobName: INGESTION_JOB, parse: (payload) => payload as { ingestionRunId: string }, jobId: (payload) => payload.ingestionRunId, afterDispatch: async (tx, payload, jobId) => { await tx.ingestionRun.update({ where: { id: payload.ingestionRunId }, data: { job: { update: { queueJobId: jobId } } } }); }, ...dispatchOptions });
   /* const batchSize = options.batchSize ?? 100, leaseMs = options.leaseMs ?? 60_000, maxAttempts = options.maxAttempts ?? 5;
   await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'FAILED'::"OutboxStatus", "leaseUntil" = NULL, "claimToken" = NULL, "lastError" = COALESCE("lastError", 'OUTBOX_MAX_ATTEMPTS_EXCEEDED'), "updatedAt" = NOW() WHERE "topic" = 'source.ingestion.requested' AND "status" = 'PROCESSING'::"OutboxStatus" AND "leaseUntil" < NOW() AND "attemptCount" >= ${maxAttempts}`;
   const events = await prisma.$queryRaw<Array<{ id: string; payload: unknown; claimToken: string }>>`
