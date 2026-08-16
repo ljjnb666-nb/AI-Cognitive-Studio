@@ -8,6 +8,7 @@ export * from "./credentials/redaction.js";
 export * from "./safety/endpoint-policy.js";
 export * from "./runtime/retry.js";
 export * from "./runtime/gateway.js";
+export * from "./authorization.js";
 export * from "./runtime/redis-controls.js";
 export * from "./persistence.js";
 export * from "./testing/fake-adapter.js";

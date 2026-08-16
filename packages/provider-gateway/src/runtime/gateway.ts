@@ -21,7 +21,7 @@ function assertBudget(request: GatewayRequest): void { const b = request.budget;
 function safeError(error: unknown, secrets: readonly string[]): ProviderGatewayError { const code = error instanceof ProviderGatewayError ? error.code : "INTERNAL_PROVIDER_ERROR"; const retryable = error instanceof ProviderGatewayError ? error.retryable : false; const raw = error instanceof Error ? error.message : String(error); secrets.reduce((value, secret) => secret ? value.split(secret).join("[REDACTED]") : value, raw); return new ProviderGatewayError(code, "Provider execution failed", { retryable }); }
 async function deadline<T>(work: (signal: AbortSignal) => Promise<T>, caller: AbortSignal | undefined, timeoutMs: number): Promise<T> { if (caller?.aborted) throw new ProviderGatewayError("CANCELLED"); const controller = new AbortController(); const onAbort = () => controller.abort(); caller?.addEventListener("abort", onAbort, { once: true }); let timedOut = false; const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs); try { return await work(controller.signal); } catch (error) { if (caller?.aborted) throw new ProviderGatewayError("CANCELLED"); if (timedOut) throw new ProviderGatewayError("TIMEOUT"); throw error; } finally { clearTimeout(timer); caller?.removeEventListener("abort", onAbort); } }
 
-export class ProviderGateway {
+class ProviderGatewayCore {
   constructor(private readonly registry: ProviderRegistry, private readonly workspaceRoutes: WorkspaceRouteResolver, private readonly platformDefaults: PlatformDefaultResolver, private readonly adapterResolver: (providerKey: string) => ProviderAdapter | undefined, private readonly execution: GatewayExecutionDependencies = {}) {}
   async resolveSnapshot(request: GatewayRequest) { if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); const route = await resolveRoute(request, this.workspaceRoutes, this.platformDefaults); const capability = this.registry.resolveCapability(route.providerKey, route.modelId, request.capability); return createExecutionSnapshot(request, { ...route, capability }); }
   async execute(request: GatewayRequest, context?: TrustedExecutionContext) {
@@ -40,8 +40,10 @@ export class ProviderGateway {
   }
 }
 
+export type ProviderGateway = { resolveSnapshot(request: GatewayRequest): Promise<ExecutionSnapshot>; execute(request: GatewayRequest, context?: TrustedExecutionContext): Promise<unknown> };
+export function createTestProviderGateway(registry: ProviderRegistry, workspaceRoutes: WorkspaceRouteResolver, platformDefaults: PlatformDefaultResolver, adapterResolver: (providerKey: string) => ProviderAdapter | undefined, execution: GatewayExecutionDependencies = {}): ProviderGateway { return new ProviderGatewayCore(registry, workspaceRoutes, platformDefaults, adapterResolver, execution); }
 export function createProductionProviderGateway(registry: ProviderRegistry, workspaceRoutes: WorkspaceRouteResolver, platformDefaults: PlatformDefaultResolver, adapterResolver: (providerKey: string) => ProviderAdapter | undefined, execution: GatewayExecutionDependencies): ProviderGateway {
   const required: (keyof GatewayExecutionDependencies)[] = ["authorize", "assertRouteUsable", "validateEndpoint", "assertBudget", "reserveIdempotency", "beforeAttempt", "circuit", "rate", "concurrency"];
   for (const key of required) if (!execution[key]) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", `Missing mandatory production gateway dependency: ${key}`);
-  return new ProviderGateway(registry, workspaceRoutes, platformDefaults, adapterResolver, execution);
+  return new ProviderGatewayCore(registry, workspaceRoutes, platformDefaults, adapterResolver, execution);
 }
