@@ -71,7 +71,11 @@ class ProviderGatewayCore {
     }
     if (request.embedding && this.execution.repository) {
       try { this.execution.repository.assertEmbeddingResultStorageAvailable(); }
-      catch (error) { await this.finish(claim, snapshot, "FAILED"); throw error; }
+      catch (error) {
+        try { await this.execution.repository.releasePreRemoteClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!); }
+        catch (releaseError) { throw safeError(releaseError, request.correlationId); }
+        throw error;
+      }
     }
     const key = `${snapshot.workspaceId}:${snapshot.connectionId ?? snapshot.providerKey}:${snapshot.modelId}`; const maxAttempts = Math.min(request.budget?.maxAttempts ?? this.execution.maxAttempts ?? 3, this.execution.maxAttempts ?? 3); let last: ProviderGatewayError | undefined;
     for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
