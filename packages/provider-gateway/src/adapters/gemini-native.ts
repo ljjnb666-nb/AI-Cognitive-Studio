@@ -6,7 +6,7 @@ import { failureForStatus, finish, header, number, parseJson, response } from ".
 export class GeminiNativeAdapter implements ProviderAdapter {
   constructor(private readonly transport: ProviderHttpTransport) {}
   async execute(input: Parameters<ProviderAdapter["execute"]>[0]) {
-    const profile = approvedProfile(input.snapshot.providerKey, input.snapshot.endpoint); if (!profile || profile.protocol !== "GEMINI_NATIVE") throw new ProviderGatewayError("NETWORK_POLICY_REJECTED"); if (!input.request.text) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE"); const text = input.request.text; const mode = text.structuredOutput?.mode;
+    const profile = approvedProfile(input.snapshot.providerKey, "TEXT_GENERATION", input.snapshot.endpoint); if (!profile || profile.protocol !== "GEMINI_NATIVE") throw new ProviderGatewayError("NETWORK_POLICY_REJECTED"); if (!input.request.text) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE"); const text = input.request.text; const mode = text.structuredOutput?.mode;
     const structuredGeneration = mode === "STRICT_JSON_SCHEMA" ? { responseMimeType: "application/json", responseJsonSchema: text.structuredOutput?.schema } : mode === "JSON_MODE" ? { responseMimeType: "application/json" } : {};
     const generationConfig = { maxOutputTokens: text.generation?.maxOutputTokens, temperature: text.generation?.temperature, topP: text.generation?.topP, ...structuredGeneration };
     const body = { ...(text.system ? { systemInstruction: { parts: [{ text: text.system }] } } : {}), contents: text.messages.map(message => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] })), generationConfig };

@@ -28,6 +28,7 @@
     "test:integration": "pnpm --filter @ai-cognitive/storage test:integration && pnpm --filter @ai-cognitive/db test:integration && pnpm --filter @ai-cognitive/ingestion test:integration && pnpm --filter @ai-cognitive/book-intelligence test:integration && pnpm --filter @ai-cognitive/podcast-generation test:integration && pnpm --filter @ai-cognitive/short-video-generation test:integration && pnpm --filter @ai-cognitive/worker test:integration && pnpm --filter @ai-cognitive/web test:integration",
     "test:phase8a": "pnpm --filter @ai-cognitive/provider-gateway test:phase8a",
     "test:phase8b": "pnpm --filter @ai-cognitive/provider-gateway test:phase8b",
+    "test:phase8c": "pnpm --filter @ai-cognitive/provider-gateway test:phase8c",
     "test:e2e": "pnpm --filter @ai-cognitive/web test:e2e",
     "test:phase1:e2e": "pnpm --filter @ai-cognitive/worker test:phase1:e2e",
     "test:phase2:e2e": "pnpm --filter @ai-cognitive/worker test:phase2:e2e",
