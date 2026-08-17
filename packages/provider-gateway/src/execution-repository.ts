@@ -1,9 +1,10 @@
 import { prisma } from "@ai-cognitive/db";
 import { randomUUID } from "node:crypto";
-import { VersionedAesGcmCipher, type CredentialCipher } from "./credentials/cipher.js";
+import { VersionedAesGcmCipher, type CredentialCipher, type EmbeddingResultCipher } from "./credentials/cipher.js";
 import { redactSecrets } from "./credentials/redaction.js";
+import { validateVectors } from "./embedding/validation.js";
 import { ProviderGatewayError } from "./errors.js";
-import type { ExecutionSnapshot, ProviderUsage } from "./types.js";
+import type { EmbeddingResponse, ExecutionSnapshot, ProviderUsage } from "./types.js";
 
 type Db = typeof prisma;
 export type ExecutionClaim = { kind: "OWNER"; invocationId: string; claimToken: string } | { kind: "ALREADY_PROCESSED"; invocationId: string } | { kind: "IN_PROGRESS"; invocationId: string } | { kind: "TERMINAL_FAILED"; invocationId: string } | { kind: "BLOCKED_EXISTING"; invocationId: string } | { kind: "RECONCILIATION_REQUIRED"; invocationId: string };
@@ -13,7 +14,7 @@ const bounded = (value: string | undefined) => value && value.length <= 256 ? va
 const uniqueViolation = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2002";
 
 export class ProviderExecutionRepository {
-  constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher, private readonly testClock?: () => Date, private readonly workerId = `gateway-${randomUUID()}`, private readonly leaseMs = leaseMilliseconds) {}
+  constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher & Partial<EmbeddingResultCipher>, private readonly testClock?: () => Date, private readonly workerId = `gateway-${randomUUID()}`, private readonly leaseMs = leaseMilliseconds) {}
   private async databaseNow(): Promise<Date> { if (this.testClock) return this.testClock(); const rows = await this.db.$queryRaw<{ now: Date }[]>`SELECT CURRENT_TIMESTAMP AS "now"`; return rows[0]?.now ?? (() => { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Database clock unavailable"); })(); }
   get leaseDurationMs(): number { return this.leaseMs; }
 
@@ -28,10 +29,10 @@ export class ProviderExecutionRepository {
     } catch (error) {
       if (!uniqueViolation(error)) throw error;
     }
-    const existing = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId: snapshot.workspaceId, idempotencyKey: input.idempotencyKey }, }, include: { attempts: { select: { id: true, status: true } } } });
+    const existing = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId: snapshot.workspaceId, idempotencyKey: input.idempotencyKey }, }, include: { attempts: { select: { id: true, status: true } }, embeddingResult: { select: { id: true } } } });
     if (!existing) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
     if (existing.requestFingerprint !== input.fingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT");
-    if (existing.status === "SUCCEEDED") return { kind: "ALREADY_PROCESSED", invocationId: existing.id };
+    if (existing.status === "SUCCEEDED") return snapshot.capability.families.includes("EMBEDDING") && !existing.embeddingResult ? { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id } : { kind: "ALREADY_PROCESSED", invocationId: existing.id };
     if (existing.status === "FAILED") return { kind: "TERMINAL_FAILED", invocationId: existing.id };
     if (existing.status === "BLOCKED") return { kind: "BLOCKED_EXISTING", invocationId: existing.id };
     if (existing.status === "RECONCILIATION_REQUIRED") return { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id };
@@ -114,6 +115,36 @@ export class ProviderExecutionRepository {
 
   async completeInvocation(workspaceId: string, invocationId: string, claimToken: string, status: "SUCCEEDED" | "FAILED" | "BLOCKED" | "RECONCILIATION_REQUIRED"): Promise<void> {
     await this.db.$transaction(async tx => { await this.assertOwnershipInTransaction(tx, workspaceId, invocationId, claimToken); const now = await this.databaseNow(); await tx.providerInvocation.update({ where: { id_workspaceId: { id: invocationId, workspaceId } }, data: { status, claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } }); });
+  }
+  async completeSuccessfulEmbeddingExecution(input: { workspaceId: string; invocationId: string; claimToken: string; attempt: StartedAttempt; snapshot: ExecutionSnapshot; response: EmbeddingResponse; usage?: ProviderUsage; remoteRequestId?: string; latencyMs: number; exactSecret?: string }): Promise<void> {
+    if (!this.cipher?.encryptEmbeddingResult) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Embedding result vault is not configured");
+    const vectors = validateVectors(input.response.vectors, input.response.vectors.length, input.response.dimensions);
+    const payload = JSON.stringify({ vectors, dimensions: input.response.dimensions, providerModel: input.response.providerModel });
+    // 8 MiB is an absolute cap in addition to provider input/dimension constraints; no result is truncated.
+    if (Buffer.byteLength(payload, "utf8") > 8 * 1024 * 1024) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Embedding result exceeds durable handoff bound");
+    const encrypted = this.cipher.encryptEmbeddingResult(payload, { workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: input.attempt.id, snapshotId: input.snapshot.id });
+    await this.db.$transaction(async tx => {
+      await this.assertOwnershipInTransaction(tx, input.workspaceId, input.invocationId, input.claimToken);
+      const now = await this.databaseNow();
+      const attempt = await tx.providerInvocationAttempt.updateMany({ where: { id: input.attempt.id, invocationId: input.invocationId, workspaceId: input.workspaceId, status: "RUNNING" }, data: { status: "SUCCEEDED", remoteRequestId: bounded(input.remoteRequestId), latencyMs: Math.max(0, Math.min(Math.round(input.latencyMs), 86_400_000)), completedAt: now } });
+      if (attempt.count !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Attempt finalization was not owned");
+      if (input.usage) await this.appendUsageWithClient(tx, { workspaceId: input.workspaceId, invocationId: input.invocationId, attempt: input.attempt, snapshot: input.snapshot, status: "SUCCEEDED", usage: input.usage, remoteRequestId: input.remoteRequestId, latencyMs: input.latencyMs, exactSecret: input.exactSecret });
+      await tx.providerEmbeddingResult.create({ data: { id: randomUUID(), workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: input.attempt.id, snapshotId: input.snapshot.id, ...encrypted, vectorCount: vectors.length, dimensions: input.response.dimensions } });
+      await tx.providerInvocation.update({ where: { id_workspaceId: { id: input.invocationId, workspaceId: input.workspaceId } }, data: { status: "SUCCEEDED", claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } });
+    });
+  }
+  async recoverEmbeddingResult(workspaceId: string, invocationId: string): Promise<EmbeddingResponse | undefined> {
+    if (!this.cipher?.decryptEmbeddingResult) return undefined;
+    const row = await this.db.providerEmbeddingResult.findFirst({ where: { workspaceId, invocationId }, include: { snapshot: true } });
+    if (!row) return undefined;
+    try {
+      const plain = this.cipher.decryptEmbeddingResult(row, { workspaceId, invocationId, attemptId: row.attemptId, snapshotId: row.snapshotId });
+      const parsed = JSON.parse(plain) as { vectors?: unknown; dimensions?: unknown; providerModel?: unknown };
+      if (typeof parsed.dimensions !== "number" || !Number.isSafeInteger(parsed.dimensions) || typeof parsed.providerModel !== "string" && parsed.providerModel !== undefined) return undefined;
+      const vectors = validateVectors(parsed.vectors, row.vectorCount, parsed.dimensions);
+      if (parsed.dimensions !== row.dimensions || vectors.length !== row.vectorCount) return undefined;
+      return { vectors, dimensions: parsed.dimensions, providerModel: parsed.providerModel };
+    } catch { return undefined; }
   }
   private async assertOwnershipInTransaction(tx: Pick<Db, "$queryRaw">, workspaceId: string, invocationId: string, claimToken: string): Promise<void> {
     if (this.testClock) { const owned = await (tx as Db).providerInvocation.findFirst({ where: { id: invocationId, workspaceId, claimToken, status: "RUNNING", claimExpiresAt: { gt: this.testClock() } }, select: { id: true } }); if (!owned) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost"); return; }

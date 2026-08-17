@@ -22,7 +22,7 @@ export type GatewayExecutionDependencies = {
   concurrency?: { acquire(key: string, limit: number, leaseMs: number): Promise<{ key: string; token: string }>; release(lease: { key: string; token: string }): Promise<boolean> };
   maxAttempts?: number; timeoutMs?: number; rateLimit?: number; rateWindowSeconds?: number; concurrencyLimit?: number; concurrencyLeaseMs?: number; circuitThreshold?: number; circuitCooldownMs?: number; sleep?: (milliseconds: number) => Promise<void>; random?: () => number;
 };
-export type GatewayExecutionResult = { status: "SUCCEEDED"; response?: unknown; usage?: unknown; remoteRequestId?: string; snapshot: ExecutionSnapshot; requestFingerprint: string; attempt: number; invocationId?: string } | { status: "ALREADY_PROCESSED" | "IN_PROGRESS" | "TERMINAL_FAILED" | "BLOCKED_EXISTING" | "RECONCILIATION_REQUIRED"; invocationId: string };
+export type GatewayExecutionResult = { status: "SUCCEEDED"; response?: unknown; usage?: unknown; remoteRequestId?: string; snapshot: ExecutionSnapshot; requestFingerprint: string; attempt: number; invocationId?: string } | { status: "ALREADY_PROCESSED"; invocationId: string; response?: unknown; snapshot?: ExecutionSnapshot } | { status: "IN_PROGRESS" | "TERMINAL_FAILED" | "BLOCKED_EXISTING" | "RECONCILIATION_REQUIRED"; invocationId: string };
 
 function assertInputHash(request: GatewayRequest): void { if (!/^[a-f0-9]{64}$/.test(request.inputHash)) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid canonical input hash"); }
 function assertBudget(request: GatewayRequest): void { const b = request.budget; const e = request.estimates; if (!b || !e) return; if ((b.maxInputTokens !== undefined && (e.inputTokens ?? 0) > b.maxInputTokens) || (b.maxOutputTokens !== undefined && (e.outputTokens ?? 0) > b.maxOutputTokens) || (b.maxEmbeddingInputTokens !== undefined && (e.embeddingInputTokens ?? 0) > b.maxEmbeddingInputTokens) || (b.maxSpeechCharacters !== undefined && (e.speechCharacters ?? 0) > b.maxSpeechCharacters)) throw new ProviderGatewayError("BUDGET_EXCEEDED"); }
@@ -61,7 +61,14 @@ class ProviderGatewayCore {
     const adapter = this.adapterResolver({ providerKey: snapshot.providerKey, family: request.capability.family, protocol: snapshot.protocol, modelId: snapshot.modelId }); if (!adapter) throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "No installed adapter for resolved provider");
     const fingerprint = stableHash({ routeSlot: snapshot.routeSlot, providerKey: snapshot.providerKey, protocol: snapshot.protocol, modelId: snapshot.modelId, connectionId: snapshot.connectionId, credentialVersionId: snapshot.credentialVersionId, configuration: snapshot.configuration, capability: request.capability, promptVersion: request.promptVersion, schemaVersion: request.schemaVersion, pipelineVersion: request.pipelineVersion, inputHash: request.inputHash, ...(request.text ? { canonicalTextInputHash: canonicalTextInputHash(request.text) } : {}), ...(request.embedding ? { canonicalEmbeddingInputHash: canonicalEmbeddingInputHash(request.embedding) } : {}) });
     const claim = this.execution.repository ? await this.execution.repository.claimExecution(snapshot, { idempotencyKey: request.idempotencyKey, fingerprint }) : { kind: "OWNER" as const, invocationId: undefined, claimToken: undefined };
-    if (claim.kind !== "OWNER") return { status: claim.kind, invocationId: claim.invocationId };
+    if (claim.kind !== "OWNER") {
+      if (claim.kind === "ALREADY_PROCESSED" && request.embedding && this.execution.repository) {
+        const response = await this.execution.repository.recoverEmbeddingResult(snapshot.workspaceId, claim.invocationId);
+        if (!response) return { status: "RECONCILIATION_REQUIRED", invocationId: claim.invocationId };
+        return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, response, snapshot };
+      }
+      return { status: claim.kind, invocationId: claim.invocationId };
+    }
     const key = `${snapshot.workspaceId}:${snapshot.connectionId ?? snapshot.providerKey}:${snapshot.modelId}`; const maxAttempts = Math.min(request.budget?.maxAttempts ?? this.execution.maxAttempts ?? 3, this.execution.maxAttempts ?? 3); let last: ProviderGatewayError | undefined;
     for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
       if (request.signal?.aborted) { await this.finish(claim, snapshot, "BLOCKED"); throw new ProviderGatewayError("CANCELLED"); }
@@ -81,7 +88,13 @@ class ProviderGatewayCore {
           remoteSucceeded = true;
           const latencyMs = Date.now() - startedAt;
           try {
-            if (durableAttempt) { await this.execution.repository!.recordAttemptOutcome(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, durableAttempt.id, "SUCCEEDED", { remoteRequestId: result.remoteRequestId, latencyMs }, { snapshot, attempt: durableAttempt, status: "SUCCEEDED", usage: result.usage, exactSecret: state?.credential }); await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, "SUCCEEDED"); }
+            if (durableAttempt) {
+              if (request.embedding) {
+                const response = result.response;
+                if (!response || typeof response !== "object" || !("vectors" in response) || !("dimensions" in response)) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
+                await this.execution.repository!.completeSuccessfulEmbeddingExecution({ workspaceId: snapshot.workspaceId, invocationId: claim.invocationId!, claimToken: claim.claimToken!, attempt: durableAttempt, snapshot, response: response as import("../types.js").EmbeddingResponse, usage: result.usage, remoteRequestId: result.remoteRequestId, latencyMs, exactSecret: state?.credential });
+              } else { await this.execution.repository!.recordAttemptOutcome(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, durableAttempt.id, "SUCCEEDED", { remoteRequestId: result.remoteRequestId, latencyMs }, { snapshot, attempt: durableAttempt, status: "SUCCEEDED", usage: result.usage, exactSecret: state?.credential }); await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, "SUCCEEDED"); }
+            }
           } catch (persistenceError) { if (claim.invocationId && claim.claimToken) await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId, claim.claimToken, "RECONCILIATION_REQUIRED").catch(() => undefined); throw safeError(persistenceError, request.correlationId); }
           await this.execution.circuit?.recordSuccess(key);
           return { status: "SUCCEEDED", ...result, snapshot, requestFingerprint: fingerprint, attempt: attemptNumber, invocationId: claim.invocationId };
