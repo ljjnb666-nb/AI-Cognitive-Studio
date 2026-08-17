@@ -16,7 +16,7 @@ Protocol compatibility != capability compatibility. Changing provider, model, mo
 
 ## EMBEDDING_DURABLE_HANDOFF_ANALYSIS
 
-The current book path can crash after a successful remote call returns vectors but before `DocumentChunkEmbedding`/`BookMemoryEmbedding` persistence. Gateway idempotency deliberately stores no raw vectors, so a replay cannot reconstruct them without another paid call. Checkpoint 2 should choose one of: persist encrypted/short-lived response handoff data transactionally; create a durable per-batch paid-call receipt with vector payload; or make the caller persist vectors in the same durable completion protocol before acknowledging gateway success. The recommended option is a durable per-batch handoff record with an atomic consumer acknowledgement, so retry can complete persistence without repaying the provider.
+Checkpoint 1 does not solve the crash boundary between a successful provider embedding response and `DocumentChunkEmbedding`/`BookMemoryEmbedding` persistence. Gateway idempotency deliberately stores no raw vectors, so a replay cannot reconstruct them without another paid call. Checkpoint 2 should choose one of: persist encrypted/short-lived response handoff data transactionally; create a durable per-batch paid-call receipt with vector payload; or make the caller persist vectors in the same durable completion protocol before acknowledging gateway success. The recommended option is a durable per-batch handoff record with bounded encrypted vector payloads and an atomic consumer acknowledgement, so retry can complete persistence without repaying the provider.
 
 ## COSINE_SIMILARITY_AUDIT
 
