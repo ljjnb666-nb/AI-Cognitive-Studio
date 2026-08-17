@@ -57,10 +57,9 @@ class ProviderGatewayCore {
   async execute(request: GatewayRequest, principal?: ExecutionPrincipal): Promise<GatewayExecutionResult> {
     if (!principal) throw new ProviderGatewayError("AUTHORIZATION_FAILED");
     await this.execution.authorize?.(principal, request); if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); assertInputHash(request);
-    const snapshot = await this.resolveSnapshot(request); this.validatePayload(request); if (request.embedding) validateEmbeddingInput(request.embedding, snapshot.capability); assertBudget(request); this.execution.assertBudget?.(request); await this.execution.validateEndpoint?.(snapshot); await this.execution.assertRouteUsable?.(snapshot);
-    const adapter = this.adapterResolver({ providerKey: snapshot.providerKey, family: request.capability.family, protocol: snapshot.protocol, modelId: snapshot.modelId }); if (!adapter) throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "No installed adapter for resolved provider");
+    let snapshot = await this.resolveSnapshot(request); this.validatePayload(request); if (request.embedding) validateEmbeddingInput(request.embedding, snapshot.capability); assertBudget(request); this.execution.assertBudget?.(request); await this.execution.validateEndpoint?.(snapshot); await this.execution.assertRouteUsable?.(snapshot);
     const fingerprint = stableHash({ routeSlot: snapshot.routeSlot, providerKey: snapshot.providerKey, protocol: snapshot.protocol, modelId: snapshot.modelId, connectionId: snapshot.connectionId, credentialVersionId: snapshot.credentialVersionId, configuration: snapshot.configuration, capability: request.capability, promptVersion: request.promptVersion, schemaVersion: request.schemaVersion, pipelineVersion: request.pipelineVersion, inputHash: request.inputHash, ...(request.text ? { canonicalTextInputHash: canonicalTextInputHash(request.text) } : {}), ...(request.embedding ? { canonicalEmbeddingInputHash: canonicalEmbeddingInputHash(request.embedding) } : {}) });
-    const claim = this.execution.repository ? await this.execution.repository.claimExecution(snapshot, { idempotencyKey: request.idempotencyKey, fingerprint }) : { kind: "OWNER" as const, invocationId: undefined, claimToken: undefined };
+    const claim = this.execution.repository ? await this.execution.repository.claimExecution(snapshot, { idempotencyKey: request.idempotencyKey, fingerprint }) : { kind: "OWNER" as const, invocationId: undefined, claimToken: undefined, snapshotId: undefined };
     if (claim.kind !== "OWNER") {
       if (claim.kind === "ALREADY_PROCESSED" && request.embedding && this.execution.repository) {
         const response = await this.execution.repository.recoverEmbeddingResult(snapshot.workspaceId, claim.invocationId);
@@ -69,6 +68,8 @@ class ProviderGatewayCore {
       }
       return { status: claim.kind, invocationId: claim.invocationId };
     }
+    if (claim.snapshotId && this.execution.repository) snapshot = await this.execution.repository.loadExecutionSnapshot(snapshot.workspaceId, claim.snapshotId);
+    const adapter = this.adapterResolver({ providerKey: snapshot.providerKey, family: request.capability.family, protocol: snapshot.protocol, modelId: snapshot.modelId }); if (!adapter) throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "No installed adapter for pinned provider");
     if (request.embedding && this.execution.repository) {
       try { this.execution.repository.assertEmbeddingResultStorageAvailable(); }
       catch (error) {

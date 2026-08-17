@@ -7,7 +7,7 @@ import { ProviderGatewayError } from "./errors.js";
 import type { EmbeddingResponse, ExecutionSnapshot, ProviderUsage } from "./types.js";
 
 type Db = typeof prisma;
-export type ExecutionClaim = { kind: "OWNER"; invocationId: string; claimToken: string } | { kind: "ALREADY_PROCESSED"; invocationId: string } | { kind: "IN_PROGRESS"; invocationId: string } | { kind: "TERMINAL_FAILED"; invocationId: string } | { kind: "BLOCKED_EXISTING"; invocationId: string } | { kind: "RECONCILIATION_REQUIRED"; invocationId: string };
+export type ExecutionClaim = { kind: "OWNER"; invocationId: string; claimToken: string; snapshotId: string } | { kind: "ALREADY_PROCESSED"; invocationId: string } | { kind: "IN_PROGRESS"; invocationId: string } | { kind: "TERMINAL_FAILED"; invocationId: string } | { kind: "BLOCKED_EXISTING"; invocationId: string } | { kind: "RECONCILIATION_REQUIRED"; invocationId: string };
 export type StartedAttempt = { id: string; attemptNumber: number };
 const leaseMilliseconds = 60_000;
 const bounded = (value: string | undefined) => value && value.length <= 256 ? value : undefined;
@@ -26,7 +26,7 @@ export class ProviderExecutionRepository {
         await tx.providerExecutionSnapshot.create({ data: snapshotData(snapshot) });
         return tx.providerInvocation.create({ data: { id: randomUUID(), workspaceId: snapshot.workspaceId, snapshotId: snapshot.id, connectionId: snapshot.connectionId, credentialVersionId: snapshot.credentialVersionId, providerKey: snapshot.providerKey, protocol: snapshot.protocol, modelId: snapshot.modelId, routeSlot: snapshot.routeSlot, idempotencyKey: input.idempotencyKey, requestFingerprint: input.fingerprint, correlationId: snapshot.correlationId, status: "RUNNING", claimToken, claimOwner: this.workerId, claimExpiresAt: expiresAt } });
       });
-      return { kind: "OWNER", invocationId: invocation.id, claimToken };
+      return { kind: "OWNER", invocationId: invocation.id, claimToken, snapshotId: invocation.snapshotId };
     } catch (error) {
       if (!uniqueViolation(error)) throw error;
     }
@@ -44,13 +44,10 @@ export class ProviderExecutionRepository {
     if (existing.attempts.length === 0 && (existing.status === "PENDING" || (existing.claimExpiresAt && existing.claimExpiresAt <= now))) {
       if (this.testClock) {
         const reclaimed = await this.db.providerInvocation.updateMany({ where: { id: existing.id, workspaceId: snapshot.workspaceId, claimToken: existing.claimToken ?? undefined, status: existing.status, OR: [{ claimExpiresAt: null }, { claimExpiresAt: { lte: now } }] }, data: { status: "RUNNING", claimToken, claimOwner: this.workerId, claimExpiresAt: expiresAt, completedAt: null } });
-        if (reclaimed.count === 1) return { kind: "OWNER", invocationId: existing.id, claimToken };
+        if (reclaimed.count === 1) return { kind: "OWNER", invocationId: existing.id, claimToken, snapshotId: existing.snapshotId };
       } else {
-        const reclaimed = await this.db.$transaction(async tx => {
-          await tx.providerExecutionSnapshot.create({ data: snapshotData(snapshot) });
-          return tx.providerInvocation.updateMany({ where: { id: existing.id, workspaceId: snapshot.workspaceId, status: existing.status, attempts: { none: {} }, OR: [{ status: "PENDING" }, { status: "RUNNING", claimExpiresAt: { lte: now } }] }, data: { snapshotId: snapshot.id, status: "RUNNING", claimToken, claimOwner: this.workerId, claimExpiresAt: expiresAt, completedAt: null } });
-        });
-        if (reclaimed.count === 1) return { kind: "OWNER", invocationId: existing.id, claimToken };
+        const reclaimed = await this.db.providerInvocation.updateMany({ where: { id: existing.id, workspaceId: snapshot.workspaceId, status: existing.status, attempts: { none: {} }, OR: [{ status: "PENDING" }, { status: "RUNNING", claimExpiresAt: { lte: now } }] }, data: { status: "RUNNING", claimToken, claimOwner: this.workerId, claimExpiresAt: expiresAt, completedAt: null } });
+        if (reclaimed.count === 1) return { kind: "OWNER", invocationId: existing.id, claimToken, snapshotId: existing.snapshotId };
       }
     }
     return { kind: "IN_PROGRESS", invocationId: existing.id };
@@ -119,6 +116,12 @@ export class ProviderExecutionRepository {
 
   async completeInvocation(workspaceId: string, invocationId: string, claimToken: string, status: "SUCCEEDED" | "FAILED" | "BLOCKED" | "RECONCILIATION_REQUIRED"): Promise<void> {
     await this.db.$transaction(async tx => { await this.assertOwnershipInTransaction(tx, workspaceId, invocationId, claimToken); const now = await this.databaseNow(); await tx.providerInvocation.update({ where: { id_workspaceId: { id: invocationId, workspaceId } }, data: { status, claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } }); });
+  }
+
+  async loadExecutionSnapshot(workspaceId: string, snapshotId: string): Promise<ExecutionSnapshot> {
+    const snapshot = await this.db.providerExecutionSnapshot.findUnique({ where: { id_workspaceId: { id: snapshotId, workspaceId } } });
+    if (!snapshot) throw new ProviderGatewayError("ROUTE_UNAVAILABLE");
+    return { ...snapshot, source: snapshot.connectionId ? "WORKSPACE" : "PLATFORM", connectionId: snapshot.connectionId ?? undefined, credentialVersionId: snapshot.credentialVersionId ?? undefined, endpoint: snapshot.endpoint ?? undefined, region: snapshot.region ?? undefined, promptVersion: snapshot.promptVersion ?? undefined, schemaVersion: snapshot.schemaVersion ?? undefined, pipelineVersion: snapshot.pipelineVersion ?? undefined, routeSlot: snapshot.routeSlot as ExecutionSnapshot["routeSlot"], protocol: snapshot.protocol as ExecutionSnapshot["protocol"], capability: snapshot.capability as unknown as ExecutionSnapshot["capability"], configuration: snapshot.configuration as unknown as ExecutionSnapshot["configuration"] };
   }
   async completeSuccessfulEmbeddingExecution(input: { workspaceId: string; invocationId: string; claimToken: string; attempt: StartedAttempt; snapshot: ExecutionSnapshot; response: EmbeddingResponse; expectedVectorCount: number; pinnedDimensions: number; usage?: ProviderUsage; remoteRequestId?: string; latencyMs: number; exactSecret?: string }): Promise<void> {
     this.assertEmbeddingResultStorageAvailable();
