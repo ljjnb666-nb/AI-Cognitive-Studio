@@ -1,7 +1,7 @@
 import { prisma } from "@ai-cognitive/db";
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { CohereEmbeddingAdapter, DeterministicProviderHttpTransport, GeminiEmbeddingAdapter, OpenAIEmbeddingAdapter, ProviderExecutionRepository, ProviderGatewayError, ProviderGatewayRepository, ProviderRegistry, QwenEmbeddingAdapter, VoyageEmbeddingAdapter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, testCipher, type GatewayRequest, type ProviderAdapter, type ProviderHttpRequest, type ProviderHttpResponse } from "../src/index.js";
+import { CohereEmbeddingAdapter, DeterministicProviderHttpTransport, GeminiEmbeddingAdapter, OpenAIEmbeddingAdapter, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, QwenEmbeddingAdapter, VoyageEmbeddingAdapter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, testCipher, type GatewayRequest, type ProviderAdapter, type ProviderHttpRequest, type ProviderHttpResponse } from "../src/index.js";
 
 const workspaces: string[] = []; const users: string[] = []; const secret = "phase8c-super-secret-credential";
 const protocols = { openai: "OPENAI_EMBEDDINGS", gemini: "GEMINI_EMBEDDINGS", qwen: "OPENAI_COMPATIBLE", cohere: "COHERE_EMBEDDINGS_V2", voyage: "VOYAGE_EMBEDDINGS" } as const;
