@@ -46,8 +46,11 @@ export class ProviderExecutionRepository {
         const reclaimed = await this.db.providerInvocation.updateMany({ where: { id: existing.id, workspaceId: snapshot.workspaceId, claimToken: existing.claimToken ?? undefined, status: existing.status, OR: [{ claimExpiresAt: null }, { claimExpiresAt: { lte: now } }] }, data: { status: "RUNNING", claimToken, claimOwner: this.workerId, claimExpiresAt: expiresAt, completedAt: null } });
         if (reclaimed.count === 1) return { kind: "OWNER", invocationId: existing.id, claimToken };
       } else {
-        const reclaimed = await this.db.$executeRaw`UPDATE "ProviderInvocation" SET "status" = 'RUNNING', "claimToken" = ${claimToken}, "claimOwner" = ${this.workerId}, "claimExpiresAt" = CURRENT_TIMESTAMP + (${this.leaseMs} * INTERVAL '1 millisecond'), "completedAt" = NULL WHERE "id" = ${existing.id} AND "workspaceId" = ${snapshot.workspaceId} AND NOT EXISTS (SELECT 1 FROM "ProviderInvocationAttempt" WHERE "invocationId" = "ProviderInvocation"."id") AND ("status" = 'PENDING' OR ("status" = 'RUNNING' AND "claimExpiresAt" <= CURRENT_TIMESTAMP))`;
-        if (reclaimed === 1) return { kind: "OWNER", invocationId: existing.id, claimToken };
+        const reclaimed = await this.db.$transaction(async tx => {
+          await tx.providerExecutionSnapshot.create({ data: snapshotData(snapshot) });
+          return tx.providerInvocation.updateMany({ where: { id: existing.id, workspaceId: snapshot.workspaceId, status: existing.status, attempts: { none: {} }, OR: [{ status: "PENDING" }, { status: "RUNNING", claimExpiresAt: { lte: now } }] }, data: { snapshotId: snapshot.id, status: "RUNNING", claimToken, claimOwner: this.workerId, claimExpiresAt: expiresAt, completedAt: null } });
+        });
+        if (reclaimed.count === 1) return { kind: "OWNER", invocationId: existing.id, claimToken };
       }
     }
     return { kind: "IN_PROGRESS", invocationId: existing.id };
