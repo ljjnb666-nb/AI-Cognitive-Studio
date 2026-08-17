@@ -5,7 +5,7 @@ import { resolveRoute, type WorkspaceRouteResolver } from "../routing/resolver.j
 import { createExecutionSnapshot, stableHash } from "../routing/snapshot.js";
 import { canonicalTextInputHash } from "../text/canonical-input.js";
 import { validateTextGenerationInput } from "../text/validation.js";
-import { canonicalEmbeddingInputHash, validateEmbeddingInput } from "../embedding/validation.js";
+import { canonicalEmbeddingInputHash, embeddingDimensions, validateEmbeddingInput, validateVectors } from "../embedding/validation.js";
 import { resolvePlatformCredential, type PlatformCredentialResolver } from "./platform-credentials.js";
 import type { ExecutionPrincipal, ExecutionSnapshot, GatewayRequest, PlatformDefaultResolver, ProviderAdapterResolver } from "../types.js";
 
@@ -69,6 +69,10 @@ class ProviderGatewayCore {
       }
       return { status: claim.kind, invocationId: claim.invocationId };
     }
+    if (request.embedding && this.execution.repository) {
+      try { this.execution.repository.assertEmbeddingResultStorageAvailable(); }
+      catch (error) { await this.finish(claim, snapshot, "FAILED"); throw error; }
+    }
     const key = `${snapshot.workspaceId}:${snapshot.connectionId ?? snapshot.providerKey}:${snapshot.modelId}`; const maxAttempts = Math.min(request.budget?.maxAttempts ?? this.execution.maxAttempts ?? 3, this.execution.maxAttempts ?? 3); let last: ProviderGatewayError | undefined;
     for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
       if (request.signal?.aborted) { await this.finish(claim, snapshot, "BLOCKED"); throw new ProviderGatewayError("CANCELLED"); }
@@ -92,7 +96,10 @@ class ProviderGatewayCore {
               if (request.embedding) {
                 const response = result.response;
                 if (!response || typeof response !== "object" || !("vectors" in response) || !("dimensions" in response)) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
-                await this.execution.repository!.completeSuccessfulEmbeddingExecution({ workspaceId: snapshot.workspaceId, invocationId: claim.invocationId!, claimToken: claim.claimToken!, attempt: durableAttempt, snapshot, response: response as import("../types.js").EmbeddingResponse, usage: result.usage, remoteRequestId: result.remoteRequestId, latencyMs, exactSecret: state?.credential });
+                const embeddingResponse = response as import("../types.js").EmbeddingResponse, pinnedDimensions = embeddingDimensions(snapshot.capability, snapshot.configuration);
+                if (embeddingResponse.dimensions !== pinnedDimensions) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
+                validateVectors(embeddingResponse.vectors, request.embedding.texts.length, pinnedDimensions);
+                await this.execution.repository!.completeSuccessfulEmbeddingExecution({ workspaceId: snapshot.workspaceId, invocationId: claim.invocationId!, claimToken: claim.claimToken!, attempt: durableAttempt, snapshot, response: embeddingResponse, expectedVectorCount: request.embedding.texts.length, pinnedDimensions, usage: result.usage, remoteRequestId: result.remoteRequestId, latencyMs, exactSecret: state?.credential });
               } else { await this.execution.repository!.recordAttemptOutcome(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, durableAttempt.id, "SUCCEEDED", { remoteRequestId: result.remoteRequestId, latencyMs }, { snapshot, attempt: durableAttempt, status: "SUCCEEDED", usage: result.usage, exactSecret: state?.credential }); await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, "SUCCEEDED"); }
             }
           } catch (persistenceError) { if (claim.invocationId && claim.claimToken) await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId, claim.claimToken, "RECONCILIATION_REQUIRED").catch(() => undefined); throw safeError(persistenceError, request.correlationId); }

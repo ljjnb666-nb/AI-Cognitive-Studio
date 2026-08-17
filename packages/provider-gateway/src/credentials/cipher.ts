@@ -4,10 +4,10 @@ import { ProviderGatewayError } from "../errors.js";
 export type CredentialAad = { workspaceId: string; connectionId: string; credentialVersionId: string; providerKey: string };
 export type EncryptedCredential = { ciphertext: string; iv: string; authTag: string; keyVersion: string };
 export interface CredentialCipher { encrypt(plaintext: string, aad: CredentialAad): EncryptedCredential; decrypt(value: EncryptedCredential, aad: CredentialAad): string; }
-export type EmbeddingResultAad = { workspaceId: string; invocationId: string; attemptId: string; snapshotId: string };
+export type EmbeddingResultAad = { workspaceId: string; invocationId: string; attemptId: string; snapshotId: string; providerKey: string; modelId: string };
 export interface EmbeddingResultCipher { encryptEmbeddingResult(plaintext: string, aad: EmbeddingResultAad): EncryptedCredential; decryptEmbeddingResult(value: EncryptedCredential, aad: EmbeddingResultAad): string; }
 function aadBytes(aad: CredentialAad): Buffer { return Buffer.from(JSON.stringify([aad.workspaceId, aad.connectionId, aad.credentialVersionId, aad.providerKey])); }
-function embeddingResultAadBytes(aad: EmbeddingResultAad): Buffer { return Buffer.from(JSON.stringify(["provider-embedding-result-v1", aad.workspaceId, aad.invocationId, aad.attemptId, aad.snapshotId])); }
+function embeddingResultAadBytes(aad: EmbeddingResultAad): Buffer { return Buffer.from(JSON.stringify(["provider-embedding-result-v1", aad.workspaceId, aad.invocationId, aad.attemptId, aad.snapshotId, aad.providerKey, aad.modelId])); }
 export class VersionedAesGcmCipher implements CredentialCipher {
   constructor(private readonly activeVersion: string, private readonly keys: ReadonlyMap<string, Buffer>) { if (!keys.has(activeVersion)) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Active credential key is unavailable"); for (const key of keys.values()) if (key.length !== 32) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Credential encryption keys must be 256-bit"); }
   encrypt(plaintext: string, aad: CredentialAad): EncryptedCredential { const key = this.keys.get(this.activeVersion); if (!key) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR"); const iv = randomBytes(12); const cipher = createCipheriv("aes-256-gcm", key, iv); cipher.setAAD(aadBytes(aad)); return { ciphertext: Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]).toString("base64"), iv: iv.toString("base64"), authTag: cipher.getAuthTag().toString("base64"), keyVersion: this.activeVersion }; }

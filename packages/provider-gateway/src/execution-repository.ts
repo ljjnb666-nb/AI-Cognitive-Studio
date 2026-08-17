@@ -17,6 +17,7 @@ export class ProviderExecutionRepository {
   constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher & Partial<EmbeddingResultCipher>, private readonly testClock?: () => Date, private readonly workerId = `gateway-${randomUUID()}`, private readonly leaseMs = leaseMilliseconds) {}
   private async databaseNow(): Promise<Date> { if (this.testClock) return this.testClock(); const rows = await this.db.$queryRaw<{ now: Date }[]>`SELECT CURRENT_TIMESTAMP AS "now"`; return rows[0]?.now ?? (() => { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Database clock unavailable"); })(); }
   get leaseDurationMs(): number { return this.leaseMs; }
+  assertEmbeddingResultStorageAvailable(): void { if (!this.cipher?.encryptEmbeddingResult || !this.cipher.decryptEmbeddingResult) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Embedding result vault is not configured"); }
 
   async claimExecution(snapshot: ExecutionSnapshot, input: { idempotencyKey: string; fingerprint: string }): Promise<ExecutionClaim> {
     const claimToken = randomUUID(); const now = await this.databaseNow(); const expiresAt = new Date(now.getTime() + this.leaseMs);
@@ -116,13 +117,15 @@ export class ProviderExecutionRepository {
   async completeInvocation(workspaceId: string, invocationId: string, claimToken: string, status: "SUCCEEDED" | "FAILED" | "BLOCKED" | "RECONCILIATION_REQUIRED"): Promise<void> {
     await this.db.$transaction(async tx => { await this.assertOwnershipInTransaction(tx, workspaceId, invocationId, claimToken); const now = await this.databaseNow(); await tx.providerInvocation.update({ where: { id_workspaceId: { id: invocationId, workspaceId } }, data: { status, claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } }); });
   }
-  async completeSuccessfulEmbeddingExecution(input: { workspaceId: string; invocationId: string; claimToken: string; attempt: StartedAttempt; snapshot: ExecutionSnapshot; response: EmbeddingResponse; usage?: ProviderUsage; remoteRequestId?: string; latencyMs: number; exactSecret?: string }): Promise<void> {
-    if (!this.cipher?.encryptEmbeddingResult) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Embedding result vault is not configured");
-    const vectors = validateVectors(input.response.vectors, input.response.vectors.length, input.response.dimensions);
+  async completeSuccessfulEmbeddingExecution(input: { workspaceId: string; invocationId: string; claimToken: string; attempt: StartedAttempt; snapshot: ExecutionSnapshot; response: EmbeddingResponse; expectedVectorCount: number; pinnedDimensions: number; usage?: ProviderUsage; remoteRequestId?: string; latencyMs: number; exactSecret?: string }): Promise<void> {
+    this.assertEmbeddingResultStorageAvailable();
+    const cipher = this.cipher as CredentialCipher & EmbeddingResultCipher;
+    if (input.response.dimensions !== input.pinnedDimensions) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
+    const vectors = validateVectors(input.response.vectors, input.expectedVectorCount, input.pinnedDimensions);
     const payload = JSON.stringify({ vectors, dimensions: input.response.dimensions, providerModel: input.response.providerModel });
     // 8 MiB is an absolute cap in addition to provider input/dimension constraints; no result is truncated.
     if (Buffer.byteLength(payload, "utf8") > 8 * 1024 * 1024) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Embedding result exceeds durable handoff bound");
-    const encrypted = this.cipher.encryptEmbeddingResult(payload, { workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: input.attempt.id, snapshotId: input.snapshot.id });
+    const encrypted = cipher.encryptEmbeddingResult(payload, { workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: input.attempt.id, snapshotId: input.snapshot.id, providerKey: input.snapshot.providerKey, modelId: input.snapshot.modelId });
     await this.db.$transaction(async tx => {
       await this.assertOwnershipInTransaction(tx, input.workspaceId, input.invocationId, input.claimToken);
       const now = await this.databaseNow();
@@ -138,7 +141,7 @@ export class ProviderExecutionRepository {
     const row = await this.db.providerEmbeddingResult.findFirst({ where: { workspaceId, invocationId }, include: { snapshot: true } });
     if (!row) return undefined;
     try {
-      const plain = this.cipher.decryptEmbeddingResult(row, { workspaceId, invocationId, attemptId: row.attemptId, snapshotId: row.snapshotId });
+      const plain = this.cipher.decryptEmbeddingResult(row, { workspaceId, invocationId, attemptId: row.attemptId, snapshotId: row.snapshotId, providerKey: row.snapshot.providerKey, modelId: row.snapshot.modelId });
       const parsed = JSON.parse(plain) as { vectors?: unknown; dimensions?: unknown; providerModel?: unknown };
       if (typeof parsed.dimensions !== "number" || !Number.isSafeInteger(parsed.dimensions) || typeof parsed.providerModel !== "string" && parsed.providerModel !== undefined) return undefined;
       const vectors = validateVectors(parsed.vectors, row.vectorCount, parsed.dimensions);

@@ -19,8 +19,10 @@ CREATE UNIQUE INDEX "ProviderEmbeddingResult_attemptId_key" ON "ProviderEmbeddin
 CREATE UNIQUE INDEX "ProviderEmbeddingResult_id_workspaceId_key" ON "ProviderEmbeddingResult"("id", "workspaceId");
 CREATE UNIQUE INDEX "ProviderEmbeddingResult_invocationId_workspaceId_key" ON "ProviderEmbeddingResult"("invocationId", "workspaceId");
 CREATE UNIQUE INDEX "ProviderEmbeddingResult_attemptId_invocationId_workspaceId_key" ON "ProviderEmbeddingResult"("attemptId", "invocationId", "workspaceId");
+CREATE UNIQUE INDEX "ProviderInvocation_id_workspaceId_snapshotId_key" ON "ProviderInvocation"("id", "workspaceId", "snapshotId");
+CREATE UNIQUE INDEX "ProviderEmbeddingResult_invocationId_workspaceId_snapshotId_key" ON "ProviderEmbeddingResult"("invocationId", "workspaceId", "snapshotId");
 CREATE INDEX "ProviderEmbeddingResult_workspaceId_invocationId_idx" ON "ProviderEmbeddingResult"("workspaceId", "invocationId");
 ALTER TABLE "ProviderEmbeddingResult" ADD CONSTRAINT "ProviderEmbeddingResult_workspaceId_fkey" FOREIGN KEY ("workspaceId") REFERENCES "Workspace"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-ALTER TABLE "ProviderEmbeddingResult" ADD CONSTRAINT "ProviderEmbeddingResult_invocationId_workspaceId_fkey" FOREIGN KEY ("invocationId", "workspaceId") REFERENCES "ProviderInvocation"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "ProviderEmbeddingResult" ADD CONSTRAINT "ProviderEmbeddingResult_invocationId_workspaceId_snapshotId_fkey" FOREIGN KEY ("invocationId", "workspaceId", "snapshotId") REFERENCES "ProviderInvocation"("id", "workspaceId", "snapshotId") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "ProviderEmbeddingResult" ADD CONSTRAINT "ProviderEmbeddingResult_attemptId_invocationId_workspaceId_fkey" FOREIGN KEY ("attemptId", "invocationId", "workspaceId") REFERENCES "ProviderInvocationAttempt"("id", "invocationId", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "ProviderEmbeddingResult" ADD CONSTRAINT "ProviderEmbeddingResult_snapshotId_workspaceId_fkey" FOREIGN KEY ("snapshotId", "workspaceId") REFERENCES "ProviderExecutionSnapshot"("id", "workspaceId") ON DELETE CASCADE ON UPDATE CASCADE;

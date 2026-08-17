@@ -491,6 +491,7 @@ model ProviderInvocation {
 
   @@unique([workspaceId, idempotencyKey])
   @@unique([id, workspaceId])
+  @@unique([id, workspaceId, snapshotId])
   @@index([workspaceId, createdAt])
   @@index([workspaceId, status, claimExpiresAt])
 }
@@ -531,12 +532,13 @@ model ProviderEmbeddingResult {
   dimensions   Int
   createdAt    DateTime                  @default(now())
   workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  invocation   ProviderInvocation        @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  invocation   ProviderInvocation        @relation(fields: [invocationId, workspaceId, snapshotId], references: [id, workspaceId, snapshotId], onDelete: Cascade)
   attempt      ProviderInvocationAttempt @relation(fields: [attemptId, invocationId, workspaceId], references: [id, invocationId, workspaceId], onDelete: Cascade)
   snapshot     ProviderExecutionSnapshot @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 
   @@unique([id, workspaceId])
   @@unique([invocationId, workspaceId])
+  @@unique([invocationId, workspaceId, snapshotId])
   @@unique([attemptId, invocationId, workspaceId])
   @@index([workspaceId, invocationId])
 }
