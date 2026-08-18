@@ -2,9 +2,9 @@ import { prisma } from "@ai-cognitive/db";
 import { randomUUID } from "node:crypto";
 import { VersionedAesGcmCipher, type CredentialCipher, type EmbeddingResultCipher } from "./credentials/cipher.js";
 import { redactSecrets } from "./credentials/redaction.js";
-import { validateVectors } from "./embedding/validation.js";
+import { embeddingDimensions, validateVectors } from "./embedding/validation.js";
 import { ProviderGatewayError } from "./errors.js";
-import type { EmbeddingResponse, ExecutionSnapshot, ProviderUsage } from "./types.js";
+import type { EmbeddingResponse, ExecutionSnapshot, ModelCapability, ProviderUsage } from "./types.js";
 
 type Db = typeof prisma;
 export type ExecutionClaim = { kind: "OWNER"; invocationId: string; claimToken: string; snapshotId: string } | { kind: "ALREADY_PROCESSED"; invocationId: string } | { kind: "IN_PROGRESS"; invocationId: string } | { kind: "TERMINAL_FAILED"; invocationId: string } | { kind: "BLOCKED_EXISTING"; invocationId: string } | { kind: "RECONCILIATION_REQUIRED"; invocationId: string };
@@ -150,8 +150,10 @@ export class ProviderExecutionRepository {
       const plain = this.cipher.decryptEmbeddingResult(row, { workspaceId, invocationId, attemptId: row.attemptId, snapshotId: row.snapshotId, providerKey: row.snapshot.providerKey, modelId: row.snapshot.modelId });
       const parsed = JSON.parse(plain) as { vectors?: unknown; dimensions?: unknown; providerModel?: unknown };
       if (typeof parsed.dimensions !== "number" || !Number.isSafeInteger(parsed.dimensions) || typeof parsed.providerModel !== "string" && parsed.providerModel !== undefined) return undefined;
-      const vectors = validateVectors(parsed.vectors, row.vectorCount, parsed.dimensions);
-      if (parsed.dimensions !== row.dimensions || vectors.length !== row.vectorCount) return undefined;
+      const pinnedDimensions = embeddingDimensions(row.snapshot.capability as unknown as ModelCapability, row.snapshot.configuration as Readonly<Record<string, unknown>>);
+      if (parsed.dimensions !== row.dimensions || parsed.dimensions !== pinnedDimensions || row.dimensions !== pinnedDimensions) return undefined;
+      const vectors = validateVectors(parsed.vectors, row.vectorCount, pinnedDimensions);
+      if (vectors.length !== row.vectorCount) return undefined;
       return { vectors, dimensions: parsed.dimensions, providerModel: parsed.providerModel };
     } catch { return undefined; }
   }
