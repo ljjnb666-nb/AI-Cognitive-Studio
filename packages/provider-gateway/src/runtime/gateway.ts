@@ -69,7 +69,14 @@ class ProviderGatewayCore {
       return { status: claim.kind, invocationId: claim.invocationId };
     }
     if (claim.snapshotId && this.execution.repository) snapshot = await this.execution.repository.loadExecutionSnapshot(snapshot.workspaceId, claim.snapshotId);
-    const adapter = this.adapterResolver({ providerKey: snapshot.providerKey, family: request.capability.family, protocol: snapshot.protocol, modelId: snapshot.modelId }); if (!adapter) throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "No installed adapter for pinned provider");
+    const adapter = this.adapterResolver({ providerKey: snapshot.providerKey, family: request.capability.family, protocol: snapshot.protocol, modelId: snapshot.modelId });
+    if (!adapter) {
+      if (claim.invocationId && claim.claimToken && this.execution.repository) {
+        try { await this.execution.repository.releasePreRemoteClaim(snapshot.workspaceId, claim.invocationId, claim.claimToken); }
+        catch (error) { throw safeError(error, request.correlationId); }
+      }
+      throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "No installed adapter for pinned provider");
+    }
     if (request.embedding && this.execution.repository) {
       try { this.execution.repository.assertEmbeddingResultStorageAvailable(); }
       catch (error) {
