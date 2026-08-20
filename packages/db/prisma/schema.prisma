@@ -519,28 +519,34 @@ model ProviderInvocationAttempt {
 }
 
 model ProviderEmbeddingResult {
-  id           String                    @id @default(cuid())
-  workspaceId  String
-  invocationId String                    @unique
-  attemptId    String                    @unique
-  snapshotId   String
-  ciphertext   String
-  iv           String
-  authTag      String
-  keyVersion   String
-  vectorCount  Int
-  dimensions   Int
-  createdAt    DateTime                  @default(now())
-  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  invocation   ProviderInvocation        @relation(fields: [invocationId, workspaceId, snapshotId], references: [id, workspaceId, snapshotId], onDelete: Cascade)
-  attempt      ProviderInvocationAttempt @relation(fields: [attemptId, invocationId, workspaceId], references: [id, invocationId, workspaceId], onDelete: Cascade)
-  snapshot     ProviderExecutionSnapshot @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  id                  String                    @id @default(cuid())
+  workspaceId         String
+  invocationId        String                    @unique
+  attemptId           String                    @unique
+  snapshotId          String
+  ciphertext          String?
+  iv                  String?
+  authTag             String?
+  keyVersion          String?
+  vectorCount         Int
+  dimensions          Int
+  createdAt           DateTime                  @default(now())
+  consumedAt          DateTime?
+  purgedAt            DateTime?
+  consumerKind        String?
+  consumerKey         String?
+  consumerFingerprint String?
+  workspace           Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invocation          ProviderInvocation        @relation(fields: [invocationId, workspaceId, snapshotId], references: [id, workspaceId, snapshotId], onDelete: Cascade)
+  attempt             ProviderInvocationAttempt @relation(fields: [attemptId, invocationId, workspaceId], references: [id, invocationId, workspaceId], onDelete: Cascade)
+  snapshot            ProviderExecutionSnapshot @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 
   @@unique([id, workspaceId])
   @@unique([invocationId, workspaceId])
   @@unique([invocationId, workspaceId, snapshotId])
   @@unique([attemptId, invocationId, workspaceId])
   @@index([workspaceId, invocationId])
+  @@index([workspaceId, consumedAt])
 }
 
 model ProviderUsageEvent {

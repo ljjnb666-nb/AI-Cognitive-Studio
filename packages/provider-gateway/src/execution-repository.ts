@@ -7,8 +7,13 @@ import { ProviderGatewayError } from "./errors.js";
 import type { EmbeddingResponse, ExecutionSnapshot, ModelCapability, ProviderUsage } from "./types.js";
 
 type Db = typeof prisma;
+type Transaction = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 export type ExecutionClaim = { kind: "OWNER"; invocationId: string; claimToken: string; snapshotId: string } | { kind: "ALREADY_PROCESSED"; invocationId: string } | { kind: "IN_PROGRESS"; invocationId: string } | { kind: "TERMINAL_FAILED"; invocationId: string } | { kind: "BLOCKED_EXISTING"; invocationId: string } | { kind: "RECONCILIATION_REQUIRED"; invocationId: string };
 export type StartedAttempt = { id: string; attemptNumber: number };
+export type EmbeddingConsumptionInput = { workspaceId: string; invocationId: string; snapshotId: string; consumerKind: string; consumerKey: string; consumerFingerprint: string };
+export type EmbeddingConsumptionResult = { status: "CONSUMED" | "ALREADY_CONSUMED"; invocationId: string; snapshotId: string; vectorCount: number; dimensions: number };
+export type EmbeddingMaterializer = (input: { tx: Transaction; vectors: readonly number[][]; snapshot: ExecutionSnapshot; receipt: { id: string; vectorCount: number; dimensions: number } }) => Promise<void>;
+export type EmbeddingHandoffState = { kind: "RECOVERABLE"; response: EmbeddingResponse } | { kind: "CONSUMED" } | { kind: "RECONCILIATION_REQUIRED" };
 const leaseMilliseconds = 60_000;
 const bounded = (value: string | undefined) => value && value.length <= 256 ? value : undefined;
 const uniqueViolation = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2002";
@@ -30,7 +35,7 @@ export class ProviderExecutionRepository {
     } catch (error) {
       if (!uniqueViolation(error)) throw error;
     }
-    const existing = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId: snapshot.workspaceId, idempotencyKey: input.idempotencyKey }, }, include: { attempts: { select: { id: true, status: true } }, embeddingResult: { select: { id: true } } } });
+    const existing = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId: snapshot.workspaceId, idempotencyKey: input.idempotencyKey }, }, include: { attempts: { select: { id: true, status: true } }, embeddingResult: { select: { id: true, consumedAt: true } } } });
     if (!existing) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
     if (existing.requestFingerprint !== input.fingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT");
     if (existing.status === "SUCCEEDED") return snapshot.capability.families.includes("EMBEDDING") && !existing.embeddingResult ? { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id } : { kind: "ALREADY_PROCESSED", invocationId: existing.id };
@@ -142,20 +147,65 @@ export class ProviderExecutionRepository {
       await tx.providerInvocation.update({ where: { id_workspaceId: { id: input.invocationId, workspaceId: input.workspaceId } }, data: { status: "SUCCEEDED", claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } });
     });
   }
-  async recoverEmbeddingResult(workspaceId: string, invocationId: string): Promise<EmbeddingResponse | undefined> {
-    if (!this.cipher?.decryptEmbeddingResult) return undefined;
+  async recoverEmbeddingHandoff(workspaceId: string, invocationId: string): Promise<EmbeddingHandoffState> {
+    if (!this.cipher?.decryptEmbeddingResult) return { kind: "RECONCILIATION_REQUIRED" };
     const row = await this.db.providerEmbeddingResult.findFirst({ where: { workspaceId, invocationId }, include: { snapshot: true } });
-    if (!row) return undefined;
+    if (!row) return { kind: "RECONCILIATION_REQUIRED" };
+    if (row.consumedAt && !row.ciphertext && !row.iv && !row.authTag && !row.keyVersion) return { kind: "CONSUMED" };
+    if (row.consumedAt || !row.ciphertext || !row.iv || !row.authTag || !row.keyVersion) return { kind: "RECONCILIATION_REQUIRED" };
     try {
-      const plain = this.cipher.decryptEmbeddingResult(row, { workspaceId, invocationId, attemptId: row.attemptId, snapshotId: row.snapshotId, providerKey: row.snapshot.providerKey, modelId: row.snapshot.modelId });
+      const plain = this.cipher.decryptEmbeddingResult({ ciphertext: row.ciphertext, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion }, { workspaceId, invocationId, attemptId: row.attemptId, snapshotId: row.snapshotId, providerKey: row.snapshot.providerKey, modelId: row.snapshot.modelId });
       const parsed = JSON.parse(plain) as { vectors?: unknown; dimensions?: unknown; providerModel?: unknown };
-      if (typeof parsed.dimensions !== "number" || !Number.isSafeInteger(parsed.dimensions) || typeof parsed.providerModel !== "string" && parsed.providerModel !== undefined) return undefined;
+      if (typeof parsed.dimensions !== "number" || !Number.isSafeInteger(parsed.dimensions) || typeof parsed.providerModel !== "string" && parsed.providerModel !== undefined) return { kind: "RECONCILIATION_REQUIRED" };
       const pinnedDimensions = embeddingDimensions(row.snapshot.capability as unknown as ModelCapability, row.snapshot.configuration as Readonly<Record<string, unknown>>);
-      if (parsed.dimensions !== row.dimensions || parsed.dimensions !== pinnedDimensions || row.dimensions !== pinnedDimensions) return undefined;
+      if (parsed.dimensions !== row.dimensions || parsed.dimensions !== pinnedDimensions || row.dimensions !== pinnedDimensions) return { kind: "RECONCILIATION_REQUIRED" };
       const vectors = validateVectors(parsed.vectors, row.vectorCount, pinnedDimensions);
-      if (vectors.length !== row.vectorCount) return undefined;
-      return { vectors, dimensions: parsed.dimensions, providerModel: parsed.providerModel };
-    } catch { return undefined; }
+      if (vectors.length !== row.vectorCount) return { kind: "RECONCILIATION_REQUIRED" };
+      return { kind: "RECOVERABLE", response: { vectors, dimensions: parsed.dimensions, providerModel: parsed.providerModel } };
+    } catch { return { kind: "RECONCILIATION_REQUIRED" }; }
+  }
+  async recoverEmbeddingResult(workspaceId: string, invocationId: string): Promise<EmbeddingResponse | undefined> { const state = await this.recoverEmbeddingHandoff(workspaceId, invocationId); return state.kind === "RECOVERABLE" ? state.response : undefined; }
+  async isEmbeddingResultConsumed(workspaceId: string, invocationId: string): Promise<boolean> {
+    const row = await this.db.providerEmbeddingResult.findFirst({ where: { workspaceId, invocationId }, select: { consumedAt: true, ciphertext: true, iv: true, authTag: true, keyVersion: true } });
+    return Boolean(row?.consumedAt && !row.ciphertext && !row.iv && !row.authTag && !row.keyVersion);
+  }
+  /**
+   * The only transition from an encrypted provider receipt to application-owned vectors.
+   * The callback deliberately receives the same transaction; Provider Gateway stays
+   * independent of the application schema while callers get an all-or-nothing handoff.
+   */
+  async consumeEmbeddingResult(input: EmbeddingConsumptionInput, materialize: EmbeddingMaterializer): Promise<EmbeddingConsumptionResult> {
+    this.assertEmbeddingResultStorageAvailable();
+    if (!input.consumerKind || !input.consumerKey || !/^[a-f0-9]{64}$/.test(input.consumerFingerprint)) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid embedding consumer identity");
+    return this.db.$transaction(async tx => {
+      const locks = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "ProviderEmbeddingResult" WHERE "workspaceId" = ${input.workspaceId} AND "invocationId" = ${input.invocationId} FOR UPDATE`;
+      if (locks.length !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED");
+      const receipt = await tx.providerEmbeddingResult.findFirst({ where: { id: locks[0]!.id, workspaceId: input.workspaceId }, include: { invocation: true, snapshot: true } });
+      if (!receipt || receipt.invocation.snapshotId !== input.snapshotId || receipt.snapshotId !== input.snapshotId || receipt.invocation.status !== "SUCCEEDED") throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED");
+      const snapshot = await this.loadExecutionSnapshotInTransaction(tx, input.workspaceId, input.snapshotId);
+      if (!snapshot.capability.families.includes("EMBEDDING")) throw new ProviderGatewayError("CAPABILITY_MISMATCH");
+      if (receipt.consumedAt) {
+        if (receipt.consumerFingerprint !== input.consumerFingerprint || receipt.consumerKind !== input.consumerKind || receipt.consumerKey !== input.consumerKey) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "Embedding receipt was consumed by a different destination");
+        return { status: "ALREADY_CONSUMED", invocationId: input.invocationId, snapshotId: input.snapshotId, vectorCount: receipt.vectorCount, dimensions: receipt.dimensions };
+      }
+      if (!receipt.ciphertext || !receipt.iv || !receipt.authTag || !receipt.keyVersion) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED");
+      let parsed: { vectors?: unknown; dimensions?: unknown };
+      try { parsed = JSON.parse((this.cipher as CredentialCipher & EmbeddingResultCipher).decryptEmbeddingResult({ ciphertext: receipt.ciphertext, iv: receipt.iv, authTag: receipt.authTag, keyVersion: receipt.keyVersion }, { workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: receipt.attemptId, snapshotId: input.snapshotId, providerKey: snapshot.providerKey, modelId: snapshot.modelId })) as { vectors?: unknown; dimensions?: unknown }; }
+      catch { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED"); }
+      const dimensions = embeddingDimensions(snapshot.capability, snapshot.configuration);
+      if (receipt.dimensions !== dimensions || parsed.dimensions !== dimensions) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED");
+      let vectors: readonly number[][];
+      try { vectors = validateVectors(parsed.vectors, receipt.vectorCount, dimensions); } catch { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED"); }
+      await materialize({ tx, vectors, snapshot, receipt: { id: receipt.id, vectorCount: receipt.vectorCount, dimensions: receipt.dimensions } });
+      const now = await this.databaseNow();
+      await tx.providerEmbeddingResult.update({ where: { id: receipt.id }, data: { consumedAt: now, purgedAt: now, consumerKind: input.consumerKind, consumerKey: input.consumerKey, consumerFingerprint: input.consumerFingerprint, ciphertext: null, iv: null, authTag: null, keyVersion: null } });
+      return { status: "CONSUMED", invocationId: input.invocationId, snapshotId: input.snapshotId, vectorCount: receipt.vectorCount, dimensions };
+    });
+  }
+  private async loadExecutionSnapshotInTransaction(tx: Transaction, workspaceId: string, snapshotId: string): Promise<ExecutionSnapshot> {
+    const snapshot = await tx.providerExecutionSnapshot.findUnique({ where: { id_workspaceId: { id: snapshotId, workspaceId } } });
+    if (!snapshot) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED");
+    return { ...snapshot, source: snapshot.connectionId ? "WORKSPACE" : "PLATFORM", connectionId: snapshot.connectionId ?? undefined, credentialVersionId: snapshot.credentialVersionId ?? undefined, endpoint: snapshot.endpoint ?? undefined, region: snapshot.region ?? undefined, promptVersion: snapshot.promptVersion ?? undefined, schemaVersion: snapshot.schemaVersion ?? undefined, pipelineVersion: snapshot.pipelineVersion ?? undefined, routeSlot: snapshot.routeSlot as ExecutionSnapshot["routeSlot"], protocol: snapshot.protocol as ExecutionSnapshot["protocol"], capability: snapshot.capability as unknown as ExecutionSnapshot["capability"], configuration: snapshot.configuration as unknown as ExecutionSnapshot["configuration"] };
   }
   private async assertOwnershipInTransaction(tx: Pick<Db, "$queryRaw">, workspaceId: string, invocationId: string, claimToken: string): Promise<void> {
     if (this.testClock) { const owned = await (tx as Db).providerInvocation.findFirst({ where: { id: invocationId, workspaceId, claimToken, status: "RUNNING", claimExpiresAt: { gt: this.testClock() } }, select: { id: true } }); if (!owned) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership was lost"); return; }

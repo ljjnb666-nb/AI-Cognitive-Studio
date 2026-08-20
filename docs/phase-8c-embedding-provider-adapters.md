@@ -22,6 +22,12 @@ The attempt success, usage append, encrypted receipt creation, invocation succes
 
 Protocol compatibility != capability compatibility. Changing provider, model, modelVersion, embeddingVersion, or dimensions requires a new embedding identity and re-embedding before vectors are compatible.
 
+## PHASE8C_CHECKPOINT2B_ATOMIC_MATERIALIZATION
+
+Checkpoint 2B turns a successful encrypted receipt into application-owned vectors with one PostgreSQL transaction. `ProviderEmbeddingResult` is retained as a tombstone: before consumption it contains the AES-256-GCM payload; after a successful materializer callback it retains invocation, workspace, snapshot, count/dimensions, consumer kind/key/fingerprint and timestamps, while ciphertext, IV, authentication tag and key version are purged.
+
+The fingerprint binds workspace, invocation, pinned snapshot, consumer kind, ordered destination ids, destination content hashes and lineage, plus embedding version. Book Intelligence re-reads and validates targets inside the same transaction, preserves vector order, uses the snapshot provider/model/dimensions and canonical identity hash, and fails closed on conflicting rows. The Gateway locks the receipt, validates/decrypts it, invokes the materializer, writes the tombstone and purges the payload. Callback failure rolls back all writes. Matching retries return `ALREADY_CONSUMED`; mismatched fingerprints are rejected. Missing/corrupt unconsumed receipts remain reconciliation-required. Gateway replay after consumption returns `ALREADY_PROCESSED` with `embeddingConsumed: true`, without vectors or another provider call. Consumption creates no new invocation, attempt or usage event.
+
 ## EMBEDDING_DURABLE_HANDOFF_ANALYSIS
 
 Checkpoint 1 does not solve the crash boundary between a successful provider embedding response and `DocumentChunkEmbedding`/`BookMemoryEmbedding` persistence. Gateway idempotency deliberately stores no raw vectors, so a replay cannot reconstruct them without another paid call. Checkpoint 2 should choose one of: persist encrypted/short-lived response handoff data transactionally; create a durable per-batch paid-call receipt with vector payload; or make the caller persist vectors in the same durable completion protocol before acknowledging gateway success. The recommended option is a durable per-batch handoff record with bounded encrypted vector payloads and an atomic consumer acknowledgement, so retry can complete persistence without repaying the provider.
