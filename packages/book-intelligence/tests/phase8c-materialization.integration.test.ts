@@ -93,11 +93,75 @@ describe("Phase 8C Checkpoint 2B permanent materialization acceptance", () => {
   it("BOOK_MEMORY_MATERIALIZER rejects changed lineage without writes and preserves the unconsumed receipt", async () => {
     const data = await lineage(), handoff = await receipt(data.workspace.id, 2);
     const targets = data.memories.map(item => ({ id: item.id, extractionId: data.extraction.id, analysisRunId: data.run.id, contentHash: item.contentHash }));
+    const before = await prisma.bookMemoryEmbedding.count({ where: { workspaceId: data.workspace.id } });
     await expect(materializeBookMemoryEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "v1", targets: [{ ...targets[0]!, contentHash: "wrong" }, targets[1]!] })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    expect(await prisma.bookMemoryEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBeGreaterThanOrEqual(0);
+    expect(await prisma.bookMemoryEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(before);
     expect((await prisma.providerEmbeddingResult.findUniqueOrThrow({ where: { invocationId: handoff.invocationId } })).consumedAt).toBeNull();
     await expect(materializeBookMemoryEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "v1", targets })).resolves.toMatchObject({ status: "CONSUMED" });
     expect(await prisma.bookMemoryEmbedding.count({ where: { workspaceId: data.workspace.id, provider: "openai", embeddingVersion: "v1" } })).toBe(2);
+  });
+
+  it("SEC06 CROSS WORKSPACE DOCUMENT CHUNK uses the real materializer and writes no application row", async () => {
+    const owner = await lineage(), foreign = await lineage(), handoff = await receipt(owner.workspace.id, 2);
+    const targets = foreign.chunks.map(chunk => ({ id: chunk.id, extractionId: foreign.extraction.id, contentHash: chunk.contentHash }));
+    const before = await prisma.documentChunkEmbedding.count({ where: { chunkId: { in: targets.map(target => target.id) } } });
+    await expect(materializeDocumentChunkEmbeddings(handoff.repository, { workspaceId: owner.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "v1", targets })).rejects.toMatchObject({ code: "AUTHORIZATION_FAILED" });
+    expect(await prisma.documentChunkEmbedding.count({ where: { chunkId: { in: targets.map(target => target.id) } } })).toBe(before);
+  });
+
+  it("SEC07 CROSS WORKSPACE BOOK MEMORY uses the real materializer and writes no application row", async () => {
+    const owner = await lineage(), foreign = await lineage(), handoff = await receipt(owner.workspace.id, 2);
+    const targets = foreign.memories.map(item => ({ id: item.id, extractionId: foreign.extraction.id, analysisRunId: foreign.run.id, contentHash: item.contentHash }));
+    const before = await prisma.bookMemoryEmbedding.count({ where: { memoryItemId: { in: targets.map(target => target.id) } } });
+    await expect(materializeBookMemoryEmbeddings(handoff.repository, { workspaceId: owner.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "v1", targets })).rejects.toMatchObject({ code: "AUTHORIZATION_FAILED" });
+    expect(await prisma.bookMemoryEmbedding.count({ where: { memoryItemId: { in: targets.map(target => target.id) } } })).toBe(before);
+  });
+
+  it("SEC08 and SEC12 reject incorrect document extraction or content hash without a write", async () => {
+    const data = await lineage(), handoff = await receipt(data.workspace.id, 2), targets = data.chunks.map(chunk => ({ id: chunk.id, extractionId: data.extraction.id, contentHash: chunk.contentHash }));
+    const before = await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } });
+    await expect(materializeDocumentChunkEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "v1", targets: [{ ...targets[0]!, extractionId: randomUUID() }, targets[1]!] })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(before);
+    await expect(materializeDocumentChunkEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "v1", targets: [{ ...targets[0]!, contentHash: "wrong" }, targets[1]!] })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("SEC09 and SEC10 reject incorrect BookMemory analysis run or extraction without a write", async () => {
+    const data = await lineage(), handoff = await receipt(data.workspace.id, 2), targets = data.memories.map(item => ({ id: item.id, extractionId: data.extraction.id, analysisRunId: data.run.id, contentHash: item.contentHash }));
+    const before = await prisma.bookMemoryEmbedding.count({ where: { workspaceId: data.workspace.id } });
+    await expect(materializeBookMemoryEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "v1", targets: [{ ...targets[0]!, analysisRunId: randomUUID() }, targets[1]!] })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(await prisma.bookMemoryEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(before);
+    await expect(materializeBookMemoryEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "v1", targets: [{ ...targets[0]!, extractionId: randomUUID() }, targets[1]!] })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("SEC13 target count mismatch is rejected by the real document materializer before any row is written", async () => {
+    const data = await lineage(), handoff = await receipt(data.workspace.id, 2), target = data.chunks[0]!;
+    const before = await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } });
+    await expect(materializeDocumentChunkEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "v1", targets: [{ id: target.id, extractionId: data.extraction.id, contentHash: target.contentHash }] })).rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE" });
+    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(before);
+  });
+
+  it("SEC11 changed target order conflicts with the consumed document intent and preserves ordered rows", async () => {
+    const data = await lineage(), handoff = await receipt(data.workspace.id, 2), targets = data.chunks.map(chunk => ({ id: chunk.id, extractionId: data.extraction.id, contentHash: chunk.contentHash }));
+    await expect(materializeDocumentChunkEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "order-v1", targets })).resolves.toMatchObject({ status: "CONSUMED" });
+    await expect(materializeDocumentChunkEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "order-v1", targets: [targets[1]!, targets[0]!] })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const identity = embeddingIdentityWithHash({ provider: "openai", model: capability.modelId, embeddingVersion: "order-v1", dimensions: 3 });
+    await expect(Promise.all(targets.map(target => prisma.documentChunkEmbedding.findUniqueOrThrow({ where: { chunkId_embeddingIdentityHash: { chunkId: target.id, embeddingIdentityHash: identity.hash } } })))).resolves.toMatchObject([{ vector: vectors[0] }, { vector: vectors[1] }]);
+  });
+
+  it("SEC24 conflicting existing DocumentChunkEmbedding fails closed and preserves the winner", async () => {
+    const data = await lineage(), handoff = await receipt(data.workspace.id, 2), targets = data.chunks.map(chunk => ({ id: chunk.id, extractionId: data.extraction.id, contentHash: chunk.contentHash }));
+    const identity = embeddingIdentityWithHash({ provider: "openai", model: capability.modelId, embeddingVersion: "conflict-v1", dimensions: 3 });
+    const existing = await prisma.documentChunkEmbedding.create({ data: { chunkId: targets[0]!.id, workspaceId: data.workspace.id, extractionId: data.extraction.id, provider: "openai", model: capability.modelId, embeddingVersion: "conflict-v1", embeddingIdentityHash: identity.hash, dimensions: 3, vector: [9, 9, 9] } });
+    await expect(materializeDocumentChunkEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "conflict-v1", targets })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(await prisma.documentChunkEmbedding.findUniqueOrThrow({ where: { id: existing.id } })).toMatchObject({ vector: [9, 9, 9], extractionId: data.extraction.id, embeddingIdentityHash: identity.hash });
+  });
+
+  it("SEC25 conflicting existing BookMemoryEmbedding fails closed and preserves the winner", async () => {
+    const data = await lineage(), handoff = await receipt(data.workspace.id, 2), targets = data.memories.map(item => ({ id: item.id, extractionId: data.extraction.id, analysisRunId: data.run.id, contentHash: item.contentHash }));
+    const identity = embeddingIdentityWithHash({ provider: "openai", model: capability.modelId, embeddingVersion: "conflict-memory-v1", dimensions: 3 });
+    const existing = await prisma.bookMemoryEmbedding.create({ data: { memoryItemId: targets[0]!.id, analysisRunId: data.run.id, workspaceId: data.workspace.id, extractionId: data.extraction.id, provider: "openai", model: capability.modelId, embeddingVersion: "conflict-memory-v1", embeddingIdentityHash: identity.hash, dimensions: 3, vector: [9, 9, 9] } });
+    await expect(materializeBookMemoryEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "conflict-memory-v1", targets })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(await prisma.bookMemoryEmbedding.findUniqueOrThrow({ where: { id: existing.id } })).toMatchObject({ vector: [9, 9, 9], analysisRunId: data.run.id, embeddingIdentityHash: identity.hash });
   });
 
   it("DOCUMENT_CHUNK_PRODUCTION_SHAPED_E2E and NO_DOUBLE_CHARGE_GATEWAY_MATERIALIZER preserve one paid receipt across ten retries and restart", async () => {
@@ -108,7 +172,7 @@ describe("Phase 8C Checkpoint 2B permanent materialization acceptance", () => {
     expect(await prisma.documentChunkEmbedding.count({ where: { chunkId: { in: targets.map(target => target.id) }, embeddingVersion: "paid-v1" } })).toBe(2); expect(handoff.transport.calls).toHaveLength(1); expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })).toBe(1); expect(await prisma.providerInvocationAttempt.count({ where: { workspaceId: data.workspace.id } })).toBe(1); expect(await prisma.providerUsageEvent.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
   });
 
-  it("BOOK_MEMORY_PRODUCTION_SHAPED_E2E preserves ordered vectors through restart and rejects a conflicting fingerprint", async () => {
+  it("SEC16 embeddingVersion conflict preserves the consumed BookMemory materialization winner", async () => {
     const data = await lineage(), handoff = await gatewayReceipt(data.workspace.id, (await prisma.workspaceMember.findFirstOrThrow({ where: { workspaceId: data.workspace.id } })).userId), targets = data.memories.map(item => ({ id: item.id, extractionId: data.extraction.id, analysisRunId: data.run.id, contentHash: item.contentHash }));
     expect(await prisma.bookMemoryEmbedding.count({ where: { memoryItemId: { in: targets.map(target => target.id) }, provider: "openai" } })).toBe(0); await expect(materializeBookMemoryEmbeddings(handoff.repository, { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "paid-memory-v1", targets })).resolves.toMatchObject({ status: "CONSUMED" });
     await expect(materializeBookMemoryEmbeddings(new ProviderExecutionRepository(prisma, testCipher()), { workspaceId: data.workspace.id, invocationId: handoff.invocationId, snapshotId: handoff.snapshotId, embeddingVersion: "paid-memory-v1", targets })).resolves.toMatchObject({ status: "ALREADY_CONSUMED" });

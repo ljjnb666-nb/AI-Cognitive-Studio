@@ -1,2 +1,2 @@
 export { prisma } from "./client.js";
-export { JobStatus } from "@prisma/client";
+export { JobStatus, PrismaClient } from "@prisma/client";
