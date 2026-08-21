@@ -5,3 +5,4 @@ export * from "./context.js";
 export * from "./persistence.js";
 export * from "./pipeline.js";
 export * from "./ownership.js";
+export * from "./gateway-materialization.js";
