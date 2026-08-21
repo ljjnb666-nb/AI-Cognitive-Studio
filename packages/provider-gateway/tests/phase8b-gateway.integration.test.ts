@@ -22,9 +22,10 @@ async function fixture(responder: (request: ProviderHttpRequest) => Promise<{ st
   const registry = new ProviderRegistry(); registry.register({ providerKey: "deepseek", displayName: "DeepSeek", protocol: "OPENAI_COMPATIBLE", adapterVersion: "phase8b", models: [capability] });
   const transport = new DeterministicProviderHttpTransport(responder);
   const repository = new ProviderExecutionRepository(prisma, cipher);
-  const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: request => store.resolveWorkspaceRoute(request) }, { resolve: async () => undefined }, () => new OpenAICompatibleAdapter(transport), { authorize: (principal, request) => new WorkspaceMembershipExecutionAuthorizer(prisma).authorizeExecution(principal, request.workspaceId), assertRouteUsable: async () => undefined, validateEndpoint: async () => undefined, assertBudget: () => undefined, repository, circuit: { admit: async () => undefined, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => undefined }, concurrency: { acquire: async key => ({ key, token: "lease" }), release: async () => true }, maxAttempts, sleep: async () => undefined, random: () => 0 });
+  const makeGateway = (adapterAvailable = true) => createProductionProviderGateway(registry, { resolveWorkspaceRoute: request => store.resolveWorkspaceRoute(request) }, { resolve: async () => undefined }, () => adapterAvailable ? new OpenAICompatibleAdapter(transport) : undefined, { authorize: (principal, request) => new WorkspaceMembershipExecutionAuthorizer(prisma).authorizeExecution(principal, request.workspaceId), assertRouteUsable: async () => undefined, validateEndpoint: async () => undefined, assertBudget: () => undefined, repository, circuit: { admit: async () => undefined, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => undefined }, concurrency: { acquire: async key => ({ key, token: "lease" }), release: async () => true }, maxAttempts, sleep: async () => undefined, random: () => 0 });
+  const gateway = makeGateway();
   const request = (idempotencyKey: string, signal?: AbortSignal): GatewayRequest => ({ workspaceId, routeSlot: "BOOK_CHUNK_ANALYSIS", correlationId: idempotencyKey, idempotencyKey, inputHash: "a".repeat(64), capability: { family: "TEXT_GENERATION" }, signal, text: { system: sentinels.system, messages: [{ role: "user", content: sentinels.user }] } });
-  return { workspaceId, userId, gateway, transport, request };
+  return { workspaceId, userId, gateway, makeGateway, transport, request };
 }
 
 async function durableJson(workspaceId: string): Promise<string> {
@@ -41,6 +42,12 @@ afterEach(async () => {
 afterAll(async () => prisma.$disconnect());
 
 describe("Phase 8B durable text adapter acceptance", () => {
+  it("releases a text pre-remote claim when the pinned adapter is unavailable and reclaims it after restoration", async () => {
+    const value = await fixture(() => ({ status: 200, headers: {}, body: JSON.stringify({ choices: [{ message: { content: "restored" } }] }) }), 1); await expect(value.makeGateway(false).execute(value.request("adapter-missing-text"), { userId: value.userId })).rejects.toMatchObject({ code: "ROUTE_UNAVAILABLE" }); const pending = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: value.workspaceId } });
+    expect(value.transport.calls).toHaveLength(0); expect(await prisma.providerInvocationAttempt.count({ where: { workspaceId: value.workspaceId } })).toBe(0); expect(await prisma.providerEmbeddingResult.count({ where: { workspaceId: value.workspaceId } })).toBe(0); expect(pending).toMatchObject({ status: "PENDING", claimToken: null, claimOwner: null, claimExpiresAt: null });
+    await expect(value.makeGateway().execute(value.request("adapter-missing-text"), { userId: value.userId })).resolves.toMatchObject({ status: "SUCCEEDED" }); expect(value.transport.calls).toHaveLength(1); expect(await prisma.providerEmbeddingResult.count({ where: { workspaceId: value.workspaceId } })).toBe(0); expect(await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: value.workspaceId } })).toMatchObject({ status: "SUCCEEDED", snapshotId: pending.snapshotId }); expect(await prisma.providerExecutionSnapshot.count({ where: { workspaceId: value.workspaceId } })).toBe(1);
+  });
+
   it("decrypts the real credential only for adapter auth and redacts a hostile remote secret echo from all durable rows", async () => {
     const remote = async () => ({ status: 500, headers: { "x-request-id": "phase8b-remote" }, body: JSON.stringify({ error: { message: secret, metadata: { nested: secret } }, arbitrary: { providerContent: sentinels.content, credential: secret } }) });
     const value = await fixture(remote);

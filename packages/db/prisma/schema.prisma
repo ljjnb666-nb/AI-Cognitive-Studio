@@ -363,6 +363,7 @@ model Workspace {
   providerSnapshots          ProviderExecutionSnapshot[]
   providerInvocations        ProviderInvocation[]
   providerInvocationAttempts ProviderInvocationAttempt[]
+  providerEmbeddingResults   ProviderEmbeddingResult[]
   providerUsageEvents        ProviderUsageEvent[]
   providerAuditEvents        ProviderAuditEvent[]
   defaultForUsers            User[]                      @relation("DefaultWorkspace")
@@ -455,6 +456,7 @@ model ProviderExecutionSnapshot {
   connection          ProviderConnection?        @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   credentialVersion   ProviderCredentialVersion? @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
   invocations         ProviderInvocation[]
+  embeddingResults    ProviderEmbeddingResult[]
 
   @@unique([id, workspaceId])
   @@index([workspaceId, routeSlot, createdAt])
@@ -485,9 +487,11 @@ model ProviderInvocation {
   credentialVersion   ProviderCredentialVersion?  @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
   usageEvents         ProviderUsageEvent[]
   attempts            ProviderInvocationAttempt[]
+  embeddingResult     ProviderEmbeddingResult?
 
   @@unique([workspaceId, idempotencyKey])
   @@unique([id, workspaceId])
+  @@unique([id, workspaceId, snapshotId])
   @@index([workspaceId, createdAt])
   @@index([workspaceId, status, claimExpiresAt])
 }
@@ -507,9 +511,35 @@ model ProviderInvocationAttempt {
   workspace       Workspace                       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   invocation      ProviderInvocation              @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   usageEvents     ProviderUsageEvent[]
+  embeddingResult ProviderEmbeddingResult?
 
   @@unique([id, invocationId, workspaceId])
   @@unique([invocationId, attemptNumber])
+  @@index([workspaceId, invocationId])
+}
+
+model ProviderEmbeddingResult {
+  id           String                    @id @default(cuid())
+  workspaceId  String
+  invocationId String                    @unique
+  attemptId    String                    @unique
+  snapshotId   String
+  ciphertext   String
+  iv           String
+  authTag      String
+  keyVersion   String
+  vectorCount  Int
+  dimensions   Int
+  createdAt    DateTime                  @default(now())
+  workspace    Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invocation   ProviderInvocation        @relation(fields: [invocationId, workspaceId, snapshotId], references: [id, workspaceId, snapshotId], onDelete: Cascade)
+  attempt      ProviderInvocationAttempt @relation(fields: [attemptId, invocationId, workspaceId], references: [id, invocationId, workspaceId], onDelete: Cascade)
+  snapshot     ProviderExecutionSnapshot @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([id, workspaceId])
+  @@unique([invocationId, workspaceId])
+  @@unique([invocationId, workspaceId, snapshotId])
+  @@unique([attemptId, invocationId, workspaceId])
   @@index([workspaceId, invocationId])
 }
 
