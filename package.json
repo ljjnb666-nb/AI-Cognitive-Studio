@@ -29,6 +29,7 @@
     "test:phase8a": "pnpm --filter @ai-cognitive/provider-gateway test:phase8a",
     "test:phase8b": "pnpm --filter @ai-cognitive/provider-gateway test:phase8b",
     "test:phase8c": "pnpm --filter @ai-cognitive/provider-gateway test:phase8c",
+    "test:phase8c:book-intelligence": "pnpm --filter @ai-cognitive/book-intelligence test:phase8c",
     "test:e2e": "pnpm --filter @ai-cognitive/web test:e2e",
     "test:phase1:e2e": "pnpm --filter @ai-cognitive/worker test:phase1:e2e",
     "test:phase2:e2e": "pnpm --filter @ai-cognitive/worker test:phase2:e2e",

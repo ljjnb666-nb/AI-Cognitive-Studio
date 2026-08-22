@@ -8,7 +8,7 @@ import type { EmbeddingResponse, ExecutionSnapshot, ModelCapability, ProviderUsa
 
 type Db = typeof prisma;
 type Transaction = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
-export type ExecutionClaim = { kind: "OWNER"; invocationId: string; claimToken: string; snapshotId: string } | { kind: "ALREADY_PROCESSED"; invocationId: string } | { kind: "IN_PROGRESS"; invocationId: string } | { kind: "TERMINAL_FAILED"; invocationId: string } | { kind: "BLOCKED_EXISTING"; invocationId: string } | { kind: "RECONCILIATION_REQUIRED"; invocationId: string };
+export type ExecutionClaim = { kind: "OWNER"; invocationId: string; claimToken: string; snapshotId: string } | { kind: "ALREADY_PROCESSED"; invocationId: string; snapshotId: string } | { kind: "IN_PROGRESS"; invocationId: string } | { kind: "TERMINAL_FAILED"; invocationId: string } | { kind: "BLOCKED_EXISTING"; invocationId: string } | { kind: "RECONCILIATION_REQUIRED"; invocationId: string };
 export type StartedAttempt = { id: string; attemptNumber: number };
 export type EmbeddingConsumptionInput = { workspaceId: string; invocationId: string; snapshotId: string; consumerKind: string; consumerKey: string; consumerFingerprint: string };
 export type EmbeddingConsumptionResult = { status: "CONSUMED" | "ALREADY_CONSUMED"; invocationId: string; snapshotId: string; vectorCount: number; dimensions: number };
@@ -38,7 +38,7 @@ export class ProviderExecutionRepository {
     const existing = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId: snapshot.workspaceId, idempotencyKey: input.idempotencyKey }, }, include: { attempts: { select: { id: true, status: true } }, embeddingResult: { select: { id: true, consumedAt: true } } } });
     if (!existing) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
     if (existing.requestFingerprint !== input.fingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT");
-    if (existing.status === "SUCCEEDED") return snapshot.capability.families.includes("EMBEDDING") && !existing.embeddingResult ? { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id } : { kind: "ALREADY_PROCESSED", invocationId: existing.id };
+    if (existing.status === "SUCCEEDED") return snapshot.capability.families.includes("EMBEDDING") && !existing.embeddingResult ? { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id } : { kind: "ALREADY_PROCESSED", invocationId: existing.id, snapshotId: existing.snapshotId };
     if (existing.status === "FAILED") return { kind: "TERMINAL_FAILED", invocationId: existing.id };
     if (existing.status === "BLOCKED") return { kind: "BLOCKED_EXISTING", invocationId: existing.id };
     if (existing.status === "RECONCILIATION_REQUIRED") return { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id };

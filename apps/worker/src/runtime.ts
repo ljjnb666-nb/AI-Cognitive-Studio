@@ -1,4 +1,4 @@
-import type { AnalysisProvider, EmbeddingProvider } from "@ai-cognitive/book-intelligence";
+import type { EmbeddingProvider, ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
 import type { PodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
 import { logger } from "@ai-cognitive/shared";
 import type { Environment } from "@ai-cognitive/shared/server";
@@ -12,7 +12,7 @@ import { createHealthCheckWorker } from "./worker.js";
 
 export type PodcastRuntimeAdapter = { provider: PodcastGenerationProvider; embeddingProvider: EmbeddingProvider };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
-export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: { analysisProvider: AnalysisProvider; embeddingProvider: EmbeddingProvider }; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
+export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: Pick<ProcessBookAnalysisDependencies, "analysisProvider" | "embeddingProvider" | "embeddingGateway">; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
 
 export function resolvePodcastRuntimeAdapter(source: NodeJS.ProcessEnv, injected?: PodcastRuntimeAdapter): PodcastRuntimeAdapter | undefined {
   const configured = source.PODCAST_GENERATION_PROVIDER?.trim();

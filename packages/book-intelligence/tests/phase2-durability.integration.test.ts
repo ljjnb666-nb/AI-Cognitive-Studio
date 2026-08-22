@@ -16,11 +16,13 @@ import {
   type AnalysisRequest,
   type AnalysisResponse,
   type EmbeddingProvider,
+  type ProcessBookAnalysisDependencies,
 } from "../src/index.js";
+import { createBookAnalysisEmbeddingGatewayFixture } from "./helpers/book-analysis-embedding-gateway.js";
 
 const workspaces: string[] = [];
 const users: string[] = [];
-async function fixture(blockTexts = ["# Chapter", ...Array.from({ length: 6 }, (_, index) => `Paragraph ${index} ${"evidence ".repeat(7)}`)]) {
+async function fixture(blockTexts = ["# Chapter", ...Array.from({ length: 6 }, (_, index) => `Paragraph ${index} ${"evidence ".repeat(7)}`)], gatewayOptions: { pauseRemote?: boolean } = {}) {
   const suffix = crypto.randomUUID();
   const user = await prisma.user.create({ data: { email: `${suffix}@durability.test` } });
   users.push(user.id);
@@ -38,7 +40,8 @@ async function fixture(blockTexts = ["# Chapter", ...Array.from({ length: 6 }, (
   await prisma.currentDocumentExtraction.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id } });
   const chunkSet = await materializeChunkSet({ workspaceId: workspace.id, sourceDocumentId: document.id, configuration: { targetSize: 70, hardMax: 80 } });
   const requested = await requestBookAnalysis({ workspaceId: workspace.id, sourceDocumentId: document.id, pipelineVersion: suffix, promptVersion: "p1", provider: "test", model: "test", modelVersion: "1" });
-  return { workspace, document, extraction, blocks, chunkSet, run: requested.run, job: requested.job };
+  const gateway = await createBookAnalysisEmbeddingGatewayFixture({ workspaceId: workspace.id, userId: user.id, ...gatewayOptions });
+  return { user, workspace, document, extraction, blocks, chunkSet, run: requested.run, job: requested.job, gateway };
 }
 
 class DurableProvider implements AnalysisProvider {
@@ -58,19 +61,9 @@ class DurableProvider implements AnalysisProvider {
 }
 
 class RecordingEmbeddingProvider extends DeterministicFakeEmbeddingProvider implements EmbeddingProvider {
+  override readonly identity = { provider: "deterministic-test", model: "deterministic-vector-v1", embeddingVersion: "gateway", dimensions: 4 };
   readonly calls: string[][] = [];
   override async embed(input: { texts: string[] }): Promise<number[][]> { this.calls.push([...input.texts]); return super.embed(input); }
-}
-
-class BarrierEmbeddingProvider implements EmbeddingProvider {
-  readonly identity = { provider: "stale-a", model: "stale-a", embeddingVersion: "stale-a", dimensions: 4 };
-  readonly entered: Promise<void>;
-  private enter!: () => void;
-  private release!: () => void;
-  private readonly released: Promise<void>;
-  constructor() { this.entered = new Promise((resolve) => { this.enter = resolve; }); this.released = new Promise((resolve) => { this.release = resolve; }); }
-  unblock() { this.release(); }
-  async embed(input: { texts: string[] }): Promise<number[][]> { this.enter(); await this.released; return input.texts.map(() => [1, 0, 0, 0]); }
 }
 
 class BarrierProvider implements AnalysisProvider {
@@ -87,6 +80,10 @@ class BarrierProvider implements AnalysisProvider {
 }
 
 async function expireLease(runId: string) { await prisma.$executeRaw`UPDATE "BookAnalysisRun" SET "executionLeaseUntil" = NOW() - INTERVAL '1 second' WHERE "id" = ${runId}`; }
+
+function deps(data: Awaited<ReturnType<typeof fixture>>, analysisProvider: AnalysisProvider, extras: Partial<ProcessBookAnalysisDependencies> = {}): ProcessBookAnalysisDependencies {
+  return { analysisProvider, embeddingProvider: new DeterministicFakeEmbeddingProvider(), embeddingGateway: data.gateway.embeddingGateway, ...extras };
+}
 
 class DeterministicBarrier {
   readonly entered: Promise<void>;
@@ -118,6 +115,14 @@ async function waitForPostgresRowLock(backendPid: number) {
 
 afterEach(async () => {
   for (const workspaceId of workspaces.splice(0)) {
+    await prisma.providerEmbeddingResult.deleteMany({ where: { workspaceId } });
+    await prisma.providerUsageEvent.deleteMany({ where: { workspaceId } });
+    await prisma.providerInvocationAttempt.deleteMany({ where: { workspaceId } });
+    await prisma.providerInvocation.deleteMany({ where: { workspaceId } });
+    await prisma.providerExecutionSnapshot.deleteMany({ where: { workspaceId } });
+    await prisma.providerRouteBinding.deleteMany({ where: { workspaceId } });
+    await prisma.providerCredentialVersion.deleteMany({ where: { workspaceId } });
+    await prisma.providerConnection.deleteMany({ where: { workspaceId } });
     await prisma.currentBookIntelligence.deleteMany({ where: { workspaceId } });
     await prisma.bookAnalysisRun.deleteMany({ where: { workspaceId } });
     await prisma.chunkSet.deleteMany({ where: { workspaceId } });
@@ -139,13 +144,13 @@ describe("durable Phase 2 orchestration", () => {
   it("has one claim winner, permits stale reclaim, rejects stale persistence, and does not increment a claim loser", async () => {
     const data = await fixture();
     const barrier = new BarrierProvider();
-    const a = processBookAnalysisRun(data.run.id, { analysisProvider: barrier, embeddingProvider: new RecordingEmbeddingProvider() });
+    const a = processBookAnalysisRun(data.run.id, deps(data, barrier));
     await barrier.entered;
     const attemptsAfterA = (await prisma.job.findUniqueOrThrow({ where: { id: data.job.id } })).attemptCount;
-    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: new RecordingEmbeddingProvider() });
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
     expect((await prisma.job.findUniqueOrThrow({ where: { id: data.job.id } })).attemptCount).toBe(attemptsAfterA);
     await expireLease(data.run.id);
-    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: new RecordingEmbeddingProvider() });
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
     barrier.unblock();
     await expect(a).rejects.toThrow(BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST);
     expect(await prisma.analysisArtifact.count({ where: { analysisRunId: data.run.id, summary: "STALE_A_RESPONSE" } })).toBe(0);
@@ -155,10 +160,10 @@ describe("durable Phase 2 orchestration", () => {
   it("does not let a stale provider failure overwrite the reclaiming worker", async () => {
     const data = await fixture();
     const barrier = new BarrierProvider(new Error("STALE_PROVIDER_FAILED"));
-    const a = processBookAnalysisRun(data.run.id, { analysisProvider: barrier, embeddingProvider: new RecordingEmbeddingProvider() });
+    const a = processBookAnalysisRun(data.run.id, deps(data, barrier));
     await barrier.entered;
     await expireLease(data.run.id);
-    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: new RecordingEmbeddingProvider() });
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
     barrier.unblock();
     await expect(a).rejects.toThrow("STALE_PROVIDER_FAILED");
     const [run, job] = await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.job.id } })]);
@@ -169,10 +174,10 @@ describe("durable Phase 2 orchestration", () => {
     const data = await fixture();
     const provider = new DurableProvider(data.blocks);
     let persisted = 0;
-    await expect(processBookAnalysisRun(data.run.id, { analysisProvider: provider, embeddingProvider: new RecordingEmbeddingProvider(), faultInjector: (point) => { if (point === "afterChunkPersist" && ++persisted === 2) throw new Error("CHUNK_CRASH"); } })).rejects.toThrow("CHUNK_CRASH");
+    await expect(processBookAnalysisRun(data.run.id, deps(data, provider, { faultInjector: (point) => { if (point === "afterChunkPersist" && ++persisted === 2) throw new Error("CHUNK_CRASH"); } }))).rejects.toThrow("CHUNK_CRASH");
     expect(await prisma.analysisArtifact.count({ where: { analysisRunId: data.run.id, scope: "CHUNK" } })).toBe(2);
     const callsAfterCrash = provider.requests.filter((request) => request.stage === "CHUNK").length;
-    await processBookAnalysisRun(data.run.id, { analysisProvider: provider, embeddingProvider: new RecordingEmbeddingProvider() });
+    await processBookAnalysisRun(data.run.id, deps(data, provider));
     const expected = await prisma.documentChunk.count({ where: { chunkSetId: data.chunkSet.id } });
     expect(provider.requests.filter((request) => request.stage === "CHUNK")).toHaveLength(expected);
     expect(callsAfterCrash).toBe(2);
@@ -180,13 +185,13 @@ describe("durable Phase 2 orchestration", () => {
   });
 
   it("reuses persisted recursive reductions after a crash without losing marker paths", async () => {
-    const texts = ["# Chapter One", `BEGIN_MARKER ${"a ".repeat(35)}`, "## Section One", `${"b ".repeat(35)}`, `${"c ".repeat(35)}`, "# Chapter Two", "## Section Two", `MIDDLE_MARKER ${"d ".repeat(35)}`, `${"e ".repeat(35)}`, `END_MARKER ${"f ".repeat(35)}`];
+    const texts = ["# Chapter One", `BEGIN_MARKER ${"a ".repeat(35).trimEnd()}`, "## Section One", `${"b ".repeat(35).trimEnd()}`, `${"c ".repeat(35).trimEnd()}`, "# Chapter Two", "## Section Two", `MIDDLE_MARKER ${"d ".repeat(35).trimEnd()}`, `${"e ".repeat(35).trimEnd()}`, `END_MARKER ${"f ".repeat(35).trimEnd()}`];
     const data = await fixture(texts);
     const provider = new DurableProvider(data.blocks, true);
     let reductions = 0;
-    await expect(processBookAnalysisRun(data.run.id, { analysisProvider: provider, embeddingProvider: new RecordingEmbeddingProvider(), faultInjector: (point) => { if (point === "afterReductionPersist" && ++reductions === 2) throw new Error("REDUCTION_CRASH"); } })).rejects.toThrow("REDUCTION_CRASH");
+    await expect(processBookAnalysisRun(data.run.id, deps(data, provider, { faultInjector: (point) => { if (point === "afterReductionPersist" && ++reductions === 2) throw new Error("REDUCTION_CRASH"); } }))).rejects.toThrow("REDUCTION_CRASH");
     expect(await prisma.analysisReductionResult.count({ where: { analysisRunId: data.run.id } })).toBe(2);
-    await processBookAnalysisRun(data.run.id, { analysisProvider: provider, embeddingProvider: new RecordingEmbeddingProvider() });
+    await processBookAnalysisRun(data.run.id, deps(data, provider));
     const reductionInputs = provider.requests.filter((request) => request.stage !== "CHUNK").map((request) => `${request.stage}:${request.content}`);
     expect(new Set(reductionInputs).size).toBe(reductionInputs.length);
     const book = await prisma.analysisArtifact.findFirstOrThrow({ where: { analysisRunId: data.run.id, scope: "BOOK" } });
@@ -200,9 +205,9 @@ describe("durable Phase 2 orchestration", () => {
     const data = await fixture();
     const provider = new DurableProvider(data.blocks);
     let memories = 0;
-    await expect(processBookAnalysisRun(data.run.id, { analysisProvider: provider, embeddingProvider: new RecordingEmbeddingProvider(), faultInjector: (point) => { if (point === "afterMemoryPersist" && ++memories === 3) throw new Error("MEMORY_CRASH"); } })).rejects.toThrow("MEMORY_CRASH");
+    await expect(processBookAnalysisRun(data.run.id, deps(data, provider, { faultInjector: (point) => { if (point === "afterMemoryPersist" && ++memories === 3) throw new Error("MEMORY_CRASH"); } }))).rejects.toThrow("MEMORY_CRASH");
     const partial = await prisma.bookMemoryItem.findMany({ where: { analysisRunId: data.run.id }, orderBy: { ordinal: "asc" } });
-    await processBookAnalysisRun(data.run.id, { analysisProvider: provider, embeddingProvider: new RecordingEmbeddingProvider() });
+    await processBookAnalysisRun(data.run.id, deps(data, provider));
     const [items, evidence, relations] = await Promise.all([prisma.bookMemoryItem.findMany({ where: { analysisRunId: data.run.id }, orderBy: { ordinal: "asc" } }), prisma.bookMemoryEvidence.findMany({ where: { analysisRunId: data.run.id } }), prisma.bookMemoryRelation.findMany({ where: { analysisRunId: data.run.id } })]);
     expect(items.slice(0, partial.length).map((item) => [item.memoryKey, item.ordinal])).toEqual(partial.map((item) => [item.memoryKey, item.ordinal]));
     expect(new Set(items.map((item) => item.memoryKey)).size).toBe(items.length);
@@ -212,61 +217,74 @@ describe("durable Phase 2 orchestration", () => {
     expect(relations.length).toBeGreaterThan(0);
   });
 
-  it("embeds only missing targets after a partial embedding crash", async () => {
+  it("reuses a durable gateway receipt after a crash before composite materialization", async () => {
     const data = await fixture();
-    const embeddings = new RecordingEmbeddingProvider();
-    let persisted = 0;
-    await expect(processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: embeddings, faultInjector: (point) => { if (point === "afterEmbeddingPersist" && ++persisted === 2) throw new Error("EMBEDDING_CRASH"); } })).rejects.toThrow("EMBEDDING_CRASH");
-    const firstTargets = embeddings.calls[0]!;
-    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: embeddings });
-    expect(embeddings.calls[1]).toHaveLength(firstTargets.length - 2);
-    expect(embeddings.calls[1]).toEqual(firstTargets.slice(2));
+    await expect(processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks), { faultInjector: (point) => { if (point === "afterEmbeddingGatewayPersist") throw new Error("EMBEDDING_RECEIPT_CRASH"); } }))).rejects.toThrow("EMBEDDING_RECEIPT_CRASH");
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    const receipt = await prisma.providerEmbeddingResult.findFirstOrThrow({ where: { workspaceId: data.workspace.id } });
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    expect(await prisma.providerInvocationAttempt.count({ where: { workspaceId: data.workspace.id, status: "SUCCEEDED" } })).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    expect([receipt.consumedAt, receipt.purgedAt]).toEqual([null, null]);
+    expect([receipt.ciphertext, receipt.iv, receipt.authTag, receipt.keyVersion].every(Boolean)).toBe(true);
+    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(0);
+    expect(await prisma.bookMemoryEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(0);
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    expect(await prisma.providerInvocationAttempt.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    const consumed = await prisma.providerEmbeddingResult.findFirstOrThrow({ where: { workspaceId: data.workspace.id } });
+    expect([consumed.consumedAt !== null, consumed.purgedAt !== null]).toEqual([true, true]);
+    expect([consumed.ciphertext, consumed.iv, consumed.authTag, consumed.keyVersion]).toEqual([null, null, null, null]);
+    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(await prisma.documentChunk.count({ where: { chunkSetId: data.chunkSet.id } }));
+    expect(await prisma.bookMemoryEmbedding.count({ where: { analysisRunId: data.run.id } })).toBe(await prisma.bookMemoryItem.count({ where: { analysisRunId: data.run.id } }));
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status).toBe("SUCCEEDED");
   });
 
   it("rejects vectors returned by an embedding call whose owner became stale", async () => {
-    const data = await fixture();
-    const staleEmbeddings = new BarrierEmbeddingProvider();
-    const a = processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: staleEmbeddings });
-    await staleEmbeddings.entered;
+    const data = await fixture(undefined, { pauseRemote: true });
+    const a = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
+    await data.gateway.remoteEntered;
     await expireLease(data.run.id);
-    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: new RecordingEmbeddingProvider() });
-    staleEmbeddings.unblock();
+    const b = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
+    data.gateway.releaseRemote();
     await expect(a).rejects.toThrow(BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST);
-    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id, provider: "stale-a" } })).toBe(0);
-    expect(await prisma.bookMemoryEmbedding.count({ where: { workspaceId: data.workspace.id, provider: "stale-a" } })).toBe(0);
+    await b;
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(await prisma.documentChunk.count({ where: { chunkSetId: data.chunkSet.id } }));
+    expect(await prisma.bookMemoryEmbedding.count({ where: { analysisRunId: data.run.id } })).toBe(await prisma.bookMemoryItem.count({ where: { analysisRunId: data.run.id } }));
   });
 
   it.each(["SECTION_ANALYSIS", "CHAPTER_ANALYSIS", "BOOK_SYNTHESIS", "MEMORY_FINALIZATION", "EMBEDDINGS", "FINALIZING"] as const)("resumes from %s without rerunning completed earlier provider work", async (stage) => {
     const data = await fixture();
-    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: new RecordingEmbeddingProvider() });
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
     await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED", analysisStage: stage, completedAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
     await prisma.job.update({ where: { id: data.job.id }, data: { status: "FAILED", completedAt: null } });
-    const provider = new DurableProvider(data.blocks), embeddings = new RecordingEmbeddingProvider();
-    await processBookAnalysisRun(data.run.id, { analysisProvider: provider, embeddingProvider: embeddings });
+    const provider = new DurableProvider(data.blocks), gatewayCallsBefore = data.gateway.remoteCallCount();
+    await processBookAnalysisRun(data.run.id, deps(data, provider));
     expect(provider.requests).toHaveLength(0);
-    expect(embeddings.calls).toHaveLength(0);
+    expect(data.gateway.remoteCallCount()).toBe(gatewayCallsBefore);
   });
 
   it("terminal redelivery is a strict no-op", async () => {
     const data = await fixture();
-    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: new RecordingEmbeddingProvider() });
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
     const before = { attempts: (await prisma.job.findUniqueOrThrow({ where: { id: data.job.id } })).attemptCount, artifacts: await prisma.analysisArtifact.count({ where: { analysisRunId: data.run.id } }), memories: await prisma.bookMemoryItem.count({ where: { analysisRunId: data.run.id } }), reductions: await prisma.analysisReductionResult.count({ where: { analysisRunId: data.run.id } }) };
-    const provider = new DurableProvider(data.blocks), embeddings = new RecordingEmbeddingProvider();
-    await processBookAnalysisRun(data.run.id, { analysisProvider: provider, embeddingProvider: embeddings });
+    const provider = new DurableProvider(data.blocks), gatewayCallsBefore = data.gateway.remoteCallCount();
+    await processBookAnalysisRun(data.run.id, deps(data, provider));
     const after = { attempts: (await prisma.job.findUniqueOrThrow({ where: { id: data.job.id } })).attemptCount, artifacts: await prisma.analysisArtifact.count({ where: { analysisRunId: data.run.id } }), memories: await prisma.bookMemoryItem.count({ where: { analysisRunId: data.run.id } }), reductions: await prisma.analysisReductionResult.count({ where: { analysisRunId: data.run.id } }) };
     expect(after).toEqual(before);
     expect(provider.requests).toHaveLength(0);
-    expect(embeddings.calls).toHaveLength(0);
+    expect(data.gateway.remoteCallCount()).toBe(gatewayCallsBefore);
   });
 
   it("does not publish A when extraction B commits before finalization locks the current row", async () => {
     const data = await fixture();
     const barrier = new DeterministicBarrier();
-    const finalization = processBookAnalysisRun(data.run.id, {
-      analysisProvider: new DurableProvider(data.blocks),
-      embeddingProvider: new RecordingEmbeddingProvider(),
-      faultInjector: async (point) => { if (point === "beforeFinalization") await barrier.wait(); },
-    });
+    const finalization = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks), { faultInjector: async (point) => { if (point === "beforeFinalization") await barrier.wait(); } }));
     await barrier.entered;
     try {
       const extractionB = await createReplacementExtraction(data);
@@ -283,11 +301,7 @@ describe("durable Phase 2 orchestration", () => {
     const data = await fixture();
     const barrier = new DeterministicBarrier();
     const embeddings = new RecordingEmbeddingProvider();
-    const finalization = processBookAnalysisRun(data.run.id, {
-      analysisProvider: new DurableProvider(data.blocks),
-      embeddingProvider: embeddings,
-      faultInjector: async (point) => { if (point === "afterCurrentExtractionLock") await barrier.wait(); },
-    });
+    const finalization = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks), { faultInjector: async (point) => { if (point === "afterCurrentExtractionLock") await barrier.wait(); } }));
     await barrier.entered;
     const extractionB = await createReplacementExtraction(data);
     let publishBackendPid!: (pid: number) => void;
@@ -311,7 +325,7 @@ describe("durable Phase 2 orchestration", () => {
   it("uses conservative English, Chinese, mixed-language, and emoji estimates in built context", async () => {
     const data = await fixture();
     const embeddings = new RecordingEmbeddingProvider();
-    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: embeddings });
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
     const memoryCount = await prisma.bookMemoryItem.count({ where: { analysisRunId: data.run.id } });
     const samples = [
       "A concise English sentence with several words.",
@@ -339,7 +353,7 @@ describe("durable Phase 2 orchestration", () => {
   it("rejects stale current intelligence while preserving historical results and exposes complete context provenance", async () => {
     const data = await fixture();
     const embeddings = new RecordingEmbeddingProvider();
-    await processBookAnalysisRun(data.run.id, { analysisProvider: new DurableProvider(data.blocks), embeddingProvider: embeddings });
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
     const context = await buildBookContext({ workspaceId: data.workspace.id, sourceDocumentId: data.document.id, task: "evidence", tokenBudget: 1000, embeddingProvider: embeddings });
     expect(context.items.length).toBeGreaterThan(0);
     expect(context.items.every((item) => item.sourceDocumentId === data.document.id && item.extractionId === data.extraction.id && item.chunkSetId === data.chunkSet.id && item.analysisRunId === data.run.id && item.memoryItemId && item.type && item.embedding?.embeddingIdentityHash && item.selectionReason && item.tokenEstimate > 0 && Array.isArray(item.sourceBlockEvidenceSpans))).toBe(true);
