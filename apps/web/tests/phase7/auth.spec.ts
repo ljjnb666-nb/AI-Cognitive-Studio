@@ -50,6 +50,19 @@ async function uploadBook(page: Page, filename: string) {
   return sourceDocumentId;
 }
 
+async function assertDurableGatewayPrincipal(input: { sourceDocumentId: string; userId: string; workspaceId: string }) {
+  const run = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { sourceDocumentId: input.sourceDocumentId, status: "SUCCEEDED", analysisStage: "COMPLETED" }, include: { job: true }, orderBy: { createdAt: "desc" } });
+  expect(run.workspaceId).toBe(input.workspaceId);
+  expect(run.job).toMatchObject({ userId: input.userId, workspaceId: input.workspaceId });
+  expect(await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: input.workspaceId, userId: input.userId } } })).not.toBeNull();
+  const invocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: input.workspaceId, idempotencyKey: `book-analysis-embeddings:${run.id}` } });
+  const result = await prisma.providerEmbeddingResult.findUniqueOrThrow({ where: { invocationId: invocation.id } });
+  expect(result).toMatchObject({ workspaceId: input.workspaceId, consumerKind: "BOOK_ANALYSIS_EMBEDDINGS", consumerKey: run.id });
+  const audit = invocation.connectionId ? await prisma.providerAuditEvent.findFirst({ where: { workspaceId: input.workspaceId, targetId: invocation.connectionId, actorUserId: input.userId, action: "CONNECTION_CREATED" } }) : null;
+  expect(audit).not.toBeNull();
+  return { invocation, result };
+}
+
 async function createBProductFixtures(input: { userId: string; workspaceId: string }) {
   const project = await prisma.podcastProject.create({ data: { workspaceId: input.workspaceId, name: "B private podcast" } });
   const style = await prisma.podcastStyleProfile.create({ data: { workspaceId: input.workspaceId, podcastProjectId: project.id, version: 1 } });
@@ -87,6 +100,7 @@ test("real Better Auth lifecycle includes same-context expiry and real Flow C", 
   expect(source.ingestionRuns.some((run) => run.status === "SUCCEEDED")).toBe(true);
   expect(source.analysisRuns.some((run) => run.status === "SUCCEEDED")).toBe(true);
   expect(source.currentIntelligence).not.toBeNull();
+  await assertDurableGatewayPrincipal({ sourceDocumentId, userId: user.id, workspaceId: user.defaultWorkspaceId! });
   await prisma.session.update({ where: { id: user.sessions[0]!.id }, data: { expiresAt: new Date(0) } });
   await page.goto("/studio");
   await expect(page).toHaveURL(/\/sign-in/);
@@ -130,6 +144,11 @@ test("two real users cannot cross tenant boundaries, while members can switch an
   const suffix = Date.now();
   const b = await signedUp(browser, "Tenant B", `phase7-b-${suffix}@ai-cognitive-studio.test`);
   const bSourceId = await uploadBook(b.page, "b-tenant-evidence.md");
+  const bGateway = await assertDurableGatewayPrincipal({ sourceDocumentId: bSourceId, userId: b.user.id, workspaceId: b.workspaceId });
+  const firstRun = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { job: { user: { email: { startsWith: "phase7-flow-" } } }, status: "SUCCEEDED" }, include: { job: true }, orderBy: { createdAt: "desc" } });
+  const firstInvocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: firstRun.workspaceId, idempotencyKey: `book-analysis-embeddings:${firstRun.id}` } });
+  expect(firstRun.workspaceId).not.toBe(b.workspaceId);
+  expect(firstInvocation.workspaceId).not.toBe(bGateway.invocation.workspaceId);
   const fixture = await createBProductFixtures({ userId: b.user.id, workspaceId: b.workspaceId });
   const a = await signedUp(browser, "Tenant A", `phase7-a-${suffix}@ai-cognitive-studio.test`);
 

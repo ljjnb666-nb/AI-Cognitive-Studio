@@ -30,6 +30,14 @@ The fingerprint binds workspace, invocation, pinned snapshot, consumer kind, ord
 
 ## EMBEDDING_DURABLE_HANDOFF_ANALYSIS
 
+## PHASE8C_CHECKPOINT3A_BOOK_INTELLIGENCE_GATEWAY_ACTIVATION
+
+The durable Book Intelligence `EMBEDDINGS` stage now submits one deterministic ordered composite request to Provider Gateway: `DocumentChunk` targets ordered by ordinal/id followed by `BookMemoryItem` targets ordered by ordinal/id. One `BOOK_ANALYSIS_EMBEDDINGS` receipt is consumed in the same PostgreSQL transaction that materializes both embedding tables. The consumer key is the analysis-run id and its fingerprint binds the complete ordered lineage and content-hash target set.
+
+The old production direct provider/vector-persistence path has been removed. A persisted gateway receipt is replayed without a second provider call; the materializer rechecks the BookAnalysisRun claim token, lease, status and stage while holding the receipt transaction, so a stale owner leaves an unconsumed recoverable receipt for the next owner. Acceptance uses deterministic local provider adapters only; it never calls an external AI service.
+
+Retrieval gateway migration, cosine-similarity changes, pgvector, reindexing and advanced batching remain out of scope for this checkpoint. No schema migration is introduced.
+
 Checkpoint 1 does not solve the crash boundary between a successful provider embedding response and `DocumentChunkEmbedding`/`BookMemoryEmbedding` persistence. Gateway idempotency deliberately stores no raw vectors, so a replay cannot reconstruct them without another paid call. Checkpoint 2 should choose one of: persist encrypted/short-lived response handoff data transactionally; create a durable per-batch paid-call receipt with vector payload; or make the caller persist vectors in the same durable completion protocol before acknowledging gateway success. The recommended option is a durable per-batch handoff record with bounded encrypted vector payloads and an atomic consumer acknowledgement, so retry can complete persistence without repaying the provider.
 
 ## COSINE_SIMILARITY_AUDIT

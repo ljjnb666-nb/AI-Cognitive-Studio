@@ -62,10 +62,11 @@ class ProviderGatewayCore {
     const claim = this.execution.repository ? await this.execution.repository.claimExecution(snapshot, { idempotencyKey: request.idempotencyKey, fingerprint }) : { kind: "OWNER" as const, invocationId: undefined, claimToken: undefined, snapshotId: undefined };
     if (claim.kind !== "OWNER") {
       if (claim.kind === "ALREADY_PROCESSED" && request.embedding && this.execution.repository) {
+        const persistedSnapshot = await this.execution.repository.loadExecutionSnapshot(snapshot.workspaceId, claim.snapshotId);
         const handoff = await this.execution.repository.recoverEmbeddingHandoff(snapshot.workspaceId, claim.invocationId);
-        if (handoff.kind === "CONSUMED") return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, snapshot, embeddingConsumed: true };
+        if (handoff.kind === "CONSUMED") return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, snapshot: persistedSnapshot, embeddingConsumed: true };
         if (handoff.kind === "RECONCILIATION_REQUIRED") return { status: "RECONCILIATION_REQUIRED", invocationId: claim.invocationId };
-        return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, response: handoff.response, snapshot };
+        return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, response: handoff.response, snapshot: persistedSnapshot };
       }
       return { status: claim.kind, invocationId: claim.invocationId };
     }
@@ -131,7 +132,7 @@ class ProviderGatewayCore {
     }
     await this.finish(claim, snapshot, "FAILED"); throw last ?? new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
   }
-  private validatePayload(request: GatewayRequest): void { if (request.capability.family === "TEXT_GENERATION") { if (request.embedding) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); if (request.text) validateTextGenerationInput(request.text); return; } if (request.capability.family === "EMBEDDING") { if (!request.embedding || request.text) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); validateEmbeddingInput(request.embedding); return; } if (request.text || request.embedding) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); }
+  private validatePayload(request: GatewayRequest): void { if (request.capability.family === "TEXT_GENERATION") { if (request.embedding) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); if (request.text) validateTextGenerationInput(request.text); return; } if (request.capability.family === "EMBEDDING") { if (!request.embedding || request.text) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); return; } if (request.text || request.embedding) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); }
   private async finish(claim: { kind: "OWNER"; invocationId?: string; claimToken?: string }, snapshot: ExecutionSnapshot, status: "FAILED" | "BLOCKED") { if (claim.invocationId && claim.claimToken) await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId, claim.claimToken, status).catch(() => undefined); }
 }
 

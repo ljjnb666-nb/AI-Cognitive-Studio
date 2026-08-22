@@ -4,7 +4,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { prisma } from "../../../packages/db/src/index.js";
 import { createIngestionService } from "@ai-cognitive/ingestion";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
-import { DeterministicFakeEmbeddingProvider, materializeChunkSet, requestBookAnalysis, type AnalysisProvider } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, requestBookAnalysis, type AnalysisProvider } from "@ai-cognitive/book-intelligence";
 import { configureShortVideoStyle, createShortVideoProject, requestShortVideoGeneration, type ShortVideoProvider, type ShortVideoTtsProvider } from "@ai-cognitive/short-video-generation";
 import { readEnvironment } from "@ai-cognitive/shared/server";
 import { createBookAnalysisQueue, dispatchBookAnalysisWithQueue } from "../src/book-analysis.js";
@@ -12,6 +12,7 @@ import { createShortVideoGenerationQueue, dispatchShortVideoGenerationWithQueue 
 import { createSourceIngestionQueue, dispatchSourceIngestionWithQueue } from "../src/source-ingestion.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 import { createE2EWorkerIsolation } from "./helpers/e2e-worker-isolation.js";
+import { clearBookAnalysisEmbeddingGatewayFixtureState, createBookAnalysisEmbeddingGatewayFixture } from "../../../packages/book-intelligence/tests/helpers/book-analysis-embedding-gateway.js";
 
 const environment = readEnvironment();
 const storage = new S3CompatibleStorageProvider({ endpoint: environment.S3_ENDPOINT, publicEndpoint: environment.S3_PUBLIC_ENDPOINT, region: environment.S3_REGION, bucket: environment.S3_BUCKET, accessKey: environment.S3_ACCESS_KEY, secretKey: environment.S3_SECRET_KEY, forcePathStyle: environment.S3_FORCE_PATH_STYLE });
@@ -28,8 +29,8 @@ describe("Phase 5 product chain", () => it("runs Source through Phase 1, Phase 2
   const service = createIngestionService(storage), intent = await service.createUploadIntent({ workspaceId: workspace.id, userId: user.id }, { filename: "book.md", mediaType: "text/markdown", sizeBytes: Buffer.byteLength(source) });
   await fetch(intent.upload.url, { method: "PUT", headers: intent.upload.headers, body: source });
   const document = await service.completeUpload({ workspaceId: workspace.id, userId: user.id }, intent.session.id, { outboxTopic: isolation.topics.sourceIngestion }), ingestion = await prisma.ingestionRun.findFirstOrThrow({ where: { sourceDocumentId: document.id } });
-  const analysisProvider = new Analysis(), video = new Video(), tts = new Tts(), embeddings = new DeterministicFakeEmbeddingProvider();
-  const runtime = await startWorkerRuntime(environment, { source: { ...process.env, BOOK_ANALYSIS_PROVIDER: "phase5-analysis", SHORT_VIDEO_GENERATION_PROVIDER: video.identity.provider }, bookDependencies: { analysisProvider, embeddingProvider: embeddings }, shortVideoAdapter: { provider: video, embeddingProvider: embeddings, tts }, dispatchIntervalMs: 60_000, bullmqPrefix: isolation.bullmqPrefix, outboxTopics: isolation.topics });
+  const analysisProvider = new Analysis(), video = new Video(), tts = new Tts(), bookEmbeddingGateway = await createBookAnalysisEmbeddingGatewayFixture({ workspaceId: workspace.id, userId: user.id }), retrievalEmbeddings = bookEmbeddingGateway.retrievalEmbeddings;
+  const runtime = await startWorkerRuntime(environment, { source: { ...process.env, BOOK_ANALYSIS_PROVIDER: "phase5-analysis", SHORT_VIDEO_GENERATION_PROVIDER: video.identity.provider }, bookDependencies: { analysisProvider, embeddingProvider: retrievalEmbeddings, embeddingGateway: bookEmbeddingGateway.embeddingGateway }, shortVideoAdapter: { provider: video, embeddingProvider: retrievalEmbeddings, tts }, dispatchIntervalMs: 60_000, bullmqPrefix: isolation.bullmqPrefix, outboxTopics: isolation.topics });
   const sourceQueue = createSourceIngestionQueue(environment, { prefix: isolation.bullmqPrefix }), bookQueue = createBookAnalysisQueue(environment, { prefix: isolation.bullmqPrefix }), shortVideoQueue = createShortVideoGenerationQueue(environment, { prefix: isolation.bullmqPrefix });
   try {
     await Promise.all([runtime.ingestionWorker.waitUntilReady(), runtime.bookWorker!.waitUntilReady(), runtime.shortVideoWorker!.waitUntilReady()]);
@@ -46,6 +47,6 @@ describe("Phase 5 product chain", () => it("runs Source through Phase 1, Phase 2
     const [run, scenes, captions, audio, render, evaluation, current] = await Promise.all([prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: requested.run.id } }), prisma.shortVideoScene.findMany({ where: { shortVideoGenerationRunId: requested.run.id }, orderBy: { ordinal: "asc" } }), prisma.shortVideoCaptionCue.findMany({ where: { shortVideoGenerationRunId: requested.run.id } }), prisma.shortVideoAudioArtifact.findMany({ where: { shortVideoGenerationRunId: requested.run.id } }), prisma.shortVideoRenderArtifact.findUniqueOrThrow({ where: { shortVideoGenerationRunId: requested.run.id } }), prisma.shortVideoEvaluationRun.findFirstOrThrow({ where: { shortVideoGenerationRunId: requested.run.id }, include: { result: true } }), prisma.currentShortVideo.findUniqueOrThrow({ where: { shortVideoProjectId: project.id }, include: { revision: true } })]);
     expect([run.stage, scenes.length, captions.length, audio.length, render.videoCodec, render.audioCodec, evaluation.result?.hardFailures, current.revision.generationRunId, hash(await storage.getObjectBytes(render.storageKey))]).toEqual(["COMPLETED", 6, 6, 6, "h264", "aac", [], requested.run.id, render.sha256]);
     expect(video.inputs.every(input => JSON.stringify(input).length < 25000)).toBe(true); expect(video.inputs.some(input => JSON.stringify(input).includes("B_ONLY_MARKER"))).toBe(false);
-  } finally { await Promise.all([sourceQueue.close(), bookQueue.close(), shortVideoQueue.close()]); await runtime.close("test"); await prisma.workspace.delete({ where: { id: workspace.id } }).catch(() => undefined); await prisma.user.delete({ where: { id: user.id } }).catch(() => undefined); }
+  } finally { await Promise.all([sourceQueue.close(), bookQueue.close(), shortVideoQueue.close()]); await runtime.close("test"); await clearBookAnalysisEmbeddingGatewayFixtureState(workspace.id); await prisma.workspace.delete({ where: { id: workspace.id } }).catch(() => undefined); await prisma.user.delete({ where: { id: user.id } }).catch(() => undefined); }
 }));
 afterAll(() => prisma.$disconnect());

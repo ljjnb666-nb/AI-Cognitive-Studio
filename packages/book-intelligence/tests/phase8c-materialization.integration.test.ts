@@ -6,7 +6,8 @@ import { materializeChunkSet } from "../src/persistence.js";
 import { processBookAnalysisRun, requestBookAnalysis } from "../src/pipeline.js";
 import type { AnalysisProvider, AnalysisResponse } from "../src/analysis.js";
 import { embeddingConsumerFingerprint, materializeBookMemoryEmbeddings, materializeDocumentChunkEmbeddings } from "../src/gateway-materialization.js";
-import { embeddingIdentityWithHash } from "../src/embeddings.js";
+import { DeterministicFakeEmbeddingProvider, embeddingIdentityWithHash } from "../src/embeddings.js";
+import { clearBookAnalysisEmbeddingGatewayFixtureState, createBookAnalysisEmbeddingGatewayFixture } from "./helpers/book-analysis-embedding-gateway.js";
 
 const owned: Array<{ workspaceId: string; userId: string }> = [];
 const capability = { modelId: "phase8c-materialization", families: ["EMBEDDING"] as const, confidence: "VERIFIED" as const, embeddingDimensions: 3, maxEmbeddingInputs: 10, embeddingPurposes: ["DOCUMENT"] as const };
@@ -34,12 +35,21 @@ async function lineage() {
   const chunkSet = await materializeChunkSet({ workspaceId: workspace.id, sourceDocumentId: document.id, configuration: { targetSize: 40, hardMax: 50 } });
   const chunks = await prisma.documentChunk.findMany({ where: { chunkSetId: chunkSet.id }, orderBy: { ordinal: "asc" } });
   const request = await requestBookAnalysis({ workspaceId: workspace.id, sourceDocumentId: document.id, pipelineVersion: `phase8c-${suffix}`, promptVersion: "p", provider: "test", model: "test" });
-  await processBookAnalysisRun(request.run.id, { analysisProvider: new Analysis(), embeddingProvider: { identity: { provider: "seed", model: "seed", embeddingVersion: "seed", dimensions: 3 }, embed: async input => input.texts.map(() => [0, 0, 1]) } });
+  const seedGateway = await createBookAnalysisEmbeddingGatewayFixture({ workspaceId: workspace.id, userId: user.id });
+  await processBookAnalysisRun(request.run.id, { analysisProvider: new Analysis(), embeddingProvider: new DeterministicFakeEmbeddingProvider(), ...seedGateway });
+  await clearBookAnalysisEmbeddingGatewayFixtureState(workspace.id);
+  await expect(Promise.all([
+    prisma.providerExecutionSnapshot.count({ where: { workspaceId: workspace.id } }),
+    prisma.providerInvocation.count({ where: { workspaceId: workspace.id } }),
+    prisma.providerInvocationAttempt.count({ where: { workspaceId: workspace.id } }),
+    prisma.providerUsageEvent.count({ where: { workspaceId: workspace.id } }),
+    prisma.providerEmbeddingResult.count({ where: { workspaceId: workspace.id } }),
+  ])).resolves.toEqual([0, 0, 0, 0, 0]);
   const artifact = await prisma.analysisArtifact.findFirstOrThrow({ where: { analysisRunId: request.run.id }, orderBy: { createdAt: "asc" } });
   const existingMemoryCount = await prisma.bookMemoryItem.count({ where: { analysisRunId: request.run.id } });
   for (const ordinal of [existingMemoryCount, existingMemoryCount + 1]) await prisma.bookMemoryItem.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id, analysisRunId: request.run.id, type: "SUMMARY", ordinal, content: `handoff memory ${ordinal}`, contentHash: `${suffix}-memory-${ordinal}`, sourceArtifactId: artifact.id, memoryKey: `${suffix}-memory-key-${ordinal}` } });
   const memories = await prisma.bookMemoryItem.findMany({ where: { analysisRunId: request.run.id }, orderBy: { ordinal: "asc" } });
-  return { workspace, extraction, chunks: chunks.slice(0, 2), run: request.run, memories: memories.slice(0, 2) };
+  return { user, workspace, extraction, chunks: chunks.slice(0, 2), run: request.run, memories: memories.slice(0, 2) };
 }
 
 async function receipt(workspaceId: string, count: number) {
@@ -57,11 +67,12 @@ async function gatewayReceipt(workspaceId: string, userId: string) {
   const connection = await store.createConnection({ workspaceId, userId }, { providerKey: "openai", protocol: "OPENAI_EMBEDDINGS", displayName: "phase8c" }); await store.rotateCredential({ workspaceId, userId }, connection.id, "phase8c-credential"); await store.setRoute({ workspaceId, userId }, { routeSlot: "EMBEDDING", connectionId: connection.id, modelId: capability.modelId });
   const registry = new ProviderRegistry(); registry.register({ providerKey: "openai", displayName: "openai", protocol: "OPENAI_EMBEDDINGS", adapterVersion: "phase8c", models: [capability] });
   const make = () => createProductionProviderGateway(registry, { resolveWorkspaceRoute: value => store.resolveWorkspaceRoute(value) }, { resolve: async () => undefined }, () => new OpenAIEmbeddingAdapter(transport), { authorize: (principal, value) => new WorkspaceMembershipExecutionAuthorizer(prisma).authorizeExecution(principal, value.workspaceId), assertRouteUsable: async () => undefined, validateEndpoint: async () => undefined, assertBudget: () => undefined, repository: new ProviderExecutionRepository(prisma, cipher), circuit: { admit: async () => undefined, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => undefined }, concurrency: { acquire: async key => ({ key, token: "lease" }), release: async () => true }, maxAttempts: 1 });
-  const key = randomUUID(); await make().execute({ workspaceId, routeSlot: "EMBEDDING", correlationId: key, idempotencyKey: key, inputHash: "b".repeat(64), capability: { family: "EMBEDDING" }, embedding: { texts: ["one", "two"], purpose: "DOCUMENT" } satisfies GatewayRequest["embedding"] }, { userId });
-  const invocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId } }); return { repository: new ProviderExecutionRepository(prisma, cipher), invocationId: invocation.id, snapshotId: invocation.snapshotId, transport, make };
+  const key = randomUUID(); const result = await make().execute({ workspaceId, routeSlot: "EMBEDDING", correlationId: key, idempotencyKey: key, inputHash: "b".repeat(64), capability: { family: "EMBEDDING" }, embedding: { texts: ["one", "two"], purpose: "DOCUMENT" } satisfies GatewayRequest["embedding"] }, { userId });
+  if (result.status !== "SUCCEEDED" || !result.invocationId) throw new Error("PHASE8C_GATEWAY_RECEIPT_NOT_SUCCEEDED");
+  return { repository: new ProviderExecutionRepository(prisma, cipher), invocationId: result.invocationId, snapshotId: result.snapshot.id, transport, make };
 }
 
-afterEach(async () => { for (const { workspaceId, userId } of owned.splice(0)) { await prisma.providerEmbeddingResult.deleteMany({ where: { workspaceId } }); await prisma.providerUsageEvent.deleteMany({ where: { workspaceId } }); await prisma.providerInvocationAttempt.deleteMany({ where: { workspaceId } }); await prisma.providerInvocation.deleteMany({ where: { workspaceId } }); await prisma.providerExecutionSnapshot.deleteMany({ where: { workspaceId } }); await prisma.providerRouteBinding.deleteMany({ where: { workspaceId } }); await prisma.providerCredentialVersion.deleteMany({ where: { workspaceId } }); await prisma.providerConnection.deleteMany({ where: { workspaceId } }); await prisma.currentBookIntelligence.deleteMany({ where: { workspaceId } }); await prisma.bookAnalysisRun.deleteMany({ where: { workspaceId } }); await prisma.chunkSet.deleteMany({ where: { workspaceId } }); await prisma.currentDocumentExtraction.deleteMany({ where: { workspaceId } }); await prisma.documentExtraction.deleteMany({ where: { workspaceId } }); await prisma.ingestionRun.deleteMany({ where: { workspaceId } }); await prisma.job.deleteMany({ where: { workspaceId } }); await prisma.sourceDocument.deleteMany({ where: { workspaceId } }); await prisma.source.deleteMany({ where: { workspaceId } }); await prisma.sourceBlob.deleteMany({ where: { workspaceId } }); await prisma.workspaceMember.deleteMany({ where: { workspaceId } }); await prisma.workspace.delete({ where: { id: workspaceId } }); await prisma.user.delete({ where: { id: userId } }); } });
+afterEach(async () => { for (const { workspaceId, userId } of owned.splice(0)) { await clearBookAnalysisEmbeddingGatewayFixtureState(workspaceId); await prisma.currentBookIntelligence.deleteMany({ where: { workspaceId } }); await prisma.bookAnalysisRun.deleteMany({ where: { workspaceId } }); await prisma.chunkSet.deleteMany({ where: { workspaceId } }); await prisma.currentDocumentExtraction.deleteMany({ where: { workspaceId } }); await prisma.documentExtraction.deleteMany({ where: { workspaceId } }); await prisma.ingestionRun.deleteMany({ where: { workspaceId } }); await prisma.job.deleteMany({ where: { workspaceId } }); await prisma.sourceDocument.deleteMany({ where: { workspaceId } }); await prisma.source.deleteMany({ where: { workspaceId } }); await prisma.sourceBlob.deleteMany({ where: { workspaceId } }); await prisma.workspaceMember.deleteMany({ where: { workspaceId } }); await prisma.workspace.delete({ where: { id: workspaceId } }); await prisma.user.delete({ where: { id: userId } }); } });
 
 describe("Phase 8C Checkpoint 2B permanent materialization acceptance", () => {
   it("FINGERPRINT_ACCEPTANCE binds every semantic materialization field", () => {

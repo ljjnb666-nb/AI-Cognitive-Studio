@@ -1,4 +1,4 @@
-import { materializeChunkSet, requestBookAnalysis } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, requestBookAnalysisForUser } from "@ai-cognitive/book-intelligence";
 import { prisma } from "@ai-cognitive/db";
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -25,8 +25,7 @@ export async function POST(request: Request) {
     const model = process.env.BOOK_ANALYSIS_MODEL?.trim();
     if (!provider || !model) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED");
     const chunkSet = await materializeChunkSet({ workspaceId: identity.workspaceId, sourceDocumentId: document.id });
-    const requested = await requestBookAnalysis({
-      workspaceId: identity.workspaceId,
+    const requested = await requestBookAnalysisForUser({ workspaceId: identity.workspaceId, userId: identity.userId }, {
       sourceDocumentId: document.id,
       chunkSetId: chunkSet.id,
       pipelineVersion: process.env.BOOK_ANALYSIS_PIPELINE_VERSION?.trim() || "product-v1",

@@ -85,6 +85,8 @@ jobs:
         run: pnpm test:phase8b
       - name: Phase 8C embedding provider adapters (no external AI calls)
         run: pnpm test:phase8c
+      - name: Phase 8C Book Intelligence gateway activation (no external AI calls)
+        run: pnpm test:phase8c:book-intelligence
       - name: Phase 1 real infrastructure ingestion
         run: pnpm test:phase1:e2e
       - name: Phase 2 book intelligence evaluation

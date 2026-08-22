@@ -16,6 +16,8 @@ import {
 import { buildContext } from "./context.js";
 import { cosineSimilarity, embeddingIdentityWithHash, type EmbeddingProvider } from "./embeddings.js";
 import { sha256, type SourceBlockInput } from "./chunking.js";
+import { canonicalEmbeddingInputHash, type ProviderExecutionRepository, type ProviderGateway } from "@ai-cognitive/provider-gateway";
+import { materializeBookAnalysisEmbeddings, type BookAnalysisEmbeddingTarget } from "./gateway-materialization.js";
 import { dispatchPendingOutbox } from "../../ingestion/src/outbox-dispatcher.js";
 import {
   BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST,
@@ -34,23 +36,26 @@ export const BOOK_ANALYSIS_TOPIC = "book.analysis.requested";
 const contextLimit = 8_000;
 const stageOrder = ["CHUNK_ANALYSIS", "SECTION_ANALYSIS", "CHAPTER_ANALYSIS", "BOOK_SYNTHESIS", "MEMORY_FINALIZATION", "EMBEDDINGS", "FINALIZING", "COMPLETED"] as const;
 type DurableStage = typeof stageOrder[number];
-type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "beforeFinalization" | "afterCurrentExtractionLock";
+type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "afterEmbeddingGatewayPersist" | "beforeEmbeddingMaterialization" | "afterEmbeddingMaterialization" | "beforeEmbeddingStageAdvance" | "beforeFinalization" | "afterCurrentExtractionLock";
 export type AnalysisFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
 export type ProcessBookAnalysisDependencies = {
   analysisProvider: AnalysisProvider;
   embeddingProvider: EmbeddingProvider;
+  /** Query/retrieval identity only; never used by the durable EMBEDDINGS stage. */
+  embeddingGateway?: { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string };
   embeddingVersion?: string;
   correlationId?: string;
   faultInjector?: AnalysisFaultInjector;
 };
-type RequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; correlationId?: string; outboxTopic?: string };
+export type BookAnalysisRequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; correlationId?: string; outboxTopic?: string };
+export type TrustedBookAnalysisRequestContext = { workspaceId: string; userId: string };
 type StageContext = { blocks: SourceBlockInput[]; blockMap: Map<string, SourceBlockInput>; chunks: any[]; nodes: any[] };
 
 const asBlocks = (blocks: Array<{ id: string; ordinal: number; text: string; kind: string; metadata: unknown }>): SourceBlockInput[] => blocks.map((block) => ({ ...block, kind: block.kind as SourceBlockInput["kind"], metadata: block.metadata as SourceBlockInput["metadata"] }));
 const embeddingIdentity = (provider: EmbeddingProvider, override?: string) => embeddingIdentityWithHash(provider.identity, override);
 const logFields = (run: any, correlationId?: string) => ({ workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, analysisRunId: run.id, chunkSetId: run.chunkSetId, analysisStage: run.analysisStage, correlationId: correlationId ?? run.id });
 
-export async function requestBookAnalysis(input: RequestInput) {
+async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requestedByUserId?: string) {
   const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: input.sourceDocumentId, workspaceId: input.workspaceId } } });
   const chunkSet = input.chunkSetId
     ? await prisma.chunkSet.findFirstOrThrow({ where: { id: input.chunkSetId, workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId } })
@@ -63,7 +68,7 @@ export async function requestBookAnalysis(input: RequestInput) {
   if (existing) return { run: existing, job: existing.job };
   try {
     return await prisma.$transaction(async (tx) => {
-      const job = await tx.job.create({ data: { workspaceId: input.workspaceId, type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey, correlationId: input.correlationId } });
+      const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersion: input.modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash } });
       await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id } } });
       logger.info("book.analysis.requested", { ...logFields(run, input.correlationId), extractionId: current.extractionId, jobId: job.id, provider: input.provider, model: input.model });
@@ -334,48 +339,61 @@ async function runMemoryStage(run: any, token: string, dependencies: ProcessBook
   await advanceStage(run, token, "MEMORY_FINALIZATION", "EMBEDDINGS", dependencies.correlationId);
 }
 
-function validateVectors(vectors: number[][], expected: number, dimensions: number) {
-  if (vectors.length !== expected || vectors.some((vector) => !vector.length || vector.some((value) => !Number.isFinite(value))) || vectors.some((vector) => vector.length !== vectors[0]!.length) || vectors.some((vector) => vector.length !== dimensions)) throw new Error("EMBEDDING_PROVIDER_RESPONSE_INVALID");
-}
-
 async function runEmbeddingStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
-  const identity = embeddingIdentity(dependencies.embeddingProvider, dependencies.embeddingVersion);
   const memoryItems = await prisma.bookMemoryItem.findMany({ where: { analysisRunId: run.id }, orderBy: [{ ordinal: "asc" }, { id: "asc" }] });
-  const [existingChunk, existingMemory] = await Promise.all([
-    prisma.documentChunkEmbedding.findMany({ where: { chunkId: { in: context.chunks.map((chunk) => chunk.id) }, embeddingIdentityHash: identity.hash }, select: { chunkId: true } }),
-    prisma.bookMemoryEmbedding.findMany({ where: { memoryItemId: { in: memoryItems.map((item) => item.id) }, embeddingIdentityHash: identity.hash }, select: { memoryItemId: true } }),
-  ]);
-  const embeddedChunks = new Set(existingChunk.map((item) => item.chunkId));
-  const embeddedMemory = new Set(existingMemory.map((item) => item.memoryItemId));
-  const targets = [
-    ...context.chunks.filter((chunk) => !embeddedChunks.has(chunk.id)).map((chunk) => ({ kind: "chunk" as const, id: chunk.id, text: chunk.content })),
-    ...memoryItems.filter((item) => !embeddedMemory.has(item.id)).map((item) => ({ kind: "memory" as const, id: item.id, text: item.content })),
+  if (!dependencies.embeddingGateway) throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_NOT_CONFIGURED");
+  const targets: BookAnalysisEmbeddingTarget[] = [
+    ...context.chunks.map(chunk => ({ kind: "DOCUMENT_CHUNK" as const, id: chunk.id, extractionId: run.extractionId, contentHash: chunk.contentHash, text: chunk.content })),
+    ...memoryItems.map(item => ({ kind: "BOOK_MEMORY" as const, id: item.id, extractionId: item.extractionId, analysisRunId: run.id, contentHash: item.contentHash, text: item.content })),
   ];
-  if (targets.length) {
-    logger.info("book.analysis.embedding.resumed", { ...logFields(run, dependencies.correlationId), missing: targets.length, total: context.chunks.length + memoryItems.length });
-    await renewBookAnalysisLease(run.id, token);
-    const vectors = await dependencies.embeddingProvider.embed({ texts: targets.map((target) => target.text), model: identity.model, correlationId: dependencies.correlationId ?? run.id });
-    validateVectors(vectors, targets.length, identity.dimensions);
-    for (const [index, target] of targets.entries()) {
-      const vector = vectors[index]!;
-      await withOwnedAnalysisTransaction(run.id, token, async (tx) => {
-        if (target.kind === "chunk") await tx.documentChunkEmbedding.createMany({ data: [{ chunkId: target.id, workspaceId: run.workspaceId, extractionId: run.extractionId, provider: identity.provider, model: identity.model, modelVersion: identity.modelVersion, embeddingVersion: identity.embeddingVersion, embeddingIdentityHash: identity.hash, dimensions: vector.length, vector }], skipDuplicates: true });
-        else await tx.bookMemoryEmbedding.createMany({ data: [{ memoryItemId: target.id, analysisRunId: run.id, workspaceId: run.workspaceId, extractionId: run.extractionId, provider: identity.provider, model: identity.model, modelVersion: identity.modelVersion, embeddingVersion: identity.embeddingVersion, embeddingIdentityHash: identity.hash, dimensions: vector.length, vector }], skipDuplicates: true });
-      });
-      await dependencies.faultInjector?.("afterEmbeddingPersist", { analysisRunId: run.id, targetKind: target.kind, targetId: target.id, embeddingIdentityHash: identity.hash });
-    }
-  }
+  const embedding = { texts: targets.map(target => target.text), purpose: "DOCUMENT" as const };
+  await renewBookAnalysisLease(run.id, token);
+  // The gateway fingerprint binds the whole ordered target set.  Keep this key
+  // run-scoped so a lineage mutation cannot pay for a second invocation before
+  // the original encrypted receipt is reconciled.
+  const targetLineageHash = sha256(JSON.stringify(targets.map(target => ({ kind: target.kind, id: target.id, extractionId: target.extractionId, contentHash: target.contentHash, ...(target.kind === "BOOK_MEMORY" ? { analysisRunId: target.analysisRunId } : {}) }))));
+  const request = { workspaceId: run.workspaceId, routeSlot: "EMBEDDING" as const, correlationId: dependencies.correlationId ?? run.id, idempotencyKey: `book-analysis-embeddings:${run.id}`, inputHash: canonicalEmbeddingInputHash(embedding), capability: { family: "EMBEDDING" as const }, embedding, pipelineVersion: `${run.pipelineVersion}:book-embedding:${targetLineageHash}` };
+  const outcome = await dependencies.embeddingGateway.gateway.execute(request, { userId: dependencies.embeddingGateway.userId });
+  if (outcome.status === "RECONCILIATION_REQUIRED") throw new Error("BOOK_ANALYSIS_EMBEDDING_RECONCILIATION_REQUIRED");
+  if (outcome.status === "IN_PROGRESS" || outcome.status === "BLOCKED_EXISTING") throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED");
+  if (outcome.status === "TERMINAL_FAILED") throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_FAILED");
+  const invocationId = outcome.invocationId;
+  const recoveredInvocation = outcome.status === "ALREADY_PROCESSED" && !outcome.snapshot ? await prisma.providerInvocation.findFirst({ where: { id: invocationId, workspaceId: run.workspaceId }, select: { snapshotId: true } }) : undefined;
+  const snapshotId = outcome.status === "SUCCEEDED" ? outcome.snapshot.id : outcome.status === "ALREADY_PROCESSED" ? outcome.snapshot?.id ?? recoveredInvocation?.snapshotId : undefined;
+  if (!invocationId || !snapshotId) throw new Error("BOOK_ANALYSIS_EMBEDDING_RECONCILIATION_REQUIRED");
+  await dependencies.faultInjector?.("afterEmbeddingGatewayPersist", { analysisRunId: run.id, invocationId, snapshotId });
+  await renewBookAnalysisLease(run.id, token);
+  await dependencies.faultInjector?.("beforeEmbeddingMaterialization", { analysisRunId: run.id, invocationId, snapshotId });
+  await materializeBookAnalysisEmbeddings(dependencies.embeddingGateway.repository, { workspaceId: run.workspaceId, analysisRunId: run.id, claimToken: token, invocationId, snapshotId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", targets });
+  await dependencies.faultInjector?.("afterEmbeddingMaterialization", { analysisRunId: run.id, invocationId, snapshotId });
+  const pinned = await dependencies.embeddingGateway.repository.loadExecutionSnapshot(run.workspaceId, snapshotId);
+  const identity = embeddingIdentityWithHash({ provider: pinned.providerKey, model: pinned.modelId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", dimensions: Number(pinned.configuration.embeddingDimensions ?? pinned.capability.embeddingDimensions) });
   const [chunkCount, memoryCount] = await Promise.all([
     prisma.documentChunkEmbedding.count({ where: { chunkId: { in: context.chunks.map((chunk) => chunk.id) }, embeddingIdentityHash: identity.hash } }),
     prisma.bookMemoryEmbedding.count({ where: { memoryItemId: { in: memoryItems.map((item) => item.id) }, embeddingIdentityHash: identity.hash } }),
   ]);
   if (chunkCount !== context.chunks.length || memoryCount !== memoryItems.length) throw new Error("EMBEDDINGS_INCOMPLETE");
+  await dependencies.faultInjector?.("beforeEmbeddingStageAdvance", { analysisRunId: run.id, invocationId, snapshotId });
   await advanceStage(run, token, "EMBEDDINGS", "FINALIZING", dependencies.correlationId);
+}
+
+/** Low-level/system request path.  It intentionally leaves Job.userId null. */
+export async function requestBookAnalysis(input: BookAnalysisRequestInput) {
+  return requestBookAnalysisCore(input);
+}
+
+/** Trusted user-facing boundary that persists the initiating principal. */
+export async function requestBookAnalysisForUser(context: TrustedBookAnalysisRequestContext, input: Omit<BookAnalysisRequestInput, "workspaceId">) {
+  const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { userId: true } });
+  if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
+  return requestBookAnalysisCore({ ...input, workspaceId: context.workspaceId }, context.userId);
 }
 
 async function runFinalizingStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
   await dependencies.faultInjector?.("beforeFinalization", { analysisRunId: run.id });
-  const identity = embeddingIdentity(dependencies.embeddingProvider, dependencies.embeddingVersion);
+  const legacyIdentity = embeddingIdentity(dependencies.embeddingProvider, dependencies.embeddingVersion);
+  const gatewayEmbedding = dependencies.embeddingGateway ? await prisma.documentChunkEmbedding.findFirst({ where: { chunkId: { in: context.chunks.map(chunk => chunk.id) }, workspaceId: run.workspaceId }, orderBy: { createdAt: "desc" }, select: { embeddingIdentityHash: true, embeddingVersion: true } }) : undefined;
+  const identity = gatewayEmbedding ? { hash: gatewayEmbedding.embeddingIdentityHash, embeddingVersion: gatewayEmbedding.embeddingVersion } : legacyIdentity;
   const sectionNodes = context.nodes.filter((node) => node.kind === "SECTION" && chunksForNode(context.chunks, node).length);
   const sectionArtifacts = await prisma.analysisArtifact.findMany({ where: { analysisRunId: run.id, scope: "SECTION" } });
   const nodeById = new Map(context.nodes.map((node) => [node.id, node]));

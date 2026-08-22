@@ -98,6 +98,20 @@ describe("Phase 8C production embedding Gateway acceptance", () => {
     expect((JSON.parse(global.transport.calls.at(-1)!.body) as { input: string[] }).input).toEqual(distinctive);
     expect(global.transport.calls).toHaveLength(4);
   });
+  it("CAPABILITY_AWARE_INPUT_LIMIT uses the resolved embedding capability instead of the fallback", async () => {
+    const capability = 128;
+    const value = await fixture("openai", request => { const input = JSON.parse(request.body) as { input: string[] }; return { status: 200, headers: {}, body: JSON.stringify(body("openai", input.input.map((_text, index) => index === 0 ? [1, 0, 0] : [0, 1, 0]))) }; }, { maxEmbeddingInputs: capability });
+    await expect(value.gateway.execute(request(value.workspaceId, "capability-aware-accepted", { texts: Array.from({ length: 97 }, (_value, index) => `accepted-${index}`), purpose: "DOCUMENT" }), { userId: value.userId })).resolves.toMatchObject({ status: "SUCCEEDED", response: { dimensions: 3 } });
+    expect(value.transport.calls).toHaveLength(1);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: value.workspaceId } })).toBe(1);
+    expect(await prisma.providerInvocationAttempt.count({ where: { workspaceId: value.workspaceId, status: "SUCCEEDED" } })).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: value.workspaceId } })).toBe(1);
+    await expect(value.gateway.execute(request(value.workspaceId, "capability-aware-rejected", { texts: Array.from({ length: capability + 1 }, (_value, index) => `rejected-${index}`), purpose: "DOCUMENT" }), { userId: value.userId })).rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE" });
+    expect(value.transport.calls).toHaveLength(1);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: value.workspaceId } })).toBe(1);
+    expect(await prisma.providerInvocationAttempt.count({ where: { workspaceId: value.workspaceId } })).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: value.workspaceId } })).toBe(1);
+  });
   it("REMOTE_REQUEST_ID_POLICY persists bounded provider IDs and never stores oversized hostile IDs", async () => {
     const normal = await fixture("openai", () => ({ status: 200, headers: { "x-request-id": "remote-request-8c" }, body: JSON.stringify(body("openai")) }));
     const result = await normal.gateway.execute(request(normal.workspaceId, "request-id-normal"), { userId: normal.userId });

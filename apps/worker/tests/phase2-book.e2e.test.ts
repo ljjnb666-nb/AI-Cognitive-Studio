@@ -3,9 +3,10 @@ import { prisma } from "../../../packages/db/src/index.js";
 import { createIngestionService } from "@ai-cognitive/ingestion";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { readEnvironment } from "@ai-cognitive/shared/server";
-import { DeterministicFakeEmbeddingProvider, buildBookContext, estimateAnalysisTokens, materializeChunkSet, requestBookAnalysis, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "../../../packages/book-intelligence/src/index.js";
+import { buildBookContext, embeddingIdentityWithHash, estimateAnalysisTokens, materializeChunkSet, requestBookAnalysis, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "../../../packages/book-intelligence/src/index.js";
 import { createBookAnalysisQueue, createBookAnalysisWorker, dispatchBookAnalysisWithQueue } from "../src/book-analysis.js";
 import { createSourceIngestionQueue, createSourceIngestionWorker, dispatchSourceIngestionWithQueue } from "../src/source-ingestion.js";
+import { clearBookAnalysisEmbeddingGatewayFixtureState, createBookAnalysisEmbeddingGatewayFixture } from "../../../packages/book-intelligence/tests/helpers/book-analysis-embedding-gateway.js";
 
 import { createE2EWorkerIsolation } from "./helpers/e2e-worker-isolation.js";
 const environment = readEnvironment();
@@ -26,6 +27,7 @@ class E2EProvider implements AnalysisProvider {
 }
 
 async function cleanup(workspaceId: string, userId: string) {
+  await clearBookAnalysisEmbeddingGatewayFixtureState(workspaceId);
   await prisma.currentBookIntelligence.deleteMany({ where: { workspaceId } });
   await prisma.bookAnalysisRun.deleteMany({ where: { workspaceId } });
   await prisma.chunkSet.deleteMany({ where: { workspaceId } });
@@ -59,7 +61,8 @@ describe("real Phase 2 book intelligence infrastructure", () => {
     expect((await fetch(intent.upload.url, { method: "PUT", headers: intent.upload.headers, body: text })).ok).toBe(true);
     const document = await service.completeUpload({ userId: user.id, workspaceId: workspace.id }, intent.session.id);
     const ingestion = await prisma.ingestionRun.findFirstOrThrow({ where: { sourceDocumentId: document.id } });
-    const isolation = createE2EWorkerIsolation("phase2"), sourcePrefix = isolation.bullmqPrefix, bookPrefix = isolation.bullmqPrefix, bookTopic = isolation.topics.bookAnalysis, sourceQueue = createSourceIngestionQueue(environment, { prefix: sourcePrefix }), sourceWorker = createSourceIngestionWorker(environment, { prefix: sourcePrefix }), provider = new E2EProvider(), embeddings = new DeterministicFakeEmbeddingProvider(), bookQueue = createBookAnalysisQueue(environment, { prefix: bookPrefix }), bookWorker = createBookAnalysisWorker(environment, { analysisProvider: provider, embeddingProvider: embeddings }, { prefix: bookPrefix });
+    const gatewayFixture = await createBookAnalysisEmbeddingGatewayFixture({ workspaceId: workspace.id, userId: user.id });
+    const isolation = createE2EWorkerIsolation("phase2"), sourcePrefix = isolation.bullmqPrefix, bookPrefix = isolation.bullmqPrefix, bookTopic = isolation.topics.bookAnalysis, sourceQueue = createSourceIngestionQueue(environment, { prefix: sourcePrefix }), sourceWorker = createSourceIngestionWorker(environment, { prefix: sourcePrefix }), provider = new E2EProvider(), retrievalEmbeddings = gatewayFixture.retrievalEmbeddings, bookQueue = createBookAnalysisQueue(environment, { prefix: bookPrefix }), bookWorker = createBookAnalysisWorker(environment, { analysisProvider: provider, embeddingProvider: retrievalEmbeddings, embeddingGateway: gatewayFixture.embeddingGateway }, { prefix: bookPrefix });
     try {
       await Promise.all([sourceWorker.waitUntilReady(), bookWorker.waitUntilReady()]);
       await dispatchSourceIngestionWithQueue(sourceQueue, environment);
@@ -69,6 +72,11 @@ describe("real Phase 2 book intelligence infrastructure", () => {
       const requested = await requestBookAnalysis({ workspaceId: workspace.id, sourceDocumentId: document.id, pipelineVersion: "e2e", promptVersion: "e2e", provider: "deterministic-test", model: "analysis-test", modelVersion: "1", outboxTopic: bookTopic });
       await dispatchBookAnalysisWithQueue(bookQueue, { topic: bookTopic });
       await expect.poll(async () => (await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } })).status, { timeout: 30_000 }).toBe("SUCCEEDED");
+      const invocation = await prisma.providerInvocation.findUniqueOrThrow({ where: { workspaceId_idempotencyKey: { workspaceId: workspace.id, idempotencyKey: `book-analysis-embeddings:${requested.run.id}` } } });
+      const snapshot = await prisma.providerExecutionSnapshot.findUniqueOrThrow({ where: { id_workspaceId: { id: invocation.snapshotId, workspaceId: workspace.id } } });
+      const receipt = await prisma.providerEmbeddingResult.findUniqueOrThrow({ where: { invocationId: invocation.id } });
+      const dimensions = Number((snapshot.configuration as { embeddingDimensions?: number }).embeddingDimensions ?? (snapshot.capability as { embeddingDimensions?: number }).embeddingDimensions);
+      const identity = embeddingIdentityWithHash({ provider: snapshot.providerKey, model: snapshot.modelId, embeddingVersion: "gateway", dimensions });
       const [run, job, chunks, artifacts, reductions, memories, evidence, relations, chunkEmbeddings, memoryEmbeddings, current, outbox] = await Promise.all([
         prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: requested.job.id } }), prisma.documentChunk.findMany({ where: { chunkSetId: chunkSet.id } }), prisma.analysisArtifact.findMany({ where: { analysisRunId: requested.run.id } }), prisma.analysisReductionResult.findMany({ where: { analysisRunId: requested.run.id } }), prisma.bookMemoryItem.findMany({ where: { analysisRunId: requested.run.id } }), prisma.bookMemoryEvidence.findMany({ where: { analysisRunId: requested.run.id } }), prisma.bookMemoryRelation.findMany({ where: { analysisRunId: requested.run.id } }), prisma.documentChunkEmbedding.findMany({ where: { chunk: { chunkSetId: chunkSet.id } } }), prisma.bookMemoryEmbedding.findMany({ where: { analysisRunId: requested.run.id } }), prisma.currentBookIntelligence.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } }), prisma.outboxEvent.findFirstOrThrow({ where: { topic: bookTopic, aggregateId: requested.run.id } }),
       ]);
@@ -86,10 +94,16 @@ describe("real Phase 2 book intelligence infrastructure", () => {
       expect(relations.length).toBeGreaterThan(0);
       expect(chunkEmbeddings).toHaveLength(chunks.length);
       expect(memoryEmbeddings).toHaveLength(memories.length);
-      expect([...chunkEmbeddings, ...memoryEmbeddings].every((embedding) => embedding.embeddingIdentityHash && embedding.provider === embeddings.identity.provider && embedding.model === embeddings.identity.model && embedding.embeddingVersion === embeddings.identity.embeddingVersion)).toBe(true);
+      expect([...chunkEmbeddings, ...memoryEmbeddings].every((embedding) => embedding.embeddingIdentityHash === identity.hash && embedding.provider === snapshot.providerKey && embedding.model === snapshot.modelId && embedding.dimensions === dimensions && embedding.embeddingVersion === "gateway")).toBe(true);
+      expect(gatewayFixture.remoteInputs()).toHaveLength(1);
+      expect(gatewayFixture.remoteInputs()[0]).toHaveLength(289);
+      expect(gatewayFixture.remoteInputs()[0]!.length).toBeGreaterThan(96);
+      expect(gatewayFixture.remoteInputs()[0]!.length).toBeLessThanOrEqual(1024);
+      expect([gatewayFixture.remoteCallCount(), await prisma.providerExecutionSnapshot.count({ where: { id: snapshot.id, workspaceId: workspace.id } }), await prisma.providerInvocation.count({ where: { id: invocation.id, workspaceId: workspace.id } }), await prisma.providerInvocationAttempt.count({ where: { invocationId: invocation.id, workspaceId: workspace.id, status: "SUCCEEDED" } }), await prisma.providerUsageEvent.count({ where: { invocationId: invocation.id, workspaceId: workspace.id } }), await prisma.providerEmbeddingResult.count({ where: { invocationId: invocation.id, workspaceId: workspace.id } })]).toEqual([1, 1, 1, 1, 1, 1]);
+      expect(receipt).toMatchObject({ consumerKind: "BOOK_ANALYSIS_EMBEDDINGS", consumerKey: requested.run.id, consumerFingerprint: expect.any(String), consumedAt: expect.any(Date), purgedAt: expect.any(Date), ciphertext: null, iv: null, authTag: null, keyVersion: null });
       expect([current.extractionId, current.chunkSetId, current.analysisRunId]).toEqual([currentExtraction.extractionId, chunkSet.id, requested.run.id]);
       expect(outbox.status).toBe("DISPATCHED");
-      const context = await buildBookContext({ workspaceId: workspace.id, sourceDocumentId: document.id, task: "summarize", tokenBudget: 200, embeddingProvider: embeddings });
+      const context = await buildBookContext({ workspaceId: workspace.id, sourceDocumentId: document.id, task: "summarize", tokenBudget: 200, embeddingProvider: retrievalEmbeddings });
       expect(context.estimatedTokens).toBeLessThanOrEqual(200);
       expect(context.items.every((item) => item.sourceDocumentId === document.id && item.extractionId === currentExtraction.extractionId && item.chunkSetId === chunkSet.id && item.analysisRunId === requested.run.id && item.embedding?.embeddingIdentityHash && item.selectionReason && Array.isArray(item.sourceBlockEvidenceSpans))).toBe(true);
       expect(provider.requests.every((request) => request.content !== text && request.content.length <= 8_000 && estimateAnalysisTokens(request.content) <= request.tokenBudget && request.systemInstructions.length > 0)).toBe(true);
