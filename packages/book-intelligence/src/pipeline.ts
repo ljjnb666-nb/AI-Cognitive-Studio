@@ -17,7 +17,7 @@ import { buildContext } from "./context.js";
 import { cosineSimilarity, embeddingIdentityWithHash, type EmbeddingProvider } from "./embeddings.js";
 import { sha256, type SourceBlockInput } from "./chunking.js";
 import { canonicalEmbeddingInputHash, type ProviderExecutionRepository, type ProviderGateway } from "@ai-cognitive/provider-gateway";
-import { materializeBookAnalysisEmbeddings, type BookAnalysisEmbeddingTarget } from "./gateway-materialization.js";
+import { loadConsumedBookAnalysisEmbeddingIdentity, materializeBookAnalysisEmbeddings, type BookAnalysisEmbeddingTarget, verifyConsumedBookAnalysisEmbeddings } from "./gateway-materialization.js";
 import { dispatchPendingOutbox } from "../../ingestion/src/outbox-dispatcher.js";
 import {
   BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST,
@@ -364,7 +364,8 @@ async function runEmbeddingStage(run: any, token: string, dependencies: ProcessB
   await dependencies.faultInjector?.("afterEmbeddingGatewayPersist", { analysisRunId: run.id, invocationId, snapshotId });
   await renewBookAnalysisLease(run.id, token);
   await dependencies.faultInjector?.("beforeEmbeddingMaterialization", { analysisRunId: run.id, invocationId, snapshotId });
-  await materializeBookAnalysisEmbeddings(dependencies.embeddingGateway.repository, { workspaceId: run.workspaceId, analysisRunId: run.id, claimToken: token, invocationId, snapshotId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", targets });
+  const materialization = await materializeBookAnalysisEmbeddings(dependencies.embeddingGateway.repository, { workspaceId: run.workspaceId, analysisRunId: run.id, claimToken: token, invocationId, snapshotId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", targets });
+  if (materialization.status === "ALREADY_CONSUMED") await verifyConsumedBookAnalysisEmbeddings({ workspaceId: run.workspaceId, analysisRunId: run.id, claimToken: token, invocationId, snapshotId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", targets });
   await dependencies.faultInjector?.("afterEmbeddingMaterialization", { analysisRunId: run.id, invocationId, snapshotId });
   const pinned = await dependencies.embeddingGateway.repository.loadExecutionSnapshot(run.workspaceId, snapshotId);
   const identity = embeddingIdentityWithHash({ provider: pinned.providerKey, model: pinned.modelId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", dimensions: Number(pinned.configuration.embeddingDimensions ?? pinned.capability.embeddingDimensions) });
@@ -391,9 +392,7 @@ export async function requestBookAnalysisForUser(context: TrustedBookAnalysisReq
 
 async function runFinalizingStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
   await dependencies.faultInjector?.("beforeFinalization", { analysisRunId: run.id });
-  const legacyIdentity = embeddingIdentity(dependencies.embeddingProvider, dependencies.embeddingVersion);
-  const gatewayEmbedding = dependencies.embeddingGateway ? await prisma.documentChunkEmbedding.findFirst({ where: { chunkId: { in: context.chunks.map(chunk => chunk.id) }, workspaceId: run.workspaceId }, orderBy: { createdAt: "desc" }, select: { embeddingIdentityHash: true, embeddingVersion: true } }) : undefined;
-  const identity = gatewayEmbedding ? { hash: gatewayEmbedding.embeddingIdentityHash, embeddingVersion: gatewayEmbedding.embeddingVersion } : legacyIdentity;
+  const identity = dependencies.embeddingGateway ? await loadConsumedBookAnalysisEmbeddingIdentity({ workspaceId: run.workspaceId, analysisRunId: run.id, embeddingVersion: dependencies.embeddingVersion ?? "gateway" }) : embeddingIdentity(dependencies.embeddingProvider, dependencies.embeddingVersion);
   const sectionNodes = context.nodes.filter((node) => node.kind === "SECTION" && chunksForNode(context.chunks, node).length);
   const sectionArtifacts = await prisma.analysisArtifact.findMany({ where: { analysisRunId: run.id, scope: "SECTION" } });
   const nodeById = new Map(context.nodes.map((node) => [node.id, node]));

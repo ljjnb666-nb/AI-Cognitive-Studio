@@ -175,9 +175,27 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     expect((await prisma.providerEmbeddingResult.findUniqueOrThrow({ where: { invocationId: seeded.invocationId } })).consumedAt).toBeNull();
   });
 
-  it("CASE14 consumed receipt redelivery has no accounting increase", async () => {
-    const data = await fixture(); await processBookAnalysisRun(data.run.id, deps(data)); const before = await accounting(data.workspace.id);
-    await processBookAnalysisRun(data.run.id, deps(data)); expect(await accounting(data.workspace.id)).toEqual(before); expect(data.gateway.remoteCallCount()).toBe(1);
+  it("CASE14 consumed EMBEDDINGS replay verifies exact destinations without a recall", async () => {
+    const data = await fixture();
+    await expect(processBookAnalysisRun(data.run.id, deps(data, { faultInjector: (point) => { if (point === "afterEmbeddingMaterialization") throw new Error("CASE14_REPLAY"); } }))).rejects.toThrow("CASE14_REPLAY");
+    const before = await accounting(data.workspace.id), receiptBefore = await receipt(data.workspace.id);
+    expect(receiptBefore.consumedAt).not.toBeNull(); expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).analysisStage).toBe("EMBEDDINGS");
+    const identityA = await prisma.documentChunkEmbedding.findFirstOrThrow({ where: { workspaceId: data.workspace.id } });
+    const identityB = embeddingIdentityWithHash({ provider: "identity-b", model: "identity-b", embeddingVersion: "identity-b", dimensions: 4 });
+    const chunks = await prisma.documentChunk.findMany({ where: { chunkSetId: data.chunkSet.id } });
+    for (const chunk of chunks) await prisma.documentChunkEmbedding.create({ data: { chunkId: chunk.id, workspaceId: data.workspace.id, extractionId: data.extraction.id, provider: "identity-b", model: "identity-b", embeddingVersion: "identity-b", embeddingIdentityHash: identityB.hash, dimensions: 4, vector: [1, 0, 0, 0] } });
+    await processBookAnalysisRun(data.run.id, deps(data));
+    expect(data.gateway.remoteCallCount()).toBe(1); expect(await accounting(data.workspace.id)).toEqual(before);
+    expect((await prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }).then(job => job.result as { embeddingIdentityHash?: string; embeddingVersion?: string })).embeddingIdentityHash).toBe(identityA.embeddingIdentityHash);
+    expect((await prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }).then(job => job.result as { embeddingIdentityHash?: string; embeddingVersion?: string })).embeddingVersion).toBe("gateway");
+
+    const negative = await fixture();
+    await expect(processBookAnalysisRun(negative.run.id, deps(negative, { faultInjector: (point) => { if (point === "afterEmbeddingMaterialization") throw new Error("CASE14_NEGATIVE"); } }))).rejects.toThrow("CASE14_NEGATIVE");
+    const negativeBefore = await accounting(negative.workspace.id), missing = await prisma.documentChunkEmbedding.findFirstOrThrow({ where: { workspaceId: negative.workspace.id } });
+    await prisma.documentChunkEmbedding.delete({ where: { id: missing.id } });
+    await expect(processBookAnalysisRun(negative.run.id, deps(negative))).rejects.toThrow("Consumed document embedding destination is invalid");
+    expect(negative.gateway.remoteCallCount()).toBe(1); expect(await accounting(negative.workspace.id)).toEqual(negativeBefore); expect(await prisma.documentChunkEmbedding.findUnique({ where: { id: missing.id } })).toBeNull();
+    expect((await receipt(negative.workspace.id)).consumedAt).not.toBeNull(); expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: negative.run.id } })).analysisStage).toBe("EMBEDDINGS");
   });
 
   it("CASE15 reconciliation required fails closed without a recall", async () => {
