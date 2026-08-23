@@ -1,12 +1,13 @@
 import { prisma } from "@ai-cognitive/db";
 import { randomUUID } from "node:crypto";
-import { VersionedAesGcmCipher, type CredentialCipher, type EmbeddingResultCipher, type TextResultCipher } from "./credentials/cipher.js";
+import { VersionedAesGcmCipher, type CredentialCipher, type EmbeddingResultCipher, type SpeechResultCipher, type TextResultCipher } from "./credentials/cipher.js";
+import { createHash } from "node:crypto";
 import { redactSecrets } from "./credentials/redaction.js";
 import { embeddingDimensions, validateVectors } from "./embedding/validation.js";
 import { validateTextGenerationResponse } from "./text/result-validation.js";
 import { ProviderGatewayError } from "./errors.js";
 import { canonicalGatewayRequestFingerprint } from "./request-fingerprint.js";
-import type { EmbeddingResponse, ExecutionSnapshot, GatewayRequest, ModelCapability, ProviderUsage, TextGenerationResponse } from "./types.js";
+import type { EmbeddingResponse, ExecutionSnapshot, GatewayRequest, ModelCapability, ProviderUsage, SpeechResponse, TextGenerationResponse } from "./types.js";
 
 type Db = typeof prisma;
 type Transaction = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
@@ -20,11 +21,19 @@ export type TextConsumptionInput = EmbeddingConsumptionInput;
 export type TextConsumptionResult = { status: "CONSUMED" | "ALREADY_CONSUMED"; invocationId: string; snapshotId: string };
 export type TextMaterializer = (input: { tx: Transaction; response: TextGenerationResponse; snapshot: ExecutionSnapshot; receipt: { id: string } }) => Promise<void>;
 export type TextHandoffState = { kind: "RECOVERABLE"; response: TextGenerationResponse } | { kind: "CONSUMED" } | { kind: "RECONCILIATION_REQUIRED" };
+export type SpeechConsumptionInput = EmbeddingConsumptionInput;
+export type SpeechHandoffState = { kind: "RECOVERABLE"; response: SpeechResponse } | { kind: "CONSUMED" } | { kind: "RECONCILIATION_REQUIRED" };
+export type SpeechMaterializer = (input: { tx: Transaction; response: SpeechResponse; snapshot: ExecutionSnapshot; receipt: { id: string; sha256: string; byteLength: number } }) => Promise<void>;
 const leaseMilliseconds = 60_000;
 const bounded = (value: string | undefined) => value && value.length <= 256 ? value : undefined;
 const uniqueViolation = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2002";
 
 export class ProviderExecutionRepository {
+  async findConsumedSpeechTombstone(workspaceId: string, invocationId: string): Promise<{ workspaceId: string; invocationId: string; snapshotId: string; consumerKind: string; consumerKey: string; consumerFingerprint: string; consumedAt: Date; purgedAt: Date } | undefined> {
+    const row = await this.db.providerSpeechResult.findFirst({ where: { workspaceId, invocationId, consumedAt: { not: null }, purgedAt: { not: null }, ciphertext: null, iv: null, authTag: null, keyVersion: null }, select: { workspaceId: true, invocationId: true, snapshotId: true, consumerKind: true, consumerKey: true, consumerFingerprint: true, consumedAt: true, purgedAt: true } });
+    if (!row?.consumerKind || !row.consumerKey || !row.consumerFingerprint || !row.consumedAt || !row.purgedAt) return undefined;
+    return { workspaceId: row.workspaceId, invocationId: row.invocationId, snapshotId: row.snapshotId, consumerKind: row.consumerKind, consumerKey: row.consumerKey, consumerFingerprint: row.consumerFingerprint, consumedAt: row.consumedAt, purgedAt: row.purgedAt };
+  }
   /** Read-only identity for a purged text receipt; it never exposes plaintext. */
   async findConsumedTextTombstone(workspaceId: string, invocationId: string): Promise<{ workspaceId: string; invocationId: string; snapshotId: string; consumerKind: string; consumerKey: string; consumerFingerprint: string; consumedAt: Date; purgedAt: Date } | undefined> {
     const row = await this.db.providerTextResult.findFirst({ where: { workspaceId, invocationId, consumedAt: { not: null }, purgedAt: { not: null }, ciphertext: null, iv: null, authTag: null, keyVersion: null }, select: { workspaceId: true, invocationId: true, snapshotId: true, consumerKind: true, consumerKey: true, consumerFingerprint: true, consumedAt: true, purgedAt: true } });
@@ -55,11 +64,23 @@ export class ProviderExecutionRepository {
     if (canonicalGatewayRequestFingerprint(snapshot, request) !== (await this.db.providerInvocation.findUniqueOrThrow({ where: { id_workspaceId: { id: existing.invocationId, workspaceId: request.workspaceId } }, select: { requestFingerprint: true } })).requestFingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "Existing embedding execution has a different semantic fingerprint");
     return existing;
   }
-  constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher & Partial<EmbeddingResultCipher & TextResultCipher>, private readonly testClock?: () => Date, private readonly workerId = `gateway-${randomUUID()}`, private readonly leaseMs = leaseMilliseconds) {}
+  async findExistingSpeechInvocationForRequest(request: GatewayRequest): Promise<{ invocationId: string; snapshotId: string; providerKey: string; modelId: string } | undefined> {
+    const invocation = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId: request.workspaceId, idempotencyKey: request.idempotencyKey } }, include: { snapshot: { select: { id: true, providerKey: true, modelId: true } }, speechResult: { select: { id: true } } } });
+    if (!invocation?.speechResult) return undefined;
+    const snapshot = await this.loadExecutionSnapshot(request.workspaceId, invocation.snapshotId);
+    if (canonicalGatewayRequestFingerprint(snapshot, request) !== invocation.requestFingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "Existing speech execution has a different semantic fingerprint");
+    return { invocationId: invocation.id, snapshotId: invocation.snapshot.id, providerKey: invocation.snapshot.providerKey, modelId: invocation.snapshot.modelId };
+  }
+  async findExistingSpeechInvocation(workspaceId: string, idempotencyKey: string): Promise<{ invocationId: string; snapshotId: string; providerKey: string; modelId: string } | undefined> {
+    const invocation = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } }, include: { snapshot: { select: { id: true, providerKey: true, modelId: true } }, speechResult: { select: { id: true } } } });
+    return invocation?.speechResult ? { invocationId: invocation.id, snapshotId: invocation.snapshot.id, providerKey: invocation.snapshot.providerKey, modelId: invocation.snapshot.modelId } : undefined;
+  }
+  constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher & Partial<EmbeddingResultCipher & TextResultCipher & SpeechResultCipher>, private readonly testClock?: () => Date, private readonly workerId = `gateway-${randomUUID()}`, private readonly leaseMs = leaseMilliseconds) {}
   private async databaseNow(): Promise<Date> { if (this.testClock) return this.testClock(); const rows = await this.db.$queryRaw<{ now: Date }[]>`SELECT CURRENT_TIMESTAMP AS "now"`; return rows[0]?.now ?? (() => { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Database clock unavailable"); })(); }
   get leaseDurationMs(): number { return this.leaseMs; }
   assertEmbeddingResultStorageAvailable(): void { if (!this.cipher?.encryptEmbeddingResult || !this.cipher.decryptEmbeddingResult) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Embedding result vault is not configured"); }
   assertTextResultStorageAvailable(): void { if (!this.cipher?.encryptTextResult || !this.cipher.decryptTextResult) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Text result vault is not configured"); }
+  assertSpeechResultStorageAvailable(): void { if (!this.cipher?.encryptSpeechResult || !this.cipher.decryptSpeechResult) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Speech result vault is not configured"); }
 
   async claimExecution(snapshot: ExecutionSnapshot, input: { idempotencyKey: string; fingerprint: string }): Promise<ExecutionClaim> {
     const claimToken = randomUUID(); const now = await this.databaseNow(); const expiresAt = new Date(now.getTime() + this.leaseMs);
@@ -72,10 +93,10 @@ export class ProviderExecutionRepository {
     } catch (error) {
       if (!uniqueViolation(error)) throw error;
     }
-    const existing = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId: snapshot.workspaceId, idempotencyKey: input.idempotencyKey }, }, include: { attempts: { select: { id: true, status: true } }, embeddingResult: { select: { id: true, consumedAt: true } }, textResult: { select: { id: true, consumedAt: true } } } });
+    const existing = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId: snapshot.workspaceId, idempotencyKey: input.idempotencyKey }, }, include: { attempts: { select: { id: true, status: true } }, embeddingResult: { select: { id: true, consumedAt: true } }, textResult: { select: { id: true, consumedAt: true } }, speechResult: { select: { id: true, consumedAt: true } } } });
     if (!existing) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
     if (existing.requestFingerprint !== input.fingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT");
-    if (existing.status === "SUCCEEDED") return snapshot.capability.families.includes("EMBEDDING") && !existing.embeddingResult && !existing.textResult ? { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id } : { kind: "ALREADY_PROCESSED", invocationId: existing.id, snapshotId: existing.snapshotId };
+    if (existing.status === "SUCCEEDED") return !existing.embeddingResult && !existing.textResult && !existing.speechResult ? { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id } : { kind: "ALREADY_PROCESSED", invocationId: existing.id, snapshotId: existing.snapshotId };
     if (existing.status === "FAILED") return { kind: "TERMINAL_FAILED", invocationId: existing.id };
     if (existing.status === "BLOCKED") return { kind: "BLOCKED_EXISTING", invocationId: existing.id };
     if (existing.status === "RECONCILIATION_REQUIRED") return { kind: "RECONCILIATION_REQUIRED", invocationId: existing.id };
@@ -254,6 +275,22 @@ export class ProviderExecutionRepository {
       await tx.providerTextResult.create({ data: { id: randomUUID(), workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: input.attempt.id, snapshotId: input.snapshot.id, ...encrypted } });
       await tx.providerInvocation.update({ where: { id_workspaceId: { id: input.invocationId, workspaceId: input.workspaceId } }, data: { status: "SUCCEEDED", claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } });
     });
+  }
+  async completeSuccessfulSpeechExecution(input: { workspaceId: string; invocationId: string; claimToken: string; attempt: StartedAttempt; snapshot: ExecutionSnapshot; response: SpeechResponse; usage?: ProviderUsage; remoteRequestId?: string; latencyMs: number; exactSecret?: string }): Promise<void> {
+    this.assertSpeechResultStorageAvailable();
+    const response = input.response, bytes = Buffer.from(response.bytes), sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (!bytes.length || bytes.length > 64 * 1024 * 1024 || !Number.isSafeInteger(response.sampleRate) || response.sampleRate <= 0 || !Number.isSafeInteger(response.channels) || response.channels <= 0) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
+    const cipher = this.cipher as CredentialCipher & SpeechResultCipher;
+    const encrypted = cipher.encryptSpeechResult(bytes.toString("base64"), { workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: input.attempt.id, snapshotId: input.snapshot.id, providerKey: input.snapshot.providerKey, modelId: input.snapshot.modelId });
+    await this.db.$transaction(async tx => { await this.assertOwnershipInTransaction(tx, input.workspaceId, input.invocationId, input.claimToken); const now = await this.databaseNow(); const attempt = await tx.providerInvocationAttempt.updateMany({ where: { id: input.attempt.id, invocationId: input.invocationId, workspaceId: input.workspaceId, status: "RUNNING" }, data: { status: "SUCCEEDED", remoteRequestId: bounded(input.remoteRequestId), latencyMs: Math.max(0, Math.min(Math.round(input.latencyMs), 86_400_000)), completedAt: now } }); if (attempt.count !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Attempt finalization was not owned"); await this.appendUsageWithClient(tx, { workspaceId: input.workspaceId, invocationId: input.invocationId, attempt: input.attempt, snapshot: input.snapshot, status: "SUCCEEDED", usage: { ...input.usage, speechInputCharacters: input.usage?.speechInputCharacters ?? 0, audioDurationMs: response.durationMs }, remoteRequestId: input.remoteRequestId, latencyMs: input.latencyMs, exactSecret: input.exactSecret }); await tx.providerSpeechResult.create({ data: { id: randomUUID(), workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: input.attempt.id, snapshotId: input.snapshot.id, ...encrypted, byteLength: bytes.length, sha256, mediaType: response.mediaType, format: response.format, sampleRate: response.sampleRate, channels: response.channels, durationMs: response.durationMs } }); await tx.providerInvocation.update({ where: { id_workspaceId: { id: input.invocationId, workspaceId: input.workspaceId } }, data: { status: "SUCCEEDED", claimToken: null, claimOwner: null, claimExpiresAt: null, completedAt: now } }); });
+  }
+  async recoverSpeechHandoff(workspaceId: string, invocationId: string): Promise<SpeechHandoffState> {
+    if (!this.cipher?.decryptSpeechResult) return { kind: "RECONCILIATION_REQUIRED" }; const row = await this.db.providerSpeechResult.findFirst({ where: { workspaceId, invocationId }, include: { snapshot: true } }); if (!row) return { kind: "RECONCILIATION_REQUIRED" }; if (row.consumedAt && !row.ciphertext && !row.iv && !row.authTag && !row.keyVersion) return { kind: "CONSUMED" }; if (row.consumedAt || !row.ciphertext || !row.iv || !row.authTag || !row.keyVersion) return { kind: "RECONCILIATION_REQUIRED" };
+    try { const bytes = Buffer.from(this.cipher.decryptSpeechResult({ ciphertext: row.ciphertext, iv: row.iv, authTag: row.authTag, keyVersion: row.keyVersion }, { workspaceId, invocationId, attemptId: row.attemptId, snapshotId: row.snapshotId, providerKey: row.snapshot.providerKey, modelId: row.snapshot.modelId }), "base64"); if (bytes.length !== row.byteLength || createHash("sha256").update(bytes).digest("hex") !== row.sha256) return { kind: "RECONCILIATION_REQUIRED" }; return { kind: "RECOVERABLE", response: { bytes, mediaType: row.mediaType, format: row.format, sampleRate: row.sampleRate, channels: row.channels, durationMs: row.durationMs ?? undefined } }; } catch { return { kind: "RECONCILIATION_REQUIRED" }; }
+  }
+  async consumeSpeechResult(input: SpeechConsumptionInput, materialize: SpeechMaterializer): Promise<{ status: "CONSUMED" | "ALREADY_CONSUMED"; invocationId: string; snapshotId: string }> {
+    this.assertSpeechResultStorageAvailable(); if (!input.consumerKind || !input.consumerKey || !/^[a-f0-9]{64}$/.test(input.consumerFingerprint)) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid speech consumer identity");
+    return this.db.$transaction(async tx => { const locks = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "ProviderSpeechResult" WHERE "workspaceId" = ${input.workspaceId} AND "invocationId" = ${input.invocationId} FOR UPDATE`; if (locks.length !== 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED"); const receipt = await tx.providerSpeechResult.findFirst({ where: { id: locks[0]!.id, workspaceId: input.workspaceId }, include: { invocation: true } }); if (!receipt || receipt.snapshotId !== input.snapshotId || receipt.invocation.snapshotId !== input.snapshotId || receipt.invocation.status !== "SUCCEEDED") throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED"); const snapshot = await this.loadExecutionSnapshotInTransaction(tx, input.workspaceId, input.snapshotId); if (!snapshot.capability.families.includes("SPEECH")) throw new ProviderGatewayError("CAPABILITY_MISMATCH"); if (receipt.consumedAt) { if (receipt.consumerKind !== input.consumerKind || receipt.consumerKey !== input.consumerKey || receipt.consumerFingerprint !== input.consumerFingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT"); return { status: "ALREADY_CONSUMED", invocationId: input.invocationId, snapshotId: input.snapshotId }; } if (!receipt.ciphertext || !receipt.iv || !receipt.authTag || !receipt.keyVersion) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED"); let bytes: Buffer; try { bytes = Buffer.from((this.cipher as CredentialCipher & SpeechResultCipher).decryptSpeechResult({ ciphertext: receipt.ciphertext, iv: receipt.iv, authTag: receipt.authTag, keyVersion: receipt.keyVersion }, { workspaceId: input.workspaceId, invocationId: input.invocationId, attemptId: receipt.attemptId, snapshotId: input.snapshotId, providerKey: snapshot.providerKey, modelId: snapshot.modelId }), "base64"); } catch { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED"); } if (bytes.length !== receipt.byteLength || createHash("sha256").update(bytes).digest("hex") !== receipt.sha256) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "RECONCILIATION_REQUIRED"); await materialize({ tx, response: { bytes, mediaType: receipt.mediaType, format: receipt.format, sampleRate: receipt.sampleRate, channels: receipt.channels, durationMs: receipt.durationMs ?? undefined }, snapshot, receipt: { id: receipt.id, sha256: receipt.sha256, byteLength: receipt.byteLength } }); const now = await this.databaseNow(); await tx.providerSpeechResult.update({ where: { id: receipt.id }, data: { consumedAt: now, purgedAt: now, consumerKind: input.consumerKind, consumerKey: input.consumerKey, consumerFingerprint: input.consumerFingerprint, ciphertext: null, iv: null, authTag: null, keyVersion: null } }); return { status: "CONSUMED", invocationId: input.invocationId, snapshotId: input.snapshotId }; });
   }
   async recoverTextHandoff(workspaceId: string, invocationId: string): Promise<TextHandoffState> {
     if (!this.cipher?.decryptTextResult) return { kind: "RECONCILIATION_REQUIRED" };

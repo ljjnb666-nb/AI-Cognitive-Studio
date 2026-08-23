@@ -6,6 +6,7 @@ import { createExecutionSnapshot } from "../routing/snapshot.js";
 import { canonicalGatewayRequestFingerprint } from "../request-fingerprint.js";
 import { validateTextGenerationInput } from "../text/validation.js";
 import { embeddingDimensions, validateEmbeddingInput, validateVectors } from "../embedding/validation.js";
+import { validateSpeechInput, validateSpeechResponse } from "../speech/validation.js";
 import { resolvePlatformCredential, type PlatformCredentialResolver } from "./platform-credentials.js";
 import type { ExecutionPrincipal, ExecutionSnapshot, GatewayRequest, PlatformDefaultResolver, ProviderAdapterResolver } from "../types.js";
 
@@ -57,13 +58,15 @@ class ProviderGatewayCore {
   async execute(request: GatewayRequest, principal?: ExecutionPrincipal): Promise<GatewayExecutionResult> {
     if (!principal) throw new ProviderGatewayError("AUTHORIZATION_FAILED");
     await this.execution.authorize?.(principal, request); if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); assertInputHash(request);
-    let snapshot = await this.resolveSnapshot(request); this.validatePayload(request); if (request.embedding) validateEmbeddingInput(request.embedding, snapshot.capability); assertBudget(request); this.execution.assertBudget?.(request); await this.execution.validateEndpoint?.(snapshot); await this.execution.assertRouteUsable?.(snapshot);
+    this.validatePayload(request); let snapshot: ExecutionSnapshot;
+    if (request.speech && this.execution.repository) { const existing = await this.execution.repository.findExistingSpeechInvocationForRequest(request); snapshot = existing ? await this.execution.repository.loadExecutionSnapshot(request.workspaceId, existing.snapshotId) : await this.resolveSnapshot(request); } else snapshot = await this.resolveSnapshot(request);
+    if (request.embedding) validateEmbeddingInput(request.embedding, snapshot.capability); if (request.speech) validateSpeechInput(request.speech, snapshot.capability, request.budget?.maxSpeechCharacters); assertBudget(request); this.execution.assertBudget?.(request); await this.execution.validateEndpoint?.(snapshot); await this.execution.assertRouteUsable?.(snapshot);
     const fingerprint = canonicalGatewayRequestFingerprint(snapshot, request);
     const claim = this.execution.repository ? await this.execution.repository.claimExecution(snapshot, { idempotencyKey: request.idempotencyKey, fingerprint }) : { kind: "OWNER" as const, invocationId: undefined, claimToken: undefined, snapshotId: undefined };
     if (claim.kind !== "OWNER") {
-      if (claim.kind === "ALREADY_PROCESSED" && (request.embedding || request.text) && this.execution.repository) {
+      if (claim.kind === "ALREADY_PROCESSED" && (request.embedding || request.text || request.speech) && this.execution.repository) {
         const persistedSnapshot = await this.execution.repository.loadExecutionSnapshot(snapshot.workspaceId, claim.snapshotId);
-        const handoff = request.embedding ? await this.execution.repository.recoverEmbeddingHandoff(snapshot.workspaceId, claim.invocationId) : await this.execution.repository.recoverTextHandoff(snapshot.workspaceId, claim.invocationId);
+        const handoff = request.embedding ? await this.execution.repository.recoverEmbeddingHandoff(snapshot.workspaceId, claim.invocationId) : request.speech ? await this.execution.repository.recoverSpeechHandoff(snapshot.workspaceId, claim.invocationId) : await this.execution.repository.recoverTextHandoff(snapshot.workspaceId, claim.invocationId);
         if (handoff.kind === "CONSUMED") return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, snapshot: persistedSnapshot, ...(request.embedding ? { embeddingConsumed: true } : { textConsumed: true }) };
         if (handoff.kind === "RECONCILIATION_REQUIRED") return { status: "RECONCILIATION_REQUIRED", invocationId: claim.invocationId };
         return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, response: handoff.response, snapshot: persistedSnapshot };
@@ -91,6 +94,7 @@ class ProviderGatewayCore {
       try { this.execution.repository.assertTextResultStorageAvailable(); }
       catch (error) { try { await this.execution.repository.releasePreRemoteClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!); } catch (releaseError) { throw safeError(releaseError, request.correlationId); } throw error; }
     }
+    if (request.speech && this.execution.repository) { try { this.execution.repository.assertSpeechResultStorageAvailable(); } catch (error) { try { await this.execution.repository.releasePreRemoteClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!); } catch (releaseError) { throw safeError(releaseError, request.correlationId); } throw error; } }
     const key = `${snapshot.workspaceId}:${snapshot.connectionId ?? snapshot.providerKey}:${snapshot.modelId}`; const maxAttempts = Math.min(request.budget?.maxAttempts ?? this.execution.maxAttempts ?? 3, this.execution.maxAttempts ?? 3); let last: ProviderGatewayError | undefined;
     for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
       if (request.signal?.aborted) { await this.finish(claim, snapshot, "BLOCKED"); throw new ProviderGatewayError("CANCELLED"); }
@@ -121,6 +125,9 @@ class ProviderGatewayCore {
               } else if (request.text) {
                 const response = result.response;
                 await this.execution.repository!.completeSuccessfulTextExecution({ workspaceId: snapshot.workspaceId, invocationId: claim.invocationId!, claimToken: claim.claimToken!, attempt: durableAttempt, snapshot, response: response as import("../types.js").TextGenerationResponse, usage: result.usage, remoteRequestId: result.remoteRequestId, latencyMs, exactSecret: state?.credential });
+              } else if (request.speech) {
+                const response = result.response as import("../types.js").SpeechResponse; validateSpeechResponse(response, request.speech.outputFormat);
+                await this.execution.repository!.completeSuccessfulSpeechExecution({ workspaceId: snapshot.workspaceId, invocationId: claim.invocationId!, claimToken: claim.claimToken!, attempt: durableAttempt, snapshot, response, usage: result.usage, remoteRequestId: result.remoteRequestId, latencyMs, exactSecret: state?.credential });
               } else { await this.execution.repository!.recordAttemptOutcome(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, durableAttempt.id, "SUCCEEDED", { remoteRequestId: result.remoteRequestId, latencyMs }, { snapshot, attempt: durableAttempt, status: "SUCCEEDED", usage: result.usage, exactSecret: state?.credential }); await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, "SUCCEEDED");
               }
             }
@@ -140,7 +147,7 @@ class ProviderGatewayCore {
     }
     await this.finish(claim, snapshot, "FAILED"); throw last ?? new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
   }
-  private validatePayload(request: GatewayRequest): void { if (request.capability.family === "TEXT_GENERATION") { if (request.embedding) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); if (request.text) validateTextGenerationInput(request.text); return; } if (request.capability.family === "EMBEDDING") { if (!request.embedding || request.text) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); return; } if (request.text || request.embedding) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); }
+  private validatePayload(request: GatewayRequest): void { if (request.capability.family === "TEXT_GENERATION") { if (request.embedding || request.speech || !request.text) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); validateTextGenerationInput(request.text); return; } if (request.capability.family === "EMBEDDING") { if (!request.embedding || request.text || request.speech) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); return; } if (!request.speech || request.text || request.embedding) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); }
   private async finish(claim: { kind: "OWNER"; invocationId?: string; claimToken?: string }, snapshot: ExecutionSnapshot, status: "FAILED" | "BLOCKED") { if (claim.invocationId && claim.claimToken) await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId, claim.claimToken, status).catch(() => undefined); }
 }
 
