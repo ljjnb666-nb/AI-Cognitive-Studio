@@ -1,6 +1,6 @@
 import { prisma } from "@ai-cognitive/db";
-import { GatewayPodcastGenerationProvider, type DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
-import { type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, validateAnalysisResponse } from "@ai-cognitive/book-intelligence";
+import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, type DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
+import { loadConsumedBookAnalysisEmbeddingIdentity, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type EmbeddingProvider, validateAnalysisResponse } from "@ai-cognitive/book-intelligence";
 import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, parseKeyring, validateProviderEndpoint, type GatewayExecutionDependencies, type GatewayRequest, type ModelCapability, type ProviderAdapterResolver, type ProviderDefinition, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
@@ -69,16 +69,30 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
   return runtime;
 }
 
-export type PodcastGatewayRuntime = { createProviderForRun(input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }): Promise<DurablePodcastGenerationProvider>; close(): Promise<void>; };
-/** Podcast TEXT reuses the accepted workspace-BYOK gateway composition; retrieval remains injected separately. */
+export type PodcastGatewayRuntime = { createProviderForRun(input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }): Promise<DurablePodcastGenerationProvider>; createEmbeddingProviderForRun(input: { workspaceId: string; podcastGenerationRunId: string }): Promise<EmbeddingProvider>; close(): Promise<void>; };
+/** Podcast TEXT and QUERY retrieval share the accepted workspace-BYOK gateway composition. */
 export function createPodcastProductionGatewayRuntime(source: NodeJS.ProcessEnv, overrides: BookProductionGatewayRuntimeOverrides = {}): PodcastGatewayRuntime {
   const base = createBookProductionGatewayRuntime(source, overrides);
-  return { close: () => base.close(), createProviderForRun: async input => {
+  const loadPrincipal = async (input: { workspaceId: string; podcastGenerationRunId: string }) => {
     const run = await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: input.podcastGenerationRunId }, include: { job: true } });
     if (run.workspaceId !== input.workspaceId || run.job.workspaceId !== run.workspaceId) throw new Error("PODCAST_DURABLE_PRINCIPAL_WORKSPACE_MISMATCH");
     if (!run.job.userId) throw new Error("PODCAST_DURABLE_PRINCIPAL_MISSING");
     const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: run.workspaceId, userId: run.job.userId } } });
     if (!member) throw new Error("PODCAST_DURABLE_PRINCIPAL_MISSING");
-    return new GatewayPodcastGenerationProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId, podcastGenerationRunId: run.id, provider: input.provider, model: input.model, pipelineVersion: run.pipelineVersion, promptVersion: run.promptVersion });
+    return run;
+  };
+  return { close: () => base.close(), createProviderForRun: async input => {
+    const run = await loadPrincipal(input);
+    return new GatewayPodcastGenerationProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId!, podcastGenerationRunId: run.id, provider: input.provider, model: input.model, pipelineVersion: run.pipelineVersion, promptVersion: run.promptVersion });
+  }, createEmbeddingProviderForRun: async input => {
+    const run = await loadPrincipal(input);
+    const sources = await prisma.podcastGenerationSource.findMany({ where: { podcastGenerationRunId: run.id, workspaceId: run.workspaceId }, select: { analysisRunId: true } });
+    if (!sources.length) throw new Error("PODCAST_RETRIEVAL_EMBEDDING_IDENTITY_MISSING");
+    let identities;
+    try { identities = await Promise.all(sources.map(item => loadConsumedBookAnalysisEmbeddingIdentity({ workspaceId: run.workspaceId, analysisRunId: item.analysisRunId, embeddingVersion: "gateway" }))); }
+    catch { throw new Error("PODCAST_RETRIEVAL_EMBEDDING_IDENTITY_MISSING"); }
+    const identity = identities[0]!;
+    if (identities.some(candidate => candidate.hash !== identity.hash || candidate.provider !== identity.provider || candidate.model !== identity.model || candidate.dimensions !== identity.dimensions || candidate.embeddingVersion !== identity.embeddingVersion || (candidate.modelVersion ?? "") !== (identity.modelVersion ?? ""))) throw new Error("PODCAST_RETRIEVAL_SOURCE_EMBEDDING_INCOMPATIBLE");
+    return new GatewayPodcastRetrievalEmbeddingProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId!, podcastGenerationRunId: run.id, pipelineVersion: run.pipelineVersion, identity });
   } };
 }

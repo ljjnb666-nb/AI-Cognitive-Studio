@@ -91,6 +91,8 @@ jobs:
         run: pnpm test:phase8c:book-production
       - name: Phase 8C Podcast durable text Gateway activation (no external AI calls)
         run: pnpm test:phase8c:podcast-gateway
+      - name: Phase 8C Podcast retrieval Gateway autonomy (no external AI calls)
+        run: pnpm test:phase8c:podcast-autonomy
       - name: Phase 1 real infrastructure ingestion
         run: pnpm test:phase1:e2e
       - name: Phase 2 book intelligence evaluation

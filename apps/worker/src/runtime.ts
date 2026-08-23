@@ -11,9 +11,9 @@ import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSource
 import { createHealthCheckWorker } from "./worker.js";
 import { createBookProductionGatewayRuntime, createPodcastProductionGatewayRuntime, type BookGatewayRuntime, type BookProductionGatewayRuntimeOverrides, type PodcastGatewayRuntime } from "./provider-gateway-runtime.js";
 
-export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider: EmbeddingProvider };
+export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider> };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
-export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; /** Production Podcast retrieval remains an explicit non-Gateway dependency. */ podcastRetrievalEmbeddingProvider?: EmbeddingProvider; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: ProcessBookAnalysisDependencies; /** Deterministic adapter/control seam for production-composition tests; never supplies Book dependencies. */ bookProductionGatewayOverrides?: BookProductionGatewayRuntimeOverrides; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
+export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: ProcessBookAnalysisDependencies; /** Deterministic adapter/control seam for production-composition tests; never supplies Book dependencies. */ bookProductionGatewayOverrides?: BookProductionGatewayRuntimeOverrides; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
 
 export function resolvePodcastRuntimeAdapter(source: NodeJS.ProcessEnv, injected?: PodcastRuntimeAdapter): PodcastRuntimeAdapter | undefined {
   const configured = source.PODCAST_GENERATION_PROVIDER?.trim();
@@ -36,9 +36,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
   try {
   if (!podcastAdapter && source.PODCAST_GENERATION_PROVIDER?.trim()) {
-    if (!options.podcastRetrievalEmbeddingProvider) throw new Error("PODCAST_RETRIEVAL_EMBEDDING_PROVIDER_NOT_CONFIGURED");
     const runtime = productionPodcastGatewayRuntime = createPodcastProductionGatewayRuntime(source, options.bookProductionGatewayOverrides);
-    podcastAdapter = { embeddingProvider: options.podcastRetrievalEmbeddingProvider, providerForRun: input => runtime.createProviderForRun(input) };
+    podcastAdapter = { providerForRun: input => runtime.createProviderForRun(input), embeddingProviderForRun: input => runtime.createEmbeddingProviderForRun(input) };
   }
   const productionBookDependencies = bookConfigured && !options.bookDependencies ? (() => { const runtime = productionBookGatewayRuntime = createBookProductionGatewayRuntime(source, options.bookProductionGatewayOverrides); return { analysisProviderForRun: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => runtime.createAnalysisProvider(input), embeddingGatewayForRun: (input: { workspaceId: string; userId: string; analysisRunId: string }) => ({ gateway: runtime.gateway, repository: runtime.repository, userId: input.userId }) }; })() : undefined;
   const bookWorker = bookConfigured ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, queueOptions) : undefined;
