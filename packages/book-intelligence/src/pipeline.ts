@@ -539,11 +539,11 @@ export async function retrieveBookKnowledge(input: { workspaceId: string; source
 
 export type ExactBookIntelligenceLineage = { workspaceId: string; sourceDocumentId: string; extractionId: string; chunkSetId: string; analysisRunId: string };
 
-export async function retrieveBookKnowledgeForIntelligence(input: ExactBookIntelligenceLineage & { query: string; limit: number; embeddingProvider: EmbeddingProvider }) {
+export async function retrieveBookKnowledgeForIntelligence(input: ExactBookIntelligenceLineage & { query: string; limit: number; embeddingProvider: EmbeddingProvider; operationKey?: string }) {
   const run = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { id: input.analysisRunId, workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: input.extractionId, chunkSetId: input.chunkSetId, status: "SUCCEEDED" } });
   const identity = embeddingIdentity(input.embeddingProvider);
   const embeddings = await prisma.bookMemoryEmbedding.findMany({ where: { workspaceId: input.workspaceId, analysisRunId: run.id, embeddingIdentityHash: identity.hash }, include: { memoryItem: { include: { evidence: true, sourceArtifact: { select: { chunkId: true } } } } } });
-  const [query] = await input.embeddingProvider.embed({ texts: [input.query], model: identity.model, correlationId: `retrieval:${run.id}` });
+  const [query] = await input.embeddingProvider.embed({ texts: [input.query], model: identity.model, correlationId: `retrieval:${run.id}`, operationKey: input.operationKey });
   if (!query) throw new Error("EMBEDDING_PROVIDER_RESPONSE_INVALID");
   return embeddings.map((embedding) => ({
     artifactId: embedding.memoryItem.sourceArtifactId,
@@ -568,7 +568,7 @@ export async function buildBookContext(input: { workspaceId: string; sourceDocum
   return { ...context, items: context.selected.map((item) => ({ ...item, ...byId.get(item.id), selectionReason: "semantic_score_then_stable_id", tokenEstimate: item.tokenEstimate, sourceBlockEvidenceSpans: item.provenance })) };
 }
 
-export async function buildBookContextForIntelligence(input: ExactBookIntelligenceLineage & { task: string; tokenBudget: number; query?: string; embeddingProvider: EmbeddingProvider }) {
+export async function buildBookContextForIntelligence(input: ExactBookIntelligenceLineage & { task: string; tokenBudget: number; query?: string; embeddingProvider: EmbeddingProvider; operationKey?: string }) {
   const items = await retrieveBookKnowledgeForIntelligence({ ...input, query: input.query ?? input.task, limit: 100 });
   const byId = new Map(items.map((item) => [item.memoryItemId, item]));
   const context = buildContext(items.map((item) => ({ id: item.memoryItemId, content: item.content, type: item.type, score: item.score, tokenEstimate: estimateAnalysisTokens(item.content), provenance: item.evidence.map((evidence) => ({ sourceBlockId: evidence.sourceBlockId, ordinal: 0, startOffset: evidence.startOffset, endOffset: evidence.endOffset })) })), input.tokenBudget);

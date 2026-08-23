@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { sourceDataPolicy, type ProviderExecutionRepository, type ProviderGateway, type TextGenerationResponse } from "@ai-cognitive/provider-gateway";
+import { canonicalEmbeddingInputHash, embeddingDimensions, sourceDataPolicy, validateVectors, type ProviderExecutionRepository, type ProviderGateway, type TextGenerationResponse } from "@ai-cognitive/provider-gateway";
+import type { EmbeddingIdentity, EmbeddingProvider } from "@ai-cognitive/book-intelligence";
 import { z } from "zod";
 import { dialogueSchema, episodePlanSchema, humanizationSchema, narrativeSchema, segmentOutlineSchema, type DurablePodcastGenerationProvider, type PodcastGenerationProvider, type PodcastTextConsumer } from "./types.js";
 
@@ -54,5 +55,61 @@ export class GatewayPodcastGenerationProvider implements DurablePodcastGeneratio
     const tombstone = await this.runtime.repository.findConsumedTextTombstone(this.runtime.workspaceId, receipt.invocationId);
     if (!tombstone) return "NOT_CONSUMED";
     return tombstone.consumerKind === consumer.consumerKind && tombstone.consumerKey === consumer.consumerKey && tombstone.consumerFingerprint === consumer.consumerFingerprint ? "EXACT" : "RECONCILIATION_REQUIRED";
+  }
+}
+
+type RetrievalRuntime = {
+  gateway: ProviderGateway;
+  repository: ProviderExecutionRepository;
+  workspaceId: string;
+  userId: string;
+  podcastGenerationRunId: string;
+  pipelineVersion: string;
+  identity: EmbeddingIdentity & { hash: string };
+};
+
+/**
+ * A run-scoped QUERY provider.  Its identity is the consumed Book receipt,
+ * never the latest workspace embedding route, so retrieval cannot cross vector
+ * spaces after a route change.
+ */
+export class GatewayPodcastRetrievalEmbeddingProvider implements EmbeddingProvider {
+  readonly identity: EmbeddingIdentity;
+  constructor(private readonly runtime: RetrievalRuntime) {
+    const { provider, model, modelVersion, embeddingVersion, dimensions } = runtime.identity;
+    this.identity = { provider, model, modelVersion, embeddingVersion, dimensions };
+  }
+  async embed(input: { texts: string[]; model: string; correlationId: string; operationKey?: string }): Promise<number[][]> {
+    if (!input.operationKey) throw new Error("PODCAST_RETRIEVAL_OPERATION_KEY_MISSING");
+    if (input.model !== this.identity.model) throw new Error("PODCAST_RETRIEVAL_EMBEDDING_IDENTITY_GAP");
+    const embedding = { texts: input.texts, purpose: "QUERY" as const };
+    const request = {
+      workspaceId: this.runtime.workspaceId,
+      routeSlot: "EMBEDDING" as const,
+      correlationId: input.correlationId,
+      idempotencyKey: `podcast-retrieval-query:${this.runtime.podcastGenerationRunId}:${input.operationKey}`,
+      inputHash: canonicalEmbeddingInputHash(embedding),
+      capability: { family: "EMBEDDING" as const },
+      embedding,
+      pipelineVersion: `${this.runtime.pipelineVersion}:podcast-retrieval-v1:${this.runtime.identity.hash}`,
+    };
+    const existing = await this.runtime.repository.findExistingEmbeddingInvocationForRequest(request);
+    if (existing) {
+      const handoff = await this.runtime.repository.recoverEmbeddingHandoff(this.runtime.workspaceId, existing.invocationId);
+      if (handoff.kind !== "RECOVERABLE") throw new Error("PODCAST_RETRIEVAL_EMBEDDING_RECONCILIATION_REQUIRED");
+      return this.validate(handoff.response.vectors, handoff.response.dimensions, input.texts.length);
+    }
+    const snapshot = await this.runtime.gateway.resolveSnapshot(request);
+    if (snapshot.providerKey !== this.identity.provider || snapshot.modelId !== this.identity.model || embeddingDimensions(snapshot.capability, snapshot.configuration) !== this.identity.dimensions) throw new Error("PODCAST_RETRIEVAL_EMBEDDING_ROUTE_IDENTITY_GAP");
+    const outcome = await this.runtime.gateway.execute(request, { userId: this.runtime.userId });
+    if (outcome.status === "RECONCILIATION_REQUIRED" || (outcome.status === "ALREADY_PROCESSED" && outcome.embeddingConsumed)) throw new Error("PODCAST_RETRIEVAL_EMBEDDING_RECONCILIATION_REQUIRED");
+    if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`PODCAST_RETRIEVAL_EMBEDDING_GATEWAY_${outcome.status}`);
+    const response = outcome.response as { vectors?: unknown; dimensions?: unknown } | undefined;
+    if (!response || typeof response.dimensions !== "number") throw new Error("PODCAST_RETRIEVAL_EMBEDDING_RECONCILIATION_REQUIRED");
+    return this.validate(response.vectors, response.dimensions, input.texts.length);
+  }
+  private validate(vectors: unknown, dimensions: number, expectedCount: number): number[][] {
+    if (dimensions !== this.identity.dimensions) throw new Error("PODCAST_RETRIEVAL_EMBEDDING_IDENTITY_GAP");
+    return [...validateVectors(vectors, expectedCount, this.identity.dimensions)];
   }
 }

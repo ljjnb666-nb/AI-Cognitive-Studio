@@ -1,7 +1,8 @@
 import { sha256 } from "./chunking.js";
 
 export type EmbeddingIdentity = { provider: string; model: string; modelVersion?: string; embeddingVersion: string; dimensions: number };
-export interface EmbeddingProvider { identity: EmbeddingIdentity; embed(input: { texts: string[]; model: string; correlationId: string }): Promise<number[][]> }
+/** operationKey is an optional, caller-owned semantic idempotency boundary for query embeddings. */
+export interface EmbeddingProvider { identity: EmbeddingIdentity; embed(input: { texts: string[]; model: string; correlationId: string; operationKey?: string }): Promise<number[][]> }
 export function embeddingIdentityWithHash(identity: EmbeddingIdentity, embeddingVersion = identity.embeddingVersion) {
   if (!Number.isInteger(identity.dimensions) || identity.dimensions <= 0) throw new Error("EMBEDDING_IDENTITY_INVALID");
   return { ...identity, embeddingVersion, hash: sha256(JSON.stringify([identity.provider, identity.model, identity.modelVersion ?? "", embeddingVersion, identity.dimensions])) };

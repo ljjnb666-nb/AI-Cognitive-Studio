@@ -18,9 +18,9 @@ import { buildDraftDestinationProjection, buildHumanizationDestinationProjection
 const PLANNING_CONTEXT_BUDGET = 4_000;
 const SEGMENT_CONTEXT_BUDGET = 2_400;
 type DurableStage = "EPISODE_PLANNING" | "NARRATIVE_DESIGN" | "SEGMENT_OUTLINE" | "SEGMENT_DRAFTING" | "HUMANIZATION" | "GROUNDING_VALIDATION" | "FINALIZING" | "COMPLETED";
-type FaultPoint = "afterTextReceipt" | "afterPlanning" | "afterNarrative" | "afterOutline" | "afterSegmentDraft" | "afterSegmentHumanization" | "afterSegmentGrounding" | "beforeFinalization";
+type FaultPoint = "afterPlanningRetrieval" | "afterTextReceipt" | "afterPlanning" | "afterNarrative" | "afterOutline" | "afterSegmentDraft" | "afterSegmentHumanization" | "afterSegmentGrounding" | "beforeFinalization";
 export type PodcastFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
-export type ProcessPodcastDependencies = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider: EmbeddingProvider; faultInjector?: PodcastFaultInjector; correlationId?: string };
+export type ProcessPodcastDependencies = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider>; faultInjector?: PodcastFaultInjector; correlationId?: string };
 const isDurable = (provider: PodcastGenerationProvider): provider is DurablePodcastGenerationProvider => "consumeTextResult" in provider && "verifyConsumedTextResult" in provider;
 const operationKey = (run: any, stage: string, segmentId?: string) => `${run.id}:${stage}${segmentId ? `:${segmentId}` : ""}`;
 const consumerFingerprint = (run: any, stage: string, destination: string, input: unknown, output: unknown) => podcastConsumerFingerprint({ run, stage, destination, input, output });
@@ -89,11 +89,11 @@ async function loadPersistedPlanContext(run: any): Promise<PodcastContextItem[]>
 function planOutput(plan: any): EpisodePlanOutput { return episodePlanSchema.parse({ centralQuestion: plan.centralQuestion, listenerStartingPoint: plan.listenerStartingPoint, listenerTakeaway: plan.listenerTakeaway, coreThesis: plan.coreThesis, tensions: plan.tensions, surprisingIdeas: plan.surprisingIdeas, misconceptions: plan.misconceptions, keyConcepts: plan.keyConcepts, candidateStories: plan.candidateStories, candidateExamples: plan.candidateExamples, openQuestions: plan.openQuestions }); }
 function narrativeOutput(narrative: any): NarrativeOutput { return narrativeSchema.parse({ arcType: narrative.arcType, intellectualProgression: narrative.intellectualProgression, openingMove: narrative.openingMove, closingMove: narrative.closingMove }); }
 
-async function retrieveContext(run: any, dependencies: ProcessPodcastDependencies, task: string, totalBudget: number): Promise<PodcastContextItem[]> {
+async function retrieveContext(run: any, dependencies: ProcessPodcastDependencies, task: string, totalBudget: number, retrievalOperationKey: string): Promise<PodcastContextItem[]> {
   const perSource = Math.max(200, Math.floor(totalBudget / run.sources.length));
   const packs = [] as PodcastContextItem[][];
   for (const source of run.sources) {
-    const pack = await buildBookContextForIntelligence({ workspaceId: run.workspaceId, sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, task, tokenBudget: perSource, embeddingProvider: dependencies.embeddingProvider });
+    const pack = await buildBookContextForIntelligence({ workspaceId: run.workspaceId, sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, task, tokenBudget: perSource, embeddingProvider: dependencies.embeddingProvider!, operationKey: retrievalOperationKey });
     if (pack.lineage.sourceDocumentId !== source.sourceDocumentId || pack.lineage.extractionId !== source.extractionId || pack.lineage.chunkSetId !== source.chunkSetId || pack.lineage.analysisRunId !== source.analysisRunId) throw new Error("PODCAST_GENERATION_SOURCE_LINEAGE_MISMATCH");
     packs.push(pack.items.map((item: any) => canonicalContextItem({ ...item, sourceBlockEvidenceSpans: item.evidence })));
   }
@@ -110,7 +110,10 @@ async function runPlanning(run: any, token: string, dependencies: ProcessPodcast
     await verifyConsumedDestination(run, dependencies.provider!, "EPISODE_PLANNING", undefined, "EPISODE_PLAN", input, buildPlanningDestinationProjection(run, plan, context));
   }
   if (!plan) {
-    const context = await retrieveContext(run, dependencies, `Plan a cognitive episode titled ${run.episode.title}`, PLANNING_CONTEXT_BUDGET);
+    const context = await retrieveContext(run, dependencies, `Plan a cognitive episode titled ${run.episode.title}`, PLANNING_CONTEXT_BUDGET, "PLANNING");
+    // Test-only seam: the Gateway query receipt is durable, while the first
+    // paid Podcast text operation has not yet been invoked.
+    await dependencies.faultInjector?.("afterPlanningRetrieval", { podcastGenerationRunId: run.id });
     await renewPodcastGenerationLease(run.id, token);
     const hosts = (await loadHosts(run)).map(persona);
     const input = { metadata: metadata(run, "EPISODE_PLANNING", PODCAST_PROVIDER_INPUT_BUDGETS.EPISODE_PLANNING), style: styleRecord(run.styleProfile), hosts, context };
@@ -181,7 +184,7 @@ async function loadPersistedSegmentContext(segment: any): Promise<PodcastContext
 async function ensureSegmentContext(run: any, segment: any, token: string, dependencies: ProcessPodcastDependencies) {
   let context = await loadPersistedSegmentContext(segment);
   if (context.length) return context;
-  context = await retrieveContext(run, dependencies, [segment.purpose, ...parseJsonArray<string>(segment.keyQuestions)].join("\n"), SEGMENT_CONTEXT_BUDGET);
+  context = await retrieveContext(run, dependencies, [segment.purpose, ...parseJsonArray<string>(segment.keyQuestions)].join("\n"), SEGMENT_CONTEXT_BUDGET, `SEGMENT_CONTEXT:${segment.id}`);
   const required = new Set(parseJsonArray<string>(segment.requiredMemoryIds));
   const missing = [...required].filter((id) => !context.some((item) => item.memoryItemId === id));
   if (missing.length) {
@@ -364,9 +367,10 @@ export async function processPodcastGenerationRun(runId: string, dependencies: P
   if (!await claimPodcastGenerationRun(run.id, token)) { run = await loadRun(run.id); if (run.status === "SUCCEEDED") return run; throw new Error("PODCAST_GENERATION_ALREADY_CLAIMED"); }
   try {
     const provider = dependencies.providerForRun ? await dependencies.providerForRun({ workspaceId: run.workspaceId, podcastGenerationRunId: run.id, provider: run.provider, model: run.model }) : dependencies.provider;
-    if (!provider) throw new Error("PODCAST_GENERATION_PROVIDER_NOT_CONFIGURED");
+    const embeddingProvider = dependencies.embeddingProviderForRun ? await dependencies.embeddingProviderForRun({ workspaceId: run.workspaceId, podcastGenerationRunId: run.id }) : dependencies.embeddingProvider;
+    if (!provider || !embeddingProvider) throw new Error("PODCAST_GENERATION_PROVIDER_NOT_CONFIGURED");
     if (provider.identity.provider !== run.provider || provider.identity.model !== run.model || (provider.identity.modelVersion ?? "") !== run.modelVersionKey) throw new Error("PODCAST_PROVIDER_IDENTITY_MISMATCH");
-    dependencies = { ...dependencies, provider };
+    dependencies = { ...dependencies, provider, embeddingProvider };
     while (true) {
       run = await loadRun(run.id);
       const stage = run.stage as DurableStage;

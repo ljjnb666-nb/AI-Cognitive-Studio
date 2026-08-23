@@ -43,6 +43,18 @@ export class ProviderExecutionRepository {
     if (canonicalGatewayRequestFingerprint(snapshot, request) !== (await this.db.providerInvocation.findUniqueOrThrow({ where: { id_workspaceId: { id: existing.invocationId, workspaceId: request.workspaceId } }, select: { requestFingerprint: true } })).requestFingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "Existing text execution has a different semantic fingerprint");
     return existing;
   }
+  /** Embedding counterpart of the text lookup: recover a pinned receipt before consulting a changed route. */
+  async findExistingEmbeddingInvocation(workspaceId: string, idempotencyKey: string): Promise<{ invocationId: string; snapshotId: string; providerKey: string; modelId: string } | undefined> {
+    const invocation = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } }, include: { snapshot: { select: { id: true, providerKey: true, modelId: true } }, embeddingResult: { select: { id: true } } } });
+    return invocation?.embeddingResult ? { invocationId: invocation.id, snapshotId: invocation.snapshot.id, providerKey: invocation.snapshot.providerKey, modelId: invocation.snapshot.modelId } : undefined;
+  }
+  async findExistingEmbeddingInvocationForRequest(request: GatewayRequest): Promise<{ invocationId: string; snapshotId: string; providerKey: string; modelId: string } | undefined> {
+    const existing = await this.findExistingEmbeddingInvocation(request.workspaceId, request.idempotencyKey);
+    if (!existing) return undefined;
+    const snapshot = await this.loadExecutionSnapshot(request.workspaceId, existing.snapshotId);
+    if (canonicalGatewayRequestFingerprint(snapshot, request) !== (await this.db.providerInvocation.findUniqueOrThrow({ where: { id_workspaceId: { id: existing.invocationId, workspaceId: request.workspaceId } }, select: { requestFingerprint: true } })).requestFingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "Existing embedding execution has a different semantic fingerprint");
+    return existing;
+  }
   constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher & Partial<EmbeddingResultCipher & TextResultCipher>, private readonly testClock?: () => Date, private readonly workerId = `gateway-${randomUUID()}`, private readonly leaseMs = leaseMilliseconds) {}
   private async databaseNow(): Promise<Date> { if (this.testClock) return this.testClock(); const rows = await this.db.$queryRaw<{ now: Date }[]>`SELECT CURRENT_TIMESTAMP AS "now"`; return rows[0]?.now ?? (() => { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Database clock unavailable"); })(); }
   get leaseDurationMs(): number { return this.leaseMs; }
