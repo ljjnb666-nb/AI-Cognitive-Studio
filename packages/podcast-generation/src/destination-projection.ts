@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { estimateSpokenDurationMs } from "./duration.js";
 const stableScore = (value: number) => Number(value.toPrecision(15));
 
