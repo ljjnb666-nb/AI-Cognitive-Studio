@@ -9,7 +9,7 @@ class AnalysisFixtureProvider implements AnalysisProvider {
   constructor(private readonly blocks: Array<{ id: string; text: string }>) {}
   async generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> { if (request.stage !== "CHUNK") return { summary: `derived ${request.stage}`, memory: request.stage === "BOOK" ? [{ type: "SUMMARY", content: "A bounded book synthesis" }] : undefined }; const block = this.blocks.find((item) => request.sourceBlockIds.includes(item.id) && item.text.includes(request.content)); const offset = block?.text.indexOf(request.content) ?? -1; return { summary: `chunk ${request.content}`, memory: block && offset >= 0 ? [{ type: "QUOTE", content: request.content, evidence: [{ sourceBlockId: block.id, startOffset: offset, endOffset: offset + request.content.length, quoteText: request.content }] }, { type: "CLAIM", content: `Interpretation of ${request.content}` }] : [{ type: "CLAIM", content: request.content }] }; }
 }
-class PodcastFixtureProvider implements PodcastGenerationProvider {
+export class PodcastFixtureProvider implements PodcastGenerationProvider {
   readonly identity = { provider: "deterministic-podcast", model: "podcast-test", modelVersion: "1" };
   readonly calls: Array<{ stage: string; segmentId?: string; tokenBudget: number; context?: unknown[] }> = [];
   async plan(input: Parameters<PodcastGenerationProvider["plan"]>[0]): Promise<EpisodePlanOutput> { this.calls.push({ ...input.metadata, context: input.context }); return { centralQuestion: "环境如何改变选择？", listenerStartingPoint: "把行为归因于意志力", listenerTakeaway: "看见环境与注意力的因果方向", coreThesis: "选择并非脱离情境", tensions: ["意志力与环境"], surprisingIdeas: ["因果方向可能相反"], misconceptions: ["自律解释一切"], keyConcepts: ["注意力", "选择架构"], candidateStories: [], candidateExamples: ["日常提醒"], openQuestions: ["边界在哪里？"] }; }
@@ -44,7 +44,7 @@ class ClaimMutatingHumanizer extends PodcastFixtureProvider {
 }
 class FailingPlanningProvider extends PodcastFixtureProvider { override async plan(input: Parameters<PodcastGenerationProvider["plan"]>[0]): Promise<EpisodePlanOutput> { void input; throw new Error("PLANNING_PROVIDER_FAILED"); } }
 
-async function fixture() {
+export async function fixture() {
   const suffix = crypto.randomUUID(), user = await prisma.user.create({ data: { email: `${suffix}@phase3.test` } }); users.push(user.id);
   const workspace = await prisma.workspace.create({ data: { name: suffix } }); workspaces.push(workspace.id); await prisma.workspaceMember.create({ data: { workspaceId: workspace.id, userId: user.id, role: "OWNER" } });
   const source = await prisma.source.create({ data: { workspaceId: workspace.id, kind: "FILE", displayName: "book.md" } }); const blob = await prisma.sourceBlob.create({ data: { workspaceId: workspace.id, sha256: suffix, sizeBytes: 1, mediaType: "text/markdown", storageKey: `phase3/${suffix}` } }); const document = await prisma.sourceDocument.create({ data: { workspaceId: workspace.id, sourceId: source.id, sourceBlobId: blob.id, version: 1, sha256: suffix, sizeBytes: 1, mediaType: "text/markdown", storageKey: blob.storageKey } });

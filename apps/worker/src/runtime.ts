@@ -1,5 +1,5 @@
 import type { EmbeddingProvider, ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
-import type { PodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
+import type { PodcastGenerationProvider, DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
 import { logger } from "@ai-cognitive/shared";
 import type { Environment } from "@ai-cognitive/shared/server";
 import type { Worker } from "bullmq";
@@ -9,22 +9,24 @@ import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudio
 import { createShortVideoGenerationWorker, createShortVideoGenerationQueue, dispatchShortVideoGenerationWithQueue, type ShortVideoRuntimeAdapter } from "./short-video-generation.js";
 import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue } from "./source-ingestion.js";
 import { createHealthCheckWorker } from "./worker.js";
-import { createBookProductionGatewayRuntime, type BookGatewayRuntime, type BookProductionGatewayRuntimeOverrides } from "./provider-gateway-runtime.js";
+import { createBookProductionGatewayRuntime, createPodcastProductionGatewayRuntime, type BookGatewayRuntime, type BookProductionGatewayRuntimeOverrides, type PodcastGatewayRuntime } from "./provider-gateway-runtime.js";
 
-export type PodcastRuntimeAdapter = { provider: PodcastGenerationProvider; embeddingProvider: EmbeddingProvider };
+export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider: EmbeddingProvider };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
-export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: ProcessBookAnalysisDependencies; /** Deterministic adapter/control seam for production-composition tests; never supplies Book dependencies. */ bookProductionGatewayOverrides?: BookProductionGatewayRuntimeOverrides; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
+export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; /** Production Podcast retrieval remains an explicit non-Gateway dependency. */ podcastRetrievalEmbeddingProvider?: EmbeddingProvider; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: ProcessBookAnalysisDependencies; /** Deterministic adapter/control seam for production-composition tests; never supplies Book dependencies. */ bookProductionGatewayOverrides?: BookProductionGatewayRuntimeOverrides; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
 
 export function resolvePodcastRuntimeAdapter(source: NodeJS.ProcessEnv, injected?: PodcastRuntimeAdapter): PodcastRuntimeAdapter | undefined {
   const configured = source.PODCAST_GENERATION_PROVIDER?.trim();
   if (!configured) return undefined;
-  if (!injected || injected.provider.identity.provider !== configured) throw new Error(`PODCAST_GENERATION_PROVIDER_UNSUPPORTED:${configured}`);
+  if (!injected) throw new Error(`PODCAST_GENERATION_PROVIDER_UNSUPPORTED:${configured}`);
+  if (injected.provider && injected.provider.identity.provider !== configured) throw new Error(`PODCAST_GENERATION_PROVIDER_UNSUPPORTED:${configured}`);
   return injected;
 }
 
 export async function startWorkerRuntime(environment: Environment, options: WorkerRuntimeOptions = {}) {
   const source = options.source ?? process.env;
-  const podcastAdapter = resolvePodcastRuntimeAdapter(source, options.podcastAdapter);
+  let productionPodcastGatewayRuntime: PodcastGatewayRuntime | undefined;
+  let podcastAdapter = options.podcastAdapter ? resolvePodcastRuntimeAdapter(source, options.podcastAdapter) : undefined;
   const audioConfigured = source.AUDIO_GENERATION_PROVIDER?.trim();
   const shortVideoConfigured = source.SHORT_VIDEO_GENERATION_PROVIDER?.trim();
   if (audioConfigured && (!options.audioAdapter || options.audioAdapter.provider.identity.provider !== audioConfigured)) throw new Error(`AUDIO_GENERATION_PROVIDER_UNSUPPORTED:${audioConfigured}`);
@@ -33,6 +35,11 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const bookConfigured = source.BOOK_ANALYSIS_PROVIDER?.trim();
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
   try {
+  if (!podcastAdapter && source.PODCAST_GENERATION_PROVIDER?.trim()) {
+    if (!options.podcastRetrievalEmbeddingProvider) throw new Error("PODCAST_RETRIEVAL_EMBEDDING_PROVIDER_NOT_CONFIGURED");
+    const runtime = productionPodcastGatewayRuntime = createPodcastProductionGatewayRuntime(source, options.bookProductionGatewayOverrides);
+    podcastAdapter = { embeddingProvider: options.podcastRetrievalEmbeddingProvider, providerForRun: input => runtime.createProviderForRun(input) };
+  }
   const productionBookDependencies = bookConfigured && !options.bookDependencies ? (() => { const runtime = productionBookGatewayRuntime = createBookProductionGatewayRuntime(source, options.bookProductionGatewayOverrides); return { analysisProviderForRun: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => runtime.createAnalysisProvider(input), embeddingGatewayForRun: (input: { workspaceId: string; userId: string; analysisRunId: string }) => ({ gateway: runtime.gateway, repository: runtime.repository, userId: input.userId }) }; })() : undefined;
   const bookWorker = bookConfigured ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, queueOptions) : undefined;
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);
@@ -75,9 +82,9 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   await Promise.all(initial.map((run) => run()));
   logger.info("worker.started", { queue: "system.health-check", podcastGenerationEnabled: Boolean(podcastWorker) });
   let closePromise: Promise<void> | undefined;
-  return { healthWorker, ingestionWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await ingestionQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); await ingestionWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+  return { healthWorker, ingestionWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await ingestionQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); await ingestionWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
-    await productionBookGatewayRuntime?.close();
+    await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close();
     throw error;
   }
 }
