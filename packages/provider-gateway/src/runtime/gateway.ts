@@ -61,10 +61,10 @@ class ProviderGatewayCore {
     const fingerprint = stableHash({ routeSlot: snapshot.routeSlot, providerKey: snapshot.providerKey, protocol: snapshot.protocol, modelId: snapshot.modelId, connectionId: snapshot.connectionId, credentialVersionId: snapshot.credentialVersionId, configuration: snapshot.configuration, capability: request.capability, promptVersion: request.promptVersion, schemaVersion: request.schemaVersion, pipelineVersion: request.pipelineVersion, inputHash: request.inputHash, ...(request.text ? { canonicalTextInputHash: canonicalTextInputHash(request.text) } : {}), ...(request.embedding ? { canonicalEmbeddingInputHash: canonicalEmbeddingInputHash(request.embedding) } : {}) });
     const claim = this.execution.repository ? await this.execution.repository.claimExecution(snapshot, { idempotencyKey: request.idempotencyKey, fingerprint }) : { kind: "OWNER" as const, invocationId: undefined, claimToken: undefined, snapshotId: undefined };
     if (claim.kind !== "OWNER") {
-      if (claim.kind === "ALREADY_PROCESSED" && request.embedding && this.execution.repository) {
+      if (claim.kind === "ALREADY_PROCESSED" && (request.embedding || request.text) && this.execution.repository) {
         const persistedSnapshot = await this.execution.repository.loadExecutionSnapshot(snapshot.workspaceId, claim.snapshotId);
-        const handoff = await this.execution.repository.recoverEmbeddingHandoff(snapshot.workspaceId, claim.invocationId);
-        if (handoff.kind === "CONSUMED") return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, snapshot: persistedSnapshot, embeddingConsumed: true };
+        const handoff = request.embedding ? await this.execution.repository.recoverEmbeddingHandoff(snapshot.workspaceId, claim.invocationId) : await this.execution.repository.recoverTextHandoff(snapshot.workspaceId, claim.invocationId);
+        if (handoff.kind === "CONSUMED") return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, snapshot: persistedSnapshot, ...(request.embedding ? { embeddingConsumed: true } : {}) };
         if (handoff.kind === "RECONCILIATION_REQUIRED") return { status: "RECONCILIATION_REQUIRED", invocationId: claim.invocationId };
         return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, response: handoff.response, snapshot: persistedSnapshot };
       }
@@ -86,6 +86,10 @@ class ProviderGatewayCore {
         catch (releaseError) { throw safeError(releaseError, request.correlationId); }
         throw error;
       }
+    }
+    if (request.text && this.execution.repository) {
+      try { this.execution.repository.assertTextResultStorageAvailable(); }
+      catch (error) { try { await this.execution.repository.releasePreRemoteClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!); } catch (releaseError) { throw safeError(releaseError, request.correlationId); } throw error; }
     }
     const key = `${snapshot.workspaceId}:${snapshot.connectionId ?? snapshot.providerKey}:${snapshot.modelId}`; const maxAttempts = Math.min(request.budget?.maxAttempts ?? this.execution.maxAttempts ?? 3, this.execution.maxAttempts ?? 3); let last: ProviderGatewayError | undefined;
     for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
@@ -114,7 +118,11 @@ class ProviderGatewayCore {
                 if (embeddingResponse.dimensions !== pinnedDimensions) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
                 validateVectors(embeddingResponse.vectors, request.embedding.texts.length, pinnedDimensions);
                 await this.execution.repository!.completeSuccessfulEmbeddingExecution({ workspaceId: snapshot.workspaceId, invocationId: claim.invocationId!, claimToken: claim.claimToken!, attempt: durableAttempt, snapshot, response: embeddingResponse, expectedVectorCount: request.embedding.texts.length, pinnedDimensions, usage: result.usage, remoteRequestId: result.remoteRequestId, latencyMs, exactSecret: state?.credential });
-              } else { await this.execution.repository!.recordAttemptOutcome(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, durableAttempt.id, "SUCCEEDED", { remoteRequestId: result.remoteRequestId, latencyMs }, { snapshot, attempt: durableAttempt, status: "SUCCEEDED", usage: result.usage, exactSecret: state?.credential }); await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, "SUCCEEDED"); }
+              } else if (request.text) {
+                const response = result.response;
+                await this.execution.repository!.completeSuccessfulTextExecution({ workspaceId: snapshot.workspaceId, invocationId: claim.invocationId!, claimToken: claim.claimToken!, attempt: durableAttempt, snapshot, response: response as import("../types.js").TextGenerationResponse, usage: result.usage, remoteRequestId: result.remoteRequestId, latencyMs, exactSecret: state?.credential });
+              } else { await this.execution.repository!.recordAttemptOutcome(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, durableAttempt.id, "SUCCEEDED", { remoteRequestId: result.remoteRequestId, latencyMs }, { snapshot, attempt: durableAttempt, status: "SUCCEEDED", usage: result.usage, exactSecret: state?.credential }); await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId!, claim.claimToken!, "SUCCEEDED");
+              }
             }
           } catch (persistenceError) { if (claim.invocationId && claim.claimToken) await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId, claim.claimToken, "RECONCILIATION_REQUIRED").catch(() => undefined); throw safeError(persistenceError, request.correlationId); }
           await this.execution.circuit?.recordSuccess(key);

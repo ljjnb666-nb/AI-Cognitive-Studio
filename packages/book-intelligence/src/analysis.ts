@@ -4,8 +4,11 @@ export type AnalysisStage = "CHUNK" | "SECTION" | "CHAPTER" | "BOOK";
 export type EvidenceCandidate = { sourceBlockId: string; startOffset: number; endOffset: number; quoteText?: string };
 export type MemoryCandidate = { type: "SUMMARY" | "CONCEPT" | "ARGUMENT" | "CLAIM" | "EXAMPLE" | "STORY" | "QUOTE" | "PERSON" | "QUESTION" | "COUNTERPOINT"; content: string; evidence?: EvidenceCandidate[] };
 export type AnalysisResponse = { summary: string; memory?: MemoryCandidate[]; relations?: Array<{ fromOrdinal: number; toOrdinal: number; type: "EXPLAINS" | "SUPPORTS" | "OPPOSES" | "ASSOCIATED_WITH" | "DEVELOPS" }> };
-export interface AnalysisRequest { stage: AnalysisStage; content: string; sourceBlockIds: string[]; tokenBudget: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; provider?: string; model?: string }
+export interface AnalysisRequest { stage: AnalysisStage; content: string; sourceBlockIds: string[]; tokenBudget: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; provider?: string; model?: string; operationKey?: string }
 export interface AnalysisProvider { generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> }
+export type AnalysisTransaction = { $queryRaw<T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T> };
+export type AnalysisReceiptConsumer = { consumerKind: string; consumerKey: string; consumerFingerprint: string; materialize: (tx: AnalysisTransaction, response: AnalysisResponse) => Promise<void> };
+export interface DurableAnalysisProvider extends AnalysisProvider { consumeGenerated?(response: AnalysisResponse, consumer: AnalysisReceiptConsumer): Promise<"CONSUMED" | "ALREADY_CONSUMED"> }
 export class RecordingFakeAnalysisProvider implements AnalysisProvider { requests: AnalysisRequest[] = []; async generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> { this.requests.push(structuredClone(request)); return { summary: request.content.slice(0, 240) }; } }
 export function estimateAnalysisTokens(text: string): number { let cjkOrEmoji = 0, ascii = 0; for (const codePoint of text) { if (/^[\u3400-\u9FFF\uF900-\uFAFF\u{1F000}-\u{1FAFF}]$/u.test(codePoint)) cjkOrEmoji++; else ascii++; } return Math.max(cjkOrEmoji + Math.ceil(ascii / 3), Math.ceil([...text].length / 2)); }
 

@@ -9,10 +9,11 @@ import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudio
 import { createShortVideoGenerationWorker, createShortVideoGenerationQueue, dispatchShortVideoGenerationWithQueue, type ShortVideoRuntimeAdapter } from "./short-video-generation.js";
 import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue } from "./source-ingestion.js";
 import { createHealthCheckWorker } from "./worker.js";
+import { createBookProductionGatewayRuntime } from "./provider-gateway-runtime.js";
 
 export type PodcastRuntimeAdapter = { provider: PodcastGenerationProvider; embeddingProvider: EmbeddingProvider };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
-export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: Pick<ProcessBookAnalysisDependencies, "analysisProvider" | "embeddingProvider" | "embeddingGateway">; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
+export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: ProcessBookAnalysisDependencies; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
 
 export function resolvePodcastRuntimeAdapter(source: NodeJS.ProcessEnv, injected?: PodcastRuntimeAdapter): PodcastRuntimeAdapter | undefined {
   const configured = source.PODCAST_GENERATION_PROVIDER?.trim();
@@ -31,7 +32,9 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);
   const queueOptions = options.bullmqPrefix ? { prefix: options.bullmqPrefix } : undefined;
   const ingestionWorker = createSourceIngestionWorker(environment, queueOptions);
-  const bookWorker = source.BOOK_ANALYSIS_PROVIDER ? createBookAnalysisWorker(environment, options.bookDependencies, queueOptions) : undefined;
+  const bookConfigured = source.BOOK_ANALYSIS_PROVIDER?.trim();
+  const productionBookDependencies = bookConfigured && !options.bookDependencies ? (() => { const runtime = createBookProductionGatewayRuntime(source); return { analysisProviderForRun: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => runtime.createAnalysisProvider(input), embeddingGatewayForRun: (input: { workspaceId: string; userId: string; analysisRunId: string }) => ({ gateway: runtime.gateway, repository: runtime.repository, userId: input.userId }) }; })() : undefined;
+  const bookWorker = bookConfigured ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, queueOptions) : undefined;
   if (!bookWorker) logger.info("worker.book_analysis.disabled", { reason: "BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED" });
   const podcastWorker = podcastAdapter ? createPodcastGenerationWorker(environment, podcastAdapter, queueOptions) : undefined;
   const audioWorker = audioConfigured ? createPodcastAudioWorker(environment, options.audioAdapter, queueOptions) : undefined;

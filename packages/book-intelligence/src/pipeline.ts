@@ -6,6 +6,7 @@ import {
   guardedGenerateStructured,
   reduceBoundedAnalysisChildren,
   type AnalysisProvider,
+  type DurableAnalysisProvider,
   type AnalysisResponse,
   type EvidenceCandidate,
   type MemoryCandidate,
@@ -39,14 +40,17 @@ type DurableStage = typeof stageOrder[number];
 type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "afterEmbeddingGatewayPersist" | "beforeEmbeddingMaterialization" | "afterEmbeddingMaterialization" | "beforeEmbeddingStageAdvance" | "beforeFinalization" | "afterCurrentExtractionLock";
 export type AnalysisFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
 export type ProcessBookAnalysisDependencies = {
-  analysisProvider: AnalysisProvider;
-  embeddingProvider: EmbeddingProvider;
+  analysisProvider?: AnalysisProvider;
+  analysisProviderForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => Promise<AnalysisProvider> | AnalysisProvider;
+  embeddingProvider?: EmbeddingProvider;
   /** Query/retrieval identity only; never used by the durable EMBEDDINGS stage. */
   embeddingGateway?: { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string };
+  embeddingGatewayForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string }) => Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string }> | { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string };
   embeddingVersion?: string;
   correlationId?: string;
   faultInjector?: AnalysisFaultInjector;
 };
+type ActiveBookAnalysisDependencies = ProcessBookAnalysisDependencies & { analysisProvider: AnalysisProvider };
 export type BookAnalysisRequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; correlationId?: string; outboxTopic?: string };
 export type TrustedBookAnalysisRequestContext = { workspaceId: string; userId: string };
 type StageContext = { blocks: SourceBlockInput[]; blockMap: Map<string, SourceBlockInput>; chunks: any[]; nodes: any[] };
@@ -54,6 +58,17 @@ type StageContext = { blocks: SourceBlockInput[]; blockMap: Map<string, SourceBl
 const asBlocks = (blocks: Array<{ id: string; ordinal: number; text: string; kind: string; metadata: unknown }>): SourceBlockInput[] => blocks.map((block) => ({ ...block, kind: block.kind as SourceBlockInput["kind"], metadata: block.metadata as SourceBlockInput["metadata"] }));
 const embeddingIdentity = (provider: EmbeddingProvider, override?: string) => embeddingIdentityWithHash(provider.identity, override);
 const logFields = (run: any, correlationId?: string) => ({ workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, analysisRunId: run.id, chunkSetId: run.chunkSetId, analysisStage: run.analysisStage, correlationId: correlationId ?? run.id });
+
+async function persistTextDestination(run: any, token: string, provider: AnalysisProvider, response: AnalysisResponse, input: { kind: string; key: string; lineage: unknown; write: (tx: any, response: AnalysisResponse) => Promise<void> }) {
+  const durable = provider as DurableAnalysisProvider;
+  if (!durable.consumeGenerated) return withOwnedAnalysisTransaction(run.id, token, tx => input.write(tx, response));
+  const consumerFingerprint = sha256(JSON.stringify([run.workspaceId, run.id, input.kind, input.key, input.lineage]));
+  return durable.consumeGenerated(response, { consumerKind: "BOOK_ANALYSIS_TEXT", consumerKey: `${input.kind}:${input.key}`, consumerFingerprint, materialize: async (tx, recovered) => {
+    const owners = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${run.id} AND "workspaceId" = ${run.workspaceId} AND "executionClaimToken" = ${token} AND "executionLeaseUntil" > NOW() AND "status" = 'RUNNING'::"AnalysisRunStatus" FOR UPDATE`;
+    if (owners.length !== 1) throw new Error("BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST");
+    await input.write(tx, recovered);
+  } });
+}
 
 async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requestedByUserId?: string) {
   const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: input.sourceDocumentId, workspaceId: input.workspaceId } } });
@@ -103,7 +118,7 @@ async function advanceStage(run: any, token: string, expected: DurableStage, nex
   logger.info("book.analysis.stage.completed", { ...logFields({ ...run, analysisStage: expected }, correlationId), nextStage: next });
 }
 
-function reductionCache(run: any, token: string, dependencies: ProcessBookAnalysisDependencies) {
+function reductionCache(run: any, token: string, dependencies: ActiveBookAnalysisDependencies) {
   return {
     find: async (identity: ReductionBatchIdentity): Promise<AnalysisResponse | null> => {
       const result = await prisma.analysisReductionResult.findUnique({ where: { analysisRunId_stage_parentKey_level_batchOrdinal_inputHash: { analysisRunId: run.id, ...identity } } });
@@ -112,11 +127,13 @@ function reductionCache(run: any, token: string, dependencies: ProcessBookAnalys
       return validateAnalysisResponse(result.structuredOutput);
     },
     persist: async (identity: ReductionBatchIdentity, response: AnalysisResponse): Promise<AnalysisResponse> => {
-      const durable = await withOwnedAnalysisTransaction(run.id, token, async (tx) => {
-        await tx.analysisReductionResult.createMany({ data: [{ workspaceId: run.workspaceId, analysisRunId: run.id, ...identity, summary: response.summary, structuredOutput: response }], skipDuplicates: true });
+      let persisted: AnalysisResponse | undefined;
+      await persistTextDestination(run, token, dependencies.analysisProvider, response, { kind: "REDUCTION", key: `${identity.stage}:${identity.parentKey}:${identity.level}:${identity.batchOrdinal}`, lineage: identity, write: async (tx, recovered) => {
+        await tx.analysisReductionResult.createMany({ data: [{ workspaceId: run.workspaceId, analysisRunId: run.id, ...identity, summary: recovered.summary, structuredOutput: recovered }], skipDuplicates: true });
         const result = await tx.analysisReductionResult.findUniqueOrThrow({ where: { analysisRunId_stage_parentKey_level_batchOrdinal_inputHash: { analysisRunId: run.id, ...identity } } });
-        return validateAnalysisResponse(result.structuredOutput);
-      });
+        persisted = validateAnalysisResponse(result.structuredOutput);
+      } });
+      const durable = persisted ?? response;
       logger.info("book.analysis.reduction.generated", { ...logFields(run, dependencies.correlationId), reductionStage: identity.stage, parentKey: identity.parentKey, reductionLevel: identity.level, batchOrdinal: identity.batchOrdinal, inputHash: identity.inputHash });
       await dependencies.faultInjector?.("afterReductionPersist", { analysisRunId: run.id, ...identity });
       return durable;
@@ -124,7 +141,7 @@ function reductionCache(run: any, token: string, dependencies: ProcessBookAnalys
   };
 }
 
-async function reduce(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext, stage: "SECTION" | "CHAPTER" | "BOOK", parentKey: string, children: any[]) {
+async function reduce(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext, stage: "SECTION" | "CHAPTER" | "BOOK", parentKey: string, children: any[]) {
   return reduceBoundedAnalysisChildren({
     provider: dependencies.analysisProvider,
     stage,
@@ -141,7 +158,7 @@ async function reduce(run: any, token: string, dependencies: ProcessBookAnalysis
   });
 }
 
-async function runChunkStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
+async function runChunkStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
   for (const chunk of context.chunks) {
     const completed = await prisma.analysisArtifact.findFirst({ where: { analysisRunId: run.id, scope: "CHUNK", chunkId: chunk.id } });
     if (completed) continue;
@@ -156,14 +173,15 @@ async function runChunkStage(run: any, token: string, dependencies: ProcessBookA
       promptVersion: run.promptVersion,
       provider: run.provider,
       model: run.model,
+      operationKey: `chunk:${chunk.id}:${chunk.contentHash}`,
     };
     await renewBookAnalysisLease(run.id, token);
     const response = await guardedGenerateStructured(dependencies.analysisProvider, request, context.blocks, contextLimit);
-    await withOwnedAnalysisTransaction(run.id, token, (tx) => tx.analysisArtifact.upsert({
+    await persistTextDestination(run, token, dependencies.analysisProvider, response, { kind: "CHUNK", key: chunk.id, lineage: { chunkId: chunk.id, contentHash: chunk.contentHash }, write: async (tx, recovered) => { await tx.analysisArtifact.upsert({
       where: { analysisRunId_scope_ordinal: { analysisRunId: run.id, scope: "CHUNK", ordinal: chunk.ordinal } },
-      create: { analysisRunId: run.id, workspaceId: run.workspaceId, chunkSetId: run.chunkSetId, extractionId: run.extractionId, chunkId: chunk.id, scope: "CHUNK", ordinal: chunk.ordinal, summary: response.summary, structuredOutput: response },
+      create: { analysisRunId: run.id, workspaceId: run.workspaceId, chunkSetId: run.chunkSetId, extractionId: run.extractionId, chunkId: chunk.id, scope: "CHUNK", ordinal: chunk.ordinal, summary: recovered.summary, structuredOutput: recovered },
       update: {},
-    }));
+    }); } });
     await dependencies.faultInjector?.("afterChunkPersist", { analysisRunId: run.id, chunkId: chunk.id, ordinal: chunk.ordinal });
   }
   const count = await prisma.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "CHUNK", chunkId: { in: context.chunks.map((chunk) => chunk.id) } } });
@@ -171,7 +189,7 @@ async function runChunkStage(run: any, token: string, dependencies: ProcessBookA
   await advanceStage(run, token, "CHUNK_ANALYSIS", "SECTION_ANALYSIS", dependencies.correlationId);
 }
 
-async function runSectionStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
+async function runSectionStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
   const sections = context.nodes.filter((node) => node.kind === "SECTION" && chunksForNode(context.chunks, node).length);
   for (const node of sections) {
     const childChunks = chunksForNode(context.chunks, node);
@@ -193,7 +211,7 @@ async function runSectionStage(run: any, token: string, dependencies: ProcessBoo
   await advanceStage(run, token, "SECTION_ANALYSIS", "CHAPTER_ANALYSIS", dependencies.correlationId);
 }
 
-async function runChapterStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
+async function runChapterStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
   const sections = await prisma.analysisArtifact.findMany({ where: { analysisRunId: run.id, scope: "SECTION" }, orderBy: { ordinal: "asc" } });
   const chunks = await prisma.analysisArtifact.findMany({ where: { analysisRunId: run.id, scope: "CHUNK" }, include: { chunk: true }, orderBy: { ordinal: "asc" } });
   const nodeById = new Map(context.nodes.map((node) => [node.id, node]));
@@ -236,7 +254,7 @@ async function runChapterStage(run: any, token: string, dependencies: ProcessBoo
   await advanceStage(run, token, "CHAPTER_ANALYSIS", "BOOK_SYNTHESIS", dependencies.correlationId);
 }
 
-async function runBookStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
+async function runBookStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
   const root = await withOwnedAnalysisTransaction(run.id, token, (tx) => tx.analysisArtifact.upsert({
     where: { analysisRunId_scope_ordinal: { analysisRunId: run.id, scope: "BOOK", ordinal: 0 } },
     create: { analysisRunId: run.id, workspaceId: run.workspaceId, chunkSetId: run.chunkSetId, extractionId: run.extractionId, scope: "BOOK", ordinal: 0, summary: "", structuredOutput: {} },
@@ -299,7 +317,7 @@ function acceptedEvidence(plan: MemoryPlan, context: StageContext): EvidenceCand
   });
 }
 
-async function runMemoryStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
+async function runMemoryStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
   const plans = await buildMemoryPlans(run);
   const itemsByPlan = new Map<string, any>();
   for (const plan of plans) {
@@ -339,7 +357,7 @@ async function runMemoryStage(run: any, token: string, dependencies: ProcessBook
   await advanceStage(run, token, "MEMORY_FINALIZATION", "EMBEDDINGS", dependencies.correlationId);
 }
 
-async function runEmbeddingStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
+async function runEmbeddingStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
   const memoryItems = await prisma.bookMemoryItem.findMany({ where: { analysisRunId: run.id }, orderBy: [{ ordinal: "asc" }, { id: "asc" }] });
   if (!dependencies.embeddingGateway) throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_NOT_CONFIGURED");
   const targets: BookAnalysisEmbeddingTarget[] = [
@@ -390,9 +408,10 @@ export async function requestBookAnalysisForUser(context: TrustedBookAnalysisReq
   return requestBookAnalysisCore({ ...input, workspaceId: context.workspaceId }, context.userId);
 }
 
-async function runFinalizingStage(run: any, token: string, dependencies: ProcessBookAnalysisDependencies, context: StageContext) {
+async function runFinalizingStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
   await dependencies.faultInjector?.("beforeFinalization", { analysisRunId: run.id });
-  const identity = dependencies.embeddingGateway ? await loadConsumedBookAnalysisEmbeddingIdentity({ workspaceId: run.workspaceId, analysisRunId: run.id, embeddingVersion: dependencies.embeddingVersion ?? "gateway" }) : embeddingIdentity(dependencies.embeddingProvider, dependencies.embeddingVersion);
+  if (!dependencies.embeddingGateway && !dependencies.embeddingProvider) throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_NOT_CONFIGURED");
+  const identity = dependencies.embeddingGateway ? await loadConsumedBookAnalysisEmbeddingIdentity({ workspaceId: run.workspaceId, analysisRunId: run.id, embeddingVersion: dependencies.embeddingVersion ?? "gateway" }) : embeddingIdentity(dependencies.embeddingProvider!, dependencies.embeddingVersion);
   const sectionNodes = context.nodes.filter((node) => node.kind === "SECTION" && chunksForNode(context.chunks, node).length);
   const sectionArtifacts = await prisma.analysisArtifact.findMany({ where: { analysisRunId: run.id, scope: "SECTION" } });
   const nodeById = new Map(context.nodes.map((node) => [node.id, node]));
@@ -442,6 +461,19 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
   if (!await claimBookAnalysisRun(initial.id, executionClaimToken)) return prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: initial.id } });
   logger.info("book.analysis.claimed", logFields(initial, dependencies.correlationId));
   try {
+    let activeDependencies: ActiveBookAnalysisDependencies;
+    if (dependencies.analysisProviderForRun || dependencies.embeddingGatewayForRun) {
+      const job = await prisma.job.findUniqueOrThrow({ where: { id: initial.jobId }, select: { userId: true, workspaceId: true } });
+      if (!job.userId) throw new Error("BOOK_ANALYSIS_DURABLE_PRINCIPAL_MISSING");
+      const membership = job.workspaceId === initial.workspaceId ? await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: initial.workspaceId, userId: job.userId } }, select: { userId: true } }) : null;
+      if (!membership) throw new Error("BOOK_ANALYSIS_DURABLE_PRINCIPAL_INVALID");
+      const analysisProvider = dependencies.analysisProviderForRun ? await dependencies.analysisProviderForRun({ workspaceId: initial.workspaceId, userId: job.userId, analysisRunId: initial.id, provider: initial.provider, model: initial.model }) : dependencies.analysisProvider;
+      if (!analysisProvider) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED");
+      activeDependencies = { ...dependencies, analysisProvider, embeddingGateway: dependencies.embeddingGatewayForRun ? await dependencies.embeddingGatewayForRun({ workspaceId: initial.workspaceId, userId: job.userId, analysisRunId: initial.id }) : dependencies.embeddingGateway };
+    } else {
+      if (!dependencies.analysisProvider) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED");
+      activeDependencies = dependencies as ActiveBookAnalysisDependencies;
+    }
     if (initial.chunkSet.status !== "SUCCEEDED") throw new Error("ANALYSIS_LINEAGE_INVALID");
     const context = await loadStageContext(initial);
     let previousStage: string | undefined;
@@ -453,13 +485,13 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
       logger.info(previousStage ? "book.analysis.stage.started" : "book.analysis.stage.resumed", logFields(run, dependencies.correlationId));
       previousStage = stage;
       switch (stage) {
-        case "CHUNK_ANALYSIS": await runChunkStage(run, executionClaimToken, dependencies, context); break;
-        case "SECTION_ANALYSIS": await runSectionStage(run, executionClaimToken, dependencies, context); break;
-        case "CHAPTER_ANALYSIS": await runChapterStage(run, executionClaimToken, dependencies, context); break;
-        case "BOOK_SYNTHESIS": await runBookStage(run, executionClaimToken, dependencies, context); break;
-        case "MEMORY_FINALIZATION": await runMemoryStage(run, executionClaimToken, dependencies, context); break;
-        case "EMBEDDINGS": await runEmbeddingStage(run, executionClaimToken, dependencies, context); break;
-        case "FINALIZING": await runFinalizingStage(run, executionClaimToken, dependencies, context); break;
+        case "CHUNK_ANALYSIS": await runChunkStage(run, executionClaimToken, activeDependencies, context); break;
+        case "SECTION_ANALYSIS": await runSectionStage(run, executionClaimToken, activeDependencies, context); break;
+        case "CHAPTER_ANALYSIS": await runChapterStage(run, executionClaimToken, activeDependencies, context); break;
+        case "BOOK_SYNTHESIS": await runBookStage(run, executionClaimToken, activeDependencies, context); break;
+        case "MEMORY_FINALIZATION": await runMemoryStage(run, executionClaimToken, activeDependencies, context); break;
+        case "EMBEDDINGS": await runEmbeddingStage(run, executionClaimToken, activeDependencies, context); break;
+        case "FINALIZING": await runFinalizingStage(run, executionClaimToken, activeDependencies, context); break;
       }
     }
   } catch (error) {

@@ -4,7 +4,7 @@ import { createRedisConnection, type Environment } from "@ai-cognitive/shared/se
 
 export const BOOK_ANALYSIS_QUEUE = "book.analysis";
 export type BookAnalysisQueueOptions = { prefix?: string };
-export function createBookAnalysisWorker(environment: Environment, dependencies?: Pick<ProcessBookAnalysisDependencies, "analysisProvider" | "embeddingProvider" | "embeddingGateway">, options: BookAnalysisQueueOptions = {}) {
+export function createBookAnalysisWorker(environment: Environment, dependencies?: ProcessBookAnalysisDependencies, options: BookAnalysisQueueOptions = {}) {
   if (!dependencies) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED"); const { analysisProvider, embeddingProvider, embeddingGateway } = dependencies;
   if (!embeddingGateway) throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_NOT_CONFIGURED");
   return new Worker<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, async (job) => processBookAnalysisRun(job.data.analysisRunId, { analysisProvider, embeddingProvider, embeddingGateway }), { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) });

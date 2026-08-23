@@ -16,6 +16,7 @@ export * from "./execution-repository.js";
 export * from "./testing/fake-adapter.js";
 export * from "./text/canonical-input.js";
 export * from "./text/validation.js";
+export * from "./text/result-validation.js";
 export * from "./embedding/validation.js";
 export * from "./text/structured-output.js";
 export * from "./adapters/http-transport.js";
