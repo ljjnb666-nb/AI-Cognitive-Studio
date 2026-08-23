@@ -5,7 +5,8 @@ import { redactSecrets } from "./credentials/redaction.js";
 import { embeddingDimensions, validateVectors } from "./embedding/validation.js";
 import { validateTextGenerationResponse } from "./text/result-validation.js";
 import { ProviderGatewayError } from "./errors.js";
-import type { EmbeddingResponse, ExecutionSnapshot, ModelCapability, ProviderUsage, TextGenerationResponse } from "./types.js";
+import { canonicalGatewayRequestFingerprint } from "./request-fingerprint.js";
+import type { EmbeddingResponse, ExecutionSnapshot, GatewayRequest, ModelCapability, ProviderUsage, TextGenerationResponse } from "./types.js";
 
 type Db = typeof prisma;
 type Transaction = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
@@ -28,6 +29,13 @@ export class ProviderExecutionRepository {
   async findExistingTextInvocation(workspaceId: string, idempotencyKey: string): Promise<{ invocationId: string; snapshotId: string; providerKey: string; modelId: string } | undefined> {
     const invocation = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } }, include: { snapshot: { select: { id: true, providerKey: true, modelId: true } }, textResult: { select: { id: true } } } });
     return invocation?.textResult ? { invocationId: invocation.id, snapshotId: invocation.snapshot.id, providerKey: invocation.snapshot.providerKey, modelId: invocation.snapshot.modelId } : undefined;
+  }
+  async findExistingTextInvocationForRequest(request: GatewayRequest): Promise<{ invocationId: string; snapshotId: string; providerKey: string; modelId: string } | undefined> {
+    const existing = await this.findExistingTextInvocation(request.workspaceId, request.idempotencyKey);
+    if (!existing) return undefined;
+    const snapshot = await this.loadExecutionSnapshot(request.workspaceId, existing.snapshotId);
+    if (canonicalGatewayRequestFingerprint(snapshot, request) !== (await this.db.providerInvocation.findUniqueOrThrow({ where: { id_workspaceId: { id: existing.invocationId, workspaceId: request.workspaceId } }, select: { requestFingerprint: true } })).requestFingerprint) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "Existing text execution has a different semantic fingerprint");
+    return existing;
   }
   constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher & Partial<EmbeddingResultCipher & TextResultCipher>, private readonly testClock?: () => Date, private readonly workerId = `gateway-${randomUUID()}`, private readonly leaseMs = leaseMilliseconds) {}
   private async databaseNow(): Promise<Date> { if (this.testClock) return this.testClock(); const rows = await this.db.$queryRaw<{ now: Date }[]>`SELECT CURRENT_TIMESTAMP AS "now"`; return rows[0]?.now ?? (() => { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Database clock unavailable"); })(); }

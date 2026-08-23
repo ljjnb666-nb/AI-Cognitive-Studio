@@ -2,10 +2,10 @@ import { ProviderExecutionRepository } from "../execution-repository.js";
 import { ProviderAdapterFailure, ProviderGatewayError } from "../errors.js";
 import { ProviderRegistry } from "../registry.js";
 import { resolveRoute, type WorkspaceRouteResolver } from "../routing/resolver.js";
-import { createExecutionSnapshot, stableHash } from "../routing/snapshot.js";
-import { canonicalTextInputHash } from "../text/canonical-input.js";
+import { createExecutionSnapshot } from "../routing/snapshot.js";
+import { canonicalGatewayRequestFingerprint } from "../request-fingerprint.js";
 import { validateTextGenerationInput } from "../text/validation.js";
-import { canonicalEmbeddingInputHash, embeddingDimensions, validateEmbeddingInput, validateVectors } from "../embedding/validation.js";
+import { embeddingDimensions, validateEmbeddingInput, validateVectors } from "../embedding/validation.js";
 import { resolvePlatformCredential, type PlatformCredentialResolver } from "./platform-credentials.js";
 import type { ExecutionPrincipal, ExecutionSnapshot, GatewayRequest, PlatformDefaultResolver, ProviderAdapterResolver } from "../types.js";
 
@@ -58,7 +58,7 @@ class ProviderGatewayCore {
     if (!principal) throw new ProviderGatewayError("AUTHORIZATION_FAILED");
     await this.execution.authorize?.(principal, request); if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); assertInputHash(request);
     let snapshot = await this.resolveSnapshot(request); this.validatePayload(request); if (request.embedding) validateEmbeddingInput(request.embedding, snapshot.capability); assertBudget(request); this.execution.assertBudget?.(request); await this.execution.validateEndpoint?.(snapshot); await this.execution.assertRouteUsable?.(snapshot);
-    const fingerprint = stableHash({ routeSlot: snapshot.routeSlot, providerKey: snapshot.providerKey, protocol: snapshot.protocol, modelId: snapshot.modelId, connectionId: snapshot.connectionId, credentialVersionId: snapshot.credentialVersionId, configuration: snapshot.configuration, capability: request.capability, promptVersion: request.promptVersion, schemaVersion: request.schemaVersion, pipelineVersion: request.pipelineVersion, inputHash: request.inputHash, ...(request.text ? { canonicalTextInputHash: canonicalTextInputHash(request.text) } : {}), ...(request.embedding ? { canonicalEmbeddingInputHash: canonicalEmbeddingInputHash(request.embedding) } : {}) });
+    const fingerprint = canonicalGatewayRequestFingerprint(snapshot, request);
     const claim = this.execution.repository ? await this.execution.repository.claimExecution(snapshot, { idempotencyKey: request.idempotencyKey, fingerprint }) : { kind: "OWNER" as const, invocationId: undefined, claimToken: undefined, snapshotId: undefined };
     if (claim.kind !== "OWNER") {
       if (claim.kind === "ALREADY_PROCESSED" && (request.embedding || request.text) && this.execution.repository) {
