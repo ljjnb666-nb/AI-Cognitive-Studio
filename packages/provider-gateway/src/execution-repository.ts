@@ -25,6 +25,12 @@ const bounded = (value: string | undefined) => value && value.length <= 256 ? va
 const uniqueViolation = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2002";
 
 export class ProviderExecutionRepository {
+  /** Read-only identity for a purged text receipt; it never exposes plaintext. */
+  async findConsumedTextTombstone(workspaceId: string, invocationId: string): Promise<{ workspaceId: string; invocationId: string; snapshotId: string; consumerKind: string; consumerKey: string; consumerFingerprint: string; consumedAt: Date; purgedAt: Date } | undefined> {
+    const row = await this.db.providerTextResult.findFirst({ where: { workspaceId, invocationId, consumedAt: { not: null }, purgedAt: { not: null }, ciphertext: null, iv: null, authTag: null, keyVersion: null }, select: { workspaceId: true, invocationId: true, snapshotId: true, consumerKind: true, consumerKey: true, consumerFingerprint: true, consumedAt: true, purgedAt: true } });
+    if (!row || !row.consumerKind || !row.consumerKey || !row.consumerFingerprint || !row.consumedAt || !row.purgedAt) return undefined;
+    return { workspaceId: row.workspaceId, invocationId: row.invocationId, snapshotId: row.snapshotId, consumerKind: row.consumerKind, consumerKey: row.consumerKey, consumerFingerprint: row.consumerFingerprint, consumedAt: row.consumedAt, purgedAt: row.purgedAt };
+  }
   /** Read-only idempotency lookup lets a consumer recover a pinned receipt before current routes are resolved. */
   async findExistingTextInvocation(workspaceId: string, idempotencyKey: string): Promise<{ invocationId: string; snapshotId: string; providerKey: string; modelId: string } | undefined> {
     const invocation = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } }, include: { snapshot: { select: { id: true, providerKey: true, modelId: true } }, textResult: { select: { id: true } } } });

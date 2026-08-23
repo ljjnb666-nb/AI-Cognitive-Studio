@@ -48,4 +48,11 @@ export class GatewayPodcastGenerationProvider implements DurablePodcastGeneratio
     const result = await this.runtime.repository.consumeTextResult({ workspaceId: this.runtime.workspaceId, invocationId: receipt.invocationId, snapshotId: receipt.snapshotId, ...consumer }, async ({ tx, response }: { tx: unknown; response: TextGenerationResponse }) => { if (response.type !== "STRUCTURED") throw new Error("PODCAST_TEXT_RECONCILIATION_REQUIRED"); await materialize({ tx, output: response.structured as T }); });
     return result.status;
   }
+  async verifyConsumedTextResult(operationKey: string, consumer: PodcastTextConsumer): Promise<"NOT_CONSUMED" | "EXACT" | "RECONCILIATION_REQUIRED"> {
+    const receipt = await this.runtime.repository.findExistingTextInvocation(this.runtime.workspaceId, `podcast-text:${operationKey}`);
+    if (!receipt) return "NOT_CONSUMED";
+    const tombstone = await this.runtime.repository.findConsumedTextTombstone(this.runtime.workspaceId, receipt.invocationId);
+    if (!tombstone) return "NOT_CONSUMED";
+    return tombstone.consumerKind === consumer.consumerKind && tombstone.consumerKey === consumer.consumerKey && tombstone.consumerFingerprint === consumer.consumerFingerprint ? "EXACT" : "RECONCILIATION_REQUIRED";
+  }
 }

@@ -70,4 +70,6 @@ export interface PodcastGenerationProvider {
 /** Production providers retain receipts by deterministic operation key, not response identity. */
 export interface DurablePodcastGenerationProvider extends PodcastGenerationProvider {
   consumeTextResult<T>(operationKey: string, consumer: PodcastTextConsumer, materialize: (input: { tx: unknown; output: T }) => Promise<void>): Promise<"CONSUMED" | "ALREADY_CONSUMED">;
+  /** Verifies a purged receipt against the destination-derived canonical identity without exposing plaintext. */
+  verifyConsumedTextResult(operationKey: string, consumer: PodcastTextConsumer): Promise<"NOT_CONSUMED" | "EXACT" | "RECONCILIATION_REQUIRED">;
 }
