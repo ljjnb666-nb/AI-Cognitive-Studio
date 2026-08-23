@@ -22,7 +22,7 @@ export type GatewayExecutionDependencies = {
   concurrency?: { acquire(key: string, limit: number, leaseMs: number): Promise<{ key: string; token: string }>; release(lease: { key: string; token: string }): Promise<boolean> };
   maxAttempts?: number; timeoutMs?: number; rateLimit?: number; rateWindowSeconds?: number; concurrencyLimit?: number; concurrencyLeaseMs?: number; circuitThreshold?: number; circuitCooldownMs?: number; sleep?: (milliseconds: number) => Promise<void>; random?: () => number;
 };
-export type GatewayExecutionResult = { status: "SUCCEEDED"; response?: unknown; usage?: unknown; remoteRequestId?: string; snapshot: ExecutionSnapshot; requestFingerprint: string; attempt: number; invocationId?: string } | { status: "ALREADY_PROCESSED"; invocationId: string; response?: unknown; snapshot?: ExecutionSnapshot; embeddingConsumed?: boolean } | { status: "IN_PROGRESS" | "TERMINAL_FAILED" | "BLOCKED_EXISTING" | "RECONCILIATION_REQUIRED"; invocationId: string };
+export type GatewayExecutionResult = { status: "SUCCEEDED"; response?: unknown; usage?: unknown; remoteRequestId?: string; snapshot: ExecutionSnapshot; requestFingerprint: string; attempt: number; invocationId?: string } | { status: "ALREADY_PROCESSED"; invocationId: string; response?: unknown; snapshot?: ExecutionSnapshot; embeddingConsumed?: boolean; textConsumed?: boolean } | { status: "IN_PROGRESS" | "TERMINAL_FAILED" | "BLOCKED_EXISTING" | "RECONCILIATION_REQUIRED"; invocationId: string };
 
 function assertInputHash(request: GatewayRequest): void { if (!/^[a-f0-9]{64}$/.test(request.inputHash)) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid canonical input hash"); }
 function assertBudget(request: GatewayRequest): void { const b = request.budget; const e = request.estimates; if (!b || !e) return; if ((b.maxInputTokens !== undefined && (e.inputTokens ?? 0) > b.maxInputTokens) || (b.maxOutputTokens !== undefined && (e.outputTokens ?? 0) > b.maxOutputTokens) || (b.maxEmbeddingInputTokens !== undefined && (e.embeddingInputTokens ?? 0) > b.maxEmbeddingInputTokens) || (b.maxSpeechCharacters !== undefined && (e.speechCharacters ?? 0) > b.maxSpeechCharacters)) throw new ProviderGatewayError("BUDGET_EXCEEDED"); }
@@ -64,7 +64,7 @@ class ProviderGatewayCore {
       if (claim.kind === "ALREADY_PROCESSED" && (request.embedding || request.text) && this.execution.repository) {
         const persistedSnapshot = await this.execution.repository.loadExecutionSnapshot(snapshot.workspaceId, claim.snapshotId);
         const handoff = request.embedding ? await this.execution.repository.recoverEmbeddingHandoff(snapshot.workspaceId, claim.invocationId) : await this.execution.repository.recoverTextHandoff(snapshot.workspaceId, claim.invocationId);
-        if (handoff.kind === "CONSUMED") return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, snapshot: persistedSnapshot, ...(request.embedding ? { embeddingConsumed: true } : {}) };
+        if (handoff.kind === "CONSUMED") return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, snapshot: persistedSnapshot, ...(request.embedding ? { embeddingConsumed: true } : { textConsumed: true }) };
         if (handoff.kind === "RECONCILIATION_REQUIRED") return { status: "RECONCILIATION_REQUIRED", invocationId: claim.invocationId };
         return { status: "ALREADY_PROCESSED", invocationId: claim.invocationId, response: handoff.response, snapshot: persistedSnapshot };
       }

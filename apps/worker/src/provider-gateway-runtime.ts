@@ -29,6 +29,7 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     const inputHash = sha256(JSON.stringify([this.input.workspaceId, routeSlot, this.input.analysisRunId, request.stage, operation, sha256(request.content), request.pipelineVersion, request.promptVersion, schema]));
     const outcome = await this.runtime.gateway.execute({ workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${request.stage}:${operation}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput: "STRICT_JSON_SCHEMA" }, text, pipelineVersion: request.pipelineVersion, promptVersion: request.promptVersion, schemaVersion: "book-analysis-v1" }, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);
+    if (outcome.status === "ALREADY_PROCESSED" && outcome.textConsumed) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const response = outcome.response as { type?: string; structured?: unknown } | undefined;
     if (!response || response.type !== "STRUCTURED" || !outcome.invocationId || !(outcome.status === "SUCCEEDED" ? outcome.snapshot : outcome.snapshot)) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const analysis = validateAnalysisResponse(response.structured), snapshotId = outcome.snapshot!.id;
