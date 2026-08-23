@@ -108,6 +108,9 @@ importers:
       '@ai-cognitive/podcast-generation':
         specifier: workspace:*
         version: link:../../packages/podcast-generation
+      '@ai-cognitive/provider-gateway':
+        specifier: workspace:*
+        version: link:../../packages/provider-gateway
       '@ai-cognitive/shared':
         specifier: workspace:*
         version: link:../../packages/shared

@@ -14,6 +14,7 @@ import { ProviderExecutionRepository, testCipher } from "../src/index.js";
 const execute = promisify(execFile), root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const migrations = resolve(root, "packages/db/prisma/migrations");
 const real2BMigration = join(migrations, "20260819010000_phase_8c_atomic_embedding_materialization");
+const post2BMigration = "20260822010000_phase_8c_durable_text_handoff";
 const require = createRequire(import.meta.url);
 const prismaConfigModule = pathToFileURL(require.resolve("prisma/config", { paths: [resolve(root, "packages/db")] })).href;
 
@@ -45,7 +46,7 @@ function createThirtyMigrationFixture() {
   stage("UPGRADE_STAGE_03B_CREATE_DIRS_BEGIN"); mkdirSync(fixtureMigrations); stage("UPGRADE_STAGE_03B_CREATE_DIRS_DONE");
   stage("UPGRADE_STAGE_03C_COPY_SCHEMA_BEGIN"); copyFileSync(resolve(root, "packages/db/prisma/schema.prisma"), join(fixture, "schema.prisma")); stage("UPGRADE_STAGE_03C_COPY_SCHEMA_DONE");
   stage("UPGRADE_STAGE_03D_ENUMERATE_MIGRATIONS_BEGIN");
-  const firstThirty = readdirSync(migrations, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name !== "20260819010000_phase_8c_atomic_embedding_materialization").map(entry => entry.name).sort().slice(0, 30);
+  const firstThirty = readdirSync(migrations, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name !== "20260819010000_phase_8c_atomic_embedding_materialization" && entry.name !== post2BMigration).map(entry => entry.name).sort().slice(0, 30);
   expect(firstThirty).toHaveLength(30);
   stage("UPGRADE_STAGE_03D_ENUMERATE_MIGRATIONS_DONE");
   for (const [index, name] of firstThirty.entries()) { const label = String(index + 1).padStart(2, "0"); stage(`UPGRADE_STAGE_03E_COPY_MIGRATION_${label}_BEGIN`); copyDirectory(join(migrations, name), join(fixtureMigrations, name)); stage(`UPGRADE_STAGE_03E_COPY_MIGRATION_${label}_DONE`); }
@@ -97,7 +98,7 @@ describe("Phase 8C 2A to 2B upgrade acceptance", () => {
       stage("UPGRADE_STAGE_07_DEPLOY_2B");
       await prisma("migrate deploy", databaseUrl);
       db = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
-      expect((await migrationCount(db))[0]?.count).toBe(31n);
+      expect((await migrationCount(db))[0]?.count).toBe(32n);
       const postUpgradeRepository = new ProviderExecutionRepository(db as never, cipher);
       expect(await postUpgradeRepository.recoverEmbeddingHandoff(workspaceId, invocationId)).toMatchObject({ kind: "RECOVERABLE", response: { vectors } });
       stage("UPGRADE_STAGE_08_CREATE_DOCUMENT_LINEAGE");
