@@ -32,7 +32,7 @@
     "test:phase8c:book-intelligence": "pnpm --filter @ai-cognitive/book-intelligence test:phase8c",
     "test:phase8c:book-production": "pnpm --filter @ai-cognitive/worker test:phase8c:production",
     "test:phase8c:podcast-gateway": "pnpm --filter @ai-cognitive/podcast-generation test:phase8c:podcast-gateway && pnpm --filter @ai-cognitive/worker test:phase8c:podcast-gateway",
-    "test:phase8c:podcast-autonomy": "pnpm --filter @ai-cognitive/provider-gateway test:phase8c && pnpm --filter @ai-cognitive/podcast-generation test:phase8c:podcast-autonomy && pnpm --filter @ai-cognitive/worker test:phase8c:podcast-autonomy",
+    "test:phase8c:podcast-autonomy": "pnpm --filter @ai-cognitive/provider-gateway test:phase8c:podcast-query && pnpm --filter @ai-cognitive/podcast-generation test:phase8c:podcast-autonomy && pnpm --filter @ai-cognitive/worker test:phase8c:podcast-autonomy",
     "test:e2e": "pnpm --filter @ai-cognitive/web test:e2e",
     "test:phase1:e2e": "pnpm --filter @ai-cognitive/worker test:phase1:e2e",
     "test:phase2:e2e": "pnpm --filter @ai-cognitive/worker test:phase2:e2e",
