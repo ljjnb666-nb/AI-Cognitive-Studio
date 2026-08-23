@@ -18,7 +18,7 @@ import { buildDraftDestinationProjection, buildHumanizationDestinationProjection
 const PLANNING_CONTEXT_BUDGET = 4_000;
 const SEGMENT_CONTEXT_BUDGET = 2_400;
 type DurableStage = "EPISODE_PLANNING" | "NARRATIVE_DESIGN" | "SEGMENT_OUTLINE" | "SEGMENT_DRAFTING" | "HUMANIZATION" | "GROUNDING_VALIDATION" | "FINALIZING" | "COMPLETED";
-type FaultPoint = "afterTextReceipt" | "afterPlanning" | "afterNarrative" | "afterOutline" | "afterSegmentDraft" | "afterSegmentHumanization" | "afterSegmentGrounding" | "beforeFinalization";
+type FaultPoint = "afterPlanningRetrieval" | "afterTextReceipt" | "afterPlanning" | "afterNarrative" | "afterOutline" | "afterSegmentDraft" | "afterSegmentHumanization" | "afterSegmentGrounding" | "beforeFinalization";
 export type PodcastFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
 export type ProcessPodcastDependencies = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider>; faultInjector?: PodcastFaultInjector; correlationId?: string };
 const isDurable = (provider: PodcastGenerationProvider): provider is DurablePodcastGenerationProvider => "consumeTextResult" in provider && "verifyConsumedTextResult" in provider;
@@ -111,6 +111,9 @@ async function runPlanning(run: any, token: string, dependencies: ProcessPodcast
   }
   if (!plan) {
     const context = await retrieveContext(run, dependencies, `Plan a cognitive episode titled ${run.episode.title}`, PLANNING_CONTEXT_BUDGET, "PLANNING");
+    // Test-only seam: the Gateway query receipt is durable, while the first
+    // paid Podcast text operation has not yet been invoked.
+    await dependencies.faultInjector?.("afterPlanningRetrieval", { podcastGenerationRunId: run.id });
     await renewPodcastGenerationLease(run.id, token);
     const hosts = (await loadHosts(run)).map(persona);
     const input = { metadata: metadata(run, "EPISODE_PLANNING", PODCAST_PROVIDER_INPUT_BUDGETS.EPISODE_PLANNING), style: styleRecord(run.styleProfile), hosts, context };
