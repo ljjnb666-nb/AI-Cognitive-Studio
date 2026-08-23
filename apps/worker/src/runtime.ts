@@ -18,7 +18,7 @@ export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?
 export function resolvePodcastRuntimeAdapter(source: NodeJS.ProcessEnv, injected?: PodcastRuntimeAdapter): PodcastRuntimeAdapter | undefined {
   const configured = source.PODCAST_GENERATION_PROVIDER?.trim();
   if (!configured) return undefined;
-  if (!injected) return undefined;
+  if (!injected) throw new Error(`PODCAST_GENERATION_PROVIDER_UNSUPPORTED:${configured}`);
   if (injected.provider && injected.provider.identity.provider !== configured) throw new Error(`PODCAST_GENERATION_PROVIDER_UNSUPPORTED:${configured}`);
   return injected;
 }
@@ -26,7 +26,7 @@ export function resolvePodcastRuntimeAdapter(source: NodeJS.ProcessEnv, injected
 export async function startWorkerRuntime(environment: Environment, options: WorkerRuntimeOptions = {}) {
   const source = options.source ?? process.env;
   let productionPodcastGatewayRuntime: PodcastGatewayRuntime | undefined;
-  let podcastAdapter = resolvePodcastRuntimeAdapter(source, options.podcastAdapter);
+  let podcastAdapter = options.podcastAdapter ? resolvePodcastRuntimeAdapter(source, options.podcastAdapter) : undefined;
   const audioConfigured = source.AUDIO_GENERATION_PROVIDER?.trim();
   const shortVideoConfigured = source.SHORT_VIDEO_GENERATION_PROVIDER?.trim();
   if (audioConfigured && (!options.audioAdapter || options.audioAdapter.provider.identity.provider !== audioConfigured)) throw new Error(`AUDIO_GENERATION_PROVIDER_UNSUPPORTED:${audioConfigured}`);
