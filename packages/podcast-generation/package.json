@@ -10,7 +10,7 @@
     "build": "tsc --noEmit",
     "test:unit": "vitest run tests/phase3-evaluation.test.ts tests/phase4-audio.test.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:phase8c:podcast-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-gateway.integration.test.ts"
+    "test:phase8c:podcast-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-gateway.integration.test.ts tests/phase8c-podcast-gateway-durability.integration.test.ts tests/phase8c-podcast-gateway-replay.integration.test.ts"
   },
   "dependencies": {
     "@ai-cognitive/book-intelligence": "workspace:*",
