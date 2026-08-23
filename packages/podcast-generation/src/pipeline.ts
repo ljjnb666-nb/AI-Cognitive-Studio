@@ -1,14 +1,14 @@
 /* Prisma rows are deliberately structurally typed at this orchestration boundary. */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
 import { buildBookContextForIntelligence, estimateAnalysisTokens, type EmbeddingProvider } from "@ai-cognitive/book-intelligence";
 import { dispatchPendingOutbox } from "@ai-cognitive/ingestion";
 import { logger } from "@ai-cognitive/shared";
 import { estimateSpokenDurationMs } from "./duration.js";
 import { evaluatePodcastScriptData } from "./evaluation.js";
-import { advancePodcastStage, claimPodcastGenerationRun, failOwnedPodcastGeneration, PODCAST_GENERATION_OWNERSHIP_LOST, renewPodcastGenerationLease, withOwnedPodcastTransaction } from "./ownership.js";
-import { dialogueSchema, episodePlanSchema, humanizationSchema, narrativeSchema, segmentOutlineSchema, type DialogueOutput, type EpisodePlanOutput, type NarrativeOutput, type PodcastContextItem, type PodcastGenerationProvider, type PodcastHostPersona, type SegmentOutlineOutput } from "./types.js";
+import { advancePodcastStage, assertOwnedPodcastRunInTransaction, claimPodcastGenerationRun, failOwnedPodcastGeneration, PODCAST_GENERATION_OWNERSHIP_LOST, renewPodcastGenerationLease, withOwnedPodcastTransaction } from "./ownership.js";
+import { dialogueSchema, episodePlanSchema, humanizationSchema, narrativeSchema, segmentOutlineSchema, type DialogueOutput, type DurablePodcastGenerationProvider, type EpisodePlanOutput, type HumanizationOutput, type NarrativeOutput, type PodcastContextItem, type PodcastGenerationProvider, type PodcastHostPersona, type SegmentOutlineOutput } from "./types.js";
 import { PODCAST_GENERATION_JOB, PODCAST_GENERATION_TOPIC } from "./services.js";
 import { assertPodcastProviderInputBudget, PODCAST_PROVIDER_INPUT_BUDGETS } from "./provider-budget.js";
 import { podcastHostPersonaSchema, podcastStyleSchema } from "./types.js";
@@ -18,7 +18,10 @@ const SEGMENT_CONTEXT_BUDGET = 2_400;
 type DurableStage = "EPISODE_PLANNING" | "NARRATIVE_DESIGN" | "SEGMENT_OUTLINE" | "SEGMENT_DRAFTING" | "HUMANIZATION" | "GROUNDING_VALIDATION" | "FINALIZING" | "COMPLETED";
 type FaultPoint = "afterPlanning" | "afterNarrative" | "afterOutline" | "afterSegmentDraft" | "afterSegmentHumanization" | "afterSegmentGrounding" | "beforeFinalization";
 export type PodcastFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
-export type ProcessPodcastDependencies = { provider: PodcastGenerationProvider; embeddingProvider: EmbeddingProvider; faultInjector?: PodcastFaultInjector; correlationId?: string };
+export type ProcessPodcastDependencies = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider: EmbeddingProvider; faultInjector?: PodcastFaultInjector; correlationId?: string };
+const isDurable = (provider: PodcastGenerationProvider): provider is DurablePodcastGenerationProvider => "consumeTextResult" in provider;
+const operationKey = (run: any, stage: string, segmentId?: string) => `${run.id}:${stage}${segmentId ? `:${segmentId}` : ""}`;
+const consumerFingerprint = (run: any, stage: string, destination: string, input: unknown) => createHash("sha256").update(JSON.stringify({ workspaceId: run.workspaceId, runId: run.id, stage, destination, generationIdentityHash: run.generationIdentityHash, sources: run.sources.map((source: any) => [source.sourceDocumentId, source.extractionId, source.chunkSetId, source.analysisRunId]), styleProfileId: run.styleProfileId, styleProfileVersion: run.styleProfileVersion, hostConfigurationVersion: run.hostConfigurationVersion, pipelineVersion: run.pipelineVersion, promptVersion: run.promptVersion, input })).digest("hex");
 
 const styleRecord = (style: any): Record<string, unknown> => podcastStyleSchema.parse({ language: style.language, tone: style.tone, depth: style.depth, pace: style.pace, hostCount: style.hostCount, targetDurationMinutes: style.targetDurationMinutes, targetAudience: style.targetAudience, formality: style.formality, humorLevel: style.humorLevel, debateLevel: style.debateLevel, storytellingLevel: style.storytellingLevel, interruptionLevel: style.interruptionLevel, disagreementLevel: style.disagreementLevel, technicalDepth: style.technicalDepth, summaryDensity: style.summaryDensity, exampleDensity: style.exampleDensity });
 const persona = (host: any): PodcastHostPersona => podcastHostPersonaSchema.parse({ id: host.id, displayName: host.displayName, role: host.role, speakingStyle: host.speakingStyle, knowledgeStyle: host.knowledgeStyle, temperament: host.temperament, skepticism: host.skepticism, humor: host.humor, verbosity: host.verbosity, questionStyle: host.questionStyle, disagreementStyle: host.disagreementStyle, preferredSentenceLength: host.preferredSentenceLength, fillerPreference: host.fillerPreference });
@@ -37,6 +40,15 @@ async function callProvider<T>(run: any, stage: keyof typeof PODCAST_PROVIDER_IN
   await assertPinnedGenerationSources(run);
   assertPodcastProviderInputBudget(input, PODCAST_PROVIDER_INPUT_BUDGETS[stage]);
   return invoke();
+}
+async function invokeText<T>(run: any, token: string, dependencies: ProcessPodcastDependencies, stage: keyof typeof PODCAST_PROVIDER_INPUT_BUDGETS, segmentId: string | undefined, input: unknown, invoke: () => Promise<unknown>, parse: (value: unknown) => T, destination: string, materialize: (tx: any, output: T) => Promise<void>): Promise<{ output: T; consumed: boolean }> {
+  const output = parse(await callProvider(run, stage, input, invoke));
+  if (!dependencies.provider || !isDurable(dependencies.provider)) return { output, consumed: false };
+  await dependencies.provider.consumeTextResult<T>(operationKey(run, stage, segmentId), { consumerKind: `PODCAST_${destination}`, consumerKey: segmentId ?? run.id, consumerFingerprint: consumerFingerprint(run, stage, destination, input) }, async ({ tx, output: raw }) => {
+    await assertOwnedPodcastRunInTransaction(tx as never, run.id, token, stage);
+    await materialize(tx, parse(raw));
+  });
+  return { output, consumed: true };
 }
 
 async function assertBoundedContext(run: any, context: PodcastContextItem[], tokenBudget: number) {
@@ -70,11 +82,13 @@ async function runPlanning(run: any, token: string, dependencies: ProcessPodcast
     await renewPodcastGenerationLease(run.id, token);
     const hosts = (await loadHosts(run)).map(persona);
     const input = { metadata: metadata(run, "EPISODE_PLANNING", PODCAST_PROVIDER_INPUT_BUDGETS.EPISODE_PLANNING), style: styleRecord(run.styleProfile), hosts, context };
-    const output = episodePlanSchema.parse(await callProvider(run, "EPISODE_PLANNING", input, () => dependencies.provider.plan(input)));
-    plan = await withOwnedPodcastTransaction(run.id, token, async (tx) => {
+    const persist = async (tx: any, output: EpisodePlanOutput) => {
       await tx.podcastPlanContextItem.createMany({ data: context.map((item) => ({ podcastGenerationRunId: run.id, workspaceId: run.workspaceId, episodeId: run.episodeId, sourceDocumentId: item.sourceDocumentId, extractionId: item.extractionId, chunkSetId: item.chunkSetId, analysisRunId: item.analysisRunId, memoryItemId: item.memoryItemId, artifactId: item.artifactId, chunkId: item.chunkId, score: item.score, selectionReason: item.selectionReason, tokenEstimate: item.tokenEstimate, evidenceSpans: item.sourceBlockEvidenceSpans as any })), skipDuplicates: true });
-      return tx.episodePlan.create({ data: { podcastGenerationRunId: run.id, workspaceId: run.workspaceId, episodeId: run.episodeId, ...output } });
-    });
+      await tx.episodePlan.create({ data: { podcastGenerationRunId: run.id, workspaceId: run.workspaceId, episodeId: run.episodeId, ...output } });
+    };
+    const generated = await invokeText(run, token, dependencies, "EPISODE_PLANNING", undefined, input, () => dependencies.provider!.plan(input), episodePlanSchema.parse, "EPISODE_PLAN", persist);
+    if (!generated.consumed) await withOwnedPodcastTransaction(run.id, token, tx => persist(tx, generated.output));
+    plan = await prisma.episodePlan.findUniqueOrThrow({ where: { podcastGenerationRunId: run.id } });
     await dependencies.faultInjector?.("afterPlanning", { podcastGenerationRunId: run.id });
   }
   await advancePodcastStage(run.id, token, "EPISODE_PLANNING", "NARRATIVE_DESIGN");
@@ -87,8 +101,10 @@ async function runNarrative(run: any, token: string, dependencies: ProcessPodcas
   if (!narrative) {
     await renewPodcastGenerationLease(run.id, token);
     const input = { metadata: metadata(run, "NARRATIVE_DESIGN", PODCAST_PROVIDER_INPUT_BUDGETS.NARRATIVE_DESIGN), style: styleRecord(run.styleProfile), hosts: (await loadHosts(run)).map(persona), plan: plan as EpisodePlanOutput };
-    const output = narrativeSchema.parse(await callProvider(run, "NARRATIVE_DESIGN", input, () => dependencies.provider.designNarrative(input)));
-    narrative = await withOwnedPodcastTransaction(run.id, token, (tx) => tx.episodeNarrative.create({ data: { podcastGenerationRunId: run.id, workspaceId: run.workspaceId, episodeId: run.episodeId, ...output } }));
+    const persist = async (tx: any, output: NarrativeOutput) => { await tx.episodeNarrative.create({ data: { podcastGenerationRunId: run.id, workspaceId: run.workspaceId, episodeId: run.episodeId, ...output } }); };
+    const generated = await invokeText(run, token, dependencies, "NARRATIVE_DESIGN", undefined, input, () => dependencies.provider!.designNarrative(input), narrativeSchema.parse, "NARRATIVE", persist);
+    if (!generated.consumed) await withOwnedPodcastTransaction(run.id, token, tx => persist(tx, generated.output));
+    narrative = await prisma.episodeNarrative.findUniqueOrThrow({ where: { podcastGenerationRunId: run.id } });
     await dependencies.faultInjector?.("afterNarrative", { podcastGenerationRunId: run.id });
   }
   await advancePodcastStage(run.id, token, "NARRATIVE_DESIGN", "SEGMENT_OUTLINE");
@@ -103,11 +119,10 @@ async function runOutline(run: any, token: string, dependencies: ProcessPodcastD
     if (!available.length) throw new Error("PODCAST_NO_SEGMENT_FEASIBLE_CONTEXT");
     await renewPodcastGenerationLease(run.id, token);
     const input = { metadata: metadata(run, "SEGMENT_OUTLINE", PODCAST_PROVIDER_INPUT_BUDGETS.SEGMENT_OUTLINE), style: styleRecord(run.styleProfile), hosts: (await loadHosts(run)).map(persona), plan: plan as EpisodePlanOutput, narrative: narrative as NarrativeOutput, availableMemoryIds: available.map((item) => item.memoryItemId) };
-    const output = segmentOutlineSchema.parse(await callProvider(run, "SEGMENT_OUTLINE", input, () => dependencies.provider.outlineSegments(input)));
-    if (new Set(output.segments.map((item) => item.ordinal)).size !== output.segments.length || output.segments.some((item, index) => item.ordinal !== index + 1)) throw new Error("PODCAST_SEGMENT_ORDINALS_INVALID");
     const allowed = new Set(available.map((item) => item.memoryItemId));
-    if (output.segments.some((item) => [...item.requiredMemoryIds, ...item.optionalMemoryIds].some((id) => !allowed.has(id)))) throw new Error("PODCAST_SEGMENT_MEMORY_LINEAGE_INVALID");
-    await withOwnedPodcastTransaction(run.id, token, (tx) => tx.episodeSegment.createMany({ data: output.segments.map((item) => ({ podcastGenerationRunId: run.id, workspaceId: run.workspaceId, podcastProjectId: run.podcastProjectId, episodeId: run.episodeId, ...item, disagreementReason: item.disagreementReason ?? null })) }));
+    const persist = async (tx: any, output: SegmentOutlineOutput) => { if (new Set(output.segments.map((item) => item.ordinal)).size !== output.segments.length || output.segments.some((item, index) => item.ordinal !== index + 1)) throw new Error("PODCAST_SEGMENT_ORDINALS_INVALID"); if (output.segments.some((item) => [...item.requiredMemoryIds, ...item.optionalMemoryIds].some((id) => !allowed.has(id)))) throw new Error("PODCAST_SEGMENT_MEMORY_LINEAGE_INVALID"); await tx.episodeSegment.createMany({ data: output.segments.map((item) => ({ podcastGenerationRunId: run.id, workspaceId: run.workspaceId, podcastProjectId: run.podcastProjectId, episodeId: run.episodeId, ...item, disagreementReason: item.disagreementReason ?? null })) }); };
+    const generated = await invokeText(run, token, dependencies, "SEGMENT_OUTLINE", undefined, input, () => dependencies.provider!.outlineSegments(input), segmentOutlineSchema.parse, "SEGMENT_OUTLINE", persist);
+    if (!generated.consumed) await withOwnedPodcastTransaction(run.id, token, tx => persist(tx, generated.output));
     segments = await prisma.episodeSegment.findMany({ where: { podcastGenerationRunId: run.id }, orderBy: { ordinal: "asc" } });
     await dependencies.faultInjector?.("afterOutline", { podcastGenerationRunId: run.id, segmentCount: segments.length });
   }
@@ -148,13 +163,12 @@ async function draftSegment(run: any, segment: any, token: string, dependencies:
   const [plan, narrative, hosts] = await Promise.all([prisma.episodePlan.findUniqueOrThrow({ where: { podcastGenerationRunId: run.id } }), prisma.episodeNarrative.findUniqueOrThrow({ where: { podcastGenerationRunId: run.id } }), loadHosts(run)]);
   await renewPodcastGenerationLease(run.id, token);
   const input = { metadata: metadata(run, "SEGMENT_DRAFTING", PODCAST_PROVIDER_INPUT_BUDGETS.SEGMENT_DRAFTING, segment.id), style: styleRecord(run.styleProfile), hosts: hosts.map(persona), plan: plan as EpisodePlanOutput, narrative: narrative as NarrativeOutput, segment: segmentOutput(segment), context };
-  const output = dialogueSchema.parse(await callProvider(run, "SEGMENT_DRAFTING", input, () => dependencies.provider.draftSegment(input)));
   const allowedHosts = new Set(hosts.map((host) => host.id)), allowedMemory = new Set(context.map((item) => item.memoryItemId));
-  if (new Set(output.utterances.map((item) => item.ordinal)).size !== output.utterances.length || output.utterances.some((item, index) => item.ordinal !== index + 1) || output.utterances.some((item) => !allowedHosts.has(item.speakerHostId) || item.evidence.some((evidence) => !allowedMemory.has(evidence.memoryItemId)))) throw new Error("PODCAST_DIALOGUE_LINEAGE_INVALID");
-  const memoryIds = [...new Set(output.utterances.flatMap((item) => item.evidence.map((evidence) => evidence.memoryItemId)))];
-  const memory = await prisma.bookMemoryItem.findMany({ where: { id: { in: memoryIds } }, include: { evidence: true } });
-  const memoryMap = new Map(memory.map((item) => [item.id, item]));
-  await withOwnedPodcastTransaction(run.id, token, async (tx) => {
+  const persist = async (tx: any, output: DialogueOutput) => {
+    if (new Set(output.utterances.map((item) => item.ordinal)).size !== output.utterances.length || output.utterances.some((item, index) => item.ordinal !== index + 1) || output.utterances.some((item) => !allowedHosts.has(item.speakerHostId) || item.evidence.some((evidence) => !allowedMemory.has(evidence.memoryItemId)))) throw new Error("PODCAST_DIALOGUE_LINEAGE_INVALID");
+    const memoryIds = [...new Set(output.utterances.flatMap((item) => item.evidence.map((evidence) => evidence.memoryItemId)))];
+    const memory: any[] = await tx.bookMemoryItem.findMany({ where: { id: { in: memoryIds } }, include: { evidence: true } });
+    const memoryMap = new Map<string, any>(memory.map((item: any): [string, any] => [item.id, item]));
     await tx.episodeSegment.update({ where: { id: segment.id }, data: { generationAttemptCount: { increment: 1 } } });
     for (const item of output.utterances) {
       const utterance = await tx.podcastUtterance.create({ data: { segmentId: segment.id, podcastGenerationRunId: run.id, workspaceId: run.workspaceId, podcastProjectId: run.podcastProjectId, episodeId: run.episodeId, speakerHostId: item.speakerHostId, ordinal: item.ordinal, draftText: item.text, text: item.text, utteranceType: item.utteranceType, substantive: item.substantive, isDirectQuote: item.isDirectQuote, estimatedDurationMs: estimateSpokenDurationMs(item.text) } });
@@ -162,15 +176,17 @@ async function draftSegment(run: any, segment: any, token: string, dependencies:
         const source = context.find((candidate) => candidate.memoryItemId === reference.memoryItemId)!;
         const memoryItem = memoryMap.get(reference.memoryItemId);
         if (!memoryItem?.evidence.length) throw new Error("PODCAST_EVIDENCE_REQUIRED");
-        const lineageEvidence = reference.sourceBlockId === undefined ? memoryItem.evidence : memoryItem.evidence.filter((evidence) => evidence.sourceBlockId === reference.sourceBlockId && evidence.startOffset === reference.startOffset && evidence.endOffset === reference.endOffset);
+        const lineageEvidence = reference.sourceBlockId === undefined ? memoryItem.evidence : memoryItem.evidence.filter((evidence: any) => evidence.sourceBlockId === reference.sourceBlockId && evidence.startOffset === reference.startOffset && evidence.endOffset === reference.endOffset);
         if (!lineageEvidence.length) throw new Error("PODCAST_EVIDENCE_SPAN_LINEAGE_INVALID");
-        const selectedEvidence = item.isDirectQuote ? lineageEvidence.filter((evidence) => Boolean(evidence.quoteText) && item.text.includes(evidence.quoteText!)) : lineageEvidence;
-        if (!selectedEvidence.length) throw new Error(`PODCAST_DIRECT_QUOTE_LINEAGE_INVALID:textLength=${item.text.length}:quoteLengths=${lineageEvidence.map((evidence) => evidence.quoteText?.length ?? 0).join(",")}`);
-        await tx.podcastUtteranceEvidence.createMany({ data: selectedEvidence.map((evidence) => ({ utteranceId: utterance.id, segmentId: segment.id, podcastGenerationRunId: run.id, workspaceId: run.workspaceId, sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, memoryItemId: memoryItem.id, sourceBlockId: evidence.sourceBlockId, startOffset: evidence.startOffset, endOffset: evidence.endOffset, quoteText: evidence.quoteText, quoteHash: evidence.quoteHash })), skipDuplicates: true });
+        const selectedEvidence = item.isDirectQuote ? lineageEvidence.filter((evidence: any) => Boolean(evidence.quoteText) && item.text.includes(evidence.quoteText!)) : lineageEvidence;
+        if (!selectedEvidence.length) throw new Error(`PODCAST_DIRECT_QUOTE_LINEAGE_INVALID:textLength=${item.text.length}:quoteLengths=${lineageEvidence.map((evidence: any) => evidence.quoteText?.length ?? 0).join(",")}`);
+        await tx.podcastUtteranceEvidence.createMany({ data: selectedEvidence.map((evidence: any) => ({ utteranceId: utterance.id, segmentId: segment.id, podcastGenerationRunId: run.id, workspaceId: run.workspaceId, sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, memoryItemId: memoryItem.id, sourceBlockId: evidence.sourceBlockId, startOffset: evidence.startOffset, endOffset: evidence.endOffset, quoteText: evidence.quoteText, quoteHash: evidence.quoteHash })), skipDuplicates: true });
       }
     }
     await tx.episodeSegment.update({ where: { id: segment.id }, data: { status: "DRAFTED" } });
-  });
+  };
+  const generated = await invokeText(run, token, dependencies, "SEGMENT_DRAFTING", segment.id, input, () => dependencies.provider!.draftSegment(input), dialogueSchema.parse, "SEGMENT_DRAFT", persist);
+  if (!generated.consumed) await withOwnedPodcastTransaction(run.id, token, tx => persist(tx, generated.output));
   await dependencies.faultInjector?.("afterSegmentDraft", { podcastGenerationRunId: run.id, segmentId: segment.id });
 }
 
@@ -187,16 +203,15 @@ async function humanizeSegment(run: any, segment: any, token: string, dependenci
   const dialogue: DialogueOutput = { utterances: utterances.map((item) => ({ ordinal: item.ordinal, speakerHostId: item.speakerHostId, text: item.text, utteranceType: item.utteranceType, substantive: item.substantive, isDirectQuote: item.isDirectQuote, evidence: [...new Set(item.evidence.map((evidence) => evidence.memoryItemId))].map((memoryItemId) => ({ memoryItemId })) })) };
   await renewPodcastGenerationLease(run.id, token);
   const input = { metadata: metadata(run, "HUMANIZATION", PODCAST_PROVIDER_INPUT_BUDGETS.HUMANIZATION, segment.id), style: styleRecord(run.styleProfile), hosts: (await loadHosts(run)).map(persona), segment: segmentOutput(segment), dialogue };
-  const output = humanizationSchema.parse(await callProvider(run, "HUMANIZATION", input, () => dependencies.provider.humanizeSegment(input)));
-  if (output.utterances.length !== utterances.length || output.utterances.some((item, index) => item.ordinal !== utterances[index]!.ordinal)) throw new Error("PODCAST_HUMANIZATION_STRUCTURE_CHANGED");
-  for (let index = 0; index < utterances.length; index++) {
-    if (utterances[index]!.isDirectQuote && output.utterances[index]!.text !== utterances[index]!.text) throw new Error("PODCAST_HUMANIZATION_CHANGED_QUOTE");
-    if ((utterances[index]!.substantive || utterances[index]!.evidence.length > 0) && output.utterances[index]!.text !== utterances[index]!.text) throw new Error("PODCAST_HUMANIZATION_CHANGED_SUBSTANTIVE_CLAIM");
-  }
-  await withOwnedPodcastTransaction(run.id, token, async (tx) => {
-    for (let index = 0; index < utterances.length; index++) await tx.podcastUtterance.update({ where: { id: utterances[index]!.id }, data: { text: output.utterances[index]!.text, estimatedDurationMs: estimateSpokenDurationMs(output.utterances[index]!.text), humanizedAt: new Date() } });
+  const persist = async (tx: any, output: HumanizationOutput) => {
+    const currentUtterances = await tx.podcastUtterance.findMany({ where: { segmentId: segment.id }, include: { evidence: true }, orderBy: { ordinal: "asc" } });
+    if (output.utterances.length !== currentUtterances.length || output.utterances.some((item, index) => item.ordinal !== currentUtterances[index]!.ordinal)) throw new Error("PODCAST_HUMANIZATION_STRUCTURE_CHANGED");
+    for (let index = 0; index < currentUtterances.length; index++) { if (currentUtterances[index]!.isDirectQuote && output.utterances[index]!.text !== currentUtterances[index]!.text) throw new Error("PODCAST_HUMANIZATION_CHANGED_QUOTE"); if ((currentUtterances[index]!.substantive || currentUtterances[index]!.evidence.length > 0) && output.utterances[index]!.text !== currentUtterances[index]!.text) throw new Error("PODCAST_HUMANIZATION_CHANGED_SUBSTANTIVE_CLAIM"); }
+    for (let index = 0; index < currentUtterances.length; index++) await tx.podcastUtterance.update({ where: { id: currentUtterances[index]!.id }, data: { text: output.utterances[index]!.text, estimatedDurationMs: estimateSpokenDurationMs(output.utterances[index]!.text), humanizedAt: new Date() } });
     await tx.episodeSegment.update({ where: { id: segment.id }, data: { status: "HUMANIZED" } });
-  });
+  };
+  const generated = await invokeText(run, token, dependencies, "HUMANIZATION", segment.id, input, () => dependencies.provider!.humanizeSegment(input), humanizationSchema.parse, "SEGMENT_HUMANIZATION", persist);
+  if (!generated.consumed) await withOwnedPodcastTransaction(run.id, token, tx => persist(tx, generated.output));
   await dependencies.faultInjector?.("afterSegmentHumanization", { podcastGenerationRunId: run.id, segmentId: segment.id });
 }
 
@@ -275,10 +290,13 @@ async function runFinalization(run: any, token: string, dependencies: ProcessPod
 export async function processPodcastGenerationRun(runId: string, dependencies: ProcessPodcastDependencies) {
   let run = await loadRun(runId);
   if (run.status === "SUCCEEDED") return run;
-  if (dependencies.provider.identity.provider !== run.provider || dependencies.provider.identity.model !== run.model || (dependencies.provider.identity.modelVersion ?? "") !== run.modelVersionKey) throw new Error("PODCAST_PROVIDER_IDENTITY_MISMATCH");
   const token = randomUUID();
   if (!await claimPodcastGenerationRun(run.id, token)) { run = await loadRun(run.id); if (run.status === "SUCCEEDED") return run; throw new Error("PODCAST_GENERATION_ALREADY_CLAIMED"); }
   try {
+    const provider = dependencies.providerForRun ? await dependencies.providerForRun({ workspaceId: run.workspaceId, podcastGenerationRunId: run.id, provider: run.provider, model: run.model }) : dependencies.provider;
+    if (!provider) throw new Error("PODCAST_GENERATION_PROVIDER_NOT_CONFIGURED");
+    if (provider.identity.provider !== run.provider || provider.identity.model !== run.model || (provider.identity.modelVersion ?? "") !== run.modelVersionKey) throw new Error("PODCAST_PROVIDER_IDENTITY_MISMATCH");
+    dependencies = { ...dependencies, provider };
     while (true) {
       run = await loadRun(run.id);
       const stage = run.stage as DurableStage;

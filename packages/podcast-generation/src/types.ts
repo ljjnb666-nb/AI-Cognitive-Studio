@@ -57,6 +57,8 @@ export type PodcastContextItem = {
   tokenEstimate: number; sourceBlockEvidenceSpans: Array<{ sourceBlockId: string; startOffset: number; endOffset: number; quoteText?: string | null }>;
 };
 export type ProviderMetadata = { stage: string; episodeId: string; segmentId?: string; provider: string; model: string; correlationId: string; tokenBudget: number };
+export type PodcastTextReceipt = { operationKey: string; invocationId: string; snapshotId: string };
+export type PodcastTextConsumer = { consumerKind: string; consumerKey: string; consumerFingerprint: string };
 export interface PodcastGenerationProvider {
   identity: { provider: string; model: string; modelVersion?: string };
   plan(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; context: PodcastContextItem[] }): Promise<unknown>;
@@ -64,4 +66,8 @@ export interface PodcastGenerationProvider {
   outlineSegments(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; plan: EpisodePlanOutput; narrative: NarrativeOutput; availableMemoryIds: string[] }): Promise<unknown>;
   draftSegment(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; plan: EpisodePlanOutput; narrative: NarrativeOutput; segment: SegmentOutlineOutput["segments"][number]; context: PodcastContextItem[] }): Promise<unknown>;
   humanizeSegment(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; segment: SegmentOutlineOutput["segments"][number]; dialogue: DialogueOutput }): Promise<unknown>;
+}
+/** Production providers retain receipts by deterministic operation key, not response identity. */
+export interface DurablePodcastGenerationProvider extends PodcastGenerationProvider {
+  consumeTextResult<T>(operationKey: string, consumer: PodcastTextConsumer, materialize: (input: { tx: unknown; output: T }) => Promise<void>): Promise<"CONSUMED" | "ALREADY_CONSUMED">;
 }

@@ -5,5 +5,6 @@ export * from "./ownership.js";
 export * from "./services.js";
 export * from "./pipeline.js";
 export * from "./provider-budget.js";
+export * from "./gateway-provider.js";
 export * from "./audio.js";
 export * from "./audio-processor.js";

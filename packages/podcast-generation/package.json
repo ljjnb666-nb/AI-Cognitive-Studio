@@ -15,6 +15,7 @@
     "@ai-cognitive/book-intelligence": "workspace:*",
     "@ai-cognitive/db": "workspace:*",
     "@ai-cognitive/ingestion": "workspace:*",
+    "@ai-cognitive/provider-gateway": "workspace:*",
     "@ai-cognitive/shared": "workspace:*",
     "@ai-cognitive/storage": "workspace:*",
     "zod": "^4.1.12"

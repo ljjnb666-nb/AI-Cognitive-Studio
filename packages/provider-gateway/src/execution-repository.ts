@@ -24,6 +24,11 @@ const bounded = (value: string | undefined) => value && value.length <= 256 ? va
 const uniqueViolation = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2002";
 
 export class ProviderExecutionRepository {
+  /** Read-only idempotency lookup lets a consumer recover a pinned receipt before current routes are resolved. */
+  async findExistingTextInvocation(workspaceId: string, idempotencyKey: string): Promise<{ invocationId: string; snapshotId: string; providerKey: string; modelId: string } | undefined> {
+    const invocation = await this.db.providerInvocation.findUnique({ where: { workspaceId_idempotencyKey: { workspaceId, idempotencyKey } }, include: { snapshot: { select: { id: true, providerKey: true, modelId: true } }, textResult: { select: { id: true } } } });
+    return invocation?.textResult ? { invocationId: invocation.id, snapshotId: invocation.snapshot.id, providerKey: invocation.snapshot.providerKey, modelId: invocation.snapshot.modelId } : undefined;
+  }
   constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher & Partial<EmbeddingResultCipher & TextResultCipher>, private readonly testClock?: () => Date, private readonly workerId = `gateway-${randomUUID()}`, private readonly leaseMs = leaseMilliseconds) {}
   private async databaseNow(): Promise<Date> { if (this.testClock) return this.testClock(); const rows = await this.db.$queryRaw<{ now: Date }[]>`SELECT CURRENT_TIMESTAMP AS "now"`; return rows[0]?.now ?? (() => { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Database clock unavailable"); })(); }
   get leaseDurationMs(): number { return this.leaseMs; }
