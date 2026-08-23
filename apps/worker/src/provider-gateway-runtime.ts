@@ -5,9 +5,9 @@ import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
 
 type Manifest = { providers: ProviderDefinition[] };
-type BookGatewayRuntime = { gateway: ProviderGateway; repository: ProviderExecutionRepository; createAnalysisProvider(input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }): Promise<AnalysisProvider>; };
+export type BookGatewayRuntime = { gateway: ProviderGateway; repository: ProviderExecutionRepository; createAnalysisProvider(input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }): Promise<AnalysisProvider>; close(): Promise<void>; };
 /** Test-only seams keep production composition real while preventing external provider traffic. */
-export type BookProductionGatewayRuntimeOverrides = Pick<GatewayExecutionDependencies, "circuit" | "rate" | "concurrency" | "validateEndpoint"> & { adapterResolver?: ProviderAdapterResolver };
+export type BookProductionGatewayRuntimeOverrides = Pick<GatewayExecutionDependencies, "circuit" | "rate" | "concurrency" | "validateEndpoint"> & { adapterResolver?: ProviderAdapterResolver; redisFactory?: (url: string) => ReturnType<typeof createRedisConnection> };
 
 function parseManifest(source: string | undefined): Manifest {
   if (!source) throw new Error("PROVIDER_GATEWAY_MODEL_MANIFEST_MISSING");
@@ -50,9 +50,11 @@ class GatewayAnalysisProvider implements AnalysisProvider {
 export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, overrides: BookProductionGatewayRuntimeOverrides = {}): BookGatewayRuntime {
   const cipher = parseKeyring(source.PROVIDER_GATEWAY_KEYRING); if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
   const manifest = parseManifest(source.PROVIDER_GATEWAY_MODEL_MANIFEST), registry = new ProviderRegistry(); for (const provider of manifest.providers) registry.register(provider);
-  const store = new ProviderGatewayRepository(prisma, cipher), repository = new ProviderExecutionRepository(prisma, cipher), authorizer = new WorkspaceMembershipExecutionAuthorizer(prisma), redis = createRedisConnection(source.REDIS_URL ?? "");
-  const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: input => store.resolveWorkspaceRoute(input) }, { resolve: async () => undefined }, overrides.adapterResolver ?? createProviderAdapterResolver(new FetchProviderHttpTransport()), { authorize: (principal, request) => authorizer.authorizeExecution(principal, request.workspaceId), assertRouteUsable: snapshot => store.assertResolvedRouteUsable(snapshot.workspaceId, snapshot.connectionId, snapshot.credentialVersionId), assertBudget: () => undefined, validateEndpoint: overrides.validateEndpoint ?? (async snapshot => { if (!snapshot.endpoint) throw new Error("ROUTE_UNAVAILABLE"); await validateProviderEndpoint(snapshot.endpoint, { environment: source.NODE_ENV ?? "production", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } }); }), repository, rate: overrides.rate ?? new RedisRateLimiter(redis), concurrency: overrides.concurrency ?? new RedisConcurrencyLimiter(redis), circuit: overrides.circuit ?? new RedisCircuitBreaker(redis) });
-  const runtime: BookGatewayRuntime = { gateway, repository, createAnalysisProvider: async input => {
+  const store = new ProviderGatewayRepository(prisma, cipher), repository = new ProviderExecutionRepository(prisma, cipher), authorizer = new WorkspaceMembershipExecutionAuthorizer(prisma);
+  const redis = !overrides.rate || !overrides.concurrency || !overrides.circuit ? (overrides.redisFactory ?? createRedisConnection)(source.REDIS_URL ?? "") : undefined;
+  const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: input => store.resolveWorkspaceRoute(input) }, { resolve: async () => undefined }, overrides.adapterResolver ?? createProviderAdapterResolver(new FetchProviderHttpTransport()), { authorize: (principal, request) => authorizer.authorizeExecution(principal, request.workspaceId), assertRouteUsable: snapshot => store.assertResolvedRouteUsable(snapshot.workspaceId, snapshot.connectionId, snapshot.credentialVersionId), assertBudget: () => undefined, validateEndpoint: overrides.validateEndpoint ?? (async snapshot => { if (!snapshot.endpoint) throw new Error("ROUTE_UNAVAILABLE"); await validateProviderEndpoint(snapshot.endpoint, { environment: source.NODE_ENV ?? "production", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } }); }), repository, rate: overrides.rate ?? new RedisRateLimiter(redis!), concurrency: overrides.concurrency ?? new RedisConcurrencyLimiter(redis!), circuit: overrides.circuit ?? new RedisCircuitBreaker(redis!) });
+  let closePromise: Promise<void> | undefined;
+  const runtime: BookGatewayRuntime = { gateway, repository, close: () => closePromise ??= redis ? redis.quit().then(() => undefined) : Promise.resolve(), createAnalysisProvider: async input => {
     const slots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
     const snapshots = await Promise.all(slots.map(routeSlot => gateway.resolveSnapshot({
       workspaceId: input.workspaceId, routeSlot, correlationId: input.analysisRunId,
