@@ -2123,11 +2123,40 @@ model ShortVideoGenerationRun {
   renderArtifact         ShortVideoRenderArtifact?
   revision               ShortVideoRevision?
   evaluations            ShortVideoEvaluationRun[]
+  speechExecutionPin     ShortVideoSpeechExecutionPin?
 
   @@unique([shortVideoProjectId, generationIdentityHash])
   @@unique([id, workspaceId])
   @@unique([id, workspaceId, shortVideoProjectId])
   @@index([workspaceId, status, executionLeaseUntil])
+}
+
+/// Immutable, credential-free speech identity for every paid Short Video run.
+/// Route credentials remain in ProviderExecutionSnapshot; this row only prevents
+/// a route edit from mixing voices/providers within a single narration.
+model ShortVideoSpeechExecutionPin {
+  id                        String                  @id @default(cuid())
+  workspaceId               String
+  shortVideoGenerationRunId String                  @unique
+  provider                  String
+  model                     String
+  modelVersion              String?
+  providerVoiceId           String
+  voiceVersion              String?
+  speakingRate              Float
+  pitch                     Float
+  style                     String?
+  language                  String
+  outputFormat              String
+  voiceIdentityHash         String
+  audioVersion              String
+  pipelineVersion           String
+  createdAt                 DateTime                @default(now())
+  run                       ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([id, workspaceId])
+  @@unique([shortVideoGenerationRunId, workspaceId])
+  @@index([workspaceId, provider, model])
 }
 
 model ShortVideoGenerationSource {
@@ -2214,6 +2243,7 @@ model ShortVideoNarration {
   run                       ShortVideoGenerationRun       @relation(fields: [shortVideoGenerationRunId], references: [id], onDelete: Cascade)
   scene                     ShortVideoScene               @relation(fields: [sceneId, shortVideoGenerationRunId], references: [id, shortVideoGenerationRunId], onDelete: Cascade)
   evidence                  ShortVideoNarrationEvidence[]
+  audioArtifacts            ShortVideoAudioArtifact[]
 
   @@unique([shortVideoGenerationRunId, ordinal])
   @@unique([sceneId, shortVideoGenerationRunId])
@@ -2280,6 +2310,8 @@ model ShortVideoAudioArtifact {
   id                        String                  @id @default(cuid())
   shortVideoGenerationRunId String
   sceneId                   String?
+  narrationId               String?
+  unitOrdinal               Int?
   synthesisIdentityHash     String
   storageKey                String
   sha256                    String
@@ -2292,8 +2324,11 @@ model ShortVideoAudioArtifact {
   createdAt                 DateTime                @default(now())
   run                       ShortVideoGenerationRun @relation(fields: [shortVideoGenerationRunId], references: [id], onDelete: Cascade)
   scene                     ShortVideoScene?        @relation(fields: [sceneId, shortVideoGenerationRunId], references: [id, shortVideoGenerationRunId], onDelete: Cascade)
+  narration                 ShortVideoNarration?    @relation(fields: [narrationId, shortVideoGenerationRunId], references: [id, shortVideoGenerationRunId], onDelete: Cascade)
 
   @@unique([shortVideoGenerationRunId, synthesisIdentityHash])
+  @@unique([shortVideoGenerationRunId, narrationId, unitOrdinal])
+  @@index([shortVideoGenerationRunId, narrationId])
 }
 
 model ShortVideoRenderArtifact {

@@ -98,7 +98,7 @@ describe("Phase 8C 2A to 2B upgrade acceptance", () => {
       stage("UPGRADE_STAGE_07_DEPLOY_2B");
       await prisma("migrate deploy", databaseUrl);
       db = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
-      expect((await migrationCount(db))[0]?.count).toBe(33n);
+      expect((await migrationCount(db))[0]?.count).toBe(34n);
       const postUpgradeRepository = new ProviderExecutionRepository(db as never, cipher);
       expect(await postUpgradeRepository.recoverEmbeddingHandoff(workspaceId, invocationId)).toMatchObject({ kind: "RECOVERABLE", response: { vectors } });
       stage("UPGRADE_STAGE_08_CREATE_DOCUMENT_LINEAGE");

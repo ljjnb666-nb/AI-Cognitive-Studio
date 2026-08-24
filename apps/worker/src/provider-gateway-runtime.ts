@@ -1,5 +1,6 @@
 import { prisma } from "@ai-cognitive/db";
 import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, GatewayPodcastSpeechSynthesisProvider, type DurablePodcastGenerationProvider, type DurableSpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
+import { GatewayShortVideoProvider, GatewayShortVideoRetrievalEmbeddingProvider, GatewayShortVideoTtsProvider, type ShortVideoProvider, type ShortVideoTtsProvider } from "@ai-cognitive/short-video-generation";
 import { loadConsumedBookAnalysisEmbeddingIdentity, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type EmbeddingProvider, validateAnalysisResponse } from "@ai-cognitive/book-intelligence";
 import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, parseKeyring, validateProviderEndpoint, type GatewayExecutionDependencies, type GatewayRequest, type ModelCapability, type ProviderAdapterResolver, type ProviderDefinition, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
@@ -71,6 +72,7 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
 
 export type PodcastGatewayRuntime = { createProviderForRun(input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }): Promise<DurablePodcastGenerationProvider>; createEmbeddingProviderForRun(input: { workspaceId: string; podcastGenerationRunId: string }): Promise<EmbeddingProvider>; close(): Promise<void>; };
 export type PodcastAudioGatewayRuntime = { createSpeechProviderForRun(input: { workspaceId: string; audioGenerationRunId: string }): Promise<DurableSpeechSynthesisProvider>; close(): Promise<void>; };
+export type ShortVideoGatewayRuntime = { createTextProviderForRun(input: { workspaceId: string; shortVideoGenerationRunId: string; provider: string; model: string }): Promise<ShortVideoProvider>; createEmbeddingProviderForRun(input: { workspaceId: string; shortVideoGenerationRunId: string }): Promise<EmbeddingProvider>; createSpeechProviderForRun(input: { workspaceId: string; shortVideoGenerationRunId: string }): Promise<ShortVideoTtsProvider>; close(): Promise<void>; };
 /** Podcast TEXT and QUERY retrieval share the accepted workspace-BYOK gateway composition. */
 export function createPodcastProductionGatewayRuntime(source: NodeJS.ProcessEnv, overrides: BookProductionGatewayRuntimeOverrides = {}): PodcastGatewayRuntime {
   const base = createBookProductionGatewayRuntime(source, overrides);
@@ -108,5 +110,45 @@ export function createPodcastAudioProductionGatewayRuntime(source: NodeJS.Proces
     const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: run.workspaceId, userId: run.job.userId } } });
     if (!member) throw new Error("AUDIO_DURABLE_PRINCIPAL_MISSING");
     return new GatewayPodcastSpeechSynthesisProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId, audioGenerationRunId: run.id, provider: run.provider, model: run.model, modelVersion: run.modelVersion, pipelineVersion: run.pipelineVersion, speechPreparationVersion: run.speechPreparationVersion });
+  } };
+}
+
+/** PHASE8C_CHECKPOINT6_SHORT_VIDEO_GATEWAY_AUTONOMY: one shared BYOK Gateway runtime for text, query, and speech. */
+export function createShortVideoProductionGatewayRuntime(source: NodeJS.ProcessEnv, overrides: BookProductionGatewayRuntimeOverrides = {}): ShortVideoGatewayRuntime {
+  const base = createBookProductionGatewayRuntime(source, overrides);
+  const loadPrincipal = async (input: { workspaceId: string; shortVideoGenerationRunId: string }) => {
+    const run = await prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: input.shortVideoGenerationRunId }, include: { job: true, styleProfile: true, speechExecutionPin: true } });
+    if (run.workspaceId !== input.workspaceId || run.job.workspaceId !== run.workspaceId) throw new Error("SHORT_VIDEO_DURABLE_PRINCIPAL_WORKSPACE_MISMATCH");
+    if (!run.job.userId) throw new Error("SHORT_VIDEO_DURABLE_PRINCIPAL_MISSING");
+    const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: run.workspaceId, userId: run.job.userId } } });
+    if (!member) throw new Error("SHORT_VIDEO_DURABLE_PRINCIPAL_MISSING");
+    return run;
+  };
+  return { close: () => base.close(), createTextProviderForRun: async input => {
+    const run = await loadPrincipal(input);
+    return new GatewayShortVideoProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId!, runId: run.id, provider: run.provider, model: run.model, modelVersion: run.modelVersion, pipelineVersion: run.pipelineVersion, promptVersion: run.promptVersion });
+  }, createEmbeddingProviderForRun: async input => {
+    const run = await loadPrincipal(input);
+    const sources = await prisma.shortVideoGenerationSource.findMany({ where: { shortVideoGenerationRunId: run.id, workspaceId: run.workspaceId }, select: { analysisRunId: true } });
+    if (!sources.length) throw new Error("SHORT_VIDEO_RETRIEVAL_EMBEDDING_IDENTITY_MISSING");
+    let identities;
+    try { identities = await Promise.all(sources.map(item => loadConsumedBookAnalysisEmbeddingIdentity({ workspaceId: run.workspaceId, analysisRunId: item.analysisRunId, embeddingVersion: "gateway" }))); } catch { throw new Error("SHORT_VIDEO_RETRIEVAL_EMBEDDING_IDENTITY_MISSING"); }
+    const identity = identities[0]!;
+    if (identities.some(candidate => candidate.hash !== identity.hash || candidate.provider !== identity.provider || candidate.model !== identity.model || candidate.dimensions !== identity.dimensions || candidate.embeddingVersion !== identity.embeddingVersion || (candidate.modelVersion ?? "") !== (identity.modelVersion ?? ""))) throw new Error("SHORT_VIDEO_RETRIEVAL_SOURCE_EMBEDDING_INCOMPATIBLE");
+    return new GatewayShortVideoRetrievalEmbeddingProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId!, runId: run.id, pipelineVersion: run.pipelineVersion, identity });
+  }, createSpeechProviderForRun: async input => {
+    const run = await loadPrincipal(input);
+    const route = await prisma.providerRouteBinding.findUnique({ where: { workspaceId_routeSlot: { workspaceId: run.workspaceId, routeSlot: "SHORT_VIDEO_TTS" } }, include: { connection: true } });
+    const configuration = (route?.configuration ?? {}) as Record<string, unknown>;
+    const providerVoiceId = typeof configuration.providerVoiceId === "string" && configuration.providerVoiceId.trim() ? configuration.providerVoiceId : undefined;
+    const voiceVersion = typeof configuration.voiceVersion === "string" && configuration.voiceVersion.trim() ? configuration.voiceVersion : undefined;
+    const outputFormat = typeof configuration.outputFormat === "string" && configuration.outputFormat.trim() ? configuration.outputFormat : undefined;
+    const speakingRate = typeof configuration.speakingRate === "number" && Number.isFinite(configuration.speakingRate) ? configuration.speakingRate : undefined;
+    const pitch = typeof configuration.pitch === "number" && Number.isFinite(configuration.pitch) ? configuration.pitch : undefined;
+    if (!route || !providerVoiceId || !voiceVersion || !outputFormat || speakingRate === undefined || pitch === undefined) throw new Error("SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED");
+    const routeIdentity = { provider: route.connection.providerKey, model: route.modelId, modelVersion: typeof configuration.modelVersion === "string" ? configuration.modelVersion : null, providerVoiceId, voiceVersion, speakingRate, pitch, style: typeof configuration.style === "string" ? configuration.style : null, language: run.styleProfile.language, outputFormat };
+    const pin = run.speechExecutionPin ?? await prisma.shortVideoSpeechExecutionPin.create({ data: { workspaceId: run.workspaceId, shortVideoGenerationRunId: run.id, ...routeIdentity, voiceIdentityHash: sha256(JSON.stringify(routeIdentity)), audioVersion: run.audioVersion, pipelineVersion: run.pipelineVersion } }).catch(async error => { if ((error as { code?: string }).code !== "P2002") throw error; return prisma.shortVideoSpeechExecutionPin.findUniqueOrThrow({ where: { shortVideoGenerationRunId: run.id } }); });
+    if (pin.provider !== routeIdentity.provider || pin.model !== routeIdentity.model || (pin.modelVersion ?? "") !== (routeIdentity.modelVersion ?? "") || pin.providerVoiceId !== routeIdentity.providerVoiceId || (pin.voiceVersion ?? "") !== routeIdentity.voiceVersion || pin.speakingRate !== routeIdentity.speakingRate || pin.pitch !== routeIdentity.pitch || (pin.style ?? "") !== (routeIdentity.style ?? "") || pin.language !== routeIdentity.language || pin.outputFormat !== routeIdentity.outputFormat) throw new Error("SHORT_VIDEO_TTS_ROUTE_IDENTITY_MISMATCH");
+    return new GatewayShortVideoTtsProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId!, runId: run.id, pipelineVersion: run.pipelineVersion, pin });
   } };
 }

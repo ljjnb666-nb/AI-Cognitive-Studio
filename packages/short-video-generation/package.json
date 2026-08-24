@@ -9,12 +9,14 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
     "test:unit": "vitest run tests/renderer.test.ts tests/duration.test.ts tests/process-diagnostics.test.ts",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:phase8c:short-video-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-gateway.integration.test.ts"
   },
   "dependencies": {
     "@ai-cognitive/book-intelligence": "workspace:*",
     "@ai-cognitive/db": "workspace:*",
     "@ai-cognitive/ingestion": "workspace:*",
+    "@ai-cognitive/provider-gateway": "workspace:*",
     "@ai-cognitive/storage": "workspace:*",
     "zod": "^4.1.12"
   },
