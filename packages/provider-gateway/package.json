@@ -14,6 +14,7 @@
     "test:phase8b": "vitest run tests/phase8b.test.ts tests/phase8b-gateway.integration.test.ts tests/phase8b-evidence.integration.test.ts",
     "test:phase8c": "vitest run tests/phase8c.test.ts tests/phase8c-gateway.integration.test.ts tests/phase8c-handoff.integration.test.ts tests/phase8c-consumption.integration.test.ts tests/phase8c-upgrade.integration.test.ts tests/phase8c-text-handoff.integration.test.ts"
     ,"test:phase8c:podcast-query": "vitest run tests/phase8c-podcast-query-recovery.integration.test.ts"
+    ,"test:phase8c:speech": "vitest run tests/phase8c-speech.unit.test.ts tests/phase8c-speech.integration.test.ts"
   },
   "dependencies": {
     "@ai-cognitive/db": "workspace:*",

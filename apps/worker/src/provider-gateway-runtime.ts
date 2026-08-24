@@ -1,5 +1,5 @@
 import { prisma } from "@ai-cognitive/db";
-import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, type DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
+import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, GatewayPodcastSpeechSynthesisProvider, type DurablePodcastGenerationProvider, type DurableSpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
 import { loadConsumedBookAnalysisEmbeddingIdentity, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type EmbeddingProvider, validateAnalysisResponse } from "@ai-cognitive/book-intelligence";
 import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, parseKeyring, validateProviderEndpoint, type GatewayExecutionDependencies, type GatewayRequest, type ModelCapability, type ProviderAdapterResolver, type ProviderDefinition, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
@@ -70,6 +70,7 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
 }
 
 export type PodcastGatewayRuntime = { createProviderForRun(input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }): Promise<DurablePodcastGenerationProvider>; createEmbeddingProviderForRun(input: { workspaceId: string; podcastGenerationRunId: string }): Promise<EmbeddingProvider>; close(): Promise<void>; };
+export type PodcastAudioGatewayRuntime = { createSpeechProviderForRun(input: { workspaceId: string; audioGenerationRunId: string }): Promise<DurableSpeechSynthesisProvider>; close(): Promise<void>; };
 /** Podcast TEXT and QUERY retrieval share the accepted workspace-BYOK gateway composition. */
 export function createPodcastProductionGatewayRuntime(source: NodeJS.ProcessEnv, overrides: BookProductionGatewayRuntimeOverrides = {}): PodcastGatewayRuntime {
   const base = createBookProductionGatewayRuntime(source, overrides);
@@ -94,5 +95,18 @@ export function createPodcastProductionGatewayRuntime(source: NodeJS.ProcessEnv,
     const identity = identities[0]!;
     if (identities.some(candidate => candidate.hash !== identity.hash || candidate.provider !== identity.provider || candidate.model !== identity.model || candidate.dimensions !== identity.dimensions || candidate.embeddingVersion !== identity.embeddingVersion || (candidate.modelVersion ?? "") !== (identity.modelVersion ?? ""))) throw new Error("PODCAST_RETRIEVAL_SOURCE_EMBEDDING_INCOMPATIBLE");
     return new GatewayPodcastRetrievalEmbeddingProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId!, podcastGenerationRunId: run.id, pipelineVersion: run.pipelineVersion, identity });
+  } };
+}
+
+/** PHASE8C_CHECKPOINT5_PODCAST_SPEECH_GATEWAY_AUTONOMY: durable job principal and PODCAST_TTS only. */
+export function createPodcastAudioProductionGatewayRuntime(source: NodeJS.ProcessEnv, overrides: BookProductionGatewayRuntimeOverrides = {}): PodcastAudioGatewayRuntime {
+  const base = createBookProductionGatewayRuntime(source, overrides);
+  return { close: () => base.close(), createSpeechProviderForRun: async input => {
+    const run = await prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: input.audioGenerationRunId }, include: { job: true } });
+    if (run.workspaceId !== input.workspaceId || run.job.workspaceId !== run.workspaceId) throw new Error("AUDIO_DURABLE_PRINCIPAL_WORKSPACE_MISMATCH");
+    if (!run.job.userId) throw new Error("AUDIO_DURABLE_PRINCIPAL_MISSING");
+    const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: run.workspaceId, userId: run.job.userId } } });
+    if (!member) throw new Error("AUDIO_DURABLE_PRINCIPAL_MISSING");
+    return new GatewayPodcastSpeechSynthesisProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId, audioGenerationRunId: run.id, provider: run.provider, model: run.model, modelVersion: run.modelVersion, pipelineVersion: run.pipelineVersion, speechPreparationVersion: run.speechPreparationVersion });
   } };
 }

@@ -6,6 +6,7 @@ export type ProviderProfile = { providerKey: "openai" | "anthropic" | "gemini" |
 export const builtInProviderProfiles: readonly ProviderProfile[] = [
   { providerKey: "openai", family: "TEXT_GENERATION", protocol: "OPENAI_RESPONSES", endpoint: "https://api.openai.com/v1/responses", authScheme: "BEARER" },
   { providerKey: "openai", family: "EMBEDDING", protocol: "OPENAI_EMBEDDINGS", endpoint: "https://api.openai.com/v1/embeddings", authScheme: "BEARER" },
+  { providerKey: "openai", family: "SPEECH", protocol: "CUSTOM_SPEECH", endpoint: "https://api.openai.com/v1/audio/speech", authScheme: "BEARER" },
   { providerKey: "anthropic", family: "TEXT_GENERATION", protocol: "ANTHROPIC_COMPATIBLE", endpoint: "https://api.anthropic.com/v1/messages", authScheme: "X_API_KEY", anthropicVersion: "2023-06-01" },
   { providerKey: "gemini", family: "TEXT_GENERATION", protocol: "GEMINI_NATIVE", endpoint: "https://generativelanguage.googleapis.com/v1beta", authScheme: "X_GOOG_API_KEY" },
   { providerKey: "gemini", family: "EMBEDDING", protocol: "GEMINI_EMBEDDINGS", endpoint: "https://generativelanguage.googleapis.com/v1beta", authScheme: "X_GOOG_API_KEY" },

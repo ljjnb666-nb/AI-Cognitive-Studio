@@ -365,6 +365,7 @@ model Workspace {
   providerInvocationAttempts ProviderInvocationAttempt[]
   providerEmbeddingResults   ProviderEmbeddingResult[]
   providerTextResults        ProviderTextResult[]
+  providerSpeechResults      ProviderSpeechResult[]
   providerUsageEvents        ProviderUsageEvent[]
   providerAuditEvents        ProviderAuditEvent[]
   defaultForUsers            User[]                      @relation("DefaultWorkspace")
@@ -459,6 +460,7 @@ model ProviderExecutionSnapshot {
   invocations         ProviderInvocation[]
   embeddingResults    ProviderEmbeddingResult[]
   textResults         ProviderTextResult[]
+  speechResults       ProviderSpeechResult[]
 
   @@unique([id, workspaceId])
   @@index([workspaceId, routeSlot, createdAt])
@@ -491,6 +493,7 @@ model ProviderInvocation {
   attempts            ProviderInvocationAttempt[]
   embeddingResult     ProviderEmbeddingResult?
   textResult          ProviderTextResult?
+  speechResult        ProviderSpeechResult?
 
   @@unique([workspaceId, idempotencyKey])
   @@unique([id, workspaceId])
@@ -516,6 +519,7 @@ model ProviderInvocationAttempt {
   usageEvents     ProviderUsageEvent[]
   embeddingResult ProviderEmbeddingResult?
   textResult      ProviderTextResult?
+  speechResult    ProviderSpeechResult?
 
   @@unique([id, invocationId, workspaceId])
   @@unique([invocationId, attemptNumber])
@@ -563,6 +567,42 @@ model ProviderTextResult {
   iv                  String?
   authTag             String?
   keyVersion          String?
+  createdAt           DateTime                  @default(now())
+  consumedAt          DateTime?
+  purgedAt            DateTime?
+  consumerKind        String?
+  consumerKey         String?
+  consumerFingerprint String?
+  workspace           Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invocation          ProviderInvocation        @relation(fields: [invocationId, workspaceId, snapshotId], references: [id, workspaceId, snapshotId], onDelete: Cascade)
+  attempt             ProviderInvocationAttempt @relation(fields: [attemptId, invocationId, workspaceId], references: [id, invocationId, workspaceId], onDelete: Cascade)
+  snapshot            ProviderExecutionSnapshot @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([id, workspaceId])
+  @@unique([invocationId, workspaceId])
+  @@unique([invocationId, workspaceId, snapshotId])
+  @@unique([attemptId, invocationId, workspaceId])
+  @@index([workspaceId, invocationId])
+  @@index([workspaceId, consumedAt])
+}
+
+model ProviderSpeechResult {
+  id                  String                    @id @default(cuid())
+  workspaceId         String
+  invocationId        String                    @unique
+  attemptId           String                    @unique
+  snapshotId          String
+  ciphertext          String?
+  iv                  String?
+  authTag             String?
+  keyVersion          String?
+  byteLength          Int
+  sha256              String
+  mediaType           String
+  format              String
+  sampleRate          Int
+  channels            Int
+  durationMs          Int?
   createdAt           DateTime                  @default(now())
   consumedAt          DateTime?
   purgedAt            DateTime?

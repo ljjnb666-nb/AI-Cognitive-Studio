@@ -12,6 +12,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:phase8c:podcast-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-gateway.integration.test.ts tests/phase8c-podcast-gateway-durability.integration.test.ts tests/phase8c-podcast-gateway-replay.integration.test.ts",
     "test:phase8c:podcast-autonomy": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-retrieval-gateway.integration.test.ts"
+    ,"test:phase8c:podcast-speech": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-speech-gateway.integration.test.ts tests/audio-durability.integration.test.ts tests/audio-lineage.integration.test.ts"
   },
   "dependencies": {
     "@ai-cognitive/book-intelligence": "workspace:*",

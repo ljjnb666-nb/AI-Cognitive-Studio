@@ -6,6 +6,7 @@ export * from "./services.js";
 export * from "./pipeline.js";
 export * from "./provider-budget.js";
 export * from "./gateway-provider.js";
+export * from "./gateway-speech-provider.js";
 export * from "./consumer-fingerprint.js";
 export * from "./destination-projection.js";
 export * from "./audio.js";
