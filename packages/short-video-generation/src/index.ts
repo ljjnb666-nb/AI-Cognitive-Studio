@@ -445,16 +445,45 @@ function textDestinationFingerprint(run: any, stageName: "PLAN" | "SCENES", dest
 function planDestination(plan: any) {
   return { centralQuestion: plan.centralQuestion, viewerAssumption: plan.viewerAssumption, coreInsight: plan.coreInsight, cognitiveShift: plan.cognitiveShift, hook: plan.hook, supportingIdeas: plan.supportingIdeas, evidenceStrategy: plan.evidenceStrategy, ending: plan.ending, targetDurationSeconds: plan.targetDurationSeconds, tone: plan.tone };
 }
-function sceneDestination(scenes: z.infer<typeof shortVideoScenesSchema>["scenes"]) {
+function compareCanonicalValue(left: string | number | null, right: string | number | null) {
+  if (left === right) return 0;
+  if (left === null) return -1;
+  if (right === null) return 1;
+  return left < right ? -1 : 1;
+}
+function canonicalSceneEvidence(evidence: Array<{ sourceDocumentId: string; extractionId: string; chunkSetId: string; analysisRunId: string; sourceBlockId: string; startOffset: number; endOffset: number; quoteText?: string | null; quoteHash?: string | null }>) {
+  return evidence.map((item) => ({
+    sourceDocumentId: item.sourceDocumentId,
+    extractionId: item.extractionId,
+    chunkSetId: item.chunkSetId,
+    analysisRunId: item.analysisRunId,
+    sourceBlockId: item.sourceBlockId,
+    startOffset: item.startOffset,
+    endOffset: item.endOffset,
+    quoteText: item.quoteText ?? null,
+    quoteHash: item.quoteHash ?? null,
+  })).sort((left, right) => {
+    for (const key of ["sourceDocumentId", "extractionId", "chunkSetId", "analysisRunId", "sourceBlockId", "startOffset", "endOffset", "quoteText", "quoteHash"] as const) {
+      const comparison = compareCanonicalValue(left[key], right[key]);
+      if (comparison) return comparison;
+    }
+    return 0;
+  });
+}
+function sceneDestination(scenes: z.infer<typeof shortVideoScenesSchema>["scenes"], evidenceSources: Map<string, any>) {
   let offset = 0;
-  return scenes.map((scene) => { const destination = { ordinal: scene.ordinal, sceneType: scene.sceneType, targetStartMs: offset, targetEndMs: offset + scene.targetDurationMs, targetDurationMs: scene.targetDurationMs, narrationText: scene.narrationText, narrationTextHash: sha256(scene.narrationText), visualIntent: scene.visualIntent, primaryText: scene.primaryText, secondaryText: scene.secondaryText ?? null, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent, evidence: scene.evidence.map((item) => ({ ...item, quoteText: item.quoteText ?? null, quoteHash: item.quoteHash ?? null })) }; offset += scene.targetDurationMs; return destination; });
+  return scenes.map((scene) => { const destination = { ordinal: scene.ordinal, sceneType: scene.sceneType, targetStartMs: offset, targetEndMs: offset + scene.targetDurationMs, targetDurationMs: scene.targetDurationMs, narrationText: scene.narrationText, narrationTextHash: sha256(scene.narrationText), visualIntent: scene.visualIntent, primaryText: scene.primaryText, secondaryText: scene.secondaryText ?? null, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent, evidence: canonicalSceneEvidence(scene.evidence.map((item) => {
+    const source = evidenceSources.get(item.sourceBlockId);
+    if (!source) throw new Error("SHORT_VIDEO_EVIDENCE_LINEAGE_INVALID");
+    return { ...source, ...item };
+  })) }; offset += scene.targetDurationMs; return destination; });
 }
 async function persistedSceneDestination(run: any) {
-  const evidence = await prisma.shortVideoNarrationEvidence.findMany({ where: { shortVideoGenerationRunId: run.id }, orderBy: [{ sceneId: "asc" }, { sourceBlockId: "asc" }, { startOffset: "asc" }, { endOffset: "asc" }] });
+  const evidence = await prisma.shortVideoNarrationEvidence.findMany({ where: { shortVideoGenerationRunId: run.id } });
   const narrationByScene = new Map<string, any>(run.narration.map((item: any) => [item.sceneId, item]));
   return run.scenes.map((scene: any) => {
     const narration = narrationByScene.get(scene.id);
-    const value = { ordinal: scene.ordinal, sceneType: scene.sceneType, targetStartMs: scene.targetStartMs, targetEndMs: scene.targetEndMs, targetDurationMs: scene.targetDurationMs, narrationText: scene.narrationText, narrationTextHash: narration?.textHash, visualIntent: scene.visualIntent, primaryText: scene.primaryText, secondaryText: scene.secondaryText ?? null, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent, evidence: evidence.filter((item) => item.sceneId === scene.id).map((item) => ({ sourceBlockId: item.sourceBlockId, startOffset: item.startOffset, endOffset: item.endOffset, quoteText: item.quoteText ?? null, quoteHash: item.quoteHash ?? null })) };
+    const value = { ordinal: scene.ordinal, sceneType: scene.sceneType, targetStartMs: scene.targetStartMs, targetEndMs: scene.targetEndMs, targetDurationMs: scene.targetDurationMs, narrationText: scene.narrationText, narrationTextHash: narration?.textHash, visualIntent: scene.visualIntent, primaryText: scene.primaryText, secondaryText: scene.secondaryText ?? null, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent, evidence: canonicalSceneEvidence(evidence.filter((item) => item.sceneId === scene.id)) };
     return value;
   });
 }
@@ -815,7 +844,7 @@ export async function processShortVideoGenerationRun(
               offset += scene.targetDurationMs;
             }
           };
-          const consumer = { consumerKind: "SHORT_VIDEO_SCENE_GRAPH", consumerKey: run.id, consumerFingerprint: textDestinationFingerprint(run, "SCENES", sceneDestination(scenes)) };
+          const consumer = { consumerKind: "SHORT_VIDEO_SCENE_GRAPH", consumerKey: run.id, consumerFingerprint: textDestinationFingerprint(run, "SCENES", sceneDestination(scenes, evidenceSources)) };
           if (isDurableTextProvider(provider)) await provider.consumeTextResult<z.infer<typeof shortVideoScenesSchema>>(operation, consumer, async ({ tx, output }) => {
             const exact = shortVideoScenesSchema.parse(output).scenes;
             assertScenes(exact, run.styleProfile.targetDurationSeconds * 1000);
