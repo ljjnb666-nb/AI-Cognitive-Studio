@@ -95,6 +95,8 @@ jobs:
         run: pnpm test:phase8c:podcast-autonomy
       - name: Phase 8C Podcast speech Gateway autonomy (no external AI calls)
         run: pnpm test:phase8c:podcast-speech-gateway
+      - name: Phase 8C Short Video Gateway autonomy (no external AI calls)
+        run: pnpm test:phase8c:short-video-gateway
       - name: Phase 1 real infrastructure ingestion
         run: pnpm test:phase1:e2e
       - name: Phase 2 book intelligence evaluation

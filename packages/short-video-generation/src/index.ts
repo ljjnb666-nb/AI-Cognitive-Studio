@@ -30,6 +30,7 @@ import {
 } from "@ai-cognitive/book-intelligence";
 import { dispatchPendingOutbox } from "@ai-cognitive/ingestion";
 import type { StorageProvider } from "@ai-cognitive/storage";
+export * from "./gateway-provider.js";
 
 const execute = promisify(execFile);
 const stable = (value: unknown) =>
@@ -117,8 +118,21 @@ export type ShortVideoTtsProvider = {
   synthesize(input: {
     text: string;
     language: string;
+    /** Stable paid-operation identity; direct test providers may ignore it. */
+    operationKey?: string;
+    semanticIdentity?: unknown;
   }): Promise<{ bytes: Uint8Array; mediaType: string; durationMs: number }>;
 };
+type DurableShortVideoTextProvider = ShortVideoProvider & {
+  consumeTextResult<T>(operation: string, consumer: { consumerKind: string; consumerKey: string; consumerFingerprint: string }, materialize: (input: { tx: unknown; output: T }) => Promise<void>): Promise<"CONSUMED" | "ALREADY_CONSUMED">;
+  verifyConsumedTextResult(operation: string, consumer: { consumerKind: string; consumerKey: string; consumerFingerprint: string }): Promise<"NOT_CONSUMED" | "EXACT" | "RECONCILIATION_REQUIRED">;
+};
+const isDurableTextProvider = (value: ShortVideoProvider): value is DurableShortVideoTextProvider => typeof (value as Partial<DurableShortVideoTextProvider>).consumeTextResult === "function" && typeof (value as Partial<DurableShortVideoTextProvider>).verifyConsumedTextResult === "function";
+type DurableShortVideoTtsProvider = ShortVideoTtsProvider & {
+  consumeSpeechResult(operation: string, consumer: { consumerKind: string; consumerKey: string; consumerFingerprint: string }, materialize: (tx: unknown) => Promise<void>): Promise<"CONSUMED" | "ALREADY_CONSUMED">;
+  verifyConsumedSpeechResult(operation: string, consumer: { consumerKind: string; consumerKey: string; consumerFingerprint: string }): Promise<"NOT_CONSUMED" | "EXACT" | "RECONCILIATION_REQUIRED">;
+};
+const isDurableTtsProvider = (value: ShortVideoTtsProvider): value is DurableShortVideoTtsProvider => typeof (value as Partial<DurableShortVideoTtsProvider>).consumeSpeechResult === "function" && typeof (value as Partial<DurableShortVideoTtsProvider>).verifyConsumedSpeechResult === "function";
 export type TrustedRequestContext = { workspaceId: string; userId: string };
 
 async function membership(context: TrustedRequestContext) {
@@ -421,6 +435,32 @@ async function owned<T>(
     return work(tx);
   });
 }
+async function assertOwnedInTransaction(tx: any, runId: string, token: string) {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "ShortVideoGenerationRun" WHERE "id"=${runId} AND "executionClaimToken"=${token} AND "executionLeaseUntil">NOW() AND "status"='RUNNING'::"ShortVideoGenerationStatus" FOR UPDATE`;
+  if (!rows.length) throw new Error("SHORT_VIDEO_OWNERSHIP_LOST");
+}
+function textDestinationFingerprint(run: any, stageName: "PLAN" | "SCENES", destination: unknown) {
+  return sha256(stable({ workspaceId: run.workspaceId, runId: run.id, shortVideoProjectId: run.shortVideoProjectId, styleProfileId: run.styleProfileId, styleProfileVersion: run.styleProfile.version, provider: run.provider, model: run.model, modelVersion: run.modelVersionKey, pipelineVersion: run.pipelineVersion, promptVersion: run.promptVersion, retrievalVersion: run.retrievalVersion, scenePlannerVersion: run.scenePlannerVersion, stageName, destination }));
+}
+function planDestination(plan: any) {
+  return { centralQuestion: plan.centralQuestion, viewerAssumption: plan.viewerAssumption, coreInsight: plan.coreInsight, cognitiveShift: plan.cognitiveShift, hook: plan.hook, supportingIdeas: plan.supportingIdeas, evidenceStrategy: plan.evidenceStrategy, ending: plan.ending, targetDurationSeconds: plan.targetDurationSeconds, tone: plan.tone };
+}
+function sceneDestination(scenes: z.infer<typeof shortVideoScenesSchema>["scenes"]) {
+  let offset = 0;
+  return scenes.map((scene) => { const destination = { ordinal: scene.ordinal, sceneType: scene.sceneType, targetStartMs: offset, targetEndMs: offset + scene.targetDurationMs, targetDurationMs: scene.targetDurationMs, narrationText: scene.narrationText, narrationTextHash: sha256(scene.narrationText), visualIntent: scene.visualIntent, primaryText: scene.primaryText, secondaryText: scene.secondaryText ?? null, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent, evidence: scene.evidence.map((item) => ({ ...item, quoteText: item.quoteText ?? null, quoteHash: item.quoteHash ?? null })) }; offset += scene.targetDurationMs; return destination; });
+}
+async function persistedSceneDestination(run: any) {
+  const evidence = await prisma.shortVideoNarrationEvidence.findMany({ where: { shortVideoGenerationRunId: run.id }, orderBy: [{ sceneId: "asc" }, { sourceBlockId: "asc" }, { startOffset: "asc" }, { endOffset: "asc" }] });
+  const narrationByScene = new Map<string, any>(run.narration.map((item: any) => [item.sceneId, item]));
+  return run.scenes.map((scene: any) => {
+    const narration = narrationByScene.get(scene.id);
+    const value = { ordinal: scene.ordinal, sceneType: scene.sceneType, targetStartMs: scene.targetStartMs, targetEndMs: scene.targetEndMs, targetDurationMs: scene.targetDurationMs, narrationText: scene.narrationText, narrationTextHash: narration?.textHash, visualIntent: scene.visualIntent, primaryText: scene.primaryText, secondaryText: scene.secondaryText ?? null, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent, evidence: evidence.filter((item) => item.sceneId === scene.id).map((item) => ({ sourceBlockId: item.sourceBlockId, startOffset: item.startOffset, endOffset: item.endOffset, quoteText: item.quoteText ?? null, quoteHash: item.quoteHash ?? null })) };
+    return value;
+  });
+}
+function audioDestinationFingerprint(run: any, narration: any, unitOrdinal: number, artifact: { synthesisIdentityHash: string; storageKey: string; sha256: string; sizeBytes: number; mediaType: string; durationMs: number; provider: string; model: string; voiceIdentity: string }) {
+  return sha256(stable({ workspaceId: run.workspaceId, runId: run.id, shortVideoProjectId: run.shortVideoProjectId, sceneId: narration.sceneId, narrationId: narration.id, narrationTextHash: narration.textHash, unitOrdinal, synthesisIdentityHash: artifact.synthesisIdentityHash, storageKey: artifact.storageKey, sha256: artifact.sha256, sizeBytes: artifact.sizeBytes, mediaType: artifact.mediaType, durationMs: artifact.durationMs, provider: artifact.provider, model: artifact.model, voiceIdentity: artifact.voiceIdentity, audioVersion: run.audioVersion, pipelineVersion: run.pipelineVersion }));
+}
 async function load(runId: string) {
   return prisma.shortVideoGenerationRun.findUniqueOrThrow({
     where: { id: runId },
@@ -476,20 +516,43 @@ async function synthesizeNarration(
           dependencies.tts.identity,
         ]),
       );
-      if (
-        await prisma.shortVideoAudioArtifact.findUnique({
+      const operationKey = `short-video-tts:${run.id}:${narration.id}:${unitOrdinal}`;
+      const existing = await prisma.shortVideoAudioArtifact.findUnique({
           where: {
             shortVideoGenerationRunId_synthesisIdentityHash: {
               shortVideoGenerationRunId: run.id,
               synthesisIdentityHash: identity,
             },
           },
-        })
-      )
+        });
+      if (existing) {
+        if (isDurableTtsProvider(dependencies.tts)) {
+          const consumer = { consumerKind: "SHORT_VIDEO_AUDIO_ARTIFACT", consumerKey: `${run.id}:${narration.id}:${unitOrdinal}`, consumerFingerprint: audioDestinationFingerprint(run, narration, unitOrdinal, existing) };
+          const verified = await dependencies.tts.verifyConsumedSpeechResult(operationKey, consumer);
+          if (verified !== "EXACT") throw new Error("SHORT_VIDEO_SPEECH_RECONCILIATION_REQUIRED");
+          const stored = await dependencies.storage.getObjectBytes(existing.storageKey);
+          if (sha256(stored) !== existing.sha256) throw new Error("SHORT_VIDEO_SPEECH_RECONCILIATION_REQUIRED");
+        }
         continue;
+      }
       const response = await dependencies.tts.synthesize({
         text: unit,
         language: narration.language,
+        operationKey,
+        semanticIdentity: {
+          workspaceId: run.workspaceId,
+          runId: run.id,
+          shortVideoProjectId: run.shortVideoProjectId,
+          sceneId: narration.sceneId,
+          narrationId: narration.id,
+          narrationTextHash: narration.textHash,
+          unitOrdinal,
+          unitText: unit,
+          unitTextHash: sha256(unit),
+          language: narration.language,
+          audioVersion: run.audioVersion,
+          pipelineVersion: run.pipelineVersion,
+        },
       });
       if (
         !response.bytes.length ||
@@ -505,29 +568,21 @@ async function synthesizeNarration(
         body: response.bytes,
         contentType: response.mediaType,
       });
+      const stored = await dependencies.storage.getObjectBytes(key);
+      if (sha256(stored) !== hash) throw new Error("SHORT_VIDEO_SPEECH_STORAGE_HASH_MISMATCH");
       await dependencies.faultInjector?.("afterNarrationObjectUpload");
-      await owned(run.id, token, (tx) =>
-        tx.shortVideoAudioArtifact.create({
-          data: {
-            shortVideoGenerationRunId: run.id,
-            sceneId: narration.sceneId,
-            synthesisIdentityHash: identity,
-            storageKey: key,
-            sha256: hash,
-            sizeBytes: response.bytes.length,
-            mediaType: response.mediaType,
-            durationMs: response.durationMs,
-            provider: dependencies.tts.identity.provider,
-            model: dependencies.tts.identity.model,
-            voiceIdentity: dependencies.tts.identity.voiceIdentity,
-          },
-        }),
-      );
+      const artifact = { synthesisIdentityHash: identity, storageKey: key, sha256: hash, sizeBytes: response.bytes.length, mediaType: response.mediaType, durationMs: response.durationMs, provider: dependencies.tts.identity.provider, model: dependencies.tts.identity.model, voiceIdentity: dependencies.tts.identity.voiceIdentity };
+      const consumer = { consumerKind: "SHORT_VIDEO_AUDIO_ARTIFACT", consumerKey: `${run.id}:${narration.id}:${unitOrdinal}`, consumerFingerprint: audioDestinationFingerprint(run, narration, unitOrdinal, artifact) };
+      if (isDurableTtsProvider(dependencies.tts)) await dependencies.tts.consumeSpeechResult(operationKey, consumer, async (tx) => {
+        await assertOwnedInTransaction(tx, run.id, token);
+        await (tx as any).shortVideoAudioArtifact.create({ data: { shortVideoGenerationRunId: run.id, sceneId: narration.sceneId, narrationId: narration.id, unitOrdinal, ...artifact } });
+      });
+      else await owned(run.id, token, (tx) => tx.shortVideoAudioArtifact.create({ data: { shortVideoGenerationRunId: run.id, sceneId: narration.sceneId, narrationId: narration.id, unitOrdinal, ...artifact } }));
       await dependencies.faultInjector?.("afterNarrationArtifactPersist");
     }
   }
 }
-async function context(run: any, embeddingProvider: EmbeddingProvider) {
+async function context(run: any, embeddingProvider: EmbeddingProvider, stageName = "CONTEXT_RETRIEVAL") {
   const result: any[] = [];
   for (const source of run.sources) {
     const pack = await buildBookContextForIntelligence({
@@ -541,6 +596,7 @@ async function context(run: any, embeddingProvider: EmbeddingProvider) {
         SHORT_VIDEO_PROVIDER_INPUT_BUDGET / run.sources.length,
       ),
       embeddingProvider,
+      operationKey: `short-video-query:${run.id}:${stageName}:${source.sourceDocumentId}`,
     });
     if (pack.lineage.analysisRunId !== source.analysisRunId)
       throw new Error("SHORT_VIDEO_PINNED_LINEAGE_MISMATCH");
@@ -611,9 +667,13 @@ function assertScenes(
 export async function processShortVideoGenerationRun(
   runId: string,
   dependencies: {
-    provider: ShortVideoProvider;
-    embeddingProvider: EmbeddingProvider;
-    tts: ShortVideoTtsProvider;
+    provider?: ShortVideoProvider;
+    embeddingProvider?: EmbeddingProvider;
+    tts?: ShortVideoTtsProvider;
+    /** Production worker factories are deliberately resolved only after this run is claimed. */
+    providerForRun?: (input: { workspaceId: string; shortVideoGenerationRunId: string; provider: string; model: string }) => Promise<ShortVideoProvider>;
+    embeddingProviderForRun?: (input: { workspaceId: string; shortVideoGenerationRunId: string }) => Promise<EmbeddingProvider>;
+    ttsForRun?: (input: { workspaceId: string; shortVideoGenerationRunId: string }) => Promise<ShortVideoTtsProvider>;
     storage: StorageProvider;
     renderer?: VideoRenderer;
     renderConfiguration?: { width: number; height: number; fps: number };
@@ -626,12 +686,6 @@ export async function processShortVideoGenerationRun(
 ) {
   let run = await load(runId);
   if (run.status === "SUCCEEDED") return run;
-  if (
-    dependencies.provider.identity.provider !== run.provider ||
-    dependencies.provider.identity.model !== run.model ||
-    (dependencies.provider.identity.modelVersion ?? "") !== run.modelVersionKey
-  )
-    throw new Error("SHORT_VIDEO_PROVIDER_IDENTITY_MISMATCH");
   const token = randomUUID();
   if (!(await claim(run.id, token))) {
     run = await load(run.id);
@@ -639,14 +693,27 @@ export async function processShortVideoGenerationRun(
     throw new Error("SHORT_VIDEO_ALREADY_CLAIMED");
   }
   try {
+    run = await load(run.id);
+    const provider = dependencies.provider ?? await dependencies.providerForRun?.({ workspaceId: run.workspaceId, shortVideoGenerationRunId: run.id, provider: run.provider, model: run.model });
+    const embeddingProvider = dependencies.embeddingProvider ?? await dependencies.embeddingProviderForRun?.({ workspaceId: run.workspaceId, shortVideoGenerationRunId: run.id });
+    const tts = dependencies.tts ?? await dependencies.ttsForRun?.({ workspaceId: run.workspaceId, shortVideoGenerationRunId: run.id });
+    if (!provider || !embeddingProvider || !tts) throw new Error("SHORT_VIDEO_GENERATION_PROVIDER_NOT_CONFIGURED");
+    if (provider.identity.provider !== run.provider || provider.identity.model !== run.model || (provider.identity.modelVersion ?? "") !== run.modelVersionKey)
+      throw new Error("SHORT_VIDEO_PROVIDER_IDENTITY_MISMATCH");
     while (true) {
       run = await load(run.id);
       if (run.stage === "CONTEXT_RETRIEVAL") {
-        await context(run, dependencies.embeddingProvider);
+        await context(run, embeddingProvider, "CONTEXT_RETRIEVAL");
         await stage(run.id, token, "CONTEXT_RETRIEVAL", "VIDEO_PLANNING");
       } else if (run.stage === "VIDEO_PLANNING") {
+        const operation = `short-video-plan:${run.id}`;
+        if (run.plan && isDurableTextProvider(provider)) {
+          const consumer = { consumerKind: "SHORT_VIDEO_PLAN", consumerKey: run.id, consumerFingerprint: textDestinationFingerprint(run, "PLAN", planDestination(run.plan)) };
+          const verified = await provider.verifyConsumedTextResult(operation, consumer);
+          if (verified === "RECONCILIATION_REQUIRED" || verified === "NOT_CONSUMED") throw new Error("SHORT_VIDEO_TEXT_RECONCILIATION_REQUIRED");
+        }
         if (!run.plan) {
-          const bounded = await context(run, dependencies.embeddingProvider);
+          const bounded = await context(run, embeddingProvider, "VIDEO_PLANNING");
           const input = {
             style: run.styleProfile,
             context: bounded,
@@ -654,25 +721,29 @@ export async function processShortVideoGenerationRun(
           };
           assertBudget(input);
           const plan = shortVideoPlanSchema.parse(
-            await withLeaseHeartbeat(run.id, token, () => dependencies.provider.plan(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed),
+            await withLeaseHeartbeat(run.id, token, () => provider.plan(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed),
           );
-          await owned(run.id, token, (tx) =>
-            tx.shortVideoPlan.create({
-              data: {
-                shortVideoGenerationRunId: run.id,
-                workspaceId: run.workspaceId,
-                ...plan,
-              },
-            }),
-          );
+          const consumer = { consumerKind: "SHORT_VIDEO_PLAN", consumerKey: run.id, consumerFingerprint: textDestinationFingerprint(run, "PLAN", planDestination(plan)) };
+          if (isDurableTextProvider(provider)) await provider.consumeTextResult<typeof plan>(operation, consumer, async ({ tx, output }) => {
+            const exact = shortVideoPlanSchema.parse(output);
+            await assertOwnedInTransaction(tx, run.id, token);
+            await (tx as any).shortVideoPlan.create({ data: { shortVideoGenerationRunId: run.id, workspaceId: run.workspaceId, ...exact } });
+          });
+          else await owned(run.id, token, (tx) => tx.shortVideoPlan.create({ data: { shortVideoGenerationRunId: run.id, workspaceId: run.workspaceId, ...plan } }));
           await dependencies.faultInjector?.("afterPlanPersist");
         }
         await stage(run.id, token, "VIDEO_PLANNING", "NARRATIVE_GENERATION");
       } else if (run.stage === "NARRATIVE_GENERATION") {
         await stage(run.id, token, "NARRATIVE_GENERATION", "SCENE_PLANNING");
       } else if (run.stage === "SCENE_PLANNING") {
+        const operation = `short-video-scenes:${run.id}`;
+        if (run.scenes.length && isDurableTextProvider(provider)) {
+          const consumer = { consumerKind: "SHORT_VIDEO_SCENE_GRAPH", consumerKey: run.id, consumerFingerprint: textDestinationFingerprint(run, "SCENES", await persistedSceneDestination(run)) };
+          const verified = await provider.verifyConsumedTextResult(operation, consumer);
+          if (verified !== "EXACT") throw new Error("SHORT_VIDEO_TEXT_RECONCILIATION_REQUIRED");
+        }
         if (!run.scenes.length) {
-          const bounded = await context(run, dependencies.embeddingProvider);
+          const bounded = await context(run, embeddingProvider, "SCENE_PLANNING");
           const input = {
             style: run.styleProfile,
             plan: run.plan,
@@ -680,14 +751,14 @@ export async function processShortVideoGenerationRun(
           };
           assertBudget(input);
           const scenes = shortVideoScenesSchema.parse(
-            await withLeaseHeartbeat(run.id, token, () => dependencies.provider.scenes(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed),
+            await withLeaseHeartbeat(run.id, token, () => provider.scenes(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed),
           ).scenes;
           assertScenes(scenes, run.styleProfile.targetDurationSeconds * 1000);
           const evidenceSources = new Map<string, any>();
           for (const item of bounded) for (const evidence of item.evidence) evidenceSources.set(evidence.sourceBlockId, item.source);
-          await owned(run.id, token, async (tx) => {
+          const materialize = async (tx: any, exactScenes: z.infer<typeof shortVideoScenesSchema>["scenes"]) => {
             let offset = 0;
-            for (const scene of scenes) {
+            for (const scene of exactScenes) {
               if (scene.evidence.some((e) => !evidenceSources.has(e.sourceBlockId)))
                 throw new Error("SHORT_VIDEO_EVIDENCE_LINEAGE_INVALID");
               const created = await tx.shortVideoScene.create({
@@ -743,12 +814,28 @@ export async function processShortVideoGenerationRun(
               }
               offset += scene.targetDurationMs;
             }
+          };
+          const consumer = { consumerKind: "SHORT_VIDEO_SCENE_GRAPH", consumerKey: run.id, consumerFingerprint: textDestinationFingerprint(run, "SCENES", sceneDestination(scenes)) };
+          if (isDurableTextProvider(provider)) await provider.consumeTextResult<z.infer<typeof shortVideoScenesSchema>>(operation, consumer, async ({ tx, output }) => {
+            const exact = shortVideoScenesSchema.parse(output).scenes;
+            assertScenes(exact, run.styleProfile.targetDurationSeconds * 1000);
+            await assertOwnedInTransaction(tx, run.id, token);
+            await materialize(tx, exact);
           });
+          else await owned(run.id, token, (tx) => materialize(tx, scenes));
           await dependencies.faultInjector?.("afterScenesPersist");
         }
         await stage(run.id, token, "SCENE_PLANNING", "NARRATION_SYNTHESIS");
       } else if (run.stage === "NARRATION_SYNTHESIS") {
-        await synthesizeNarration(run, token, { ...dependencies, tts: { ...dependencies.tts, synthesize: input => withLeaseHeartbeat(run.id, token, () => dependencies.tts.synthesize(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed) } });
+        const heartbeatTts: ShortVideoTtsProvider & Partial<DurableShortVideoTtsProvider> = {
+          identity: tts.identity,
+          synthesize: input => withLeaseHeartbeat(run.id, token, () => tts.synthesize(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed),
+          ...(isDurableTtsProvider(tts) ? {
+            consumeSpeechResult: tts.consumeSpeechResult.bind(tts),
+            verifyConsumedSpeechResult: tts.verifyConsumedSpeechResult.bind(tts),
+          } : {}),
+        };
+        await synthesizeNarration(run, token, { ...dependencies, tts: heartbeatTts });
         await stage(run.id, token, "NARRATION_SYNTHESIS", "VISUAL_PREPARATION");
       } else if (run.stage === "VISUAL_PREPARATION") {
         const existing = await prisma.shortVideoVisualAsset.count({ where: { shortVideoGenerationRunId: run.id } });

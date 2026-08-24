@@ -18,9 +18,12 @@ import {
 export const SHORT_VIDEO_GENERATION_QUEUE = "short-video.generation";
 export type ShortVideoGenerationQueueOptions = { prefix?: string };
 export type ShortVideoRuntimeAdapter = {
-  provider: ShortVideoProvider;
-  embeddingProvider: EmbeddingProvider;
-  tts: ShortVideoTtsProvider;
+  provider?: ShortVideoProvider;
+  embeddingProvider?: EmbeddingProvider;
+  tts?: ShortVideoTtsProvider;
+  providerForRun?: (input: { workspaceId: string; shortVideoGenerationRunId: string; provider: string; model: string }) => Promise<ShortVideoProvider>;
+  embeddingProviderForRun?: (input: { workspaceId: string; shortVideoGenerationRunId: string }) => Promise<EmbeddingProvider>;
+  ttsForRun?: (input: { workspaceId: string; shortVideoGenerationRunId: string }) => Promise<ShortVideoTtsProvider>;
   renderer?: VideoRenderer;
   renderConfiguration?: { width: number; height: number; fps: number };
 };
@@ -29,7 +32,7 @@ export function createShortVideoGenerationWorker(
   dependencies?: ShortVideoRuntimeAdapter,
   options: ShortVideoGenerationQueueOptions = {},
 ) {
-  if (!dependencies)
+  if (!dependencies || (!dependencies.provider && !dependencies.providerForRun) || (!dependencies.embeddingProvider && !dependencies.embeddingProviderForRun) || (!dependencies.tts && !dependencies.ttsForRun))
     throw new Error("SHORT_VIDEO_GENERATION_PROVIDER_NOT_CONFIGURED");
   const storage = new S3CompatibleStorageProvider({
     endpoint: environment.S3_ENDPOINT,

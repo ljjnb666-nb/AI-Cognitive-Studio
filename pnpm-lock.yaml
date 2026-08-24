@@ -407,6 +407,9 @@ importers:
       '@ai-cognitive/ingestion':
         specifier: workspace:*
         version: link:../ingestion
+      '@ai-cognitive/provider-gateway':
+        specifier: workspace:*
+        version: link:../provider-gateway
       '@ai-cognitive/storage':
         specifier: workspace:*
         version: link:../storage

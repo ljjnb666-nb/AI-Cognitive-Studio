@@ -37,3 +37,17 @@ Workspace credentials are selected only when `ACTIVE`; a snapshot can continue u
 The additive `phase_8a_provider_gateway_core` migration adds provider connections, encrypted credential versions, route bindings, immutable execution snapshots, invocation provenance, append-only usage events, and append-only audit events. Workspace-owned references use composite tenant relations where provider objects cross boundaries.
 
 Phase 8B adds mainstream LLM adapters; 8C embedding adapters; 8D TTS adapters; 8E BYOK/custom-provider UI; and 8F real-provider E2E, benchmark, usage pricing, and preset validation. None are part of Phase 8A.
+
+## PHASE8C_CHECKPOINT6_SHORT_VIDEO_GATEWAY_AUTONOMY
+
+Short Video uses workspace-owned `SHORT_VIDEO_SCRIPT`, `EMBEDDING` query, and `SHORT_VIDEO_TTS` routes. Production Worker composition creates a shared Gateway runtime from the durable job principal; it does not require static worker credentials or manually injected providers. The worker claims the run before resolving run-scoped providers, so stale or terminal deliveries do not create pins or make paid calls.
+
+`ShortVideoSpeechExecutionPin` is a credential-free, one-per-run immutable pin for provider/model/version, voice/version, rate, pitch, style, language, format, audio version, and pipeline version. Every new TTS unit revalidates the current route against that pin. Thus replay uses the original durable receipt/snapshot, while a new unit after an incompatible A-to-B route edit fails rather than silently mixing voices.
+
+Plan and scene generation use `ProviderTextResult`: a receipt is encrypted after the remote result, then consumed and purged in the same PostgreSQL transaction that writes either `ShortVideoPlan` or the full Scene/Narration/Evidence graph. A consumed-receipt retry verifies the exact persisted destination fingerprint; divergence is reconciliation-required, never regeneration from purged plaintext.
+
+Query embeddings use stage-and-source operation identities of the form `short-video-query:<run>:<stage>:<source>`. They retain encrypted `ProviderEmbeddingResult` receipts for exact replay and must match every source run's consumed Book embedding vector-space identity. Missing, incompatible, or changed-route identities fail before a new remote query.
+
+Speech uses `ProviderSpeechResult` and stable per-unit identities of the form `short-video-tts:<run>:<narration>:<unit>`. Bytes are uploaded to immutable MinIO storage and read back for SHA-256 verification before the authoritative `ShortVideoAudioArtifact` is written. Its `narrationId` and `unitOrdinal` preserve the unit lineage; artifact write plus receipt consume/purge is atomic. Consumed replay checks the database artifact fingerprint and actual object hash, so database or object corruption is reconciliation-required.
+
+FFmpeg rendering and deterministic editorial frames remain local infrastructure; visual AI, render Gateway routes, and visual-provider features are outside this checkpoint.
