@@ -1,0 +1,23 @@
+import { describe, expect, it } from "vitest";
+import { parseProviderModelManifest, sanitizedProviderManifest, validateRouteManifestSelection } from "../src/index.js";
+
+const manifest = JSON.stringify({ providers: [{ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "phase9", models: [{ modelId: "text", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }, { modelId: "embed", families: ["EMBEDDING"], confidence: "VERIFIED", embeddingDimensions: 4 }, { modelId: "speech", families: ["SPEECH"], confidence: "VERIFIED", speechFormats: ["wav"] }] }] });
+
+describe("Phase 9 model manifest", () => {
+  it("exposes only safe capability metadata and gates each route by model family", () => {
+    const parsed = parseProviderModelManifest(manifest);
+    expect(sanitizedProviderManifest(parsed)).toEqual(expect.objectContaining({ providers: [expect.objectContaining({ providerKey: "fixture", models: expect.arrayContaining([expect.objectContaining({ modelId: "text" })]) })] }));
+    expect(validateRouteManifestSelection(parsed, { routeSlot: "BOOK_CHUNK_ANALYSIS", providerKey: "fixture", protocol: "TEST", modelId: "text" }).modelId).toBe("text");
+    expect(validateRouteManifestSelection(parsed, { routeSlot: "EMBEDDING", providerKey: "fixture", protocol: "TEST", modelId: "embed" }).modelId).toBe("embed");
+    expect(validateRouteManifestSelection(parsed, { routeSlot: "PODCAST_TTS", providerKey: "fixture", protocol: "TEST", modelId: "speech", configuration: { outputFormat: "wav" } }).modelId).toBe("speech");
+    expectErrorCode(() => validateRouteManifestSelection(parsed, { routeSlot: "SHORT_VIDEO_TTS", providerKey: "fixture", protocol: "TEST", modelId: "text" }), "CAPABILITY_MISMATCH");
+    expectErrorCode(() => validateRouteManifestSelection(parsed, { routeSlot: "PODCAST_TTS", providerKey: "fixture", protocol: "TEST", modelId: "speech", configuration: { outputFormat: "mp3" } }), "CAPABILITY_MISMATCH");
+  });
+
+  it("fails closed for malformed production configuration", () => {
+    expect(() => parseProviderModelManifest(undefined)).toThrow(/PROVIDER_GATEWAY_MODEL_MANIFEST_MISSING/);
+    expect(() => parseProviderModelManifest("{")).toThrow(/PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID/);
+  });
+});
+
+function expectErrorCode(work: () => unknown, code: string) { try { work(); } catch (error) { expect(error).toMatchObject({ code }); return; } throw new Error(`Expected ${code}`); }

@@ -11,7 +11,7 @@ function errorResponse(error: unknown) { const code = error instanceof Error ? e
 
 export async function POST(request: Request) {
   try { const body = await request.json() as unknown; const identity = await resolveWebIdentity(); const service = createIngestionService(storage());
-    if (typeof body === "object" && body !== null && "sessionId" in body) { const { sessionId } = completeSchema.parse(body); const document = await service.completeUpload(identity, sessionId); return NextResponse.json({ sourceDocumentId: document.id }); }
+    if (typeof body === "object" && body !== null && "sessionId" in body) { const { sessionId } = completeSchema.parse(body); const outboxTopic = process.env.PHASE9_SOURCE_TOPIC?.trim(); const document = await service.completeUpload(identity, sessionId, outboxTopic ? { outboxTopic } : undefined); return NextResponse.json({ sourceDocumentId: document.id }); }
     const input = createSchema.parse(body); const intent = await service.createUploadIntent(identity, input); return NextResponse.json({ sessionId: intent.session.id, upload: intent.upload });
   } catch (error) { return errorResponse(error); }
 }

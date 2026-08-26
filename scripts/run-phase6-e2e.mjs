@@ -11,6 +11,16 @@ const root = process.cwd();
 const require = createRequire(join(root, "apps", "web", "package.json"));
 const tsxCli = require.resolve("tsx/cli");
 const postgresPort = process.env.POSTGRES_HOST_PORT ?? "5433";
+const redisPort = process.env.REDIS_HOST_PORT ?? "6379";
+const minioPort = process.env.S3_HOST_PORT ?? "9000";
+const providerKeyring = Buffer.alloc(32, 6).toString("base64");
+const providerManifest = JSON.stringify({ providers: [
+  { providerKey: "phase6-analysis", displayName: "Phase 6 analysis", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "fixture", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }, { modelId: "embedding", families: ["EMBEDDING"], confidence: "VERIFIED", embeddingDimensions: 4 }] },
+  { providerKey: "phase6-podcast", displayName: "Phase 6 podcast", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "fixture", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }] },
+  { providerKey: "phase6-wav", displayName: "Phase 6 audio", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "fixture", families: ["SPEECH"], confidence: "VERIFIED", speechFormats: ["wav"] }] },
+  { providerKey: "phase6-video", displayName: "Phase 6 video", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "fixture", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }] },
+  { providerKey: "phase6-video-wav", displayName: "Phase 6 video audio", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "fixture", families: ["SPEECH"], confidence: "VERIFIED", speechFormats: ["wav"] }] },
+] });
 const environment = {
   ...process.env,
   NODE_ENV: "test",
@@ -20,9 +30,9 @@ const environment = {
   PHASE6_BROWSER_ACCEPTANCE: "true",
   DATABASE_URL: `postgresql://app:app@localhost:${postgresPort}/${database}?schema=public`,
   DATABASE_URL_TEST: `postgresql://app:app@localhost:${postgresPort}/${database}?schema=public`,
-  REDIS_URL: "redis://localhost:6379/15",
-  S3_ENDPOINT: "http://localhost:9000",
-  S3_PUBLIC_ENDPOINT: "http://localhost:9000",
+  REDIS_URL: `redis://localhost:${redisPort}/15`,
+  S3_ENDPOINT: `http://localhost:${minioPort}`,
+  S3_PUBLIC_ENDPOINT: `http://localhost:${minioPort}`,
   S3_REGION: "us-east-1",
   S3_BUCKET: "ai-cognitive-studio-phase6-test",
   S3_ACCESS_KEY: "local-development-only",
@@ -32,6 +42,7 @@ const environment = {
   WEB_DEV_BOOTSTRAP_EMAIL: "phase6-browser@ai-cognitive-studio.test",
   WEB_TEST_HARNESS_TOKEN: randomUUID(),
   WEB_TEST_HARNESS_EMAIL: "phase6-browser@ai-cognitive-studio.test",
+  PHASE6_BULLMQ_PREFIX: `phase6-${randomUUID()}`,
   BOOK_ANALYSIS_PROVIDER: "phase6-analysis",
   BOOK_ANALYSIS_MODEL: "fixture",
   PODCAST_GENERATION_PROVIDER: "phase6-podcast",
@@ -43,6 +54,8 @@ const environment = {
   SHORT_VIDEO_GENERATION_PROVIDER: "phase6-video",
   SHORT_VIDEO_GENERATION_MODEL: "fixture",
   SHORT_VIDEO_GENERATION_MODEL_VERSION: "1",
+  PROVIDER_GATEWAY_KEYRING: JSON.stringify({ activeVersion: "phase6", keys: { phase6: providerKeyring } }),
+  PROVIDER_GATEWAY_MODEL_MANIFEST: providerManifest,
 };
 
 function command(program, args) {
@@ -52,14 +65,11 @@ function command(program, args) {
   if (result.status !== 0) throw new Error(`PHASE6_COMMAND_FAILED:${program}`);
 }
 function postgres(sql) {
+  const container = process.env.PHASE6_POSTGRES_CONTAINER;
+  if (container) { execFileSync("docker", ["exec", "-i", container, "psql", "-U", "app", "-d", "postgres", "-c", sql], { cwd: root, env: environment, stdio: "inherit" }); return; }
   try { execFileSync("psql", ["-h", "localhost", "-p", postgresPort, "-U", "app", "-d", "postgres", "-c", sql], { cwd: root, env: { ...environment, PGPASSWORD: "app" }, stdio: "inherit" }); }
   catch { command("docker", ["compose", "exec", "-T", "postgres", "psql", "-U", "app", "-d", "postgres", "-c", sql]); }
 }
-function redis(argumentsList) {
-  try { execFileSync("redis-cli", argumentsList, { cwd: root, env: environment, stdio: "inherit" }); }
-  catch { command("docker", ["compose", "exec", "-T", "redis", "redis-cli", ...argumentsList]); }
-}
-
 let worker;
 let workerTermination;
 let stopWorkerPromise;
@@ -77,12 +87,13 @@ async function stopWorker() {
   })();
 }
 function minio(commandLine) {
+  const container = process.env.PHASE6_MINIO_CONTAINER;
+  if (container) { execFileSync("docker", ["exec", container, "sh", "-c", commandLine], { cwd: root, env: environment, stdio: "inherit" }); return; }
   command("docker", ["compose", "exec", "-T", "minio", "sh", "-c", commandLine]);
 }
 try {
   postgres(`DROP DATABASE IF EXISTS ${database} WITH (FORCE);`);
   postgres(`CREATE DATABASE ${database};`);
-  redis(["-n", "15", "FLUSHDB"]);
   minio(`mc alias set phase6 http://localhost:9000 ${environment.S3_ACCESS_KEY} ${environment.S3_SECRET_KEY} && (mc rb --force phase6/${environment.S3_BUCKET} || true) && mc mb phase6/${environment.S3_BUCKET}`);
   command("pnpm", ["db:migrate:deploy"]);
   command("pnpm", ["--filter", "@ai-cognitive/web", "build"]);
@@ -110,7 +121,8 @@ try {
   throw error;
 } finally {
   await stopWorker();
-  try { redis(["-n", "15", "FLUSHDB"]); } catch { /* isolated cleanup is best effort */ }
-  try { minio(`mc alias set phase6 http://localhost:9000 ${environment.S3_ACCESS_KEY} ${environment.S3_SECRET_KEY} && (mc rb --force phase6/${environment.S3_BUCKET} || true)`); } catch { /* isolated cleanup is best effort */ }
-  postgres(`DROP DATABASE IF EXISTS ${database} WITH (FORCE);`);
+  if (process.env.PHASE6_KEEP_ARTIFACTS !== "true") {
+    try { minio(`mc alias set phase6 http://localhost:9000 ${environment.S3_ACCESS_KEY} ${environment.S3_SECRET_KEY} && (mc rb --force phase6/${environment.S3_BUCKET} || true)`); } catch { /* isolated cleanup is best effort */ }
+    postgres(`DROP DATABASE IF EXISTS ${database} WITH (FORCE);`);
+  }
 }

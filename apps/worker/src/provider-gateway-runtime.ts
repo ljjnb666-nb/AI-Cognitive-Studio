@@ -2,23 +2,14 @@ import { prisma } from "@ai-cognitive/db";
 import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, GatewayPodcastSpeechSynthesisProvider, type DurablePodcastGenerationProvider, type DurableSpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
 import { GatewayShortVideoProvider, GatewayShortVideoRetrievalEmbeddingProvider, GatewayShortVideoTtsProvider, type ShortVideoProvider, type ShortVideoTtsProvider } from "@ai-cognitive/short-video-generation";
 import { loadConsumedBookAnalysisEmbeddingIdentity, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type EmbeddingProvider, validateAnalysisResponse } from "@ai-cognitive/book-intelligence";
-import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, parseKeyring, validateProviderEndpoint, type GatewayExecutionDependencies, type GatewayRequest, type ModelCapability, type ProviderAdapterResolver, type ProviderDefinition, type ProviderGateway } from "@ai-cognitive/provider-gateway";
+import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, parseKeyring, parseProviderModelManifest, validateProviderEndpoint, type GatewayExecutionDependencies, type GatewayRequest, type ProviderAdapterResolver, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
 
-type Manifest = { providers: ProviderDefinition[] };
 export type BookGatewayRuntime = { gateway: ProviderGateway; repository: ProviderExecutionRepository; createAnalysisProvider(input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }): Promise<AnalysisProvider>; close(): Promise<void>; };
 /** Test-only seams keep production composition real while preventing external provider traffic. */
 export type BookProductionGatewayRuntimeOverrides = Pick<GatewayExecutionDependencies, "circuit" | "rate" | "concurrency" | "validateEndpoint"> & { adapterResolver?: ProviderAdapterResolver; redisFactory?: (url: string) => ReturnType<typeof createRedisConnection> };
 
-function parseManifest(source: string | undefined): Manifest {
-  if (!source) throw new Error("PROVIDER_GATEWAY_MODEL_MANIFEST_MISSING");
-  let raw: unknown; try { raw = JSON.parse(source); } catch { throw new Error("PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID"); }
-  if (!raw || typeof raw !== "object" || !Array.isArray((raw as Manifest).providers)) throw new Error("PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID");
-  const providers = (raw as Manifest).providers;
-  for (const p of providers) if (!p || !p.providerKey || !p.protocol || !p.adapterVersion || !Array.isArray(p.models) || !p.models.every((m: ModelCapability) => m && m.modelId && Array.isArray(m.families) && m.families.length)) throw new Error("PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID");
-  return { providers };
-}
 const schema = { type: "object", additionalProperties: false, required: ["summary"], properties: { summary: { type: "string" }, memory: { type: "array", items: { type: "object" } }, relations: { type: "array", items: { type: "object" } } } };
 function slot(stage: AnalysisRequest["stage"]): GatewayRequest["routeSlot"] { return stage === "CHUNK" ? "BOOK_CHUNK_ANALYSIS" : stage === "BOOK" ? "BOOK_SYNTHESIS" : "BOOK_REDUCTION_ANALYSIS"; }
 
@@ -51,7 +42,7 @@ class GatewayAnalysisProvider implements AnalysisProvider {
 /** PHASE8C_CHECKPOINT3B_BOOK_PRODUCTION_GATEWAY: workspace BYOK only; no platform resolver. */
 export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, overrides: BookProductionGatewayRuntimeOverrides = {}): BookGatewayRuntime {
   const cipher = parseKeyring(source.PROVIDER_GATEWAY_KEYRING); if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
-  const manifest = parseManifest(source.PROVIDER_GATEWAY_MODEL_MANIFEST), registry = new ProviderRegistry(); for (const provider of manifest.providers) registry.register(provider);
+  const manifest = parseProviderModelManifest(source.PROVIDER_GATEWAY_MODEL_MANIFEST), registry = new ProviderRegistry(); for (const provider of manifest.providers) registry.register(provider);
   const store = new ProviderGatewayRepository(prisma, cipher), repository = new ProviderExecutionRepository(prisma, cipher), authorizer = new WorkspaceMembershipExecutionAuthorizer(prisma);
   const redis = !overrides.rate || !overrides.concurrency || !overrides.circuit ? (overrides.redisFactory ?? createRedisConnection)(source.REDIS_URL ?? "") : undefined;
   const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: input => store.resolveWorkspaceRoute(input) }, { resolve: async () => undefined }, overrides.adapterResolver ?? createProviderAdapterResolver(new FetchProviderHttpTransport()), { authorize: (principal, request) => authorizer.authorizeExecution(principal, request.workspaceId), assertRouteUsable: snapshot => store.assertResolvedRouteUsable(snapshot.workspaceId, snapshot.connectionId, snapshot.credentialVersionId), assertBudget: () => undefined, validateEndpoint: overrides.validateEndpoint ?? (async snapshot => { if (!snapshot.endpoint) throw new Error("ROUTE_UNAVAILABLE"); await validateProviderEndpoint(snapshot.endpoint, { environment: source.NODE_ENV ?? "production", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } }); }), repository, rate: overrides.rate ?? new RedisRateLimiter(redis!), concurrency: overrides.concurrency ?? new RedisConcurrencyLimiter(redis!), circuit: overrides.circuit ?? new RedisCircuitBreaker(redis!) });
