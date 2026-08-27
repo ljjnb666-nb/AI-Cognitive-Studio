@@ -17,6 +17,7 @@ export function AccountMenu({ name, email, workspace, workspaces }: { name: stri
     <p>{email}</p>
     {workspaces.length > 1 && <label>Workspace <select aria-label="Workspace" value={workspace.id} onChange={(event) => void switchWorkspace(event.target.value)}>{workspaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
     <Link href="/studio/settings/account">Account settings</Link>
+    <Link href="/studio/settings/providers">AI Providers</Link>
     <button onClick={async () => { await authClient.signOut(); router.replace("/sign-in"); router.refresh(); }}>Sign out</button>
   </details>;
 }

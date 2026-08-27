@@ -2,9 +2,26 @@ import { createHash } from "node:crypto";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { prisma } from "@ai-cognitive/db";
 import { createS3CompatibleStorageProvider } from "@ai-cognitive/storage";
+import { ProviderGatewayRepository, testCipher } from "@ai-cognitive/provider-gateway";
 
 const password = "Phase7Password!1";
 let nextTestIp = 10;
+
+async function configurePhase7Routes(identity: { workspaceId: string; userId: string }) {
+  const repository = new ProviderGatewayRepository(prisma, testCipher());
+  const connection = new Map<string, string>();
+  for (const providerKey of ["phase6-analysis", "phase6-podcast", "phase6-wav", "phase6-video", "phase6-video-wav"]) {
+    const created = await repository.createConnection(identity, { providerKey, protocol: "TEST", displayName: providerKey, endpoint: `https://${providerKey}.fixture.test/v1` });
+    await repository.rotateCredential(identity, created.id, `phase7-${providerKey}-credential`);
+    connection.set(providerKey, created.id);
+  }
+  const route = (routeSlot: string, providerKey: string, modelId: string, configuration: Record<string, unknown> = {}) => repository.setRoute(identity, { routeSlot, connectionId: connection.get(providerKey)!, modelId, configuration });
+  await Promise.all([
+    route("BOOK_CHUNK_ANALYSIS", "phase6-analysis", "fixture"), route("BOOK_REDUCTION_ANALYSIS", "phase6-analysis", "fixture"), route("BOOK_SYNTHESIS", "phase6-analysis", "fixture"), route("EMBEDDING", "phase6-analysis", "embedding"),
+    route("PODCAST_SCRIPT", "phase6-podcast", "fixture"), route("PODCAST_TTS", "phase6-wav", "fixture", { outputFormat: "wav", hostVoices: [{ ordinal: 1, providerVoiceId: "phase6-host-a", voiceVersion: "1", speakingRate: 1, pitch: 0, outputFormat: "wav" }, { ordinal: 2, providerVoiceId: "phase6-host-b", voiceVersion: "1", speakingRate: 1, pitch: 0, outputFormat: "wav" }] }),
+    route("SHORT_VIDEO_SCRIPT", "phase6-video", "fixture"), route("SHORT_VIDEO_TTS", "phase6-video-wav", "fixture", { providerVoiceId: "phase6-video", voiceVersion: "1", speakingRate: 1, pitch: 0, outputFormat: "wav" }),
+  ]);
+}
 
 function captureErrors(page: Page) {
   const errors: string[] = [];
@@ -37,6 +54,7 @@ async function signedUp(browser: Browser, name: string, email: string) {
   await signUp(page, name, email);
   const user = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
   expect(user.memberships).toHaveLength(1);
+  await configurePhase7Routes({ workspaceId: user.memberships[0]!.workspaceId, userId: user.id });
   return { context, page, user, workspaceId: user.memberships[0]!.workspaceId };
 }
 
@@ -94,6 +112,7 @@ test("real Better Auth lifecycle includes same-context expiry and real Flow C", 
   const user = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true, sessions: true } });
   expect(user.sessions.length).toBeGreaterThan(0);
   expect(user.defaultWorkspaceId).toBe(user.memberships[0]!.workspaceId);
+  await configurePhase7Routes({ workspaceId: user.defaultWorkspaceId!, userId: user.id });
   const sourceDocumentId = await uploadBook(page, "phase7-authenticated-book.md");
   const source = await prisma.sourceDocument.findUniqueOrThrow({ where: { id: sourceDocumentId }, include: { currentIntelligence: true, ingestionRuns: true, analysisRuns: true } });
   expect(source.workspaceId).toBe(user.defaultWorkspaceId);

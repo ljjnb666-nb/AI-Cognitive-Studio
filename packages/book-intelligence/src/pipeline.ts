@@ -77,15 +77,29 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
     : await prisma.chunkSet.findFirstOrThrow({ where: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, status: "SUCCEEDED" }, orderBy: { completedAt: "desc" } });
   if (chunkSet.status !== "SUCCEEDED") throw new Error("CHUNK_SET_NOT_SUCCEEDED");
   const modelVersionKey = input.modelVersion ?? "";
-  const analysisIdentityHash = sha256(JSON.stringify([chunkSet.id, input.pipelineVersion, input.promptVersion, input.provider, input.model, modelVersionKey]));
-  const idempotencyKey = `book:${analysisIdentityHash}`;
+  const identityBase = [chunkSet.id, input.pipelineVersion, input.promptVersion, input.provider, input.model, modelVersionKey] as const;
+  const analysisIdentityHash = sha256(JSON.stringify(identityBase));
   const existing = await prisma.bookAnalysisRun.findFirst({ where: { chunkSetId: chunkSet.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersionKey }, include: { job: true } });
-  if (existing) return { run: existing, job: existing.job };
+  if (existing && existing.status !== "FAILED") return { run: existing, job: existing.job };
+  if (existing) {
+    const requeued = await prisma.$transaction(async (tx) => {
+      const updated = await tx.bookAnalysisRun.updateMany({ where: { id: existing.id, status: "FAILED" }, data: { status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null } });
+      if (updated.count !== 1) return null;
+      const retryJob = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey: `book:${analysisIdentityHash}:retry:${existing.job.attemptCount + 1}`, correlationId: input.correlationId } });
+      await tx.bookAnalysisRun.update({ where: { id: existing.id }, data: { jobId: retryJob.id } });
+      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: existing.id, payload: { analysisRunId: existing.id, queueJobId: retryJob.id } } });
+      return tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: existing.id }, include: { job: true } });
+    });
+    if (requeued) return { run: requeued, job: requeued.job };
+    const concurrent = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { chunkSetId: chunkSet.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersionKey }, include: { job: true } });
+    return { run: concurrent, job: concurrent.job };
+  }
+  const idempotencyKey = `book:${analysisIdentityHash}`;
   try {
     return await prisma.$transaction(async (tx) => {
       const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersion: input.modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash } });
-      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id } } });
+      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id, queueJobId: job.id } } });
       logger.info("book.analysis.requested", { ...logFields(run, input.correlationId), extractionId: current.extractionId, jobId: job.id, provider: input.provider, model: input.model });
       return { run, job };
     });
@@ -508,7 +522,7 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
 
 export async function dispatchPendingBookAnalysis(queue: { add(name: string, payload: { analysisRunId: string }, options: { jobId: string }): Promise<unknown> }, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; beforeFinalize?: (eventId: string) => Promise<void> | void; topic?: string } = {}) {
   const { topic = BOOK_ANALYSIS_TOPIC, ...dispatchOptions } = options;
-  return dispatchPendingOutbox({ topic, queue, jobName: BOOK_ANALYSIS_JOB, parse: (payload) => payload as { analysisRunId: string }, jobId: (payload) => payload.analysisRunId, afterDispatch: async (tx, payload, jobId) => { const run = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: payload.analysisRunId } }); await tx.job.update({ where: { id: run.jobId }, data: { queueJobId: jobId } }); }, ...dispatchOptions });
+  return dispatchPendingOutbox<{ analysisRunId: string; queueJobId?: string }>({ topic, queue, jobName: BOOK_ANALYSIS_JOB, parse: (payload) => payload as { analysisRunId: string; queueJobId?: string }, jobId: (payload) => payload.queueJobId ?? payload.analysisRunId, afterDispatch: async (tx, payload, jobId) => { const run = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: payload.analysisRunId } }); await tx.job.update({ where: { id: run.jobId }, data: { queueJobId: jobId } }); }, ...dispatchOptions });
 }
 
 export async function retrieveBookKnowledge(input: { workspaceId: string; sourceDocumentId: string; query: string; limit: number; embeddingProvider: EmbeddingProvider }) {

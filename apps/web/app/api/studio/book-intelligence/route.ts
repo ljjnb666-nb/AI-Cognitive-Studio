@@ -3,6 +3,7 @@ import { prisma } from "@ai-cognitive/db";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { resolveWebIdentity } from "@/lib/identity";
+import { resolveBookProductExecution } from "@/lib/provider-product";
 
 const schema = z.object({ sourceDocumentId: z.string().cuid() });
 
@@ -21,18 +22,17 @@ export async function POST(request: Request) {
       include: { ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true } } },
     });
     if (document.ingestionRuns[0]?.status !== "SUCCEEDED") throw new Error("INGESTION_NOT_SUCCEEDED");
-    const provider = process.env.BOOK_ANALYSIS_PROVIDER?.trim();
-    const model = process.env.BOOK_ANALYSIS_MODEL?.trim();
-    if (!provider || !model) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED");
+    const provider = await resolveBookProductExecution(identity.workspaceId);
     const chunkSet = await materializeChunkSet({ workspaceId: identity.workspaceId, sourceDocumentId: document.id });
     const requested = await requestBookAnalysisForUser({ workspaceId: identity.workspaceId, userId: identity.userId }, {
       sourceDocumentId: document.id,
       chunkSetId: chunkSet.id,
       pipelineVersion: process.env.BOOK_ANALYSIS_PIPELINE_VERSION?.trim() || "product-v1",
       promptVersion: process.env.BOOK_ANALYSIS_PROMPT_VERSION?.trim() || "product-v1",
-      provider,
-      model,
-      modelVersion: process.env.BOOK_ANALYSIS_MODEL_VERSION?.trim(),
+      provider: provider.provider,
+      model: provider.model,
+      modelVersion: provider.modelVersion,
+      outboxTopic: process.env.PHASE9_BOOK_TOPIC?.trim() || undefined,
     });
     return NextResponse.json({ analysisRunId: requested.run.id, status: requested.run.status, stage: requested.run.analysisStage });
   } catch (error) { return failure(error); }
