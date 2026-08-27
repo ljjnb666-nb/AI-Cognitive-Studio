@@ -16,6 +16,7 @@ const minioPort = process.env.S3_HOST_PORT ?? "9000";
 const providerKeyring = Buffer.alloc(32, 6).toString("base64");
 const providerManifest = JSON.stringify({ providers: [
   { providerKey: "phase6-analysis", displayName: "Phase 6 analysis", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "fixture", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }, { modelId: "embedding", families: ["EMBEDDING"], confidence: "VERIFIED", embeddingDimensions: 4 }] },
+  { providerKey: "deterministic-test", displayName: "Phase 6 embedding fixture", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "deterministic-vector-v1", families: ["EMBEDDING"], confidence: "VERIFIED", embeddingDimensions: 4 }] },
   { providerKey: "phase6-podcast", displayName: "Phase 6 podcast", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "fixture", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }] },
   { providerKey: "phase6-wav", displayName: "Phase 6 audio", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "fixture", families: ["SPEECH"], confidence: "VERIFIED", speechFormats: ["wav"] }] },
   { providerKey: "phase6-video", displayName: "Phase 6 video", protocol: "TEST", adapterVersion: "phase6", models: [{ modelId: "fixture", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }] },

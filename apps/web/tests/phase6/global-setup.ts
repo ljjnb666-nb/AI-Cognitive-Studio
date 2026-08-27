@@ -22,7 +22,7 @@ export async function configurePhase6Routes(identity: { workspaceId: string; use
   const repository = new ProviderGatewayRepository(prisma, cipher);
   const connection = new Map<string, string>();
   for (const providerKey of ["phase6-analysis", "phase6-podcast", "phase6-wav", "phase6-video", "phase6-video-wav"]) {
-    const created = await repository.createConnection(identity, { providerKey, protocol: "TEST", displayName: providerKey });
+    const created = await repository.createConnection(identity, { providerKey, protocol: "TEST", displayName: providerKey, endpoint: `https://${providerKey}.fixture.test/v1` });
     await repository.rotateCredential(identity, created.id, `phase6-${providerKey}-credential`);
     connection.set(providerKey, created.id);
   }

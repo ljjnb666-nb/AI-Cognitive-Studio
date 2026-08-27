@@ -9,7 +9,7 @@ export class DeterministicGatewayRetrievalEmbeddingProvider extends Deterministi
 export async function createBookAnalysisEmbeddingGatewayFixture(input: { workspaceId: string; userId: string; pauseRemote?: boolean }) {
   const cipher = testCipher();
   const store = new ProviderGatewayRepository(prisma, cipher);
-  const connection = await store.createConnection({ workspaceId: input.workspaceId, userId: input.userId }, { providerKey: "deterministic-test", protocol: "TEST", displayName: "phase2 durable embedding fixture" });
+  const connection = await store.createConnection({ workspaceId: input.workspaceId, userId: input.userId }, { providerKey: "deterministic-test", protocol: "TEST", displayName: "phase2 durable embedding fixture", endpoint: "https://deterministic-test.fixture.test/v1" });
   await store.rotateCredential({ workspaceId: input.workspaceId, userId: input.userId }, connection.id, "phase2-test-credential");
   const capability = { modelId: "deterministic-vector-v1", families: ["EMBEDDING"] as const, confidence: "VERIFIED" as const, embeddingDimensions: 4, maxEmbeddingInputs: 1024, embeddingPurposes: ["DOCUMENT"] as const };
   await store.setRoute({ workspaceId: input.workspaceId, userId: input.userId }, { routeSlot: "EMBEDDING", connectionId: connection.id, modelId: capability.modelId });
