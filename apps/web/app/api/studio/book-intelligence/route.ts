@@ -3,7 +3,7 @@ import { prisma } from "@ai-cognitive/db";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { resolveWebIdentity } from "@/lib/identity";
-import { resolveBookRouteIdentity } from "@/lib/provider-product";
+import { resolveBookProductExecution } from "@/lib/provider-product";
 
 const schema = z.object({ sourceDocumentId: z.string().cuid() });
 
@@ -22,7 +22,7 @@ export async function POST(request: Request) {
       include: { ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true } } },
     });
     if (document.ingestionRuns[0]?.status !== "SUCCEEDED") throw new Error("INGESTION_NOT_SUCCEEDED");
-    const provider = await resolveBookRouteIdentity(identity.workspaceId);
+    const provider = await resolveBookProductExecution(identity.workspaceId);
     const chunkSet = await materializeChunkSet({ workspaceId: identity.workspaceId, sourceDocumentId: document.id });
     const requested = await requestBookAnalysisForUser({ workspaceId: identity.workspaceId, userId: identity.userId }, {
       sourceDocumentId: document.id,

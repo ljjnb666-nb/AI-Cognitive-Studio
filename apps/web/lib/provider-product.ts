@@ -6,7 +6,7 @@ import { parseProviderModelManifest, routeSlotCapabilities, sanitizedProviderMan
 const bookSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
 const requiredSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"] as const;
 type JsonRecord = Record<string, unknown>;
-type RouteWithConnection = { routeSlot: string; modelId: string; configuration: unknown; connection: { id: string; providerKey: string; protocol: string; status: string; credentialVersions: { id: string; status: string }[] } };
+type RouteWithConnection = { routeSlot: string; modelId: string; configuration: unknown; connection: { id: string; providerKey: string; protocol: string; endpoint: string | null; status: string; credentialVersions: { id: string; status: string }[] } };
 
 export type ProductRouteIdentity = { provider: string; model: string; modelVersion?: string; configuration: JsonRecord };
 export type PodcastVoice = { ordinal: number; providerVoiceId: string; voiceVersion: string; speakingRate: number; pitch: number; style?: string; language?: string; outputFormat: string };
@@ -31,13 +31,18 @@ export function assertSafeConfiguration(value: JsonRecord): void {
 
 function modelVersion(configuration: JsonRecord): string | undefined { return typeof configuration.modelVersion === "string" && configuration.modelVersion.trim() ? configuration.modelVersion : undefined; }
 function hasActiveCredential(route: RouteWithConnection): boolean { return route.connection.status === "ACTIVE" && route.connection.credentialVersions.some(item => item.status === "ACTIVE"); }
+function hasExecutableEndpoint(endpoint: string | null): endpoint is string {
+  if (!endpoint) return false;
+  try { const url = new URL(endpoint); return url.protocol === "https:" && !url.username && !url.password && !url.hash && !url.search; }
+  catch { return false; }
+}
 async function routesForWorkspace(workspaceId: string): Promise<RouteWithConnection[]> {
   return prisma.providerRouteBinding.findMany({ where: { workspaceId }, include: { connection: { include: { credentialVersions: { where: { status: "ACTIVE" }, select: { id: true, status: true } } } } } }) as Promise<RouteWithConnection[]>;
 }
 
 function routeIdentity(manifest: ReturnType<typeof productManifest>, routes: RouteWithConnection[], routeSlot: RouteSlot): ProductRouteIdentity {
   const route = routes.find(item => item.routeSlot === routeSlot);
-  if (!route || !hasActiveCredential(route)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
+  if (!route || !hasActiveCredential(route) || !hasExecutableEndpoint(route.connection.endpoint)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
   const configuration = safeConfiguration(route.configuration);
   validateRouteManifestSelection(manifest, { routeSlot, providerKey: route.connection.providerKey, protocol: route.connection.protocol, modelId: route.modelId, configuration });
   return { provider: route.connection.providerKey, model: route.modelId, modelVersion: modelVersion(configuration), configuration };
@@ -52,6 +57,19 @@ export async function resolveBookRouteIdentity(workspaceId: string): Promise<Pro
 }
 export async function resolvePodcastRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "PODCAST_SCRIPT"); }
 export async function resolveShortVideoRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "SHORT_VIDEO_SCRIPT"); }
+function configurationRequired(error: unknown): never {
+  if (error instanceof Error && (error.message === "PODCAST_TTS_CONFIGURATION_REQUIRED" || error.message === "SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED")) throw error;
+  throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
+}
+export async function resolveBookProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
+  try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(); const identity = bookSlots.map(slot => routeIdentity(manifest, routes, slot)); const [first] = identity; if (!first || identity.some(item => item.provider !== first.provider || item.model !== first.model || (item.modelVersion ?? "") !== (first.modelVersion ?? ""))) throw new Error("BOOK_ROUTE_IDENTITY_INCONSISTENT"); routeIdentity(manifest, routes, "EMBEDDING"); return first; } catch (error) { return configurationRequired(error); }
+}
+export async function resolvePodcastProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
+  try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(); const script = routeIdentity(manifest, routes, "PODCAST_SCRIPT"); routeIdentity(manifest, routes, "EMBEDDING"); return script; } catch (error) { return configurationRequired(error); }
+}
+export async function resolveShortVideoProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
+  try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(); const script = routeIdentity(manifest, routes, "SHORT_VIDEO_SCRIPT"); routeIdentity(manifest, routes, "EMBEDDING"); const tts = routeIdentity(manifest, routes, "SHORT_VIDEO_TTS"); const configuration = tts.configuration; if (typeof configuration.providerVoiceId !== "string" || !configuration.providerVoiceId.trim() || typeof configuration.voiceVersion !== "string" || !configuration.voiceVersion.trim() || typeof configuration.outputFormat !== "string" || !configuration.outputFormat.trim() || !Number.isFinite(configuration.speakingRate) || !Number.isFinite(configuration.pitch)) throw new Error("SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED"); return script; } catch (error) { return configurationRequired(error); }
+}
 export async function resolvePodcastAudioRoute(workspaceId: string): Promise<ProductRouteIdentity & { voices: PodcastVoice[] }> {
   const identity = routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "PODCAST_TTS");
   const raw = identity.configuration.hostVoices;

@@ -36,7 +36,9 @@ export function SourceProcessing({ sourceDocumentId, ingestionStatus, analysisSt
     const timer = window.setInterval(() => router.refresh(), 1_000);
     return () => window.clearInterval(timer);
   }, [message, router, terminal]);
-  if (message === "AI_PROVIDER_CONFIGURATION_REQUIRED" || message === "BOOK_ROUTE_IDENTITY_INCONSISTENT") return <section className="panel"><p>书籍解析完成。配置 AI Provider 后开始深度理解。</p><div className="actions"><Link className="button" href="/studio/settings/providers">配置 AI Provider</Link><button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></div></section>;
+  const configurationError = message === "AI_PROVIDER_CONFIGURATION_REQUIRED" || message === "BOOK_ROUTE_IDENTITY_INCONSISTENT" || errorCode === "AI_PROVIDER_CONFIGURATION_REQUIRED";
+  if (analysisStatus === "FAILED") return <section className="panel"><p className="error">深度理解失败{errorCode ? `：${errorCode}` : "。"}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 AI Provider</Link>}<button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></div></section>;
+  if (configurationError) return <section className="panel"><p>书籍解析完成。配置 AI Provider 后开始深度理解。</p><div className="actions"><Link className="button" href="/studio/settings/providers">配置 AI Provider</Link><button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></div></section>;
   if (message) return <section className="panel"><p className="error">深度理解请求失败：{message}</p><button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></section>;
   return null;
 }

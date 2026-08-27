@@ -25,7 +25,9 @@ async function main() {
   const environment = readEnvironment();
   let calls = 0;
   const controls = { circuit: { admit: async () => undefined, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => undefined }, concurrency: { acquire: async (key: string) => ({ key, token: "phase9" }), release: async () => true }, validateEndpoint: async () => undefined };
-  const runtime = await startWorkerRuntime(environment, { source: process.env, bookProductionGatewayOverrides: { ...controls, adapterResolver: () => ({ execute: async ({ request }: any) => {
+  const runtime = await startWorkerRuntime(environment, { source: process.env, bookProductionGatewayOverrides: { ...controls, adapterResolver: () => ({ execute: async ({ request, snapshot }: any) => {
+    if (request.text && snapshot.endpoint?.includes("phase9-fail-book")) throw new Error("PHASE9_DETERMINISTIC_BOOK_FAILURE");
+    if (request.speech && snapshot.endpoint?.includes("phase9-fail-audio")) throw new Error("PHASE9_DETERMINISTIC_AUDIO_FAILURE");
     if (request.embedding) return { response: { vectors: request.embedding.texts.map(() => [1, 0, 0, 0]), dimensions: 4 }, usage: { embeddingInputTokens: request.embedding.texts.length }, remoteRequestId: `phase9-embed-${++calls}` };
     if (request.speech) return { response: { bytes: wav(++calls), mediaType: "audio/wav", format: "wav", sampleRate: 8_000, channels: 1 }, usage: { speechInputCharacters: request.speech.text.length }, remoteRequestId: `phase9-speech-${calls}` };
     const content = request.text?.messages?.[0]?.content ?? "";
@@ -42,7 +44,7 @@ async function main() {
     const quoteText = block?.text.slice(startOffset, startOffset + (candidateOffset >= 0 ? knownEvidence.length : Math.min(20, block.text.length))) ?? "";
     return { response: { type: "STRUCTURED", structured: { summary: "Bounded intelligence from the workspace route.", memory: block ? [{ type: "QUOTE", content: quoteText, evidence: [{ sourceBlockId: block.id, startOffset, endOffset: startOffset + quoteText.length, quoteText }] }, { type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence." }] : [{ type: "SUMMARY", content: "Bounded intelligence" }] } }, usage: { inputTokens: 1, outputTokens: 1 }, remoteRequestId: `phase9-book-${++calls}` };
   } }) }, dispatchIntervalMs: 200, bullmqPrefix: process.env.PHASE9_BULLMQ_PREFIX, outboxTopics: { sourceIngestion: process.env.PHASE9_SOURCE_TOPIC, bookAnalysis: process.env.PHASE9_BOOK_TOPIC, podcastGeneration: process.env.PHASE9_PODCAST_TOPIC, podcastAudio: process.env.PHASE9_AUDIO_TOPIC, shortVideo: process.env.PHASE9_VIDEO_TOPIC } });
-  await Promise.all([runtime.ingestionWorker.waitUntilReady(), runtime.bookWorker?.waitUntilReady(), runtime.podcastWorker?.waitUntilReady(), runtime.audioWorker?.waitUntilReady(), runtime.shortVideoWorker?.waitUntilReady()]);
+  if (!runtime.bookWorker || !runtime.podcastWorker || !runtime.audioWorker || !runtime.shortVideoWorker) throw new Error("PHASE9_RUNTIME_WORKER_NOT_CONFIGURED");
   const readyFile = process.env.PHASE9_RUNTIME_READY_FILE;
   if (!readyFile) throw new Error("PHASE9_RUNTIME_READY_FILE_REQUIRED");
   await mkdir(join(readyFile, ".."), { recursive: true }); await writeFile(readyFile, "ready", "utf8");
