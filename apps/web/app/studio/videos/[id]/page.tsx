@@ -37,7 +37,7 @@ export default async function VideoDetail({ params }: { params: Promise<{ id: st
   const statusText = run
     ? run.status === "FAILED"
       ? "生成失败，可重新尝试"
-      : videoStageLabel[run.stage] ?? statusLabel(run.status, run.errorCode)
+      : videoStageLabel(run.stage) ?? statusLabel(run.status, run.errorCode)
     : "等待处理";
 
   return (

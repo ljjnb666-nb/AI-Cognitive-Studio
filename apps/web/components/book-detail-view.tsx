@@ -85,9 +85,9 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
 
   return (
     <div className="book-detail-layout">
-      {/* Left Pane: System Interpretation */}
+      {/* Left Pane: System Interpretation (系统解读) */}
       <div className="interpretation-pane">
-        <div className="page-eyebrow">系统解读 / SYSTEM INTERPRETATION</div>
+        <div className="page-eyebrow">系统解读</div>
         <h1 className="font-serif" style={{ fontSize: 32, fontWeight: 600, color: "var(--on-surface)", margin: "0 0 20px 0" }}>
           {item.displayName}
         </h1>
@@ -127,18 +127,27 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
           </div>
         )}
 
-        {/* Memory Items Cards */}
+        {/* Memory Items Cards - Fully Keyboard Accessible Buttons */}
         {memories.map((memory) => {
           const firstEvidence = memory.evidence[0];
           const linkedNode = firstEvidence ? structureNodes.find((n) => n.id === firstEvidence.sourceBlock.structureNodeId) : null;
 
           return (
-            <article
+            <button
+              type="button"
               key={memory.id}
               className="memory-card"
+              style={{ width: "100%", textAlign: "left", display: "block" }}
               onClick={() => {
                 if (firstEvidence) highlightEvidence(firstEvidence.id);
               }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  if (firstEvidence) highlightEvidence(firstEvidence.id);
+                }
+              }}
+              aria-label={`查看 ${categoryNames[memory.type] ?? "解读点"} 对应的原文证据`}
             >
               <div style={{ fontSize: 11, color: "var(--outline)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>
                 {categoryNames[memory.type] ?? "BOOK MEMORY"}
@@ -166,7 +175,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
                   </span>
                 </div>
               </div>
-            </article>
+            </button>
           );
         })}
 
@@ -177,7 +186,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
         )}
       </div>
 
-      {/* Right Pane: Source Evidence (Parchment Surface) */}
+      {/* Right Pane: Source Evidence (原文证据 - Parchment Surface) */}
       <div className="evidence-pane">
         <div className="evidence-header">
           <h2 className="evidence-title">原文证据</h2>
@@ -193,7 +202,14 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
                 key={ev.id}
                 id={`evidence-${ev.id}`}
                 className={`evidence-item ${isHighlighted ? "highlighted active" : ""}`}
+                tabIndex={0}
                 onClick={() => setActiveEvidenceId(ev.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setActiveEvidenceId(ev.id);
+                  }
+                }}
               >
                 <div className="evidence-node-dot" />
                 <blockquote className="evidence-text">“{excerpt}”</blockquote>

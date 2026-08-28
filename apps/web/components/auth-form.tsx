@@ -28,12 +28,16 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
         ? await authClient.signUp.email({ name, email, password })
         : await authClient.signIn.email({ email, password, rememberMe: true });
 
-    setPending(false);
-
     if (result.error) {
+      setPending(false);
       return setError(mode === "sign-in" ? "邮箱或密码不正确。" : "无法创建账户，请检查信息或尝试登录。");
     }
 
+    if (mode === "sign-up") {
+      await authClient.signIn.email({ email, password, rememberMe: true });
+    }
+
+    setPending(false);
     router.replace("/studio");
     router.refresh();
   }
@@ -64,7 +68,7 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
           {mode === "sign-up" && (
             <div className="form-group">
               <label className="form-label">姓名</label>
-              <input className="input-control" name="name" autoComplete="name" required minLength={2} maxLength={80} placeholder="例如：Scholar 01" />
+              <input className="input-control" name="name" autoComplete="name" required minLength={2} maxLength={80} placeholder="例如：Scholar" />
             </div>
           )}
 
@@ -101,7 +105,9 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
             </div>
           )}
 
-          {error && <p className="form-error">{error}</p>}
+          <p className="form-error" aria-live="polite">
+            {error}
+          </p>
 
           <button type="submit" className="btn btn-primary" disabled={pending} style={{ width: "100%", marginTop: 8 }}>
             {pending ? "正在处理…" : mode === "sign-up" ? "注册并进入 Studio" : "登录并进入工作台"}

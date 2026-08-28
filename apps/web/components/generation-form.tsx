@@ -81,6 +81,7 @@ export function GenerationForm({
     >
       {!configured && (
         <div
+          aria-live="polite"
           style={{
             backgroundColor: "var(--surface-container)",
             border: "1px solid var(--muted-terracotta)",
@@ -133,7 +134,7 @@ export function GenerationForm({
             </label>
           ))}
           {!supported.length && (
-            <p style={{ color: "var(--outline)", margin: 0, fontSize: 13 }}>
+            <p style={{ color: "var(--outline)", margin: 0, fontSize: 13 }} aria-live="polite">
               暂无可用书籍。请先完成书籍解析和理解。
             </p>
           )}
@@ -176,7 +177,9 @@ export function GenerationForm({
         />
       </div>
 
-      {message && <p className="form-error">{message}</p>}
+      <p className="form-error" aria-live="polite">
+        {message}
+      </p>
 
       <button
         type="submit"

@@ -92,7 +92,7 @@ export function ProviderSettings() {
             >
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                 <span style={{ fontWeight: 600, fontSize: 14 }}>{readinessLabels[name] ?? name}</span>
-                <StatusBadge value={item.state === "READY" ? "理解完成" : "未准备就绪"} />
+                <StatusBadge value={item.state === "READY" ? "已就绪" : "未完成"} />
               </div>
               {item.missing.length > 0 && (
                 <p style={{ fontSize: 12, color: "var(--muted-terracotta)", margin: "8px 0 0 0" }}>

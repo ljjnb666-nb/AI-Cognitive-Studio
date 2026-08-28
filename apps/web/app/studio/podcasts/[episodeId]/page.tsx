@@ -46,7 +46,7 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
   const statusText = run
     ? run.status === "FAILED"
       ? "生成失败，可重新尝试"
-      : podcastStageLabel[run.stage] ?? statusLabel(run.status, run.errorCode)
+      : podcastStageLabel(run.stage) ?? statusLabel(run.status, run.errorCode)
     : "等待处理";
 
   return (
