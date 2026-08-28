@@ -1,5 +1,3 @@
-import "server-only";
-
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity, type WebIdentityContext } from "./identity";
 
