@@ -1,5 +1,3 @@
-import "server-only";
-
 import { cookies } from "next/headers";
 import { prisma } from "@ai-cognitive/db";
 import { browserIdentityMode } from "./identity-policy";

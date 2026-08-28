@@ -1,5 +1,5 @@
 import { prisma } from "@ai-cognitive/db";
-import { resolveWebIdentity, type WebIdentityContext } from "./identity";
+import type { WebIdentityContext } from "./identity";
 
 export type SourceSummary = { id: string; title: string; mediaType: string; createdAt: string; status: string; errorCode?: string; hasIntelligence: boolean };
 export type GenerationSummary = { id: string; title: string; kind: "podcast" | "video"; status: string; stage: string; createdAt: string; updatedAt?: string; href: string; errorCode?: string };
@@ -30,6 +30,7 @@ export const videoStageLabel = (stage: string) => {
 
 export async function sources(context?: WebIdentityContext): Promise<SourceSummary[]> {
   try {
+    const { resolveWebIdentity } = await import("./identity");
     const identity = context ?? await resolveWebIdentity();
     const records = await prisma.sourceDocument.findMany({
       where: { workspaceId: identity.workspaceId },
@@ -52,6 +53,7 @@ export async function sources(context?: WebIdentityContext): Promise<SourceSumma
 
 export async function dashboard(context?: WebIdentityContext) {
   try {
+    const { resolveWebIdentity } = await import("./identity");
     const identity = context ?? await resolveWebIdentity();
     const [items, podcasts, videos, jobs] = await Promise.all([
       sources(identity),
@@ -71,6 +73,7 @@ export async function dashboard(context?: WebIdentityContext) {
 }
 
 export async function sourceDetail(sourceDocumentId: string, context?: WebIdentityContext) {
+  const { resolveWebIdentity } = await import("./identity");
   const identity = context ?? await resolveWebIdentity();
   const record = await prisma.sourceDocument.findFirst({
     where: { id: sourceDocumentId, workspaceId: identity.workspaceId },
