@@ -26,7 +26,7 @@ export const auth = betterAuth({
   database: prismaAdapter(prisma, { provider: "postgresql" }),
   trustedOrigins: trustedOrigins(),
   emailAndPassword: { enabled: true, minPasswordLength: 10, maxPasswordLength: 128 },
-  session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24 },
+  session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24, cookieCache: { enabled: false } },
   rateLimit: { enabled: true, window: 60, max: 10 },
   advanced: { useSecureCookies: process.env.NODE_ENV === "production", disableCSRFCheck: false, disableOriginCheck: false },
   plugins: [nextCookies()],

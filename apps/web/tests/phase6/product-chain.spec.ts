@@ -23,10 +23,10 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.locator('input[type="file"]').setInputFiles({ name: "phase6-book.md", mimeType: "text/markdown", buffer: Buffer.from(fixture) });
   await expect(page).toHaveURL(/\/studio\/library\//, { timeout: 30_000 });
   await expect(page.getByText("处理状态")).toBeVisible();
-  await expect.poll(async () => page.getByText("深度理解").isVisible(), { timeout: 90_000 }).toBe(true);
+  await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 90_000 });
   await expect(page.getByText(excerpt).first()).toBeVisible();
-  await page.getByText("查看原文证据").first().click();
-  await expect(page.locator("blockquote").filter({ hasText: excerpt }).first()).toBeVisible();
+  await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
+  await expect(page.locator(".evidence-item.active").filter({ hasText: excerpt })).toBeVisible();
   await expect(page.getByText(/IGNORE PREVIOUS INSTRUCTIONS/)).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("book-intelligence.png"), fullPage: true });
   console.log("FLOW_A_PASS");
@@ -44,8 +44,9 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   const audioResponse = await page.request.get(audioSource!);
   expect(audioResponse.ok()).toBeTruthy();
   expect(audioResponse.headers()["content-type"]).toContain("audio/");
-  await page.getByText("查看证据").first().click();
-  await expect(page.locator("blockquote").filter({ hasText: excerpt }).first()).toBeVisible();
+  const citationDisclosure = page.locator("details").filter({ hasText: "查看引用证据" }).first();
+  await expect(citationDisclosure).toContainText("查看引用证据");
+  await expect(citationDisclosure.locator("blockquote")).toContainText(excerpt);
   await page.screenshot({ path: testInfo.outputPath("podcast-player.png"), fullPage: true });
   console.log("FLOW_B_PASS");
 

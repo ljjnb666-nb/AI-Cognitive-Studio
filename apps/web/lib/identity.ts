@@ -12,15 +12,15 @@ const DEVELOPMENT_WORKSPACE_ID = "cm000000000000000000000001";
 export async function resolveWebIdentity(): Promise<WebIdentityContext> {
   const jar = await cookies();
   try {
-    const session = await auth.api.getSession({ headers: new Headers({ cookie: jar.toString() }) }).catch(() => null);
+    const session = await auth.api.getSession({ headers: new Headers({ cookie: jar.toString() }), query: { disableCookieCache: true } }).catch(() => null);
     if (session?.user?.id) return await resolveAuthenticatedIdentity(session.user.id, jar.get("acs_active_workspace")?.value);
     const mode = browserIdentityMode(jar.get(TEST_HARNESS_COOKIE)?.value);
-    if (mode === "REQUIRED" && process.env.NODE_ENV === "production") throw new Error("WEB_IDENTITY_REQUIRED");
+    if (mode === "REQUIRED") throw new Error("WEB_IDENTITY_REQUIRED");
     return await resolveFixedBootstrapIdentity(mode === "TEST_HARNESS"
       ? (process.env.WEB_TEST_HARNESS_EMAIL ?? "phase6-browser@ai-cognitive-studio.test")
       : (process.env.WEB_DEV_BOOTSTRAP_EMAIL ?? "local-product@ai-cognitive-studio.test"));
   } catch (error) {
-    if (error instanceof Error && error.message === "WEB_IDENTITY_REQUIRED" && process.env.NODE_ENV === "production") throw error;
+    if (error instanceof Error && error.message === "WEB_IDENTITY_REQUIRED") throw error;
     // Fallback bootstrap identity when database or auth session is not active in dev/test
     return { userId: "dev-user-01", workspaceId: DEVELOPMENT_WORKSPACE_ID };
   }
