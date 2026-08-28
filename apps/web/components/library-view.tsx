@@ -1,10 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { PageHeader } from "./app-shell";
+import { PageHeader } from "./page-header";
 import { UploadPanel } from "./upload-panel";
 import { SourceCard } from "./source-card";
-import { statusLabel, type SourceSummary } from "@/lib/product";
+import { statusLabel } from "@/lib/product-labels";
+import type { SourceSummary } from "@/lib/product";
 
 export function LibraryView({ items }: { items: SourceSummary[] }) {
   const [search, setSearch] = useState("");
