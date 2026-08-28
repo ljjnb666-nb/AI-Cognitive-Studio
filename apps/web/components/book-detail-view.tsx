@@ -87,7 +87,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
     <div className="book-detail-layout">
       {/* Left Pane: System Interpretation (系统解读) */}
       <div className="interpretation-pane">
-        <div className="page-eyebrow">系统解读</div>
+        <div className="page-eyebrow">深度理解 · 系统解读</div>
         <h1 className="font-serif" style={{ fontSize: 32, fontWeight: 600, color: "var(--on-surface)", margin: "0 0 20px 0" }}>
           {item.displayName}
         </h1>
@@ -174,6 +174,14 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
                     )}
                   </span>
                 </div>
+              </div>
+
+              <div style={{ marginTop: 12, fontSize: 13, color: "var(--muted-amber)", fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>
+                <span>查看原文证据</span>
+                <span style={{ fontSize: 11, opacity: 0.7 }}>(查看证据)</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
               </div>
             </button>
           );
