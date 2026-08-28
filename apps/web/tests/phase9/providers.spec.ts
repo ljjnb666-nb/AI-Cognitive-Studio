@@ -6,6 +6,10 @@ const password = "Phase9Password!1";
 const uniqueEmail = (label: string) => `phase9-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@ai-cognitive-studio.test`;
 let nextTestIp = 10;
 
+function routeForm(page: import("@playwright/test").Page, slot: string) {
+  return page.locator("form").filter({ has: page.getByRole("heading", { name: new RegExp(`\\(${slot}\\)$`) }) });
+}
+
 function testPdf(lines: string[]) {
   const escape = (value: string) => value.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
   const pages = Array.from({ length: Math.ceil(lines.length / 5) }, (_, page) => lines.slice(page * 5, page * 5 + 5));
@@ -41,9 +45,10 @@ async function configureAllRoutes(page: import("@playwright/test").Page, display
   await connectionForm.getByRole("button", { name: "创建连接" }).click();
   const credentialForm = page.locator("form").filter({ has: page.locator('input[name="secret"]') });
   await credentialForm.locator('input[name="secret"]').fill(secret);
-  await credentialForm.getByRole("button", { name: "加密保存/轮换" }).click();
+  await credentialForm.getByRole("button", { name: "保存/轮换密钥" }).click();
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"]) {
-    const route = page.locator("form.memory").filter({ hasText: slot });
+    const route = routeForm(page, slot);
+    if (slot.endsWith("TTS")) await route.getByRole("button", { name: "展开高级路由配置 JSON" }).click();
     if (slot === "PODCAST_TTS") await route.locator('textarea[name="configuration"]').fill(JSON.stringify({ outputFormat: "wav", hostVoices: [{ ordinal: 1, providerVoiceId: "host-a", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }, { ordinal: 2, providerVoiceId: "host-b", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }] }));
     if (slot === "SHORT_VIDEO_TTS") await route.locator('textarea[name="configuration"]').fill(JSON.stringify({ providerVoiceId: "video", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }));
     await Promise.all([page.waitForResponse(response => response.url().includes("/api/studio/providers") && response.request().method() === "POST"), route.getByRole("button", { name: "保存路由" }).click()]);
@@ -87,11 +92,12 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   await expect(page.getByText("Phase 9 test provider", { exact: true })).toBeVisible();
   const credentialForm = page.locator("form").filter({ has: page.locator('input[name="secret"]') });
   await credentialForm.locator('input[name="secret"]').fill(secret);
-  await credentialForm.getByRole("button", { name: "加密保存/轮换" }).click();
+  await credentialForm.getByRole("button", { name: "保存/轮换密钥" }).click();
   await expect(page.getByText("已配置")).toBeVisible();
 
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"]) {
-    const route = page.locator("form.memory").filter({ hasText: slot });
+    const route = routeForm(page, slot);
+    if (slot.endsWith("TTS")) await route.getByRole("button", { name: "展开高级路由配置 JSON" }).click();
     if (slot.endsWith("TTS")) await route.locator('textarea[name="configuration"]').fill(slot === "PODCAST_TTS" ? JSON.stringify({ outputFormat: "wav", hostVoices: [{ ordinal: 1, providerVoiceId: "voice-a", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }, { ordinal: 2, providerVoiceId: "voice-b", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }] }) : JSON.stringify({ providerVoiceId: "voice-video", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }));
     const save = route.getByRole("button", { name: "保存路由" });
     await expect(save).toBeEnabled();
@@ -230,10 +236,9 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
   await expect.poll(() => prisma.bookAnalysisRun.count({ where: { sourceDocumentId } }), { timeout: 30_000 }).toBe(1);
   await expect.poll(() => prisma.currentBookIntelligence.count({ where: { workspaceId } }), { timeout: 120_000 }).toBe(1);
   await page.reload();
-  await expect(page.getByRole("heading", { name: "深度理解" })).toBeVisible();
-  await expect(page.getByText("查看原文证据").first()).toBeVisible();
-  await page.getByText("查看原文证据").first().click();
-  await expect(page.locator("blockquote").filter({ hasText: knownEvidence }).first()).toBeVisible();
+  await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible();
+  await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
+  await expect(page.locator(".evidence-item.active").filter({ hasText: knownEvidence })).toBeVisible();
   await expect(page.locator("blockquote").filter({ hasText: "IGNORE PREVIOUS INSTRUCTIONS" })).toHaveCount(0);
 
   const connection = await prisma.providerConnection.findFirstOrThrow({ where: { workspaceId } });
