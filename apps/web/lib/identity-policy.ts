@@ -5,7 +5,7 @@ export type BrowserIdentityMode = "TEST_HARNESS" | "DEVELOPMENT_BOOTSTRAP" | "RE
 export function developmentBootstrapAllowed(environment: NodeJS.ProcessEnv = process.env): boolean {
   if (environment.NODE_ENV === "production") return false;
 
-  return environment.WEB_DEV_BOOTSTRAP_IDENTITY === "true" || process.env.NODE_ENV !== "production";
+  return environment.WEB_DEV_BOOTSTRAP_IDENTITY === "true";
 }
 
 export function testHarnessCredentialValid(credential: string | undefined, environment: NodeJS.ProcessEnv = process.env): boolean {
