@@ -20,6 +20,10 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   test.setTimeout(300_000);
   const errors = capturePageErrors(page);
   await page.goto("/studio/library");
+  // The Studio loading boundary can stream the shell before its client upload
+  // handler hydrates. Wait for the browser's real resource quiescence rather
+  // than racing a synthetic file-selection event against hydration.
+  await page.waitForLoadState("networkidle");
   await page.locator('input[type="file"]').setInputFiles({ name: "phase6-book.md", mimeType: "text/markdown", buffer: Buffer.from(fixture) });
   await expect(page).toHaveURL(/\/studio\/library\//, { timeout: 30_000 });
   await expect(page.getByText("处理状态")).toBeVisible();
