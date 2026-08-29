@@ -20,7 +20,16 @@ export default async function ActivityPage() {
     where: { workspaceId: ctx.workspaceId },
     orderBy: { updatedAt: "desc" },
     take: 100,
-    include: { podcastGenerationRun: true, shortVideoGenerationRun: true, ingestionRun: true },
+    select: {
+      id: true,
+      type: true,
+      status: true,
+      error: true,
+      updatedAt: true,
+      podcastGenerationRun: { select: { episodeId: true } },
+      shortVideoGenerationRun: { select: { shortVideoProjectId: true } },
+      ingestionRun: { select: { sourceDocumentId: true } },
+    },
   });
 
   return (

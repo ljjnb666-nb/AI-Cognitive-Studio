@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { AccountMenu } from "./account-menu";
 import { StatusBadge } from "./status-badge";
@@ -18,30 +17,9 @@ export { PageHeader };
 
 export async function AppShell({ children }: { children: React.ReactNode }) {
   const identity = await resolveWebIdentity();
-  let user;
-
-  try {
-    user = await prisma.user.findUniqueOrThrow({
-      where: { id: identity.userId },
-      select: {
-        name: true,
-        email: true,
-        memberships: {
-          select: { workspaceId: true, workspace: { select: { name: true } } },
-          orderBy: { createdAt: "asc" },
-        },
-      },
-    });
-  } catch {
-    user = {
-      name: "Local Product User",
-      email: "local-product@ai-cognitive-studio.test",
-      memberships: [{ workspaceId: identity.workspaceId, workspace: { name: "Local product workspace" } }],
-    };
-  }
-
-  const workspaces = user.memberships.map(({ workspaceId, workspace }) => ({ id: workspaceId, name: workspace.name }));
+  const workspaces = identity.workspaces;
   const workspace = workspaces.find((item) => item.id === identity.workspaceId) ?? workspaces[0];
+  if (!workspace) throw new Error("WEB_IDENTITY_WORKSPACE_REQUIRED");
 
   return (
     <div className="shell">
@@ -68,7 +46,7 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
             <NavIcon name="settings" />
             <span>设置</span>
           </Link>
-          <AccountMenu name={user.name || user.email} email={user.email} workspace={workspace} workspaces={workspaces} />
+          <AccountMenu name={identity.userName || identity.email} email={identity.email} workspace={workspace} workspaces={workspaces} />
         </div>
       </aside>
 

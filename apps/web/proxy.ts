@@ -1,12 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
-import { auth } from "./lib/auth";
 import { testHarnessCredentialValid } from "./lib/identity-policy";
 
 export async function proxy(request: NextRequest) {
   const phase6Harness = testHarnessCredentialValid(request.cookies.get("acs_phase6_harness")?.value);
-  const session = phase6Harness ? null : await auth.api.getSession({ headers: request.headers, query: { disableCookieCache: true } }).catch(() => null);
-  if ((!getSessionCookie(request.headers) || !session?.user?.id) && !phase6Harness) {
+  // This is only an optimistic routing check. resolveWebIdentity is the
+  // authoritative server-side session validation for Studio RSC/document
+  // requests, so expired or revoked cookies cannot reach Studio data.
+  if (!getSessionCookie(request.headers) && !phase6Harness) {
     const callbackUrl = `${request.nextUrl.pathname}${request.nextUrl.search}`;
     const url = new URL("/sign-in", request.url);
     url.searchParams.set("callbackUrl", callbackUrl);
