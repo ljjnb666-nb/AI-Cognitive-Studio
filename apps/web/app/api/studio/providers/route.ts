@@ -39,7 +39,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const context = await resolveWebIdentity(), input = bodySchema.parse(await request.json());
-    const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context }, select: { role: true } });
+    const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { role: true } });
     if (membership?.role !== "OWNER") throw new Error("AUTHORIZATION_FAILED");
     const manifest = productManifest();
     const cipher = parseKeyring(process.env.PROVIDER_GATEWAY_KEYRING);

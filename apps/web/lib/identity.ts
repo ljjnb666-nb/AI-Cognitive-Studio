@@ -13,6 +13,11 @@ export type WebIdentityContext = {
   workspaces: { id: string; name: string }[];
 };
 
+/** Strip presentation-only identity fields before crossing into domain services. */
+export function trustedRequestContext(identity: WebIdentityContext): { userId: string; workspaceId: string } {
+  return { userId: identity.userId, workspaceId: identity.workspaceId };
+}
+
 const TEST_HARNESS_COOKIE = "acs_phase6_harness";
 const DEVELOPMENT_WORKSPACE_ID = "cm000000000000000000000001";
 
