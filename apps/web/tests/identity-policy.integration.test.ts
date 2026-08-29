@@ -37,6 +37,6 @@ describe("requiredAuthBaseUrl", () => {
 
   it("accepts an explicit HTTPS production URL and a local development URL", () => {
     expect(requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "https://studio.example" })).toBe("https://studio.example");
-    expect(requiredAuthBaseUrl({ NODE_ENV: "development", BETTER_AUTH_URL: "http://localhost:3000" })).toBe("http://localhost:3000");
+    expect(requiredAuthBaseUrl({ NODE_ENV: "development", BETTER_AUTH_URL: "http://localhost:3001" })).toBe("http://localhost:3001");
   });
 });

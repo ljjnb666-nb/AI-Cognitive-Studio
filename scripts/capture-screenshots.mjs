@@ -33,16 +33,16 @@ async function run() {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
 
-  console.log("Starting screenshot capture workflow on http://localhost:3000 ...");
+  console.log("Starting screenshot capture workflow on http://localhost:3001 ...");
 
   // 1. Desktop Home (1440x900)
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("http://localhost:3000/studio", { waitUntil: "networkidle" });
+  await page.goto("http://localhost:3001/studio", { waitUntil: "networkidle" });
   console.log("Home URL:", page.url());
   await capture(page, "/studio", page.url(), { width: 1440, height: 900 }, "desktop_home.png");
 
   // 2. Desktop Library (1440x900)
-  await page.goto("http://localhost:3000/studio/library", { waitUntil: "networkidle" });
+  await page.goto("http://localhost:3001/studio/library", { waitUntil: "networkidle" });
   console.log("Library URL:", page.url());
   await capture(page, "/studio/library", page.url(), { width: 1440, height: 900 }, "desktop_library.png");
 
@@ -57,7 +57,7 @@ async function run() {
   await capture(page, "/studio/library/[sourceDocumentId]", bookDetailUrl, { width: 1440, height: 900 }, "desktop_book_detail.png");
 
   // 4. Desktop Podcast Detail / List (1440x900)
-  await page.goto("http://localhost:3000/studio/podcasts", { waitUntil: "networkidle" });
+  await page.goto("http://localhost:3001/studio/podcasts", { waitUntil: "networkidle" });
   let podcastCard = page.locator('a[href*="/studio/podcasts/"]').first();
   let podcastDetailUrl = page.url();
   if (await podcastCard.count() > 0) {
@@ -68,7 +68,7 @@ async function run() {
   await capture(page, "/studio/podcasts/[episodeId]", podcastDetailUrl, { width: 1440, height: 900 }, "desktop_podcast_detail.png");
 
   // 5. Desktop Video Detail / List (1440x900)
-  await page.goto("http://localhost:3000/studio/videos", { waitUntil: "networkidle" });
+  await page.goto("http://localhost:3001/studio/videos", { waitUntil: "networkidle" });
   let videoCard = page.locator('a[href*="/studio/videos/"]').first();
   let videoDetailUrl = page.url();
   if (await videoCard.count() > 0) {
@@ -79,18 +79,18 @@ async function run() {
   await capture(page, "/studio/videos/[id]", videoDetailUrl, { width: 1440, height: 900 }, "desktop_video_detail.png");
 
   // 6. Desktop Provider Settings (1440x900)
-  await page.goto("http://localhost:3000/studio/settings/providers", { waitUntil: "networkidle" });
+  await page.goto("http://localhost:3001/studio/settings/providers", { waitUntil: "networkidle" });
   await capture(page, "/studio/settings/providers", page.url(), { width: 1440, height: 900 }, "desktop_provider_settings.png");
 
   // Mobile Screenshots (390x844)
   await page.setViewportSize({ width: 390, height: 844 });
 
   // 1. Mobile Home (390x844)
-  await page.goto("http://localhost:3000/studio", { waitUntil: "networkidle" });
+  await page.goto("http://localhost:3001/studio", { waitUntil: "networkidle" });
   await capture(page, "/studio", page.url(), { width: 390, height: 844 }, "mobile_home.png");
 
   // 2. Mobile Library (390x844)
-  await page.goto("http://localhost:3000/studio/library", { waitUntil: "networkidle" });
+  await page.goto("http://localhost:3001/studio/library", { waitUntil: "networkidle" });
   await capture(page, "/studio/library", page.url(), { width: 390, height: 844 }, "mobile_library.png");
 
   // 3. Mobile Book Detail (390x844)
@@ -102,7 +102,7 @@ async function run() {
   await capture(page, "/studio/podcasts/[episodeId]", page.url(), { width: 390, height: 844 }, "mobile_podcast_detail.png");
 
   // 5. Mobile Settings (390x844)
-  await page.goto("http://localhost:3000/studio/settings/account", { waitUntil: "networkidle" });
+  await page.goto("http://localhost:3001/studio/settings/account", { waitUntil: "networkidle" });
   await capture(page, "/studio/settings/account", page.url(), { width: 390, height: 844 }, "mobile_settings.png");
 
   await browser.close();

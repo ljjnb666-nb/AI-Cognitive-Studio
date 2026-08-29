@@ -14,7 +14,7 @@ function requiredSecret(): string {
 
 function trustedOrigins(): string[] {
   const configured = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "").split(",").map((origin) => origin.trim()).filter(Boolean);
-  if (process.env.NODE_ENV !== "production") configured.push("http://localhost:3000");
+  if (process.env.NODE_ENV !== "production") configured.push(requiredAuthBaseUrl());
   if (!configured.length) throw new Error("BETTER_AUTH_TRUSTED_ORIGINS_REQUIRED");
   return [...new Set(configured)];
 }

@@ -59,12 +59,12 @@ describe("S3CompatibleStorageProvider against MinIO", () => {
     const preflightResponse = await fetch(upload.url, {
       method: "OPTIONS",
       headers: {
-        Origin: "http://localhost:3000",
+        Origin: "http://localhost:3001",
         "Access-Control-Request-Method": "PUT",
         "Access-Control-Request-Headers": "content-type",
       },
     });
-    expect(preflightResponse.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+    expect(preflightResponse.headers.get("access-control-allow-origin")).toBe("http://localhost:3001");
     const evilPreflightResponse = await fetch(upload.url, {
       method: "OPTIONS",
       headers: {
