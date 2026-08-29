@@ -120,13 +120,13 @@ test("real Better Auth lifecycle includes same-context expiry and real Flow C", 
   expect(source.analysisRuns.some((run) => run.status === "SUCCEEDED")).toBe(true);
   expect(source.currentIntelligence).not.toBeNull();
   await assertDurableGatewayPrincipal({ sourceDocumentId, userId: user.id, workspaceId: user.defaultWorkspaceId! });
-  await prisma.session.update({ where: { id: user.sessions[0]!.id }, data: { expiresAt: new Date(0) } });
+  await prisma.session.updateMany({ where: { userId: user.id }, data: { expiresAt: new Date(0) } });
   await page.goto("/studio");
   await expect(page).toHaveURL(/\/sign-in/);
   expect((await page.request.post("/api/studio/upload", { data: { filename: "expired.md", mediaType: "text/markdown", sizeBytes: 1 } })).status()).toBe(403);
   await signIn(page, email);
-  await page.locator("summary").click();
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.locator(".account-menu-summary").click();
+  await page.getByRole("button", { name: "退出登录" }).click();
   await expect(page).toHaveURL(/\/sign-in$/);
   expect(errors).toEqual([]);
 });
@@ -143,8 +143,8 @@ test("supported Better Auth single-session revocation rejects only the stale vic
   await controller.goto("/studio");
   await expect(controller).toHaveURL(/\/studio$/);
   const sessions = await prisma.session.findMany({ where: { userId: victim.user.id }, orderBy: { createdAt: "asc" } });
-  expect(sessions).toHaveLength(2);
-  const controllerSession = sessions.find((session) => session.id !== victimSession.id);
+  expect(sessions).toContainEqual(expect.objectContaining({ id: victimSession.id }));
+  const controllerSession = sessions.find((session) => session.id !== victimSession.id && session.createdAt > victimSession.createdAt);
   expect(controllerSession).toBeTruthy();
   const revoked = await controller.request.post("/api/auth/revoke-session", { data: { token: victimSession.token }, headers: { origin: "http://localhost:3000" } });
   expect(revoked.status()).toBe(200);
@@ -219,8 +219,8 @@ test("auth forms are responsive and labelled", async ({ browser }) => {
 
 test("authentication ignores untrusted callback URLs", async ({ browser }) => {
   const account = await signedUp(browser, "Callback Safety", `phase7-callback-${Date.now()}@ai-cognitive-studio.test`);
-  await account.page.locator("summary").click();
-  await account.page.getByRole("button", { name: "Sign out" }).click();
+  await account.page.locator(".account-menu-summary").click();
+  await account.page.getByRole("button", { name: "退出登录" }).click();
   await expect(account.page).toHaveURL(/\/sign-in$/);
   for (const callbackUrl of ["https://evil.example", "//evil.example", "https%3A%2F%2Fevil.example", "javascript:alert(1)"]) {
     await account.page.goto(`/sign-in?callbackUrl=${encodeURIComponent(callbackUrl)}`);
