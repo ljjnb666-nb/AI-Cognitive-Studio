@@ -5,6 +5,37 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { authClient } from "@/lib/auth-client";
 
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || !("code" in error)) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function errorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== "object" || !("status" in error)) return undefined;
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" ? status : undefined;
+}
+
+function authErrorMessage(mode: "sign-in" | "sign-up", error: unknown): string {
+  const code = errorCode(error);
+  const status = errorStatus(error);
+
+  if (mode === "sign-up" && (code === "USER_ALREADY_EXISTS" || code === "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL")) {
+    return "该邮箱已经注册，请直接登录。";
+  }
+
+  if (mode === "sign-in" && code === "INVALID_EMAIL_OR_PASSWORD") {
+    return "邮箱或密码不正确。";
+  }
+
+  if (status === undefined || status >= 500 || code === "NETWORK_ERROR" || code === "FETCH_ERROR") {
+    return "服务暂时不可用，请稍后重试。";
+  }
+
+  return mode === "sign-in" ? "无法登录，请稍后重试。" : "无法创建账户，请检查信息后重试。";
+}
+
 export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
   const router = useRouter();
   const [error, setError] = useState("");
@@ -30,11 +61,7 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
 
     if (result.error) {
       setPending(false);
-      return setError(mode === "sign-in" ? "邮箱或密码不正确。" : "无法创建账户，请检查信息或尝试登录。");
-    }
-
-    if (mode === "sign-up") {
-      await authClient.signIn.email({ email, password, rememberMe: true });
+      return setError(authErrorMessage(mode, result.error));
     }
 
     setPending(false);
