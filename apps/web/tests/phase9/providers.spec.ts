@@ -88,7 +88,14 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   const connectionForm = page.locator("form").first();
   await connectionForm.locator('input[name="displayName"]').fill("Phase 9 test provider");
   await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
+  const createResponse = page.waitForResponse(response => response.url().includes("/api/studio/providers") && response.request().method() === "POST");
   await connectionForm.getByRole("button", { name: "创建连接" }).click();
+  const created = await createResponse;
+  expect(created.status()).toBe(200);
+  const createdBody = await created.json() as { connections: Array<{ id: string; displayName: string }> };
+  const createdConnection = createdBody.connections.find(connection => connection.displayName === "Phase 9 test provider");
+  expect(createdConnection).toBeTruthy();
+  await expect.poll(() => prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: createdConnection!.id, workspaceId } }, select: { workspaceId: true } })).toMatchObject({ workspaceId });
   await expect(page.getByText("Phase 9 test provider", { exact: true })).toBeVisible();
   const credentialForm = page.locator("form").filter({ has: page.locator('input[name="secret"]') });
   await credentialForm.locator('input[name="secret"]').fill(secret);

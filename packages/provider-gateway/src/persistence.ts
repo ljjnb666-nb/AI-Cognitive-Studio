@@ -7,7 +7,10 @@ import type { ExecutionSnapshot, GatewayRequest, ResolvedRoute } from "./types.j
 
 type Db = typeof prisma;
 type OwnerContext = { workspaceId: string; userId: string };
-async function requireOwner(db: Db, context: OwnerContext): Promise<void> { const membership = await db.workspaceMember.findUnique({ where: { workspaceId_userId: context } }); if (membership?.role !== "OWNER") throw new ProviderGatewayError("AUTHORIZATION_FAILED"); }
+async function requireOwner(db: Db, context: OwnerContext): Promise<void> {
+  const membership = await db.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } } });
+  if (membership?.role !== "OWNER") throw new ProviderGatewayError("AUTHORIZATION_FAILED");
+}
 function hint(secret: string): string { return secret.length >= 4 ? `…${secret.slice(-4)}` : "configured"; }
 function boundedMetadata(value: Record<string, unknown>): Record<string, unknown> { const clean = redactSecrets(value) as Record<string, unknown>; if (JSON.stringify(clean).length > 8_192) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Provider metadata exceeds its safety bound"); return clean; }
 
