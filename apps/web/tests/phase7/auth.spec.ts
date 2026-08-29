@@ -146,7 +146,7 @@ test("supported Better Auth single-session revocation rejects only the stale vic
   expect(sessions).toContainEqual(expect.objectContaining({ id: victimSession.id }));
   const controllerSession = sessions.find((session) => session.id !== victimSession.id && session.createdAt > victimSession.createdAt);
   expect(controllerSession).toBeTruthy();
-  const revoked = await controller.request.post("/api/auth/revoke-session", { data: { token: victimSession.token }, headers: { origin: "http://localhost:3000" } });
+  const revoked = await controller.request.post("/api/auth/revoke-session", { data: { token: victimSession.token }, headers: { origin: "http://localhost:3001" } });
   expect(revoked.status()).toBe(200);
   expect(await prisma.session.findUnique({ where: { id: victimSession.id } })).toBeNull();
   expect(await prisma.session.findUnique({ where: { id: controllerSession!.id } })).not.toBeNull();
@@ -193,7 +193,7 @@ test("two real users cannot cross tenant boundaries, while members can switch an
 
   const rawWorkspace = await a.page.request.post("/api/studio/workspace", { data: { workspaceId: b.workspaceId, userId: b.user.id }, headers: { "x-user-id": b.user.id, "x-workspace-id": b.workspaceId } });
   expect(rawWorkspace.status()).toBe(403);
-  await a.context.addCookies([{ name: "acs_active_workspace", value: b.workspaceId, url: "http://localhost:3000", httpOnly: true, sameSite: "Lax" }]);
+  await a.context.addCookies([{ name: "acs_active_workspace", value: b.workspaceId, url: "http://localhost:3001", httpOnly: true, sameSite: "Lax" }]);
   const rawCookieDashboard = await a.page.request.get("/studio");
   expect(rawCookieDashboard.status()).toBe(200);
   expect(await rawCookieDashboard.text()).not.toContain("b-tenant-evidence.md");
@@ -224,7 +224,7 @@ test("authentication ignores untrusted callback URLs", async ({ browser }) => {
   await expect(account.page).toHaveURL(/\/sign-in$/);
   for (const callbackUrl of ["https://evil.example", "//evil.example", "https%3A%2F%2Fevil.example", "javascript:alert(1)"]) {
     await account.page.goto(`/sign-in?callbackUrl=${encodeURIComponent(callbackUrl)}`);
-    expect(new URL(account.page.url()).origin).toBe("http://localhost:3000");
+    expect(new URL(account.page.url()).origin).toBe("http://localhost:3001");
     await expect(account.page.locator('input[name="email"]')).toBeVisible();
   }
   await account.page.locator('input[name="email"]').fill(account.user.email);
@@ -236,7 +236,7 @@ test("authentication ignores untrusted callback URLs", async ({ browser }) => {
 
 test("forged and random Better Auth cookies cannot pass protected boundaries", async ({ browser }) => {
   const context = await browser.newContext();
-  await context.addCookies([{ name: "better-auth.session_token", value: "forged-session-token-that-is-not-persisted", url: "http://localhost:3000", httpOnly: true, sameSite: "Lax" }]);
+  await context.addCookies([{ name: "better-auth.session_token", value: "forged-session-token-that-is-not-persisted", url: "http://localhost:3001", httpOnly: true, sameSite: "Lax" }]);
   const page = await context.newPage();
   await page.goto("/studio");
   await expect(page).toHaveURL(/\/sign-in/);

@@ -6,7 +6,7 @@ export default defineConfig({
   timeout: 90_000,
   expect: { timeout: 20_000 },
   outputDir: "../../output/playwright/phase9",
-  use: { baseURL: "http://localhost:3000", trace: "retain-on-failure", screenshot: "only-on-failure" },
-  webServer: { command: "pnpm exec next start -p 3000", url: "http://localhost:3000/api/health", reuseExistingServer: false, env: { ...process.env, NODE_ENV: "test", WEB_DEV_BOOTSTRAP_IDENTITY: "false", PHASE6_BROWSER_ACCEPTANCE: "false" } },
+  use: { baseURL: "http://localhost:3001", trace: "retain-on-failure", screenshot: "only-on-failure" },
+  webServer: { command: "pnpm exec next start -p 3001", url: "http://localhost:3001/api/health", reuseExistingServer: false, env: { ...process.env, NODE_ENV: "test", WEB_DEV_BOOTSTRAP_IDENTITY: "false", PHASE6_BROWSER_ACCEPTANCE: "false" } },
   projects: [{ name: "desktop", use: { ...devices["Desktop Chrome"] } }],
 });

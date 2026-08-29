@@ -3,18 +3,18 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests/e2e",
   use: {
-    baseURL: "http://127.0.0.1:3000",
+    baseURL: "http://localhost:3001",
     trace: "on-first-retry",
   },
   webServer: {
     command: "pnpm dev",
-    url: "http://127.0.0.1:3000",
+    url: "http://localhost:3001",
     reuseExistingServer: !process.env.CI,
     env: {
       NODE_ENV: "test",
       BETTER_AUTH_SECRET: "playwright-test-secret-must-be-at-least-32-characters",
-      BETTER_AUTH_URL: "http://127.0.0.1:3000",
-      BETTER_AUTH_TRUSTED_ORIGINS: "http://127.0.0.1:3000",
+      BETTER_AUTH_URL: "http://localhost:3001",
+      BETTER_AUTH_TRUSTED_ORIGINS: "http://localhost:3001",
       DATABASE_URL: process.env.DATABASE_URL_TEST ?? "postgresql://app:app@localhost:5433/ai_cognitive_studio_test?schema=public",
       REDIS_URL: process.env.REDIS_URL ?? "redis://localhost:6379",
       S3_ENDPOINT: process.env.S3_ENDPOINT ?? "http://localhost:9000",
