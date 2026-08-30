@@ -14,6 +14,7 @@ const routeSlots = [
   { slot: "BOOK_REDUCTION_ANALYSIS", label: "书籍归纳分析 (BOOK_REDUCTION_ANALYSIS)" },
   { slot: "BOOK_SYNTHESIS", label: "书籍综合理解 (BOOK_SYNTHESIS)" },
   { slot: "EMBEDDING", label: "向量嵌入 (EMBEDDING)" },
+  { slot: "THINKING_SESSION", label: "思考会话 (THINKING_SESSION)" },
   { slot: "PODCAST_SCRIPT", label: "播客脚本生成 (PODCAST_SCRIPT)" },
   { slot: "PODCAST_TTS", label: "播客语音合成 (PODCAST_TTS)" },
   { slot: "SHORT_VIDEO_SCRIPT", label: "短视频脚本生成 (SHORT_VIDEO_SCRIPT)" },

@@ -1,0 +1,4 @@
+"use client";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+export function StartThinkingButton({ memoryItemId }: { memoryItemId: string }) { const router = useRouter(), [busy, setBusy] = useState(false), [error, setError] = useState(""); async function start() { setBusy(true); setError(""); const response = await fetch("/api/studio/thinking-sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ memoryItemId, sessionId: crypto.randomUUID() }) }); const body = await response.json(); setBusy(false); if (!response.ok) { setError(body.message ?? "无法开始思考，请检查 Provider 设置。"); return; } router.push(body.href); } return <div><button className="btn btn-primary" disabled={busy} onClick={() => void start()}>{busy ? "正在生成引导…" : "开始思考"}</button>{error ? <p role="alert">{error} <a href="/studio/settings/providers">前往 Provider 设置</a></p> : null}</div>; }

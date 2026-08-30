@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { PageHeader } from "@/components/app-shell";
 import { CognitionSaveButton } from "@/components/cognition-save-button";
+import { StartThinkingButton } from "@/components/start-thinking-button";
 import { cognitionDetail, cognitionTypeLabels } from "@/lib/cognitions";
 import { resolveWebIdentity } from "@/lib/identity";
 
@@ -19,6 +20,7 @@ export default async function CognitionDetailPage({ params }: { params: Promise<
           <CognitionSaveButton cognitionId={cognition.id} initialSaved={cognition.saved} />
         </div>
       </article>
+      <section className="card-panel" style={{ marginBottom: 24 }}><h2 className="section-title">思考引导</h2><p style={{ color: "var(--outline)" }}>从这个认知开始一次属于你的追问，而不是再读一遍摘要。</p><StartThinkingButton memoryItemId={cognition.id} /></section>
       <section className="card-panel" style={{ marginBottom: 24 }}>
         <h2 className="section-title">来源书籍</h2>
         <Link href={`/studio/library/${cognition.sourceDocumentId}`}>{cognition.sourceTitle}</Link>

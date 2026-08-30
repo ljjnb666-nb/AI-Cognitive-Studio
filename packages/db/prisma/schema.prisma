@@ -197,6 +197,16 @@ enum UserCognitionStateKind {
   ARCHIVED
 }
 
+enum ThinkingSessionStatus {
+  ACTIVE
+  COMPLETED
+}
+
+enum ThinkingSessionMessageRole {
+  USER
+  ASSISTANT
+}
+
 enum PodcastEpisodeStatus {
   DRAFT
   GENERATING
@@ -321,21 +331,21 @@ enum ShortVideoSceneType {
 }
 
 model User {
-  id                 String            @id @default(cuid())
-  email              String            @unique
+  id                 String               @id @default(cuid())
+  email              String               @unique
   name               String?
   avatarUrl          String?
-  emailVerified      Boolean           @default(false)
+  emailVerified      Boolean              @default(false)
   image              String?
   defaultWorkspaceId String?
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
   jobs               Job[]
   memberships        WorkspaceMember[]
   accounts           Account[]
   sessions           Session[]
   cognitionStates    UserCognitionState[]
-  defaultWorkspace   Workspace?        @relation("DefaultWorkspace", fields: [defaultWorkspaceId], references: [id], onDelete: SetNull)
+  defaultWorkspace   Workspace?           @relation("DefaultWorkspace", fields: [defaultWorkspaceId], references: [id], onDelete: SetNull)
 
   @@index([defaultWorkspaceId])
 }
@@ -718,12 +728,13 @@ model Verification {
 }
 
 model WorkspaceMember {
-  workspaceId String
-  userId      String
-  role        WorkspaceRole
-  createdAt   DateTime      @default(now())
-  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId      String
+  userId           String
+  role             WorkspaceRole
+  createdAt        DateTime          @default(now())
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  thinkingSessions ThinkingSession[]
 
   @@id([workspaceId, userId])
 }
@@ -1198,6 +1209,7 @@ model BookMemoryItem {
   podcastSegmentContext PodcastSegmentContextItem[]
   podcastEvidence       PodcastUtteranceEvidence[]
   cognitionStates       UserCognitionState[]
+  thinkingSessions      ThinkingSession[]
 
   @@unique([analysisRunId, ordinal])
   @@unique([id, analysisRunId, workspaceId])
@@ -1220,6 +1232,42 @@ model UserCognitionState {
 
   @@unique([workspaceId, userId, memoryItemId])
   @@index([workspaceId, userId, state])
+}
+
+model ThinkingSession {
+  id           String                   @id @default(cuid())
+  workspaceId  String
+  userId       String
+  memoryItemId String
+  status       ThinkingSessionStatus    @default(ACTIVE)
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+  completedAt  DateTime?
+  owner        WorkspaceMember          @relation(fields: [workspaceId, userId], references: [workspaceId, userId], onDelete: Cascade)
+  memoryItem   BookMemoryItem           @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  messages     ThinkingSessionMessage[]
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, userId, updatedAt])
+  @@index([workspaceId, memoryItemId])
+}
+
+model ThinkingSessionMessage {
+  id               String                     @id @default(cuid())
+  workspaceId      String
+  sessionId        String
+  role             ThinkingSessionMessageRole
+  content          String
+  ordinal          Int
+  clientMessageId  String?
+  replyToMessageId String?
+  createdAt        DateTime                   @default(now())
+  session          ThinkingSession            @relation(fields: [sessionId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([sessionId, ordinal])
+  @@unique([sessionId, clientMessageId])
+  @@unique([sessionId, replyToMessageId])
+  @@index([workspaceId, sessionId, createdAt])
 }
 
 model DocumentChunkEmbedding {
@@ -2106,15 +2154,15 @@ model ShortVideoStyleProfile {
 }
 
 model ShortVideoGenerationRun {
-  id                     String                       @id @default(cuid())
+  id                     String                        @id @default(cuid())
   workspaceId            String
   shortVideoProjectId    String
   styleProfileId         String
-  jobId                  String                       @unique
+  jobId                  String                        @unique
   provider               String
   model                  String
   modelVersion           String?
-  modelVersionKey        String                       @default("")
+  modelVersionKey        String                        @default("")
   promptVersion          String
   pipelineVersion        String
   retrievalVersion       String
@@ -2123,21 +2171,21 @@ model ShortVideoGenerationRun {
   audioVersion           String
   renderVersion          String
   generationIdentityHash String
-  idempotencyKey         String                       @unique
+  idempotencyKey         String                        @unique
   correlationId          String?
-  status                 ShortVideoGenerationStatus   @default(QUEUED)
-  stage                  ShortVideoGenerationStage    @default(QUEUED)
+  status                 ShortVideoGenerationStatus    @default(QUEUED)
+  stage                  ShortVideoGenerationStage     @default(QUEUED)
   executionClaimToken    String?
   executionClaimedAt     DateTime?
   executionLeaseUntil    DateTime?
   errorCode              String?
-  createdAt              DateTime                     @default(now())
+  createdAt              DateTime                      @default(now())
   startedAt              DateTime?
   completedAt            DateTime?
-  workspace              Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  project                ShortVideoProject            @relation(fields: [shortVideoProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  styleProfile           ShortVideoStyleProfile       @relation(fields: [styleProfileId, workspaceId, shortVideoProjectId], references: [id, workspaceId, shortVideoProjectId], onDelete: Restrict)
-  job                    Job                          @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  workspace              Workspace                     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project                ShortVideoProject             @relation(fields: [shortVideoProjectId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  styleProfile           ShortVideoStyleProfile        @relation(fields: [styleProfileId, workspaceId, shortVideoProjectId], references: [id, workspaceId, shortVideoProjectId], onDelete: Restrict)
+  job                    Job                           @relation(fields: [jobId], references: [id], onDelete: Restrict)
   sources                ShortVideoGenerationSource[]
   plan                   ShortVideoPlan?
   scenes                 ShortVideoScene[]

@@ -1,0 +1,24 @@
+import { prisma } from "@ai-cognitive/db";
+import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, parseKeyring, parseProviderModelManifest, validateProviderEndpoint } from "@ai-cognitive/provider-gateway";
+import { createRedisConnection } from "@ai-cognitive/shared/server";
+
+type ThinkingGatewayRuntime = ReturnType<typeof assembleThinkingGatewayRuntime>;
+let cachedRuntime: ThinkingGatewayRuntime | undefined;
+
+/** Canonical workspace-BYOK Gateway composition for request-scoped thinking turns. */
+function assembleThinkingGatewayRuntime(environment: NodeJS.ProcessEnv) {
+  const cipher = parseKeyring(environment.PROVIDER_GATEWAY_KEYRING); if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
+  const manifest = parseProviderModelManifest(environment.PROVIDER_GATEWAY_MODEL_MANIFEST), registry = new ProviderRegistry(); for (const provider of manifest.providers) registry.register(provider);
+  const store = new ProviderGatewayRepository(prisma, cipher), repository = new ProviderExecutionRepository(prisma, cipher), authorizer = new WorkspaceMembershipExecutionAuthorizer(prisma), redis = createRedisConnection(environment.REDIS_URL ?? "");
+  const browserFixture = environment.NODE_ENV === "test" && environment.THINKING_SESSION_TEST_GATEWAY === "true";
+  const adapters = browserFixture
+    ? () => ({ execute: async () => ({ response: { type: "TEXT" as const, text: "你愿意用哪一条证据来检验这个判断？" }, usage: { inputTokens: 1, outputTokens: 1 } }) })
+    : createProviderAdapterResolver(new FetchProviderHttpTransport());
+  const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: request => store.resolveWorkspaceRoute(request) }, { resolve: async () => undefined }, adapters, { authorize: (principal, request) => authorizer.authorizeExecution(principal, request.workspaceId), assertRouteUsable: snapshot => store.assertResolvedRouteUsable(snapshot.workspaceId, snapshot.connectionId, snapshot.credentialVersionId), assertBudget: () => undefined, validateEndpoint: async snapshot => { if (!snapshot.endpoint) throw new Error("ROUTE_UNAVAILABLE"); await validateProviderEndpoint(snapshot.endpoint, { environment: environment.NODE_ENV ?? "production", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } }); }, repository, rate: new RedisRateLimiter(redis), concurrency: new RedisConcurrencyLimiter(redis), circuit: new RedisCircuitBreaker(redis) });
+  return { gateway, repository };
+}
+
+export function createThinkingGatewayRuntime(environment: NodeJS.ProcessEnv): ThinkingGatewayRuntime {
+  if (!cachedRuntime) cachedRuntime = assembleThinkingGatewayRuntime(environment);
+  return cachedRuntime;
+}

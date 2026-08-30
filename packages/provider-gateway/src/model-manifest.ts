@@ -14,6 +14,7 @@ export const routeSlotCapabilities: Readonly<Record<RouteSlot, CapabilityFamily>
   PODCAST_TTS: "SPEECH",
   SHORT_VIDEO_SCRIPT: "TEXT_GENERATION",
   SHORT_VIDEO_TTS: "SPEECH",
+  THINKING_SESSION: "TEXT_GENERATION",
 };
 
 export function parseProviderModelManifest(source: string | undefined): ProviderModelManifest {
