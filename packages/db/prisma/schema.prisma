@@ -192,6 +192,11 @@ enum BookMemoryRelationType {
   DEVELOPS
 }
 
+enum UserCognitionStateKind {
+  SAVED
+  ARCHIVED
+}
+
 enum PodcastEpisodeStatus {
   DRAFT
   GENERATING
@@ -329,6 +334,7 @@ model User {
   memberships        WorkspaceMember[]
   accounts           Account[]
   sessions           Session[]
+  cognitionStates    UserCognitionState[]
   defaultWorkspace   Workspace?        @relation("DefaultWorkspace", fields: [defaultWorkspaceId], references: [id], onDelete: SetNull)
 
   @@index([defaultWorkspaceId])
@@ -368,6 +374,7 @@ model Workspace {
   providerSpeechResults      ProviderSpeechResult[]
   providerUsageEvents        ProviderUsageEvent[]
   providerAuditEvents        ProviderAuditEvent[]
+  cognitionStates            UserCognitionState[]
   defaultForUsers            User[]                      @relation("DefaultWorkspace")
 }
 
@@ -1190,11 +1197,29 @@ model BookMemoryItem {
   podcastPlanContext    PodcastPlanContextItem[]
   podcastSegmentContext PodcastSegmentContextItem[]
   podcastEvidence       PodcastUtteranceEvidence[]
+  cognitionStates       UserCognitionState[]
 
   @@unique([analysisRunId, ordinal])
   @@unique([id, analysisRunId, workspaceId])
   @@unique([id, analysisRunId, workspaceId, extractionId])
+  @@unique([id, workspaceId])
   @@index([workspaceId, sourceDocumentId, extractionId, type])
+}
+
+model UserCognitionState {
+  id           String                 @id @default(cuid())
+  workspaceId  String
+  userId       String
+  memoryItemId String
+  state        UserCognitionStateKind @default(SAVED)
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  workspace    Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user         User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  memoryItem   BookMemoryItem         @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([workspaceId, userId, memoryItemId])
+  @@index([workspaceId, userId, state])
 }
 
 model DocumentChunkEmbedding {

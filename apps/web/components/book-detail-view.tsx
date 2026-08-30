@@ -17,6 +17,8 @@ const categoryNames: Record<string, string> = {
   QUOTE: "重要引用",
 };
 
+const cognitionTypes = new Set(["SUMMARY", "CONCEPT", "ARGUMENT", "CLAIM", "QUOTE", "QUESTION", "COUNTERPOINT", "EXAMPLE", "STORY"]);
+
 type EvidenceItemData = {
   id: string;
   startOffset: number;
@@ -133,49 +135,51 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
           const linkedNode = firstEvidence ? structureNodes.find((n) => n.id === firstEvidence.sourceBlock.structureNodeId) : null;
 
           return (
-            <button
-              type="button"
+            <article
               key={memory.id}
               className="memory-card"
-              style={{ width: "100%", textAlign: "left", display: "block" }}
-              onClick={() => {
-                if (firstEvidence) highlightEvidence(firstEvidence.id);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  if (firstEvidence) highlightEvidence(firstEvidence.id);
-                }
-              }}
-              aria-label={`查看 ${categoryNames[memory.type] ?? "解读点"} 对应的原文证据`}
             >
-              <div style={{ fontSize: 11, color: "var(--outline)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>
-                {categoryNames[memory.type] ?? "BOOK MEMORY"}
-              </div>
-              <h3 className="memory-card-title">{categoryNames[memory.type] ?? "解读点"}</h3>
-              <p className="memory-card-body">{memory.content}</p>
+              <button
+                type="button"
+                style={{ width: "100%", textAlign: "left", display: "block", appearance: "none", background: "transparent", border: 0, padding: 0, color: "inherit", font: "inherit", cursor: "pointer" }}
+                onClick={() => {
+                  if (firstEvidence) highlightEvidence(firstEvidence.id);
+                }}
+                aria-label={`查看 ${categoryNames[memory.type] ?? "解读点"} 对应的原文证据`}
+              >
+                <div style={{ fontSize: 11, color: "var(--outline)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>
+                  {categoryNames[memory.type] ?? "BOOK MEMORY"}
+                </div>
+                <h3 className="memory-card-title">{categoryNames[memory.type] ?? "解读点"}</h3>
+                <p className="memory-card-body">{memory.content}</p>
 
-              <div className="memory-meta-box">
-                <div className="meta-field">
-                  <span className="meta-label">结构节点 / Node</span>
-                  <span className="meta-value">{linkedNode?.title ?? linkedNode?.kind ?? "--"}</span>
+                <div className="memory-meta-box">
+                  <div className="meta-field">
+                    <span className="meta-label">结构节点 / Node</span>
+                    <span className="meta-value">{linkedNode?.title ?? linkedNode?.kind ?? "--"}</span>
+                  </div>
+                  <div className="meta-field">
+                    <span className="meta-label">来源区块 / Block</span>
+                    <span className="meta-value">{firstEvidence ? `#${firstEvidence.sourceBlock.ordinal + 1}` : "--"}</span>
+                  </div>
+                  <div className="meta-field" style={{ gridColumn: "span 2", marginTop: 4 }}>
+                    <span className="meta-label">字符范围 / Offset</span>
+                    <span className="meta-value">
+                      {firstEvidence ? (
+                        <span className="meta-badge">{`${firstEvidence.startOffset}-${firstEvidence.endOffset}`}</span>
+                      ) : (
+                        "--"
+                      )}
+                    </span>
+                  </div>
                 </div>
-                <div className="meta-field">
-                  <span className="meta-label">来源区块 / Block</span>
-                  <span className="meta-value">{firstEvidence ? `#${firstEvidence.sourceBlock.ordinal + 1}` : "--"}</span>
-                </div>
-                <div className="meta-field" style={{ gridColumn: "span 2", marginTop: 4 }}>
-                  <span className="meta-label">字符范围 / Offset</span>
-                  <span className="meta-value">
-                    {firstEvidence ? (
-                      <span className="meta-badge">{`${firstEvidence.startOffset}-${firstEvidence.endOffset}`}</span>
-                    ) : (
-                      "--"
-                    )}
-                  </span>
-                </div>
-              </div>
-            </button>
+              </button>
+              {cognitionTypes.has(memory.type) ? (
+                <Link href={`/studio/cognitions/${memory.id}`} className="btn btn-secondary">
+                  查看认知详情
+                </Link>
+              ) : null}
+            </article>
           );
         })}
 
