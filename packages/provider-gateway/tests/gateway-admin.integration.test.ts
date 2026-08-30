@@ -8,6 +8,31 @@ async function user(role: "OWNER" | "EDITOR" | "VIEWER") { const workspaceId = w
 afterEach(async () => { for (const id of workspaceIds.splice(0)) await prisma.$transaction([prisma.providerAuditEvent.deleteMany({ where: { workspaceId: id } }), prisma.providerRouteBinding.deleteMany({ where: { workspaceId: id } }), prisma.providerCredentialVersion.deleteMany({ where: { workspaceId: id } }), prisma.providerConnection.deleteMany({ where: { workspaceId: id } }), prisma.workspace.delete({ where: { id } })]); for (const id of userIds.splice(0)) await prisma.user.delete({ where: { id } }); }); afterAll(async () => prisma.$disconnect());
 
 describe("gateway administration (OWNER only)", () => {
+  it("creates the initial encrypted credential atomically and leaves no orphan when encryption fails", async () => {
+    const owner = await user("OWNER");
+    const repository = new ProviderGatewayRepository(prisma, testCipher());
+    const result = await repository.createConnectionWithCredential(owner, { providerKey: "fixture", protocol: "TEST", displayName: "atomic-success", endpoint: "https://fixture.example.test/v1", secret: "first-secret" });
+    expect(result.credential).toMatchObject({ workspaceId: owner.workspaceId, connectionId: result.connection.id, credentialVersion: 1, status: "ACTIVE" });
+    expect(result.credential.ciphertext).not.toContain("first-secret");
+    const failingCipher = { encrypt: () => { throw new Error("encryption failed"); }, decrypt: () => "" };
+    const failing = new ProviderGatewayRepository(prisma, failingCipher);
+    await expect(failing.createConnectionWithCredential(owner, { providerKey: "fixture", protocol: "TEST", displayName: "atomic-failure", endpoint: "https://fixture.example.test/v1", secret: "must-not-persist" })).rejects.toThrow("encryption failed");
+    expect(await prisma.providerConnection.count({ where: { workspaceId: owner.workspaceId, displayName: "atomic-failure" } })).toBe(0);
+    expect(await prisma.providerCredentialVersion.count({ where: { workspaceId: owner.workspaceId, connectionId: result.connection.id } })).toBe(1);
+  });
+
+  it("keeps combined creation and credential mutation scoped to the owning workspace", async () => {
+    const ownerA = await user("OWNER");
+    const workspaceB = randomUUID(), userB = randomUUID(); workspaceIds.push(workspaceB); userIds.push(userB);
+    await prisma.workspace.create({ data: { id: workspaceB, name: "workspace-b" } }); await prisma.user.create({ data: { id: userB, email: `${userB}@test.invalid` } }); await prisma.workspaceMember.create({ data: { workspaceId: workspaceB, userId: userB, role: "OWNER" } });
+    const repository = new ProviderGatewayRepository(prisma, testCipher());
+    const created = await repository.createConnectionWithCredential(ownerA, { providerKey: "fixture", protocol: "TEST", displayName: "workspace-a", endpoint: "https://fixture.example.test/v1", secret: "workspace-a-secret" });
+    const ownerB = { workspaceId: workspaceB, userId: userB };
+    await expect(repository.rotateCredential(ownerB, created.connection.id, "cross-workspace")).rejects.toMatchObject({ code: "AUTHORIZATION_FAILED" });
+    await expect(repository.revokeCredential(ownerB, created.credential.id)).rejects.toThrow();
+    expect(await prisma.providerCredentialVersion.findUnique({ where: { id_workspaceId: { id: created.credential.id, workspaceId: ownerA.workspaceId } }, select: { status: true } })).toMatchObject({ status: "ACTIVE" });
+  });
+
   it("allows each administrative mutation only to real workspace owners and emits no denied audit", async () => {
     const owner = await user("OWNER"); const editor = await user("EDITOR"); const viewer = await user("VIEWER"); const repository = new ProviderGatewayRepository(prisma, testCipher());
     const connection = await repository.createConnection(owner, { providerKey: "fixture", protocol: "TEST", displayName: "fixture" });

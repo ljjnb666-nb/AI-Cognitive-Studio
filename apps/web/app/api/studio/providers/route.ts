@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { ProviderGatewayRepository, parseKeyring, sanitizedProviderManifest, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayError, ProviderGatewayRepository, parseKeyring, sanitizedProviderManifest, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
@@ -8,11 +8,12 @@ import { assertSafeConfiguration, productManifest, providerReadiness, safeConfig
 const jsonRecord = z.record(z.string(), z.unknown()).default({});
 const executableEndpoint = z.string().url().max(500).refine(value => { try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.hash && !url.search; } catch { return false; } }, "PROVIDER_CONNECTION_ENDPOINT_INVALID");
 const createConnection = z.object({ action: z.literal("CREATE_CONNECTION"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), displayName: z.string().trim().min(1).max(160), endpoint: executableEndpoint, region: z.string().trim().min(1).max(80).optional(), configuration: jsonRecord });
+const createConnectionWithCredential = z.object({ action: z.literal("CREATE_CONNECTION_WITH_CREDENTIAL"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), displayName: z.string().trim().min(1).max(160), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000), region: z.string().trim().min(1).max(80).optional(), configuration: jsonRecord });
 const setCredential = z.object({ action: z.literal("SET_CREDENTIAL"), connectionId: z.string().cuid(), secret: z.string().trim().min(1).max(10_000) });
 const revokeCredential = z.object({ action: z.literal("REVOKE_CREDENTIAL"), credentialVersionId: z.string().uuid() });
 const setEnabled = z.object({ action: z.literal("SET_ENABLED"), connectionId: z.string().cuid(), enabled: z.boolean() });
 const setRoute = z.object({ action: z.literal("SET_ROUTE"), routeSlot: z.enum(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"]), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200), configuration: jsonRecord });
-const bodySchema = z.discriminatedUnion("action", [createConnection, setCredential, revokeCredential, setEnabled, setRoute]);
+const bodySchema = z.discriminatedUnion("action", [createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute]);
 
 function safeConnection(connection: { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credentialVersions: { id: string; displayHint: string | null; status: string }[] }) {
   const credential = connection.credentialVersions[0];
@@ -27,7 +28,7 @@ async function response(workspaceId: string) {
   return NextResponse.json({ manifest: sanitizedProviderManifest(productManifest()), connections: connections.map(safeConnection), routes: routes.map(route => ({ id: route.id, routeSlot: route.routeSlot, connectionId: route.connectionId, modelId: route.modelId, configuration: safeConfiguration(route.configuration), connection: route.connection })), readiness });
 }
 function failure(error: unknown) {
-  const code = error instanceof Error ? error.message.split(":")[0] : "PROVIDER_SETTINGS_REQUEST_FAILED";
+  const code = error instanceof ProviderGatewayError ? error.code : error instanceof Error ? error.message.split(":")[0] : "PROVIDER_SETTINGS_REQUEST_FAILED";
   const status = code === "WEB_IDENTITY_REQUIRED" ? 401 : code === "AUTHORIZATION_FAILED" || code.includes("ACCESS_DENIED") ? 403 : 400;
   return NextResponse.json({ error: code === "INTERNAL_PROVIDER_ERROR" ? "PROVIDER_GATEWAY_KEYRING_MISSING" : code }, { status });
 }
@@ -38,18 +39,21 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const context = await resolveWebIdentity(), input = bodySchema.parse(await request.json());
+    const context = await resolveWebIdentity(), parsed = bodySchema.safeParse(await request.json());
+    if (!parsed.success) throw new Error(parsed.error.issues[0]?.message === "PROVIDER_CONNECTION_ENDPOINT_INVALID" ? "PROVIDER_CONNECTION_ENDPOINT_INVALID" : "PROVIDER_SETTINGS_REQUEST_FAILED");
+    const input = parsed.data;
     const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { role: true } });
     if (membership?.role !== "OWNER") throw new Error("AUTHORIZATION_FAILED");
     const manifest = productManifest();
     const cipher = parseKeyring(process.env.PROVIDER_GATEWAY_KEYRING);
     if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
     const repository = new ProviderGatewayRepository(prisma, cipher);
-    if (input.action === "CREATE_CONNECTION") {
+    if (input.action === "CREATE_CONNECTION" || input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") {
       assertSafeConfiguration(input.configuration);
       const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
       if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
-      await repository.createConnection(context, input);
+      if (input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") await repository.createConnectionWithCredential(context, input);
+      else await repository.createConnection(context, input);
     } else if (input.action === "SET_CREDENTIAL") {
       await repository.rotateCredential(context, input.connectionId, input.secret);
     } else if (input.action === "REVOKE_CREDENTIAL") {

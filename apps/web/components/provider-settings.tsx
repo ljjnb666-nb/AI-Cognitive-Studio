@@ -26,6 +26,14 @@ const readinessLabels: Record<string, string> = {
   podcastAudio: "播客音频",
   shortVideo: "短视频生成",
 };
+const providerErrorMessages: Record<string, string> = {
+  PROVIDER_GATEWAY_KEYRING_MISSING: "Provider 密钥存储尚未配置，请联系管理员。",
+  PROVIDER_CONNECTION_ENDPOINT_INVALID: "请输入有效的 HTTPS API Endpoint。",
+  AUTHORIZATION_FAILED: "当前账户无权修改此工作区的 Provider。",
+  PROVIDER_CONNECTION_PROTOCOL_INVALID: "请选择当前 Provider 支持的协议。",
+  PROVIDER_CONFIGURATION_SECRET_FORBIDDEN: "高级配置不能包含密钥或凭据。",
+};
+function readableError(code: string): string { return providerErrorMessages[code] ?? "保存 Provider 设置失败，请检查输入后重试。"; }
 
 export function ProviderSettings() {
   const [state, setState] = useState<State | null>(null);
@@ -35,7 +43,7 @@ export function ProviderSettings() {
   const refresh = async () => {
     const response = await fetch("/api/studio/providers", { cache: "no-store" });
     const body = (await response.json()) as State & { error?: string };
-    if (!response.ok) throw new Error(body.error ?? "PROVIDER_SETTINGS_LOAD_FAILED");
+    if (!response.ok) throw new Error(readableError(body.error ?? "PROVIDER_SETTINGS_LOAD_FAILED"));
     setState(body);
   };
 
@@ -53,7 +61,7 @@ export function ProviderSettings() {
         body: JSON.stringify(payload),
       });
       const body = (await response.json()) as State & { error?: string };
-      if (!response.ok) throw new Error(body.error ?? "PROVIDER_SETTINGS_SAVE_FAILED");
+      if (!response.ok) throw new Error(readableError(body.error ?? "PROVIDER_SETTINGS_SAVE_FAILED"));
       setState(body);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "PROVIDER_SETTINGS_SAVE_FAILED");
@@ -107,15 +115,16 @@ export function ProviderSettings() {
       {/* 2. Create Connection */}
       <section className="card-panel">
         <h2 className="section-title" style={{ marginBottom: 20 }}>
-          添加 AI Provider 连接
+          添加 AI Provider
         </h2>
+        <p style={{ color: "var(--on-surface-variant)", fontSize: 14, margin: "0 0 20px" }}>添加你自己的 AI Provider。API Key 会加密保存，之后不会再次显示明文。</p>
         <ConnectionForm providers={state.manifest.providers} busy={busy} submit={submit} />
       </section>
 
       {/* 3. Existing Connections */}
       <section className="card-panel">
         <h2 className="section-title" style={{ marginBottom: 20 }}>
-          已保存的连接与密钥
+          已配置 Provider
         </h2>
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           {state.connections.map((connection) => (
@@ -133,37 +142,17 @@ export function ProviderSettings() {
                   <h3 style={{ fontSize: 16, fontWeight: 600, margin: "0 0 4px 0", color: "var(--on-surface)" }}>
                     {connection.displayName}
                   </h3>
-                  <div className="font-mono" style={{ fontSize: 12, color: "var(--outline)" }}>
-                    {connection.providerKey} · 协议: {connection.protocol}
-                    {connection.endpoint ? ` · ${connection.endpoint}` : ""}
-                    {connection.region ? ` (${connection.region})` : ""}
-                  </div>
+                  <div style={{ fontSize: 12, color: "var(--outline)" }}>Provider: {connection.providerKey} · Endpoint: {connection.endpoint ?? "未配置"}{connection.region ? ` · ${connection.region}` : ""}</div>
                 </div>
                 <StatusBadge value={connection.status === "ACTIVE" ? "已启用" : "已停用"} />
               </div>
 
               <p style={{ fontSize: 13, color: "var(--on-surface-variant)", margin: "0 0 16px 0" }}>
-                密钥状态: {connection.credential.exists ? `已配置 (${connection.credential.displayHint ?? "密钥已加密"})` : "未配置密钥"}
+                API Key: {connection.credential.exists ? `已配置 ${connection.credential.displayHint ?? ""}` : "未配置"}
               </p>
 
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
-                <form
-                  style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 280 }}
-                  action={(form) => void submit({ action: "SET_CREDENTIAL", connectionId: connection.id, secret: form.get("secret") })}
-                >
-                  <input
-                    className="input-control"
-                    name="secret"
-                    type="password"
-                    autoComplete="new-password"
-                    placeholder="输入新的 API 密钥"
-                    required
-                    style={{ height: 36, fontSize: 13 }}
-                  />
-                  <button type="submit" className="btn btn-secondary" disabled={busy} style={{ height: 36, fontSize: 13 }}>
-                    保存/轮换密钥
-                  </button>
-                </form>
+                <CredentialRotation connectionId={connection.id} busy={busy} submit={submit} />
 
                 {connection.credential.id && connection.credential.status === "ACTIVE" && (
                   <button
@@ -173,7 +162,7 @@ export function ProviderSettings() {
                     onClick={() => void submit({ action: "REVOKE_CREDENTIAL", credentialVersionId: connection.credential.id })}
                     style={{ height: 36, fontSize: 13 }}
                   >
-                    撤销密钥
+                    撤销 API Key
                   </button>
                 )}
 
@@ -184,17 +173,13 @@ export function ProviderSettings() {
                   onClick={() => void submit({ action: "SET_ENABLED", connectionId: connection.id, enabled: connection.status !== "ACTIVE" })}
                   style={{ height: 36, fontSize: 13 }}
                 >
-                  {connection.status === "ACTIVE" ? "停用连接" : "启用连接"}
+                  {connection.status === "ACTIVE" ? "停用 Provider" : "启用 Provider"}
                 </button>
               </div>
             </div>
           ))}
 
-          {!state.connections.length && (
-            <p style={{ color: "var(--outline)", margin: 0, fontSize: 14 }}>
-              暂未添加 AI Provider 连接。
-            </p>
-          )}
+          {!state.connections.length && <p style={{ color: "var(--outline)", margin: 0, fontSize: 14 }}>保存后，Provider 会显示在这里；随后可在下方配置执行路由。</p>}
         </div>
       </section>
 
@@ -246,11 +231,12 @@ function ConnectionForm({
     <form
       action={(form) =>
         void submit({
-          action: "CREATE_CONNECTION",
+          action: "CREATE_CONNECTION_WITH_CREDENTIAL",
           providerKey,
           protocol: form.get("protocol"),
           displayName: form.get("displayName"),
           endpoint: form.get("endpoint"),
+          secret: form.get("secret"),
           region: form.get("region") || undefined,
           configuration: parseConfiguration(form.get("configuration")),
         })
@@ -268,7 +254,7 @@ function ConnectionForm({
         </select>
       </div>
 
-      <div className="form-group">
+      {protocols.length > 1 && <div className="form-group">
         <label className="form-label">协议 (Protocol)</label>
         <select className="select-control" name="protocol">
           {protocols.map((proto) => (
@@ -277,7 +263,8 @@ function ConnectionForm({
             </option>
           ))}
         </select>
-      </div>
+      </div>}
+      {protocols.length === 1 && <input type="hidden" name="protocol" value={protocols[0]} />}
 
       <div className="form-group">
         <label className="form-label">显示名称</label>
@@ -287,6 +274,11 @@ function ConnectionForm({
       <div className="form-group">
         <label className="form-label">HTTPS 执行端点 (必填)</label>
         <input className="input-control font-mono" name="endpoint" type="url" required placeholder="https://api.example.com/v1" />
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">API Key</label>
+        <input className="input-control" name="secret" type="password" autoComplete="new-password" required placeholder="输入 API Key" />
       </div>
 
       <div className="form-group">
@@ -319,10 +311,20 @@ function ConnectionForm({
       )}
 
       <button type="submit" className="btn btn-primary" disabled={busy || !provider} style={{ justifySelf: "start" }}>
-        {busy ? "创建中…" : "创建连接"}
+        {busy ? "保存中…" : "保存 Provider"}
       </button>
     </form>
   );
+}
+
+function CredentialRotation({ connectionId, busy, submit }: { connectionId: string; busy: boolean; submit(payload: Record<string, unknown>): Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  if (!editing) return <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setEditing(true)} style={{ height: 36, fontSize: 13 }}>更新 API Key</button>;
+  return <form style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 280 }} action={async (form) => { await submit({ action: "SET_CREDENTIAL", connectionId, secret: form.get("secret") }); setEditing(false); }}>
+    <input className="input-control" name="secret" type="password" autoComplete="new-password" placeholder="输入新的 API Key" required style={{ height: 36, fontSize: 13 }} />
+    <button type="submit" className="btn btn-secondary" disabled={busy} style={{ height: 36, fontSize: 13 }}>保存 API Key</button>
+    <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setEditing(false)} style={{ height: 36, fontSize: 13 }}>取消</button>
+  </form>;
 }
 
 function RouteForm({

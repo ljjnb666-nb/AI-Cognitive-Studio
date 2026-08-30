@@ -42,10 +42,8 @@ async function configureAllRoutes(page: import("@playwright/test").Page, display
   const connectionForm = page.locator("form").first();
   await connectionForm.locator('input[name="displayName"]').fill(displayName);
   await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
-  await connectionForm.getByRole("button", { name: "创建连接" }).click();
-  const credentialForm = page.locator("form").filter({ has: page.locator('input[name="secret"]') });
-  await credentialForm.locator('input[name="secret"]').fill(secret);
-  await credentialForm.getByRole("button", { name: "保存/轮换密钥" }).click();
+  await connectionForm.locator('input[name="secret"]').fill(secret);
+  await connectionForm.getByRole("button", { name: "保存 Provider" }).click();
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"]) {
     const route = routeForm(page, slot);
     if (slot.endsWith("TTS")) await route.getByRole("button", { name: "展开高级路由配置 JSON" }).click();
@@ -86,21 +84,25 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   await page.goto("/studio/settings/providers");
   await expect(page.getByRole("heading", { name: "AI Providers" })).toBeVisible();
   const connectionForm = page.locator("form").first();
+  await expect(connectionForm.locator('input[name="secret"]')).toBeVisible();
   await connectionForm.locator('input[name="displayName"]').fill("Phase 9 test provider");
   await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
+  await connectionForm.locator('input[name="secret"]').fill(secret);
   const createResponse = page.waitForResponse(response => response.url().includes("/api/studio/providers") && response.request().method() === "POST");
-  await connectionForm.getByRole("button", { name: "创建连接" }).click();
+  await connectionForm.getByRole("button", { name: "保存 Provider" }).click();
   const created = await createResponse;
   expect(created.status()).toBe(200);
   const createdBody = await created.json() as { connections: Array<{ id: string; displayName: string }> };
+  expect(JSON.stringify(createdBody)).not.toContain(secret);
   const createdConnection = createdBody.connections.find(connection => connection.displayName === "Phase 9 test provider");
   expect(createdConnection).toBeTruthy();
   await expect.poll(() => prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: createdConnection!.id, workspaceId } }, select: { workspaceId: true } })).toMatchObject({ workspaceId });
   await expect(page.getByText("Phase 9 test provider", { exact: true })).toBeVisible();
-  const credentialForm = page.locator("form").filter({ has: page.locator('input[name="secret"]') });
-  await credentialForm.locator('input[name="secret"]').fill(secret);
-  await credentialForm.getByRole("button", { name: "保存/轮换密钥" }).click();
-  await expect(page.getByText("已配置")).toBeVisible();
+  await expect(page.getByText(/API Key: 已配置/)).toBeVisible();
+  const initialCredential = await prisma.providerCredentialVersion.findFirstOrThrow({ where: { workspaceId, connectionId: createdConnection!.id } });
+  expect(initialCredential).toMatchObject({ workspaceId, connectionId: createdConnection!.id, credentialVersion: 1, status: "ACTIVE" });
+  expect(initialCredential.ciphertext).not.toContain(secret);
+  expect(await page.content()).not.toContain(secret);
 
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"]) {
     const route = routeForm(page, slot);
