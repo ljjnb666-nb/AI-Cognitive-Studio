@@ -6,6 +6,7 @@ import { StatusBadge } from "./status-badge";
 const navLinks = [
   { href: "/studio", label: "首页", icon: "home" },
   { href: "/studio/library", label: "知识库", icon: "library" },
+  { href: "/studio/cognitions", label: "我的认知", icon: "cognition" },
   { href: "/studio/podcasts", label: "播客", icon: "podcast" },
   { href: "/studio/videos", label: "短视频", icon: "video" },
   { href: "/studio/activity", label: "活动", icon: "activity" },
@@ -116,6 +117,14 @@ function NavIcon({ name }: { name: string }) {
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
           <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+        </svg>
+      );
+    case "cognition":
+      return (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M4 5a3 3 0 0 1 3-3h11a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a3 3 0 0 0-3 3z" />
+          <path d="M4 5v16a3 3 0 0 1 3-3h13" />
+          <path d="M9 7h7M9 11h7M9 15h4" />
         </svg>
       );
     case "podcast":

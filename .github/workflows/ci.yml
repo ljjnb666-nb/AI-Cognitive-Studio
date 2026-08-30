@@ -123,6 +123,10 @@ jobs:
         run: pnpm test:phase9:release
         env:
           POSTGRES_HOST_PORT: "5432"
+      - name: Phase 10 Cognitive Unit product release gate (real auth + PostgreSQL + no external AI calls)
+        run: pnpm test:phase10:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
       - name: End-to-end tests
         run: pnpm test:e2e
       - name: Build

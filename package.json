@@ -44,6 +44,7 @@
     "test:phase6:e2e": "node scripts/run-phase6-e2e.mjs",
     "test:phase7:e2e": "node scripts/run-phase7-e2e.mjs",
     "test:phase9:release": "node scripts/run-phase9-release.mjs",
+    "test:phase10:release": "node scripts/run-phase10-release.mjs",
     "build": "node --env-file-if-exists=.env scripts/run-pnpm-with-root-env.mjs -r --if-present build",
     "db:generate": "pnpm --filter @ai-cognitive/db prisma:generate:root",
     "db:migrate": "pnpm --filter @ai-cognitive/db prisma:migrate:root",

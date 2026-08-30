@@ -15,6 +15,7 @@ const execute = promisify(execFile), root = resolve(dirname(fileURLToPath(import
 const migrations = resolve(root, "packages/db/prisma/migrations");
 const real2BMigration = join(migrations, "20260819010000_phase_8c_atomic_embedding_materialization");
 const post2BMigration = "20260822010000_phase_8c_durable_text_handoff";
+const currentMigrationCount = BigInt(readdirSync(migrations, { withFileTypes: true }).filter(entry => entry.isDirectory()).length);
 const require = createRequire(import.meta.url);
 const prismaConfigModule = pathToFileURL(require.resolve("prisma/config", { paths: [resolve(root, "packages/db")] })).href;
 
@@ -98,7 +99,7 @@ describe("Phase 8C 2A to 2B upgrade acceptance", () => {
       stage("UPGRADE_STAGE_07_DEPLOY_2B");
       await prisma("migrate deploy", databaseUrl);
       db = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
-      expect((await migrationCount(db))[0]?.count).toBe(34n);
+      expect((await migrationCount(db))[0]?.count).toBe(currentMigrationCount);
       const postUpgradeRepository = new ProviderExecutionRepository(db as never, cipher);
       expect(await postUpgradeRepository.recoverEmbeddingHandoff(workspaceId, invocationId)).toMatchObject({ kind: "RECOVERABLE", response: { vectors } });
       stage("UPGRADE_STAGE_08_CREATE_DOCUMENT_LINEAGE");
