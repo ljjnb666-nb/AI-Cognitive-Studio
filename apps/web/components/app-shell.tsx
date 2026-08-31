@@ -7,6 +7,7 @@ const navLinks = [
   { href: "/studio", label: "首页", icon: "home" },
   { href: "/studio/library", label: "知识库", icon: "library" },
   { href: "/studio/cognitions", label: "我的认知", icon: "cognition" },
+  { href: "/studio/thinking", label: "思考", icon: "cognition" },
   { href: "/studio/podcasts", label: "播客", icon: "podcast" },
   { href: "/studio/videos", label: "短视频", icon: "video" },
   { href: "/studio/activity", label: "活动", icon: "activity" },
