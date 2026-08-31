@@ -4,7 +4,7 @@ import { prisma } from "@ai-cognitive/db";
 import { parseProviderModelManifest, routeSlotCapabilities, sanitizedProviderManifest, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
 
 const bookSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
-const requiredSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION"] as const;
+const requiredSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"] as const;
 type JsonRecord = Record<string, unknown>;
 type RouteWithConnection = { routeSlot: string; modelId: string; configuration: unknown; connection: { id: string; providerKey: string; protocol: string; endpoint: string | null; status: string; credentialVersions: { id: string; status: string }[] } };
 
@@ -58,6 +58,7 @@ export async function resolveBookRouteIdentity(workspaceId: string): Promise<Pro
 export async function resolvePodcastRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "PODCAST_SCRIPT"); }
 export async function resolveShortVideoRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "SHORT_VIDEO_SCRIPT"); }
 export async function resolveThinkingSessionRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "THINKING_SESSION"); }
+export async function resolveTeachBackAssessmentRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "TEACH_BACK_ASSESSMENT"); }
 function configurationRequired(error: unknown): never {
   if (error instanceof Error && (error.message === "PODCAST_TTS_CONFIGURATION_REQUIRED" || error.message === "SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED")) throw error;
   throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
@@ -73,6 +74,9 @@ export async function resolveShortVideoProductExecution(workspaceId: string): Pr
 }
 export async function resolveThinkingSessionProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
   try { return await resolveThinkingSessionRouteIdentity(workspaceId); } catch (error) { return configurationRequired(error); }
+}
+export async function resolveTeachBackProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
+  try { return await resolveTeachBackAssessmentRouteIdentity(workspaceId); } catch (error) { return configurationRequired(error); }
 }
 export async function resolvePodcastAudioRoute(workspaceId: string): Promise<ProductRouteIdentity & { voices: PodcastVoice[] }> {
   const identity = routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "PODCAST_TTS");
@@ -100,8 +104,9 @@ export async function providerReadiness(workspaceId: string) {
   try { await resolvePodcastAudioRoute(workspaceId); } catch (error) { audioMissing.push(error instanceof Error ? error.message : "PODCAST_TTS_CONFIGURATION_REQUIRED"); }
   const videoMissing = missing(["SHORT_VIDEO_SCRIPT", "EMBEDDING", "SHORT_VIDEO_TTS"]);
   const thinkingMissing = missing(["THINKING_SESSION"]);
+  const masteryMissing = missing(["TEACH_BACK_ASSESSMENT"]);
   try { await resolveShortVideoTtsRoute(workspaceId); } catch (error) { videoMissing.push(error instanceof Error ? error.message : "SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED"); }
-  return { book: { state: bookMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(bookMissing)] }, podcast: { state: podcastMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(podcastMissing)] }, podcastAudio: { state: audioMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(audioMissing)] }, shortVideo: { state: videoMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(videoMissing)] }, thinking: { state: thinkingMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(thinkingMissing)] } } as const;
+  return { book: { state: bookMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(bookMissing)] }, podcast: { state: podcastMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(podcastMissing)] }, podcastAudio: { state: audioMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(audioMissing)] }, shortVideo: { state: videoMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(videoMissing)] }, thinking: { state: thinkingMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(thinkingMissing)] }, mastery: { state: masteryMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(masteryMissing)] } } as const;
 }
 
 export function routeCapability(routeSlot: RouteSlot) { return routeSlotCapabilities[routeSlot]; }

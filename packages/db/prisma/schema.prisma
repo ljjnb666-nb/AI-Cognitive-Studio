@@ -207,6 +207,17 @@ enum ThinkingSessionMessageRole {
   ASSISTANT
 }
 
+enum TeachBackAttemptStatus {
+  PENDING_ASSESSMENT
+  ASSESSED
+}
+
+enum TeachBackMasteryState {
+  NEEDS_REVIEW
+  DEVELOPING
+  DEMONSTRATED
+}
+
 enum PodcastEpisodeStatus {
   DRAFT
   GENERATING
@@ -735,6 +746,7 @@ model WorkspaceMember {
   workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   thinkingSessions ThinkingSession[]
+  teachBackAttempts TeachBackAttempt[]
 
   @@id([workspaceId, userId])
 }
@@ -1210,6 +1222,7 @@ model BookMemoryItem {
   podcastEvidence       PodcastUtteranceEvidence[]
   cognitionStates       UserCognitionState[]
   thinkingSessions      ThinkingSession[]
+  teachBackAttempts     TeachBackAttempt[]
 
   @@unique([analysisRunId, ordinal])
   @@unique([id, analysisRunId, workspaceId])
@@ -1268,6 +1281,41 @@ model ThinkingSessionMessage {
   @@unique([sessionId, clientMessageId])
   @@unique([sessionId, replyToMessageId])
   @@index([workspaceId, sessionId, createdAt])
+}
+
+model TeachBackAttempt {
+  id           String                 @id
+  workspaceId  String
+  userId       String
+  memoryItemId String
+  content      String
+  status       TeachBackAttemptStatus @default(PENDING_ASSESSMENT)
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  assessedAt   DateTime?
+  owner        WorkspaceMember        @relation(fields: [workspaceId, userId], references: [workspaceId, userId], onDelete: Cascade)
+  memoryItem   BookMemoryItem         @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  assessment   TeachBackAssessment?
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, userId, createdAt])
+  @@index([workspaceId, memoryItemId, createdAt])
+}
+
+model TeachBackAssessment {
+  id           String                 @id @default(cuid())
+  workspaceId  String
+  attemptId    String
+  masteryState TeachBackMasteryState
+  rubric       Json
+  feedback     String
+  nextPrompt   String?
+  createdAt    DateTime               @default(now())
+  attempt      TeachBackAttempt       @relation(fields: [attemptId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([attemptId])
+  @@unique([attemptId, workspaceId])
+  @@index([workspaceId, createdAt])
 }
 
 model DocumentChunkEmbedding {

@@ -5,12 +5,14 @@ import { CognitionSaveButton } from "@/components/cognition-save-button";
 import { StartThinkingButton } from "@/components/start-thinking-button";
 import { cognitionDetail, cognitionTypeLabels } from "@/lib/cognitions";
 import { resolveWebIdentity } from "@/lib/identity";
+import { latestTeachBackForCognition } from "@/lib/teach-back";
 
 export default async function CognitionDetailPage({ params }: { params: Promise<{ cognitionId: string }> }) {
   const { cognitionId } = await params;
   const identity = await resolveWebIdentity();
   const cognition = await cognitionDetail(identity, cognitionId);
   if (!cognition) notFound();
+  const latest = await latestTeachBackForCognition(identity, cognition.id);
   return (
     <div>
       <PageHeader eyebrow={cognitionTypeLabels[cognition.type]} title="认知详情" description={cognition.sourceTitle} />
@@ -21,6 +23,7 @@ export default async function CognitionDetailPage({ params }: { params: Promise<
         </div>
       </article>
       <section className="card-panel" style={{ marginBottom: 24 }}><h2 className="section-title">思考引导</h2><p style={{ color: "var(--outline)" }}>从这个认知开始一次属于你的追问，而不是再读一遍摘要。</p><StartThinkingButton memoryItemId={cognition.id} /></section>
+      <section className="card-panel" style={{ marginBottom: 24 }}><h2 className="section-title">复述理解</h2><p style={{ color: "var(--outline)" }}>{latest?.assessment ? `最近一次：${latest.assessment.masteryState === "DEMONSTRATED" ? "已表现出理解" : latest.assessment.masteryState === "DEVELOPING" ? "正在形成" : "需要再梳理"}` : "还没有复述这条认知。"}</p><Link className="btn btn-primary" href={`/studio/cognitions/${cognition.id}/teach-back`}>用自己的话讲一遍</Link></section>
       <section className="card-panel" style={{ marginBottom: 24 }}>
         <h2 className="section-title">来源书籍</h2>
         <Link href={`/studio/library/${cognition.sourceDocumentId}`}>{cognition.sourceTitle}</Link>

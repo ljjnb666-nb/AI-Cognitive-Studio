@@ -3,7 +3,6 @@ import "server-only";
 import { prisma } from "@ai-cognitive/db";
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
-import { nextCookies } from "better-auth/next-js";
 import { requiredAuthBaseUrl } from "./auth-config";
 
 function requiredSecret(): string {
@@ -28,6 +27,5 @@ export const auth = betterAuth({
   emailAndPassword: { enabled: true, minPasswordLength: 10, maxPasswordLength: 128 },
   session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24, cookieCache: { enabled: false } },
   rateLimit: { enabled: true, window: 60, max: 10 },
-  advanced: { useSecureCookies: process.env.NODE_ENV === "production", disableCSRFCheck: false, disableOriginCheck: false },
-  plugins: [nextCookies()],
+  advanced: { useSecureCookies: new URL(requiredAuthBaseUrl()).protocol === "https:", disableCSRFCheck: false, disableOriginCheck: false },
 });
