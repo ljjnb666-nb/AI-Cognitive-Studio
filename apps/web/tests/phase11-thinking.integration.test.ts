@@ -51,3 +51,26 @@ describe("Phase 11 Gateway in-progress recovery", () => {
     expect(await prisma.thinkingSessionMessage.count({ where: { sessionId, role: "ASSISTANT" } })).toBe(2);
   });
 });
+
+describe("Phase 11 immutable idempotency payloads", () => {
+  it("rejects changed content for one client message ID while allowing the same normalized retry", async () => {
+    const data = await fixture();
+    const identity = { workspaceId: data.workspace.id, userId: data.userA.id };
+    const sessionId = randomUUID();
+    const messageId = randomUUID();
+    await createThinkingSession(identity, data.first.item.id, sessionId);
+    data.failNext();
+    await expect(appendThinkingResponse(identity, sessionId, messageId, "first content")).rejects.toThrow("THINKING_SESSION_PROVIDER_FAILED");
+    const callsBeforeConflict = data.calls();
+
+    await expect(appendThinkingResponse(identity, sessionId, messageId, "different content")).rejects.toThrow("THINKING_SESSION_IDEMPOTENCY_CONFLICT");
+    expect(await prisma.thinkingSessionMessage.count({ where: { sessionId, role: "USER" } })).toBe(1);
+    expect((await prisma.thinkingSessionMessage.findUniqueOrThrow({ where: { sessionId_clientMessageId: { sessionId, clientMessageId: messageId } } })).content).toBe("first content");
+    expect(data.calls()).toBe(callsBeforeConflict);
+    expect(await prisma.thinkingSessionMessage.count({ where: { sessionId, role: "ASSISTANT" } })).toBe(1);
+
+    await expect(appendThinkingResponse(identity, sessionId, messageId, " first content ")).resolves.toEqual({ id: sessionId });
+    expect(await prisma.thinkingSessionMessage.count({ where: { sessionId, role: "USER" } })).toBe(1);
+    expect(await prisma.thinkingSessionMessage.count({ where: { sessionId, role: "ASSISTANT" } })).toBe(2);
+  });
+});

@@ -81,11 +81,11 @@ test("real Better Auth session creates, persists, completes, and protects a grou
   await expect(page.getByText(`“${fixture.sourceText}”`, { exact: true })).toBeVisible();
   const sessionId = page.url().split("/").at(-1)!;
   expect(await prisma.thinkingSession.count({ where: { id: sessionId } })).toBe(1);
-  const messageIds: string[] = [];
+  const messageBodies: Array<{ clientMessageId: string; content: string }> = [];
   let messageAttempt = 0;
   await page.route(`**/api/studio/thinking-sessions/${sessionId}/messages`, async route => {
     if (route.request().method() !== "POST") return route.continue();
-    messageIds.push((route.request().postDataJSON() as { clientMessageId: string }).clientMessageId);
+    messageBodies.push(route.request().postDataJSON() as { clientMessageId: string; content: string });
     if (messageAttempt++ === 0) {
       await route.fetch();
       await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "RETRYABLE" }) });
@@ -101,28 +101,34 @@ test("real Better Auth session creates, persists, completes, and protects a grou
   await page.getByRole("button", { name: "提交回应" }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page.getByLabel("你的回应")).toHaveValue("我会先核验原文证据。");
-  await page.getByRole("button", { name: "提交回应" }).click();
+  await expect(page.getByLabel("你的回应")).toBeDisabled();
+  await expect(page.getByText("这条回应可能已经提交，重试期间暂不能修改。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "重试回应" }).click();
   await expect(page.getByText("我会先核验原文证据。", { exact: true })).toBeVisible();
   await expect.poll(() => prisma.thinkingSessionMessage.count({ where: { sessionId, role: "USER" } })).toBe(1);
   await expect.poll(() => prisma.thinkingSessionMessage.count({ where: { sessionId, role: "ASSISTANT" } })).toBe(2);
   await expect(page.getByLabel("你的回应")).toHaveValue("");
-  expect(messageIds[1]).toBe(messageIds[0]);
+  await expect(page.getByLabel("你的回应")).toBeEnabled();
+  expect(messageBodies[1]).toEqual(messageBodies[0]);
 
   await page.getByLabel("你的回应").fill("这一回应仍在生成。");
   await page.getByRole("button", { name: "提交回应" }).click();
   await expect(page.getByText("回应仍在生成中，请使用相同内容重试。", { exact: true })).toBeVisible();
   await expect(page.getByLabel("你的回应")).toHaveValue("这一回应仍在生成。");
+  await expect(page.getByLabel("你的回应")).toBeDisabled();
   expect(await prisma.thinkingSessionMessage.count({ where: { sessionId, role: "USER" } })).toBe(1);
-  await page.getByRole("button", { name: "提交回应" }).click();
+  await page.getByRole("button", { name: "重试回应" }).click();
   await expect.poll(() => prisma.thinkingSessionMessage.count({ where: { sessionId, role: "ASSISTANT" } })).toBe(3);
   await expect(page.getByLabel("你的回应")).toHaveValue("");
-  expect(messageIds[3]).toBe(messageIds[2]);
-  expect(messageIds[2]).not.toBe(messageIds[0]);
+  await expect(page.getByLabel("你的回应")).toBeEnabled();
+  expect(messageBodies[3]).toEqual(messageBodies[2]);
+  expect(messageBodies[2]!.clientMessageId).not.toBe(messageBodies[0]!.clientMessageId);
 
   await page.getByLabel("你的回应").fill("这是新的逻辑回应。");
   await page.getByRole("button", { name: "提交回应" }).click();
   await expect.poll(() => prisma.thinkingSessionMessage.count({ where: { sessionId, role: "ASSISTANT" } })).toBe(4);
-  expect(messageIds[4]).not.toBe(messageIds[2]);
+  expect(messageBodies[4]!.clientMessageId).not.toBe(messageBodies[2]!.clientMessageId);
+  expect(messageBodies[4]!.content).toBe("这是新的逻辑回应。");
   await page.reload();
   await expect(page.getByText("我会先核验原文证据。", { exact: true })).toBeVisible();
   const sessionUrl = page.url();

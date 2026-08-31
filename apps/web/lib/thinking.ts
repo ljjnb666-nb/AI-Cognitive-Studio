@@ -36,7 +36,8 @@ export async function createThinkingSession(identity: Identity, memoryItemId: st
   return { id: sessionId };
 }
 export async function appendThinkingResponse(identity: Identity, sessionId: string, clientMessageId: string, content: string) {
-  if (!/^[0-9a-f-]{36}$/i.test(clientMessageId) || !content.trim() || content.length > MAX_USER_CONTENT) throw new Error("THINKING_SESSION_MESSAGE_INVALID");
+  const normalizedContent = content.trim();
+  if (!/^[0-9a-f-]{36}$/i.test(clientMessageId) || !normalizedContent || content.length > MAX_USER_CONTENT) throw new Error("THINKING_SESSION_MESSAGE_INVALID");
   const session = await prisma.thinkingSession.findFirst({ where: { id: sessionId, workspaceId: identity.workspaceId, userId: identity.userId }, include: { memoryItem: true } });
   if (!session) throw new Error("THINKING_SESSION_NOT_FOUND");
   if (session.status !== "ACTIVE") throw new Error("THINKING_SESSION_COMPLETED");
@@ -46,11 +47,14 @@ export async function appendThinkingResponse(identity: Identity, sessionId: stri
     if (!locked) throw new Error("THINKING_SESSION_NOT_FOUND");
     if (locked.status !== "ACTIVE") throw new Error("THINKING_SESSION_COMPLETED");
     const existing = await tx.thinkingSessionMessage.findUnique({ where: { sessionId_clientMessageId: { sessionId, clientMessageId } } });
-    if (existing) return existing;
+    if (existing) {
+      if (existing.content !== normalizedContent) throw new Error("THINKING_SESSION_IDEMPOTENCY_CONFLICT");
+      return existing;
+    }
     const count = await tx.thinkingSessionMessage.count({ where: { sessionId, role: "USER" } });
     if (count >= MAX_USER_MESSAGES) throw new Error("THINKING_SESSION_LIMIT_REACHED");
     const last = await tx.thinkingSessionMessage.findFirst({ where: { sessionId }, orderBy: { ordinal: "desc" }, select: { ordinal: true } });
-    return tx.thinkingSessionMessage.create({ data: { workspaceId: identity.workspaceId, sessionId, role: "USER", content: content.trim(), ordinal: (last?.ordinal ?? -1) + 1, clientMessageId } });
+    return tx.thinkingSessionMessage.create({ data: { workspaceId: identity.workspaceId, sessionId, role: "USER", content: normalizedContent, ordinal: (last?.ordinal ?? -1) + 1, clientMessageId } });
   });
   if (await prisma.thinkingSessionMessage.findUnique({ where: { sessionId_replyToMessageId: { sessionId, replyToMessageId: user.id } }, select: { id: true } })) return { id: sessionId };
   const dialogue = await prisma.thinkingSessionMessage.findMany({ where: { sessionId }, orderBy: { ordinal: "desc" }, take: MAX_CONTEXT_MESSAGES });
