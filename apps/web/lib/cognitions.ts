@@ -46,7 +46,7 @@ function encodeCursor(row: CognitionRow): string {
   return Buffer.from(JSON.stringify({ id: row.id, createdAt: row.createdAt.toISOString() })).toString("base64url");
 }
 
-function currentLineageJoin() {
+export function currentLineageJoin() {
   return Prisma.sql`
     INNER JOIN "BookAnalysisRun" run
       ON run."id" = memory."analysisRunId" AND run."workspaceId" = memory."workspaceId"

@@ -131,6 +131,10 @@ jobs:
         run: pnpm test:phase11:release
         env:
           POSTGRES_HOST_PORT: "5432"
+      - name: Phase 12 Teach Back + Cognition Mastery product release gate (real auth + PostgreSQL + fake Gateway)
+        run: pnpm test:phase12:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
       - name: End-to-end tests
         run: pnpm test:e2e
       - name: Build

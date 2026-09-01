@@ -33,10 +33,12 @@ describe("requiredAuthBaseUrl", () => {
     expect(() => requiredAuthBaseUrl({ NODE_ENV: "production" })).toThrow("BETTER_AUTH_URL_REQUIRED");
     expect(() => requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "not a url" })).toThrow("BETTER_AUTH_URL_INVALID");
     expect(() => requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "http://studio.example" })).toThrow("BETTER_AUTH_URL_HTTPS_REQUIRED");
+    expect(() => requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "http://studio.example", BETTER_AUTH_ALLOW_LOCALHOST_HTTP_FOR_TESTS: "true" })).toThrow("BETTER_AUTH_URL_HTTPS_REQUIRED");
   });
 
   it("accepts an explicit HTTPS production URL and a local development URL", () => {
     expect(requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "https://studio.example" })).toBe("https://studio.example");
     expect(requiredAuthBaseUrl({ NODE_ENV: "development", BETTER_AUTH_URL: "http://localhost:3001" })).toBe("http://localhost:3001");
+    expect(requiredAuthBaseUrl({ NODE_ENV: "production", BETTER_AUTH_URL: "http://localhost:3001", BETTER_AUTH_ALLOW_LOCALHOST_HTTP_FOR_TESTS: "true" })).toBe("http://localhost:3001");
   });
 });
