@@ -27,7 +27,10 @@ async function fixture() {
   const userA = await prisma.user.create({ data: { email: `${suffix}-a@phase12.test` } });
   const userB = await prisma.user.create({ data: { email: `${suffix}-b@phase12.test` } });
   const workspace = await prisma.workspace.create({ data: { name: `phase12-${suffix}` } });
+  const userC = await prisma.user.create({ data: { email: `${suffix}-c@phase12.test` } });
+  const workspaceC = await prisma.workspace.create({ data: { name: `phase12-c-${suffix}` } });
   await prisma.workspaceMember.createMany({ data: [{ workspaceId: workspace.id, userId: userA.id, role: "OWNER" }, { workspaceId: workspace.id, userId: userB.id, role: "VIEWER" }] });
+  await prisma.workspaceMember.create({ data: { workspaceId: workspaceC.id, userId: userC.id, role: "OWNER" } });
   const source = await prisma.source.create({ data: { workspaceId: workspace.id, kind: "FILE", displayName: "Phase 12 evidence" } });
   const blob = await prisma.sourceBlob.create({ data: { workspaceId: workspace.id, sha256: suffix, sizeBytes: 1, mediaType: "text/plain", storageKey: suffix } });
   const document = await prisma.sourceDocument.create({ data: { workspaceId: workspace.id, sourceId: source.id, sourceBlobId: blob.id, version: 1, sha256: suffix, sizeBytes: 1, mediaType: "text/plain", storageKey: suffix } });
@@ -62,7 +65,7 @@ async function fixture() {
   const connection = await providerStore.createConnection({ workspaceId: workspace.id, userId: userA.id }, { providerKey: "phase12-fixture", protocol: "TEST", displayName: "Phase 12 fixture", endpoint: "https://example.com" });
   await providerStore.rotateCredential({ workspaceId: workspace.id, userId: userA.id }, connection.id, "fixture-secret");
   await providerStore.setRoute({ workspaceId: workspace.id, userId: userA.id }, { routeSlot: "TEACH_BACK_ASSESSMENT", connectionId: connection.id, modelId: "phase12-assessment" });
-  return { workspace, userA, userB, document, first, cognition };
+  return { workspace, userA, userB, workspaceC, userC, providerStore, document, first, cognition };
 }
 
 function validStructured() { return { criteria: rubric.map((key) => ({ key, status: "MET", rationale: "Grounded assessment", evidenceRefs: [] })), feedback: "Clear explanation", nextPrompt: null }; }
@@ -85,6 +88,12 @@ describe("Phase 12 real database service gates", () => {
     expect(prompts.at(-1)).toContain("暂无可验证来源证据");
     const detail = await teachBackAttemptDetail(identity, attemptId); expect(detail?.sourceGrounding).toBe("NO_VERIFIABLE_EVIDENCE"); expect(await prisma.teachBackAssessment.count({ where: { attemptId } })).toBe(1);
     await expect(teachBackAttemptDetail({ workspaceId: data.workspace.id, userId: data.userB.id }, attemptId)).resolves.toBeNull();
+    const crossWorkspace = { workspaceId: data.workspaceC.id, userId: data.userC.id }, replay = { memoryItemId: data.first.item.id, attemptId, content: "I can explain the cognition without inventing a source." };
+    await expect(createOrAssessTeachBackAttempt(crossWorkspace, replay)).rejects.toThrow("COGNITION_NOT_CURRENT");
+    await expect(createOrAssessTeachBackAttempt({ workspaceId: data.workspace.id, userId: data.userB.id }, replay)).rejects.toThrow("TEACH_BACK_ATTEMPT_NOT_FOUND");
+    const cConnection = await data.providerStore.createConnection(crossWorkspace, { providerKey: "phase12-fixture", protocol: "TEST", displayName: "Cross workspace fixture", endpoint: "https://example.com" });
+    await data.providerStore.rotateCredential(crossWorkspace, cConnection.id, "fixture-secret"); await data.providerStore.setRoute(crossWorkspace, { routeSlot: "TEACH_BACK_ASSESSMENT", connectionId: cConnection.id, modelId: "phase12-assessment" });
+    await expect(createOrAssessTeachBackAttempt(crossWorkspace, replay)).rejects.toThrow("COGNITION_NOT_CURRENT");
   });
 
   it("excludes regenerated historical lineage from mastery and refuses new assessment transfer", async () => {
