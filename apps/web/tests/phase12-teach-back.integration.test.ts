@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
-import { ProviderGatewayRepository, testCipher } from "@ai-cognitive/provider-gateway";
-import { assessmentSchema, createOrAssessTeachBackAttempt, deriveMasteryState, listMasteryCognitions, rubricForCognitionType, setTeachBackGatewayRuntimeForTests, teachBackAttemptDetail, validateTeachBackAssessment, type Criterion } from "../lib/teach-back";
+import { parseProviderModelManifest, ProviderGatewayRepository, testCipher, validateRouteManifestSelection } from "@ai-cognitive/provider-gateway";
+import { assessmentSchema, createOrAssessTeachBackAttempt, deriveMasteryState, listMasteryCognitions, recoverPendingTeachBackAttempt, rubricForCognitionType, setTeachBackGatewayRuntimeForTests, teachBackAttemptDetail, validateTeachBackAssessment, type Criterion } from "../lib/teach-back";
 
-process.env.PROVIDER_GATEWAY_MODEL_MANIFEST = JSON.stringify({ providers: [{ providerKey: "phase12-fixture", displayName: "Phase 12 Fixture", protocol: "TEST", adapterVersion: "phase12", models: [{ modelId: "phase12-assessment", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "SUPPORTED" }] }] });
+process.env.PROVIDER_GATEWAY_MODEL_MANIFEST = JSON.stringify({ providers: [{ providerKey: "phase12-fixture", displayName: "Phase 12 Fixture", protocol: "TEST", adapterVersion: "phase12", models: [{ modelId: "phase12-assessment", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }] }] });
 
 const rubric = rubricForCognitionType("SUMMARY");
 const valid: { criteria: Criterion[]; feedback: string; nextPrompt: string } = { criteria: rubric.map((key) => ({ key, status: "MET", rationale: "简洁理由", evidenceRefs: [] })), feedback: "反馈", nextPrompt: "再说明其中的关系。" };
@@ -12,6 +12,7 @@ describe("Phase 12 Teach Back deterministic assessment", () => {
   it("derives mastery without a provider score", () => { expect(deriveMasteryState(rubric, valid.criteria)).toBe("DEMONSTRATED"); expect(deriveMasteryState(rubric, [{ ...valid.criteria[0], status: "NOT_MET" }, ...valid.criteria.slice(1)])).toBe("NEEDS_REVIEW"); expect(deriveMasteryState(rubric, [{ ...valid.criteria[0], status: "PARTIAL" }, ...valid.criteria.slice(1)])).toBe("DEVELOPING"); });
   it("rejects missing, duplicate, unknown, invalid, empty, oversized, score, and invented-evidence fields", () => { for (const value of [{ ...valid, criteria: valid.criteria.slice(1) }, { ...valid, criteria: [valid.criteria[0], valid.criteria[0], valid.criteria[2]] }, { ...valid, criteria: [{ ...valid.criteria[0], key: "UNKNOWN" }, ...valid.criteria.slice(1)] }, { ...valid, criteria: [{ ...valid.criteria[0], status: "INVALID" }, ...valid.criteria.slice(1)] }, { ...valid, criteria: [{ ...valid.criteria[0], rationale: "" }, ...valid.criteria.slice(1)] }, { ...valid, feedback: "" }, { ...valid, score: 92 }, { ...valid, feedback: "x".repeat(2001) }, { ...valid, nextPrompt: "x".repeat(601) }, { ...valid, criteria: [{ ...valid.criteria[0], evidenceRefs: ["E9"] }, ...valid.criteria.slice(1)] }]) expect(() => validateTeachBackAssessment(value, rubric, ["E1"])).toThrow("TEACH_BACK_ASSESSMENT_INVALID"); });
   it("uses a valid zero-evidence schema without an empty enum", () => { const schema = assessmentSchema(rubric, []); const refs = (schema.properties.criteria.items.properties.evidenceRefs as { items: Record<string, unknown>; maxItems: number }); expect(refs.maxItems).toBe(0); expect(refs.items).toEqual({ type: "string" }); expect(refs.items).not.toHaveProperty("enum"); });
+  it("requires strict JSON schema for the real Teach Back route selection", () => { for (const structuredOutput of [undefined, "UNSUPPORTED", "PROMPT_ONLY", "JSON_MODE"] as const) { const manifest = parseProviderModelManifest(JSON.stringify({ providers: [{ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "test", models: [{ modelId: "assessment", families: ["TEXT_GENERATION"], confidence: "VERIFIED", ...(structuredOutput ? { structuredOutput } : {}) }] }] })); expect(() => validateRouteManifestSelection(manifest, { routeSlot: "TEACH_BACK_ASSESSMENT", providerKey: "fixture", protocol: "TEST", modelId: "assessment" })).toThrow("strict JSON schema"); } const strict = parseProviderModelManifest(JSON.stringify({ providers: [{ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "test", models: [{ modelId: "assessment", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }] }] })); expect(validateRouteManifestSelection(strict, { routeSlot: "TEACH_BACK_ASSESSMENT", providerKey: "fixture", protocol: "TEST", modelId: "assessment" }).structuredOutput).toBe("STRICT_JSON_SCHEMA"); });
 });
 
 describe("Better Auth production-build contract", () => {
@@ -69,10 +70,10 @@ async function fixture() {
 }
 
 function validStructured() { return { criteria: rubric.map((key) => ({ key, status: "MET", rationale: "Grounded assessment", evidenceRefs: [] })), feedback: "Clear explanation", nextPrompt: null }; }
-function installGateway(options: { fail?: boolean } = {}) {
+function installGateway(options: { fail?: boolean; inProgress?: boolean } = {}) {
   const prompts: string[] = []; let failures = options.fail ? 1 : 0;
   setTeachBackGatewayRuntimeForTests(() => ({
-    gateway: { execute: async (request: { text: { messages: Array<{ content: string }> } }) => { prompts.push(request.text.messages[0]!.content); if (failures-- > 0) throw new Error("fixture failure"); return { status: "SUCCEEDED", invocationId: randomUUID(), snapshot: { id: randomUUID() }, response: { type: "STRUCTURED", structured: validStructured() } }; } } as never,
+    gateway: { execute: async (request: { text: { messages: Array<{ content: string }> } }) => { prompts.push(request.text.messages[0]!.content); if (failures-- > 0) throw new Error("fixture failure"); if (options.inProgress) return { status: "IN_PROGRESS", invocationId: randomUUID() }; return { status: "SUCCEEDED", invocationId: randomUUID(), snapshot: { id: randomUUID() }, response: { type: "STRUCTURED", structured: validStructured() } }; } } as never,
     repository: { consumeTextResult: async (_input: unknown, callback: (context: { tx: typeof prisma }) => Promise<void>) => callback({ tx: prisma }) } as never,
   }));
   return prompts;
@@ -104,4 +105,5 @@ describe("Phase 12 real database service gates", () => {
     const secondPage = await listMasteryCognitions(identity, { cursor: firstPage.nextCursor, pageSize: 50 }); expect(secondPage.items).toHaveLength(3); expect(new Set([...firstPage.items, ...secondPage.items].map(item => item.id)).size).toBe(27); expect(firstPage.items.some(item => item.id === data.first.item.id)).toBe(false); expect([...firstPage.items, ...secondPage.items].some(item => item.id === replacement.item.id)).toBe(true);
     const old = data.first.item; await expect(createOrAssessTeachBackAttempt(identity, { memoryItemId: old.id, attemptId: randomUUID(), content: "Old lineage cannot receive a new assessment." })).rejects.toThrow("COGNITION_NOT_CURRENT");
   });
+  it("recovers only the owner's pending current attempt with its immutable content", async () => { const data = await fixture(); const owner = { workspaceId: data.workspace.id, userId: data.userA.id }, attemptId = randomUUID(), content = "Reload must retry this exact explanation."; installGateway({ inProgress: true }); await expect(createOrAssessTeachBackAttempt(owner, { memoryItemId: data.first.item.id, attemptId, content })).resolves.toMatchObject({ id: attemptId, pending: true }); await expect(recoverPendingTeachBackAttempt(owner, data.first.item.id)).resolves.toEqual({ id: attemptId, content }); await expect(recoverPendingTeachBackAttempt({ workspaceId: data.workspace.id, userId: data.userB.id }, data.first.item.id)).resolves.toBeNull(); await expect(recoverPendingTeachBackAttempt({ workspaceId: data.workspaceC.id, userId: data.userC.id }, data.first.item.id)).resolves.toBeNull(); });
 });

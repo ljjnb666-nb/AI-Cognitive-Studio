@@ -47,7 +47,8 @@ export function validateRouteManifestSelection(manifest: ProviderModelManifest, 
   if (input.protocol !== expectedProtocol) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Provider protocol is not compatible with route capability");
   const model = provider.models.find(item => item.modelId === input.modelId);
   if (!model || !model.families.includes(family)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Model is not compatible with route capability");
-  if (family === "TEXT_GENERATION" && (input.routeSlot.startsWith("BOOK_") || input.routeSlot === "TEACH_BACK_ASSESSMENT") && (model.structuredOutput === "UNSUPPORTED" || !model.structuredOutput)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "This route requires structured output support");
+  if (input.routeSlot === "TEACH_BACK_ASSESSMENT" && model.structuredOutput !== "STRICT_JSON_SCHEMA") throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Teach Back requires strict JSON schema support");
+  if (family === "TEXT_GENERATION" && input.routeSlot.startsWith("BOOK_") && (model.structuredOutput === "UNSUPPORTED" || !model.structuredOutput)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "This route requires structured output support");
   if (family === "SPEECH") {
     const outputFormat = input.configuration?.outputFormat;
     if (typeof outputFormat === "string" && model.speechFormats && !model.speechFormats.includes(outputFormat)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Speech format is unsupported by model");
