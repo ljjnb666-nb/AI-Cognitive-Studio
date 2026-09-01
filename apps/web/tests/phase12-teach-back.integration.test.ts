@@ -34,17 +34,28 @@ async function fixture() {
   const extraction = await prisma.documentExtraction.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: ingestion.id, status: "SUCCEEDED", parserName: "test", parserVersion: "test", normalizationVersion: "test" } });
   await prisma.currentDocumentExtraction.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id } });
   const block = await prisma.sourceBlock.create({ data: { extractionId: extraction.id, ordinal: 0, kind: "PARAGRAPH", text: "Verifiable evidence anchors a claim.", contentHash: suffix } });
-  async function cognition(label: string, evidence = true) {
+  async function cognition(label: string, evidence = true, separateDocument = false) {
+    let targetDocument = document, targetExtraction = extraction, targetBlock = block;
+    if (separateDocument) {
+      const nextSource = await prisma.source.create({ data: { workspaceId: workspace.id, kind: "FILE", displayName: `Phase 12 ${label}` } });
+      const nextBlob = await prisma.sourceBlob.create({ data: { workspaceId: workspace.id, sha256: `${suffix}-${label}`, sizeBytes: 1, mediaType: "text/plain", storageKey: `${suffix}-${label}` } });
+      targetDocument = await prisma.sourceDocument.create({ data: { workspaceId: workspace.id, sourceId: nextSource.id, sourceBlobId: nextBlob.id, version: 1, sha256: `${suffix}-${label}`, sizeBytes: 1, mediaType: "text/plain", storageKey: nextBlob.storageKey } });
+      const nextJob = await prisma.job.create({ data: { workspaceId: workspace.id, type: "source.ingest", payload: {} } });
+      const nextIngestion = await prisma.ingestionRun.create({ data: { workspaceId: workspace.id, sourceDocumentId: targetDocument.id, jobId: nextJob.id, parserVersion: "test", normalizationVersion: "test", status: "SUCCEEDED" } });
+      targetExtraction = await prisma.documentExtraction.create({ data: { workspaceId: workspace.id, sourceDocumentId: targetDocument.id, ingestionRunId: nextIngestion.id, status: "SUCCEEDED", parserName: "test", parserVersion: "test", normalizationVersion: "test" } });
+      targetBlock = await prisma.sourceBlock.create({ data: { extractionId: targetExtraction.id, ordinal: 0, kind: "PARAGRAPH", text: `Evidence ${label}`, contentHash: `${suffix}-${label}` } });
+      await prisma.currentDocumentExtraction.create({ data: { workspaceId: workspace.id, sourceDocumentId: targetDocument.id, extractionId: targetExtraction.id } });
+    }
     const job = await prisma.job.create({ data: { workspaceId: workspace.id, type: "book.analysis", payload: {} } });
-    const chunk = await prisma.chunkSet.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id, chunkingVersion: label, configuration: {}, configurationHash: `${suffix}-${label}`, status: "SUCCEEDED" } });
-    const run = await prisma.bookAnalysisRun.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunk.id, jobId: job.id, pipelineVersion: "test", promptVersion: label, provider: "fixture", model: "fixture", modelVersionKey: "fixture", idempotencyKey: `${suffix}-${label}`, analysisIdentityHash: `${suffix}-${label}`, status: "SUCCEEDED", analysisStage: "COMPLETED", completedAt: new Date() } });
-    const artifact = await prisma.analysisArtifact.create({ data: { workspaceId: workspace.id, analysisRunId: run.id, chunkSetId: chunk.id, extractionId: extraction.id, scope: "BOOK", ordinal: 0, structuredOutput: {} } });
-    const item = await prisma.bookMemoryItem.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id, analysisRunId: run.id, sourceArtifactId: artifact.id, type: "SUMMARY", ordinal: 0, content: `Cognition ${label}`, contentHash: `${suffix}-${label}`, memoryKey: `${run.id}:0` } });
-    if (evidence) await prisma.bookMemoryEvidence.create({ data: { workspaceId: workspace.id, analysisRunId: run.id, extractionId: extraction.id, memoryItemId: item.id, sourceBlockId: block.id, startOffset: 0, endOffset: block.text.length } });
-    return { item, chunk, run };
+    const chunk = await prisma.chunkSet.create({ data: { workspaceId: workspace.id, sourceDocumentId: targetDocument.id, extractionId: targetExtraction.id, chunkingVersion: label, configuration: {}, configurationHash: `${suffix}-${label}`, status: "SUCCEEDED" } });
+    const run = await prisma.bookAnalysisRun.create({ data: { workspaceId: workspace.id, sourceDocumentId: targetDocument.id, extractionId: targetExtraction.id, chunkSetId: chunk.id, jobId: job.id, pipelineVersion: "test", promptVersion: label, provider: "fixture", model: "fixture", modelVersionKey: "fixture", idempotencyKey: `${suffix}-${label}`, analysisIdentityHash: `${suffix}-${label}`, status: "SUCCEEDED", analysisStage: "COMPLETED", completedAt: new Date() } });
+    const artifact = await prisma.analysisArtifact.create({ data: { workspaceId: workspace.id, analysisRunId: run.id, chunkSetId: chunk.id, extractionId: targetExtraction.id, scope: "BOOK", ordinal: 0, structuredOutput: {} } });
+    const item = await prisma.bookMemoryItem.create({ data: { workspaceId: workspace.id, sourceDocumentId: targetDocument.id, extractionId: targetExtraction.id, analysisRunId: run.id, sourceArtifactId: artifact.id, type: "SUMMARY", ordinal: 0, content: `Cognition ${label}`, contentHash: `${suffix}-${label}`, memoryKey: `${run.id}:0` } });
+    if (evidence) await prisma.bookMemoryEvidence.create({ data: { workspaceId: workspace.id, analysisRunId: run.id, extractionId: targetExtraction.id, memoryItemId: item.id, sourceBlockId: targetBlock.id, startOffset: 0, endOffset: targetBlock.text.length } });
+    await prisma.currentBookIntelligence.upsert({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: targetDocument.id, workspaceId: workspace.id } }, create: { workspaceId: workspace.id, sourceDocumentId: targetDocument.id, extractionId: targetExtraction.id, chunkSetId: chunk.id, analysisRunId: run.id }, update: { extractionId: targetExtraction.id, chunkSetId: chunk.id, analysisRunId: run.id } });
+    return { item, chunk, run, document: targetDocument };
   }
   const first = await cognition("first", false);
-  await prisma.currentBookIntelligence.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: first.chunk.id, analysisRunId: first.run.id } });
   const providerStore = new ProviderGatewayRepository(prisma, testCipher());
   const connection = await providerStore.createConnection({ workspaceId: workspace.id, userId: userA.id }, { providerKey: "phase12-fixture", protocol: "TEST", displayName: "Phase 12 fixture", endpoint: "https://example.com" });
   await providerStore.rotateCredential({ workspaceId: workspace.id, userId: userA.id }, connection.id, "fixture-secret");
@@ -76,8 +87,10 @@ describe("Phase 12 real database service gates", () => {
 
   it("excludes regenerated historical lineage from mastery and refuses new assessment transfer", async () => {
     const data = await fixture(); const identity = { workspaceId: data.workspace.id, userId: data.userA.id }; installGateway();
-    for (let index = 0; index < 26; index += 1) { const current = await data.cognition(`page-${index}`, index === 0); await prisma.currentBookIntelligence.update({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } }, data: { extractionId: current.run.extractionId, chunkSetId: current.chunk.id, analysisRunId: current.run.id } }); }
-    const newest = await listMasteryCognitions(identity, { pageSize: 999 }); expect(newest.items).toHaveLength(1); expect(newest.items[0]?.content).toBe("Cognition page-25");
+    for (let index = 0; index < 26; index += 1) await data.cognition(`page-${index}`, false, true);
+    const replacement = await data.cognition("replacement", false);
+    const firstPage = await listMasteryCognitions(identity), repeatedFirstPage = await listMasteryCognitions(identity); expect(firstPage.items).toHaveLength(24); expect(firstPage.items.map(item => item.id)).toEqual(repeatedFirstPage.items.map(item => item.id)); expect(firstPage.nextCursor).toBeTruthy();
+    const secondPage = await listMasteryCognitions(identity, { cursor: firstPage.nextCursor, pageSize: 50 }); expect(secondPage.items).toHaveLength(3); expect(new Set([...firstPage.items, ...secondPage.items].map(item => item.id)).size).toBe(27); expect(firstPage.items.some(item => item.id === data.first.item.id)).toBe(false); expect([...firstPage.items, ...secondPage.items].some(item => item.id === replacement.item.id)).toBe(true);
     const old = data.first.item; await expect(createOrAssessTeachBackAttempt(identity, { memoryItemId: old.id, attemptId: randomUUID(), content: "Old lineage cannot receive a new assessment." })).rejects.toThrow("COGNITION_NOT_CURRENT");
   });
 });
