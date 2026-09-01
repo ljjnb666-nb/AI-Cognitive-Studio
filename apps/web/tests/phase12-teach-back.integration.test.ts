@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { assessmentSchema, deriveMasteryState, rubricForCognitionType, validateTeachBackAssessment, type Criterion } from "../lib/teach-back";
+import { randomUUID } from "node:crypto";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { prisma } from "@ai-cognitive/db";
+import { ProviderGatewayRepository, testCipher } from "@ai-cognitive/provider-gateway";
+import { assessmentSchema, createOrAssessTeachBackAttempt, deriveMasteryState, listMasteryCognitions, rubricForCognitionType, setTeachBackGatewayRuntimeForTests, teachBackAttemptDetail, validateTeachBackAssessment, type Criterion } from "../lib/teach-back";
 
 const rubric = rubricForCognitionType("SUMMARY");
 const valid: { criteria: Criterion[]; feedback: string; nextPrompt: string } = { criteria: rubric.map((key) => ({ key, status: "MET", rationale: "简洁理由", evidenceRefs: [] })), feedback: "反馈", nextPrompt: "再说明其中的关系。" };
@@ -14,5 +17,67 @@ describe("Better Auth production-build contract", () => {
     const { auth } = await import("../lib/auth");
     const response = await auth.handler(new Request("http://localhost:3001/api/auth/sign-up/email", { method: "POST", headers: { "content-type": "application/json", origin: "http://localhost:3001" }, body: JSON.stringify({ name: "Phase Twelve Auth", email: `phase12-auth-${Date.now()}@ai-cognitive-studio.test`, password: "Phase12Password!" }) }));
     expect(response.status, await response.text()).toBe(200);
+  });
+});
+
+async function fixture() {
+  const suffix = randomUUID();
+  const userA = await prisma.user.create({ data: { email: `${suffix}-a@phase12.test` } });
+  const userB = await prisma.user.create({ data: { email: `${suffix}-b@phase12.test` } });
+  const workspace = await prisma.workspace.create({ data: { name: `phase12-${suffix}` } });
+  await prisma.workspaceMember.createMany({ data: [{ workspaceId: workspace.id, userId: userA.id, role: "OWNER" }, { workspaceId: workspace.id, userId: userB.id, role: "VIEWER" }] });
+  const source = await prisma.source.create({ data: { workspaceId: workspace.id, kind: "FILE", displayName: "Phase 12 evidence" } });
+  const blob = await prisma.sourceBlob.create({ data: { workspaceId: workspace.id, sha256: suffix, sizeBytes: 1, mediaType: "text/plain", storageKey: suffix } });
+  const document = await prisma.sourceDocument.create({ data: { workspaceId: workspace.id, sourceId: source.id, sourceBlobId: blob.id, version: 1, sha256: suffix, sizeBytes: 1, mediaType: "text/plain", storageKey: suffix } });
+  const ingestJob = await prisma.job.create({ data: { workspaceId: workspace.id, type: "source.ingest", payload: {} } });
+  const ingestion = await prisma.ingestionRun.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, jobId: ingestJob.id, parserVersion: "test", normalizationVersion: "test", status: "SUCCEEDED" } });
+  const extraction = await prisma.documentExtraction.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: ingestion.id, status: "SUCCEEDED", parserName: "test", parserVersion: "test", normalizationVersion: "test" } });
+  await prisma.currentDocumentExtraction.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id } });
+  const block = await prisma.sourceBlock.create({ data: { extractionId: extraction.id, ordinal: 0, kind: "PARAGRAPH", text: "Verifiable evidence anchors a claim.", contentHash: suffix } });
+  async function cognition(label: string, evidence = true) {
+    const job = await prisma.job.create({ data: { workspaceId: workspace.id, type: "book.analysis", payload: {} } });
+    const chunk = await prisma.chunkSet.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id, chunkingVersion: label, configuration: {}, configurationHash: `${suffix}-${label}`, status: "SUCCEEDED" } });
+    const run = await prisma.bookAnalysisRun.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunk.id, jobId: job.id, pipelineVersion: "test", promptVersion: label, provider: "fixture", model: "fixture", modelVersionKey: "fixture", idempotencyKey: `${suffix}-${label}`, analysisIdentityHash: `${suffix}-${label}`, status: "SUCCEEDED", analysisStage: "COMPLETED", completedAt: new Date() } });
+    const artifact = await prisma.analysisArtifact.create({ data: { workspaceId: workspace.id, analysisRunId: run.id, chunkSetId: chunk.id, extractionId: extraction.id, scope: "BOOK", ordinal: 0, structuredOutput: {} } });
+    const item = await prisma.bookMemoryItem.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id, analysisRunId: run.id, sourceArtifactId: artifact.id, type: "SUMMARY", ordinal: 0, content: `Cognition ${label}`, contentHash: `${suffix}-${label}`, memoryKey: `${run.id}:0` } });
+    if (evidence) await prisma.bookMemoryEvidence.create({ data: { workspaceId: workspace.id, analysisRunId: run.id, extractionId: extraction.id, memoryItemId: item.id, sourceBlockId: block.id, startOffset: 0, endOffset: block.text.length } });
+    return { item, chunk, run };
+  }
+  const first = await cognition("first", false);
+  await prisma.currentBookIntelligence.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: first.chunk.id, analysisRunId: first.run.id } });
+  const providerStore = new ProviderGatewayRepository(prisma, testCipher());
+  const connection = await providerStore.createConnection({ workspaceId: workspace.id, userId: userA.id }, { providerKey: "phase12-fixture", protocol: "TEST", displayName: "Phase 12 fixture", endpoint: "https://example.com" });
+  await providerStore.rotateCredential({ workspaceId: workspace.id, userId: userA.id }, connection.id, "fixture-secret");
+  await providerStore.setRoute({ workspaceId: workspace.id, userId: userA.id }, { routeSlot: "TEACH_BACK_ASSESSMENT", connectionId: connection.id, modelId: "phase12-assessment" });
+  return { workspace, userA, userB, document, first, cognition };
+}
+
+function validStructured() { return { criteria: rubric.map((key) => ({ key, status: "MET", rationale: "Grounded assessment", evidenceRefs: [] })), feedback: "Clear explanation", nextPrompt: null }; }
+function installGateway(options: { fail?: boolean } = {}) {
+  const prompts: string[] = []; let failures = options.fail ? 1 : 0;
+  setTeachBackGatewayRuntimeForTests(() => ({
+    gateway: { execute: async (request: { text: { messages: Array<{ content: string }> } }) => { prompts.push(request.text.messages[0]!.content); if (failures-- > 0) throw new Error("fixture failure"); return { status: "SUCCEEDED", invocationId: randomUUID(), snapshot: { id: randomUUID() }, response: { type: "STRUCTURED", structured: validStructured() } }; } } as never,
+    repository: { consumeTextResult: async (_input: unknown, callback: (context: { tx: typeof prisma }) => Promise<void>) => callback({ tx: prisma }) } as never,
+  }));
+  return prompts;
+}
+afterEach(() => setTeachBackGatewayRuntimeForTests(undefined));
+afterAll(() => prisma.$disconnect());
+
+describe("Phase 12 real database service gates", () => {
+  it("uses the zero-evidence prompt/schema path, persists source grounding, and recovers concurrent retries", async () => {
+    const data = await fixture(); const identity = { workspaceId: data.workspace.id, userId: data.userA.id }; const prompts = installGateway({ fail: true }); const attemptId = randomUUID();
+    await expect(createOrAssessTeachBackAttempt(identity, { memoryItemId: data.first.item.id, attemptId, content: "I can explain the cognition without inventing a source." })).rejects.toThrow("TEACH_BACK_PROVIDER_FAILED");
+    await Promise.all([createOrAssessTeachBackAttempt(identity, { memoryItemId: data.first.item.id, attemptId, content: "I can explain the cognition without inventing a source." }), createOrAssessTeachBackAttempt(identity, { memoryItemId: data.first.item.id, attemptId, content: "I can explain the cognition without inventing a source." })]);
+    expect(prompts.at(-1)).toContain("暂无可验证来源证据");
+    const detail = await teachBackAttemptDetail(identity, attemptId); expect(detail?.sourceGrounding).toBe("NO_VERIFIABLE_EVIDENCE"); expect(await prisma.teachBackAssessment.count({ where: { attemptId } })).toBe(1);
+    await expect(teachBackAttemptDetail({ workspaceId: data.workspace.id, userId: data.userB.id }, attemptId)).resolves.toBeNull();
+  });
+
+  it("excludes regenerated historical lineage from mastery and refuses new assessment transfer", async () => {
+    const data = await fixture(); const identity = { workspaceId: data.workspace.id, userId: data.userA.id }; installGateway();
+    for (let index = 0; index < 26; index += 1) { const current = await data.cognition(`page-${index}`, index === 0); await prisma.currentBookIntelligence.update({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } }, data: { extractionId: current.run.extractionId, chunkSetId: current.chunk.id, analysisRunId: current.run.id } }); }
+    const newest = await listMasteryCognitions(identity, { pageSize: 999 }); expect(newest.items).toHaveLength(1); expect(newest.items[0]?.content).toBe("Cognition page-25");
+    const old = data.first.item; await expect(createOrAssessTeachBackAttempt(identity, { memoryItemId: old.id, attemptId: randomUUID(), content: "Old lineage cannot receive a new assessment." })).rejects.toThrow("COGNITION_NOT_CURRENT");
   });
 });
