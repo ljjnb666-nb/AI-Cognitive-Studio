@@ -4,6 +4,8 @@ import { prisma } from "@ai-cognitive/db";
 import { ProviderGatewayRepository, testCipher } from "@ai-cognitive/provider-gateway";
 import { assessmentSchema, createOrAssessTeachBackAttempt, deriveMasteryState, listMasteryCognitions, rubricForCognitionType, setTeachBackGatewayRuntimeForTests, teachBackAttemptDetail, validateTeachBackAssessment, type Criterion } from "../lib/teach-back";
 
+process.env.PROVIDER_GATEWAY_MODEL_MANIFEST = JSON.stringify({ providers: [{ providerKey: "phase12-fixture", displayName: "Phase 12 Fixture", protocol: "TEST", adapterVersion: "phase12", models: [{ modelId: "phase12-assessment", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "SUPPORTED" }] }] });
+
 const rubric = rubricForCognitionType("SUMMARY");
 const valid: { criteria: Criterion[]; feedback: string; nextPrompt: string } = { criteria: rubric.map((key) => ({ key, status: "MET", rationale: "简洁理由", evidenceRefs: [] })), feedback: "反馈", nextPrompt: "再说明其中的关系。" };
 describe("Phase 12 Teach Back deterministic assessment", () => {
