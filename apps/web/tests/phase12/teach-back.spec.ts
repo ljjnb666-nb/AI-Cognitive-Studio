@@ -3,8 +3,127 @@ import { expect, test } from "@playwright/test";
 import { prisma } from "@ai-cognitive/db";
 
 const password = "Phase12Password!";
-async function signUp(page: import("@playwright/test").Page, email: string) { await page.goto("/sign-up"); await page.locator('input[name="name"]').fill("Phase Twelve Reader"); await page.locator('input[name="email"]').fill(email); await page.locator('input[name="password"]').fill(password); await page.locator('input[name="confirmPassword"]').fill(password); const response = page.waitForResponse(item => item.url().endsWith("/api/auth/sign-up/email")); await page.getByRole("button", { name: "注册并进入 Studio" }).click(); const result = await response, text = await result.text(); if (result.status() !== 200) throw new Error(`SIGNUP_${result.status()}:${text}`); await expect(page).toHaveURL(/\/studio$/); }
-async function currentCognition(workspaceId: string, userId: string, evidence = true) { const suffix = randomUUID(), source = await prisma.source.create({ data: { workspaceId, kind: "FILE", displayName: "复述来源.md" } }), blob = await prisma.sourceBlob.create({ data: { workspaceId, sha256: suffix, sizeBytes: 1, mediaType: "text/markdown", storageKey: `phase12/${suffix}` } }), document = await prisma.sourceDocument.create({ data: { workspaceId, sourceId: source.id, sourceBlobId: blob.id, version: 1, sha256: suffix, sizeBytes: 1, mediaType: "text/markdown", storageKey: blob.storageKey } }), ingestJob = await prisma.job.create({ data: { workspaceId, userId, type: "source.ingest", status: "SUCCEEDED", payload: {} } }), ingestion = await prisma.ingestionRun.create({ data: { workspaceId, sourceDocumentId: document.id, jobId: ingestJob.id, parserVersion: "phase12", normalizationVersion: "phase12", status: "SUCCEEDED" } }), extraction = await prisma.documentExtraction.create({ data: { workspaceId, sourceDocumentId: document.id, ingestionRunId: ingestion.id, status: "SUCCEEDED", parserName: "phase12", parserVersion: "phase12", normalizationVersion: "phase12" } }), sourceText = "原文证据必须准确地回到读者可以核验的来源。", block = await prisma.sourceBlock.create({ data: { extractionId: extraction.id, ordinal: 0, kind: "PARAGRAPH", text: sourceText, contentHash: suffix } }); await prisma.currentDocumentExtraction.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id } }); const job = await prisma.job.create({ data: { workspaceId, userId, type: "book.analysis", status: "SUCCEEDED", payload: {} } }), chunk = await prisma.chunkSet.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkingVersion: "phase12", configuration: {}, configurationHash: suffix, status: "SUCCEEDED" } }), run = await prisma.bookAnalysisRun.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunk.id, jobId: job.id, pipelineVersion: "phase12", promptVersion: "phase12", provider: "fixture", model: "fixture", modelVersionKey: "fixture", idempotencyKey: `phase12:${suffix}`, analysisIdentityHash: `phase12:${suffix}`, status: "SUCCEEDED", analysisStage: "COMPLETED", completedAt: new Date() } }), artifact = await prisma.analysisArtifact.create({ data: { workspaceId, analysisRunId: run.id, chunkSetId: chunk.id, extractionId: extraction.id, scope: "BOOK", ordinal: 0, structuredOutput: {} } }), cognition = await prisma.bookMemoryItem.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, analysisRunId: run.id, sourceArtifactId: artifact.id, type: "SUMMARY", ordinal: 0, content: "可验证的认知从准确的原文开始。", contentHash: suffix, memoryKey: `${run.id}:0` } }); if (evidence) await prisma.bookMemoryEvidence.create({ data: { workspaceId, analysisRunId: run.id, extractionId: extraction.id, memoryItemId: cognition.id, sourceBlockId: block.id, startOffset: 0, endOffset: sourceText.length } }); await prisma.currentBookIntelligence.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunk.id, analysisRunId: run.id } }); return { cognition, sourceText }; }
-async function configure(page: import("@playwright/test").Page) { const created = await page.evaluate(async () => (await fetch("/api/studio/providers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "CREATE_CONNECTION", providerKey: "phase12-fixture", protocol: "TEST", displayName: "Phase 12 Fixture", endpoint: "https://example.com", configuration: {} }) })).json() as Promise<{ connections: Array<{ id: string }> }>); const id = created.connections[0]!.id; for (const value of [{ action: "SET_CREDENTIAL", connectionId: id, secret: "phase12-browser-fixture-secret" }, { action: "SET_ROUTE", connectionId: id, routeSlot: "TEACH_BACK_ASSESSMENT", modelId: "phase12-assessment", configuration: {} }]) expect(await page.evaluate(async input => (await fetch("/api/studio/providers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) })).status, value)).toBe(200); }
 
-test("real auth Teach Back persists immutable attempts, evidence, and private 404", async ({ page, browser }) => { const email = `phase12-owner-${Date.now()}@ai-cognitive-studio.test`; await signUp(page, email); const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } }), workspaceId = owner.memberships[0]!.workspaceId, fixture = await currentCognition(workspaceId, owner.id); await page.goto(`/studio/cognitions/${fixture.cognition.id}`); await page.getByRole("link", { name: "用自己的话讲一遍" }).click(); await expect(page.getByText("复述评估尚未就绪，请先配置 Provider。", { exact: false })).toBeVisible(); await configure(page); await page.reload(); const bodies: Array<{ attemptId: string; content: string }> = []; let request = 0; await page.route("**/api/studio/teach-back", async route => { if (route.request().method() !== "POST") return route.continue(); bodies.push(route.request().postDataJSON() as { attemptId: string; content: string }); if (request++ === 0) { await route.fetch(); return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "RETRYABLE" }) }); } return route.continue(); }); await page.getByLabel("Teach Back explanation").fill("我会用自己的话说明原文必须能被读者核验。"); await page.getByRole("button", { name: "提交复述" }).click(); await expect(page.getByRole("alert")).toBeVisible(); await expect(page.getByLabel("Teach Back explanation")).toBeDisabled(); await page.getByRole("button", { name: "重试这次复述" }).click(); await expect(page).toHaveURL(/\/studio\/teach-back\//); expect(bodies).toHaveLength(2); expect(bodies[1]).toEqual(bodies[0]); await expect(page.getByText("理解表现：已表现出理解", { exact: false })).toBeVisible(); await expect(page.getByText(`“${fixture.sourceText}”`, { exact: true })).toBeVisible(); const attemptId = page.url().split("/").at(-1)!; expect(await prisma.teachBackAttempt.count({ where: { id: attemptId } })).toBe(1); expect(await prisma.teachBackAssessment.count({ where: { attemptId } })).toBe(1); await page.getByRole("link", { name: "再讲一遍" }).click(); await page.getByLabel("Teach Back explanation").fill("这是第二次独立复述。"); await page.getByRole("button", { name: "提交复述" }).click(); await expect(page).toHaveURL(/\/studio\/teach-back\//); expect(await prisma.teachBackAttempt.count({ where: { workspaceId, userId: owner.id } })).toBe(2); await page.goto("/studio/mastery"); await expect(page.getByText("已表现出理解", { exact: false })).toBeVisible(); const memberContext = await browser.newContext(), memberPage = await memberContext.newPage(), memberEmail = `phase12-member-${Date.now()}@ai-cognitive-studio.test`; await signUp(memberPage, memberEmail); const member = await prisma.user.findUniqueOrThrow({ where: { email: memberEmail } }); await prisma.workspaceMember.create({ data: { workspaceId, userId: member.id, role: "VIEWER" } }); await prisma.user.update({ where: { id: member.id }, data: { defaultWorkspaceId: workspaceId } }); const privateResponse = await memberPage.request.get(`/studio/teach-back/${attemptId}`); expect(privateResponse.status()).toBe(404); expect(await privateResponse.text()).not.toContain("我会用自己的话"); await memberContext.close(); const noEvidence = await currentCognition(workspaceId, owner.id, false); await page.goto(`/studio/cognitions/${noEvidence.cognition.id}/teach-back`); await page.getByLabel("Teach Back explanation").fill("即使没有来源摘录，我也能清楚说明这个观点。"); await page.getByRole("button", { name: "提交复述" }).click(); await expect(page).toHaveURL(/\/studio\/teach-back\//); await expect(page.getByText("暂无可验证来源证据", { exact: false })).toBeVisible(); });
+async function signUp(page: import("@playwright/test").Page, email: string) {
+  await page.goto("/sign-up");
+  await page.locator('input[name="name"]').fill("Phase Twelve Reader");
+  await page.locator('input[name="email"]').fill(email);
+  await page.locator('input[name="password"]').fill(password);
+  await page.locator('input[name="confirmPassword"]').fill(password);
+  const response = page.waitForResponse(item => item.url().endsWith("/api/auth/sign-up/email"));
+  await page.getByRole("button", { name: "注册并进入 Studio" }).click();
+  const result = await response, text = await result.text();
+  if (result.status() !== 200) throw new Error(`SIGNUP_${result.status()}:${text}`);
+  await expect(page).toHaveURL(/\/studio$/);
+}
+
+async function currentCognition(workspaceId: string, userId: string, evidence = true) {
+  const suffix = randomUUID();
+  const source = await prisma.source.create({ data: { workspaceId, kind: "FILE", displayName: "复述来源.md" } });
+  const blob = await prisma.sourceBlob.create({ data: { workspaceId, sha256: suffix, sizeBytes: 1, mediaType: "text/markdown", storageKey: `phase12/${suffix}` } });
+  const document = await prisma.sourceDocument.create({ data: { workspaceId, sourceId: source.id, sourceBlobId: blob.id, version: 1, sha256: suffix, sizeBytes: 1, mediaType: "text/markdown", storageKey: blob.storageKey } });
+  const ingestJob = await prisma.job.create({ data: { workspaceId, userId, type: "source.ingest", status: "SUCCEEDED", payload: {} } });
+  const ingestion = await prisma.ingestionRun.create({ data: { workspaceId, sourceDocumentId: document.id, jobId: ingestJob.id, parserVersion: "phase12", normalizationVersion: "phase12", status: "SUCCEEDED" } });
+  const extraction = await prisma.documentExtraction.create({ data: { workspaceId, sourceDocumentId: document.id, ingestionRunId: ingestion.id, status: "SUCCEEDED", parserName: "phase12", parserVersion: "phase12", normalizationVersion: "phase12" } });
+  const sourceText = "原文证据必须准确地回到读者可以核验的来源。";
+  const block = await prisma.sourceBlock.create({ data: { extractionId: extraction.id, ordinal: 0, kind: "PARAGRAPH", text: sourceText, contentHash: suffix } });
+  await prisma.currentDocumentExtraction.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id } });
+  const job = await prisma.job.create({ data: { workspaceId, userId, type: "book.analysis", status: "SUCCEEDED", payload: {} } });
+  const chunk = await prisma.chunkSet.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkingVersion: "phase12", configuration: {}, configurationHash: suffix, status: "SUCCEEDED" } });
+  const run = await prisma.bookAnalysisRun.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunk.id, jobId: job.id, pipelineVersion: "phase12", promptVersion: "phase12", provider: "fixture", model: "fixture", modelVersionKey: "fixture", idempotencyKey: `phase12:${suffix}`, analysisIdentityHash: `phase12:${suffix}`, status: "SUCCEEDED", analysisStage: "COMPLETED", completedAt: new Date() } });
+  const artifact = await prisma.analysisArtifact.create({ data: { workspaceId, analysisRunId: run.id, chunkSetId: chunk.id, extractionId: extraction.id, scope: "BOOK", ordinal: 0, structuredOutput: {} } });
+  const cognition = await prisma.bookMemoryItem.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, analysisRunId: run.id, sourceArtifactId: artifact.id, type: "SUMMARY", ordinal: 0, content: "可验证的认知从准确的原文开始。", contentHash: suffix, memoryKey: `${run.id}:0` } });
+  if (evidence) await prisma.bookMemoryEvidence.create({ data: { workspaceId, analysisRunId: run.id, extractionId: extraction.id, memoryItemId: cognition.id, sourceBlockId: block.id, startOffset: 0, endOffset: sourceText.length } });
+  await prisma.currentBookIntelligence.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunk.id, analysisRunId: run.id } });
+  return { cognition, sourceText };
+}
+
+async function configure(page: import("@playwright/test").Page) {
+  const created = await page.evaluate(async () => (await fetch("/api/studio/providers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "CREATE_CONNECTION", providerKey: "phase12-fixture", protocol: "TEST", displayName: "Phase 12 Fixture", endpoint: "https://example.com", configuration: {} }) })).json() as Promise<{ connections: Array<{ id: string }> }>);
+  const id = created.connections[0]!.id;
+  for (const value of [{ action: "SET_CREDENTIAL", connectionId: id, secret: "phase12-browser-fixture-secret" }, { action: "SET_ROUTE", connectionId: id, routeSlot: "TEACH_BACK_ASSESSMENT", modelId: "phase12-assessment", configuration: {} }]) expect(await page.evaluate(async input => (await fetch("/api/studio/providers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) })).status, value)).toBe(200);
+}
+
+async function expectPrivate404(response: import("@playwright/test").APIResponse, code: string) {
+  expect(response.status()).toBe(404);
+  expect(await response.json()).toEqual({ error: code });
+}
+
+test("real auth Teach Back reloads a database pending attempt and keeps mutation privacy opaque", async ({ page, browser }) => {
+  const email = `phase12-owner-${Date.now()}@ai-cognitive-studio.test`;
+  await signUp(page, email);
+  const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
+  const workspaceId = owner.memberships[0]!.workspaceId, fixture = await currentCognition(workspaceId, owner.id);
+  await page.goto(`/studio/cognitions/${fixture.cognition.id}`);
+  await page.getByRole("link", { name: "用自己的话讲一遍" }).click();
+  await expect(page.getByText("复述评估尚未就绪，请先配置 Provider。", { exact: false })).toBeVisible();
+  await configure(page);
+  await page.reload();
+
+  const submittedContent = "我会用自己的话说明原文必须能被读者核验。";
+  const posts: Array<{ memoryItemId: string; attemptId: string; content: string }> = [];
+  page.on("request", request => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/studio/teach-back") posts.push(request.postDataJSON() as { memoryItemId: string; attemptId: string; content: string });
+  });
+  const pendingResponse = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/studio/teach-back");
+  await page.getByLabel("Teach Back explanation").fill(submittedContent);
+  await page.getByRole("button", { name: "提交复述" }).click();
+  const pending = await pendingResponse;
+  expect(pending.status()).toBe(202);
+  const pendingBody = await pending.json() as { id: string; pending: boolean };
+  expect(pendingBody.pending).toBe(true);
+  const attemptId = pendingBody.id;
+  expect(posts).toEqual([{ memoryItemId: fixture.cognition.id, attemptId, content: submittedContent }]);
+  expect(await prisma.teachBackAttempt.findUniqueOrThrow({ where: { id: attemptId }, select: { status: true, content: true } })).toEqual({ status: "PENDING_ASSESSMENT", content: submittedContent });
+  await expect(page.getByLabel("Teach Back explanation")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "重试这次复述" })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByLabel("Teach Back explanation")).toHaveValue(submittedContent);
+  await expect(page.getByLabel("Teach Back explanation")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "重试这次复述" })).toBeVisible();
+  await expect(page.getByText("已恢复待处理复述；重试期间暂不能修改。", { exact: false })).toBeVisible();
+
+  const retryResponse = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/studio/teach-back");
+  await page.getByRole("button", { name: "重试这次复述" }).click();
+  expect((await retryResponse).status()).toBe(200);
+  await expect(page).toHaveURL(/\/studio\/teach-back\//);
+  expect(posts).toEqual([{ memoryItemId: fixture.cognition.id, attemptId, content: submittedContent }, { memoryItemId: fixture.cognition.id, attemptId, content: submittedContent }]);
+  await expect(page.getByText("理解表现：已表现出理解", { exact: false })).toBeVisible();
+  await expect(page.getByText(`“${fixture.sourceText}”`, { exact: true })).toBeVisible();
+  expect(await prisma.teachBackAttempt.count({ where: { id: attemptId } })).toBe(1);
+  expect(await prisma.teachBackAssessment.count({ where: { attemptId } })).toBe(1);
+  expect(await prisma.teachBackAttempt.count({ where: { id: attemptId, status: "PENDING_ASSESSMENT" } })).toBe(0);
+
+  await page.goto(`/studio/cognitions/${fixture.cognition.id}/teach-back`);
+  await expect(page.getByLabel("Teach Back explanation")).toBeEnabled();
+  await expect(page.getByRole("button", { name: "重试这次复述" })).toHaveCount(0);
+  await expect(page.getByText("已恢复待处理复述；重试期间暂不能修改。", { exact: false })).toHaveCount(0);
+
+  const memberContext = await browser.newContext(), memberPage = await memberContext.newPage();
+  const memberEmail = `phase12-member-${Date.now()}@ai-cognitive-studio.test`;
+  await signUp(memberPage, memberEmail);
+  const foreignRequest = { memoryItemId: fixture.cognition.id, attemptId, content: submittedContent };
+  await expectPrivate404(await memberPage.request.post("/api/studio/teach-back", { data: foreignRequest }), "COGNITION_NOT_CURRENT");
+  await configure(memberPage);
+  await expectPrivate404(await memberPage.request.post("/api/studio/teach-back", { data: foreignRequest }), "COGNITION_NOT_CURRENT");
+  const member = await prisma.user.findUniqueOrThrow({ where: { email: memberEmail } });
+  await prisma.workspaceMember.create({ data: { workspaceId, userId: member.id, role: "VIEWER" } });
+  await prisma.user.update({ where: { id: member.id }, data: { defaultWorkspaceId: workspaceId } });
+  await expectPrivate404(await memberPage.request.post("/api/studio/teach-back", { data: foreignRequest }), "TEACH_BACK_ATTEMPT_NOT_FOUND");
+  await memberContext.close();
+
+  await page.getByLabel("Teach Back explanation").fill("这是第二次独立复述。");
+  await page.getByRole("button", { name: "提交复述" }).click();
+  await expect(page).toHaveURL(/\/studio\/teach-back\//);
+  expect(await prisma.teachBackAttempt.count({ where: { workspaceId, userId: owner.id } })).toBe(2);
+  await page.goto("/studio/mastery");
+  await expect(page.getByText("已表现出理解", { exact: false })).toBeVisible();
+
+  const noEvidence = await currentCognition(workspaceId, owner.id, false);
+  await page.goto(`/studio/cognitions/${noEvidence.cognition.id}/teach-back`);
+  await page.getByLabel("Teach Back explanation").fill("即使没有来源摘录，我也能清楚说明这个观点。");
+  await page.getByRole("button", { name: "提交复述" }).click();
+  await expect(page).toHaveURL(/\/studio\/teach-back\//);
+  await expect(page.getByText("暂无可验证来源证据", { exact: false })).toBeVisible();
+});
