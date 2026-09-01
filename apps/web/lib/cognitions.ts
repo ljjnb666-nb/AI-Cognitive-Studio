@@ -159,7 +159,11 @@ export async function updateCognitionUserState(identity: Pick<WebIdentityContext
   const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: identity.workspaceId, userId: identity.userId } }, select: { userId: true } });
   if (!membership || !(await currentCognitionRow(identity, input.cognitionId))) throw new Error("COGNITION_NOT_FOUND");
   if (!input.saved) {
-    await prisma.userCognitionState.deleteMany({ where: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.cognitionId } });
+    await prisma.userCognitionState.upsert({
+      where: { workspaceId_userId_memoryItemId: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.cognitionId } },
+      create: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.cognitionId, state: "ARCHIVED" },
+      update: { state: "ARCHIVED" },
+    });
     return { saved: false };
   }
   await prisma.userCognitionState.upsert({

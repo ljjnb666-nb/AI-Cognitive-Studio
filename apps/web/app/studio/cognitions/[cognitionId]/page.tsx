@@ -6,13 +6,16 @@ import { StartThinkingButton } from "@/components/start-thinking-button";
 import { cognitionDetail, cognitionTypeLabels } from "@/lib/cognitions";
 import { resolveWebIdentity } from "@/lib/identity";
 import { latestTeachBackForCognition } from "@/lib/teach-back";
+import { findCrossBookCognitionConnections } from "@/lib/cognition-associations";
+
+export const dynamic = "force-dynamic";
 
 export default async function CognitionDetailPage({ params }: { params: Promise<{ cognitionId: string }> }) {
   const { cognitionId } = await params;
   const identity = await resolveWebIdentity();
   const cognition = await cognitionDetail(identity, cognitionId);
   if (!cognition) notFound();
-  const latest = await latestTeachBackForCognition(identity, cognition.id);
+  const [latest, connections] = await Promise.all([latestTeachBackForCognition(identity, cognition.id), findCrossBookCognitionConnections(identity, cognition.id)]);
   return (
     <div>
       <PageHeader eyebrow={cognitionTypeLabels[cognition.type]} title="认知详情" description={cognition.sourceTitle} />
@@ -33,6 +36,7 @@ export default async function CognitionDetailPage({ params }: { params: Promise<
         {cognition.evidence.length ? <div style={{ display: "grid", gap: 16 }}>{cognition.evidence.map((evidence) => <blockquote key={evidence.id} style={{ borderLeft: "2px solid var(--outline)", paddingLeft: 16, margin: 0 }}><p className="font-serif" style={{ margin: "0 0 8px", whiteSpace: "pre-wrap" }}>“{evidence.excerpt}”</p><footer style={{ color: "var(--outline)", fontSize: 12 }}>来源区块 #{evidence.blockOrdinal + 1}</footer></blockquote>)}</div> : <p style={{ margin: 0, color: "var(--outline)" }}>暂无可验证来源证据</p>}
       </section>
       {cognition.related.length ? <section className="card-panel"><h2 className="section-title">相关认知</h2><div style={{ display: "grid", gap: 10 }}>{cognition.related.map((item) => <Link key={item.id} href={`/studio/cognitions/${item.id}`}><span className="meta-badge">{cognitionTypeLabels[item.type]}</span>　{item.content}</Link>)}</div></section> : null}
+      <section className="card-panel" style={{ marginTop: cognition.related.length ? 24 : 0 }}><h2 className="section-title">跨书关联</h2>{connections.length ? <div style={{ display: "grid", gap: 10 }}>{connections.map(item => <Link key={item.id} href={`/studio/cognitions/${item.id}`}><span className="meta-badge">{cognitionTypeLabels[item.type]}</span>　{item.content}<small style={{ display: "block", color: "var(--outline)", marginTop: 4 }}>{item.sourceTitle} · 可能相关的认知</small></Link>)}</div> : <p style={{ margin: 0, color: "var(--outline)" }}>暂无可用的跨书关联。</p>}</section>
     </div>
   );
 }

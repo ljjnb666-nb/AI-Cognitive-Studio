@@ -74,6 +74,10 @@ describe("Phase 10 cognition product read model", () => {
     await expect(updateCognitionUserState(identityA, { cognitionId: cognitionA.id, saved: true })).resolves.toEqual({ saved: true });
     expect((await cognitionDetail(identityA, cognitionA.id))?.saved).toBe(true);
     expect((await cognitionDetail(identityB, cognitionA.id))?.saved).toBe(false);
+    await expect(updateCognitionUserState(identityA, { cognitionId: cognitionA.id, saved: false })).resolves.toEqual({ saved: false });
+    expect((await cognitionDetail(identityA, cognitionA.id))?.saved).toBe(false);
+    expect(await prisma.userCognitionState.findUniqueOrThrow({ where: { workspaceId_userId_memoryItemId: { workspaceId: data.workspace.id, userId: data.userA.id, memoryItemId: cognitionA.id } } })).toMatchObject({ state: "ARCHIVED" });
+    await expect(updateCognitionUserState(identityA, { cognitionId: cognitionA.id, saved: true })).resolves.toEqual({ saved: true });
     const runB = await createRun(data, "b");
     const cognitionB = await memory(data, runB, 0, "Run B cognition");
     await makeCurrent(data, runB);
