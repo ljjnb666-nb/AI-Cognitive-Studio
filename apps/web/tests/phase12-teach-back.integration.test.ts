@@ -113,11 +113,11 @@ describe("Phase 12 real database service gates", () => {
     await prisma.userCognitionState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: data.first.item.id, state: "SAVED" } });
     await prisma.thinkingSession.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: thinkingOnly.item.id } });
     await prisma.teachBackAttempt.create({ data: { id: randomUUID(), workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: teachBackOnly.item.id, content: "Pending attempts are still a meaningful interaction." } });
-    expect((await getPersonalCognitionCorpus(identity)).map(item => item.id).sort()).toEqual([data.first.item.id, thinkingOnly.item.id, teachBackOnly.item.id].sort());
-    expect((await getPersonalCognitionCorpus({ workspaceId: identity.workspaceId, userId: data.userB.id })).map(item => item.id)).toEqual([]);
+    expect((await getPersonalCognitionCorpus(identity)).items.map(item => item.id).sort()).toEqual([data.first.item.id, thinkingOnly.item.id, teachBackOnly.item.id].sort());
+    expect((await getPersonalCognitionCorpus({ workspaceId: identity.workspaceId, userId: data.userB.id })).items.map(item => item.id)).toEqual([]);
     await prisma.userCognitionState.update({ where: { workspaceId_userId_memoryItemId: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: data.first.item.id } }, data: { state: "ARCHIVED" } });
-    expect((await getPersonalCognitionCorpus(identity)).map(item => item.id).sort()).toEqual([thinkingOnly.item.id, teachBackOnly.item.id].sort());
-    expect((await getPersonalCognitionCorpus(identity)).map(item => item.id)).not.toContain(untouched.item.id);
+    expect((await getPersonalCognitionCorpus(identity)).items.map(item => item.id).sort()).toEqual([thinkingOnly.item.id, teachBackOnly.item.id].sort());
+    expect((await getPersonalCognitionCorpus(identity)).items.map(item => item.id)).not.toContain(untouched.item.id);
   });
   it("orders due recommendations by mastery and uses deterministic reason codes", async () => {
     const data = await fixture(), identity = { workspaceId: data.workspace.id, userId: data.userA.id }, past = new Date("2020-01-01T00:00:00.000Z");

@@ -27,8 +27,8 @@ export default async function CognitionsPage({ searchParams }: { searchParams: P
   const selected = filters.find((filter) => filter.key === stringValue(query.filter)) ?? filters[0]!;
   const identity = await resolveWebIdentity();
   const personal = stringValue(query.view) !== "all";
-  const [result, corpus, overview, recommendations, weak] = await Promise.all([listCognitions(identity, { types: selected.types, cursor: stringValue(query.cursor), pageSize: 24 }), personal ? getPersonalCognitionCorpus(identity) : Promise.resolve([]), personal ? getPersonalCognitionOverview(identity) : Promise.resolve(null), personal ? getRecommendedReviews(identity, 5) : Promise.resolve([]), personal ? getPersonalWeakPoints(identity) : Promise.resolve(null)]);
-  const items = personal ? corpus.filter(item => !selected.types || selected.types.includes(item.type)) : result.items;
+  const [result, corpus, overview, recommendations, weak] = await Promise.all([listCognitions(identity, { types: selected.types, cursor: stringValue(query.cursor), pageSize: 24 }), personal ? getPersonalCognitionCorpus(identity, { types: selected.types, cursor: stringValue(query.cursor), pageSize: 24 }) : Promise.resolve({ items: [], nextCursor: undefined }), personal ? getPersonalCognitionOverview(identity) : Promise.resolve(null), personal ? getRecommendedReviews(identity, 5) : Promise.resolve([]), personal ? getPersonalWeakPoints(identity) : Promise.resolve(null)]);
+  const items = personal ? corpus.items : result.items;
 
   return (
     <div>
@@ -36,7 +36,7 @@ export default async function CognitionsPage({ searchParams }: { searchParams: P
       <nav aria-label="认知视图" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}><Link className={personal ? "btn btn-primary" : "btn btn-secondary"} href="/studio/cognitions">我的认知</Link><Link className={!personal ? "btn btn-primary" : "btn btn-secondary"} href="/studio/cognitions?view=all">全部认知</Link></nav>
       {personal && overview ? <section className="card-panel" aria-label="我的认知概览" style={{ marginBottom: 24 }}><h2 className="section-title">我的认知</h2><div style={{ display: "flex", gap: 16, flexWrap: "wrap", color: "var(--outline)" }}><span>总认知 {overview.total}</span><span>待复习 {overview.dueNow}</span><span>尚未验证 {overview.unassessed}</span><span>需要复习 {overview.needsReview}</span><span>正在形成 {overview.developing}</span><span>已掌握 {overview.demonstrated}</span></div></section> : null}
       {personal ? <section className="card-panel" aria-label="今天建议复习" style={{ marginBottom: 24 }}><h2 className="section-title">今天建议复习</h2>{recommendations.length ? <div style={{ display: "grid", gap: 12 }}>{recommendations.map(item => <article key={item.id} style={{ display: "grid", gap: 6 }}><div><span className="meta-badge">{cognitionTypeLabels[item.type]}</span>　<span style={{ color: "var(--outline)" }}>{masteryText(item.masteryState)} · {reasonLabel[item.reason]}</span></div><Link href={`/studio/cognitions/${item.id}`}>{item.content}</Link><small style={{ color: "var(--outline)" }}>{item.sourceTitle}{item.overdue ? " · 已到复习时间" : " · 即将复习"}</small><div style={{ display: "flex", gap: 8 }}><Link className="btn btn-secondary" href={`/studio/cognitions/${item.id}`}>查看认知</Link><Link className="btn btn-secondary" href={`/studio/cognitions/${item.id}/teach-back`}>开始复述</Link><CognitionReviewButton cognitionId={item.id} /></div></article>)}</div> : <p style={{ color: "var(--outline)", margin: 0 }}>暂时没有需要复习的认知。</p>}</section> : null}
-      {personal && weak ? <section className="card-panel" aria-label="当前薄弱点" style={{ marginBottom: 24 }}><h2 className="section-title">当前薄弱点</h2><p style={{ color: "var(--outline)" }}>{weak.weak.length ? `有 ${weak.weak.length} 条认知需要继续梳理。` : "当前没有需要重点梳理的已验证认知。"} {weak.unassessed.length ? `另有 ${weak.unassessed.length} 条尚未验证。` : ""}</p>{weak.criteria.map(item => <p key={item.criterionKey} style={{ margin: "6px 0", color: "var(--outline)" }}>有 {item.affectedCognitionCount} 条认知在「{item.criterionKey}」这一项尚未达到要求。</p>)}</section> : null}
+      {personal && weak ? <section className="card-panel" aria-label="当前薄弱点" style={{ marginBottom: 24 }}><h2 className="section-title">当前薄弱点</h2><p style={{ color: "var(--outline)" }}>{weak.totalWeak ? `有 ${weak.totalWeak} 条认知需要继续梳理。` : "当前没有需要重点梳理的已验证认知。"} {weak.totalUnassessed ? `另有 ${weak.totalUnassessed} 条尚未验证。` : ""}</p>{weak.criteria.map(item => <p key={item.criterionKey} style={{ margin: "6px 0", color: "var(--outline)" }}>有 {item.affectedCognitionCount} 条认知在「{item.criterionKey}」这一项尚未达到要求。</p>)}</section> : null}
       <nav aria-label="认知类型筛选" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 28 }}>
         {filters.map((filter) => (
           <Link key={filter.key} href={`/studio/cognitions?${new URLSearchParams({ ...(personal ? {} : { view: "all" }), ...(filter.key === "all" ? {} : { filter: filter.key }) })}`} className={filter.key === selected.key ? "btn btn-primary" : "btn btn-secondary"}>
@@ -65,8 +65,8 @@ export default async function CognitionsPage({ searchParams }: { searchParams: P
           ))}
         </div>
       )}
-      {!personal && result.nextCursor ? (
-        <div style={{ marginTop: 24 }}><Link className="btn btn-secondary" href={`/studio/cognitions?${new URLSearchParams({ ...(selected.key === "all" ? {} : { filter: selected.key }), cursor: result.nextCursor })}`}>继续浏览</Link></div>
+      {(personal ? corpus.nextCursor : result.nextCursor) ? (
+        <div style={{ marginTop: 24 }}><Link className="btn btn-secondary" href={`/studio/cognitions?${new URLSearchParams({ ...(personal ? {} : { view: "all" }), ...(selected.key === "all" ? {} : { filter: selected.key }), cursor: personal ? corpus.nextCursor! : result.nextCursor! })}`}>继续浏览</Link></div>
       ) : null}
     </div>
   );

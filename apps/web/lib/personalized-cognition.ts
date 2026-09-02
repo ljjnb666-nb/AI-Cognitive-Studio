@@ -6,8 +6,24 @@ import { nextReviewAt, REVIEW_SCHEDULE_VERSION, type ReviewMasteryState, type Te
 type Identity = Pick<WebIdentityContext, "workspaceId" | "userId">;
 type CorpusRow = { id: string; type: CognitionType; content: string; sourceDocumentId: string; sourceTitle: string; createdAt: Date; masteryState: TeachBackMasteryState | null; assessedAt: Date | null; reviewCount: number | null; lastReviewedAt: Date | null; nextReviewAt: Date | null; cachedMasteryState: TeachBackMasteryState | null; cachedMasteryAssessedAt: Date | null };
 export type PersonalCognition = Omit<CorpusRow, "masteryState" | "createdAt" | "assessedAt" | "lastReviewedAt" | "nextReviewAt" | "cachedMasteryState" | "cachedMasteryAssessedAt"> & { masteryState: ReviewMasteryState; createdAt: string; assessedAt: string | null; lastReviewedAt: string | null; nextReviewAt: string | null };
+type CorpusCursor = { createdAt: string; id: string };
+export type PersonalCorpusPage = { items: PersonalCognition[]; nextCursor?: string };
 
-function corpusQuery(identity: Identity) {
+function decodeCursor(value: string | undefined): CorpusCursor | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as CorpusCursor;
+    return typeof parsed.id === "string" && typeof parsed.createdAt === "string" && !Number.isNaN(Date.parse(parsed.createdAt)) ? parsed : undefined;
+  } catch { return undefined; }
+}
+
+function encodeCursor(row: CorpusRow) { return Buffer.from(JSON.stringify({ id: row.id, createdAt: row.createdAt.toISOString() })).toString("base64url"); }
+
+function corpusQuery(identity: Identity, input: { types?: CognitionType[]; cursor?: string } = {}) {
+  const selectedTypes = input.types?.filter(isCognitionType) ?? [];
+  const cursor = decodeCursor(input.cursor);
+  const typeClause = selectedTypes.length ? Prisma.sql`AND memory."type" IN (${Prisma.join(selectedTypes.map(type => Prisma.sql`${type}::"BookMemoryItemType"`))})` : Prisma.empty;
+  const cursorClause = cursor ? Prisma.sql`AND (memory."createdAt" < ${new Date(cursor.createdAt)} OR (memory."createdAt" = ${new Date(cursor.createdAt)} AND memory."id" < ${cursor.id}))` : Prisma.empty;
   return Prisma.sql`
     SELECT memory."id", memory."type", memory."content", memory."sourceDocumentId", memory."createdAt", source."displayName" AS "sourceTitle",
       assessment."masteryState", attempt."assessedAt", review."reviewCount", review."lastReviewedAt", review."nextReviewAt",
@@ -23,16 +39,23 @@ function corpusQuery(identity: Identity) {
     LEFT JOIN "UserCognitionReviewState" review ON review."workspaceId"=memory."workspaceId" AND review."userId"=${identity.userId} AND review."memoryItemId"=memory."id"
     WHERE memory."workspaceId"=${identity.workspaceId} AND run."status"='SUCCEEDED'::"AnalysisRunStatus"
       AND memory."type" IN ('SUMMARY'::"BookMemoryItemType",'CONCEPT'::"BookMemoryItemType",'ARGUMENT'::"BookMemoryItemType",'CLAIM'::"BookMemoryItemType",'COUNTERPOINT'::"BookMemoryItemType",'QUOTE'::"BookMemoryItemType",'QUESTION'::"BookMemoryItemType",'EXAMPLE'::"BookMemoryItemType",'STORY'::"BookMemoryItemType")
+      ${typeClause}
+      ${cursorClause}
       AND (state."id" IS NULL OR state."state"<>'ARCHIVED'::"UserCognitionStateKind")
       AND (state."state"='SAVED'::"UserCognitionStateKind" OR EXISTS (SELECT 1 FROM "ThinkingSession" session WHERE session."workspaceId"=memory."workspaceId" AND session."userId"=${identity.userId} AND session."memoryItemId"=memory."id") OR EXISTS (SELECT 1 FROM "TeachBackAttempt" teach WHERE teach."workspaceId"=memory."workspaceId" AND teach."userId"=${identity.userId} AND teach."memoryItemId"=memory."id"))
   `;
 }
 
-async function corpusRows(identity: Identity): Promise<CorpusRow[]> { return prisma.$queryRaw<CorpusRow[]>(corpusQuery(identity)); }
+async function corpusRows(identity: Identity): Promise<CorpusRow[]> { return prisma.$queryRaw<CorpusRow[]>(Prisma.sql`${corpusQuery(identity)} ORDER BY memory."createdAt" DESC, memory."id" DESC`); }
 function mastery(row: CorpusRow): ReviewMasteryState { return row.masteryState ?? "UNASSESSED"; }
 function serialize(row: CorpusRow): PersonalCognition { return { id: row.id, type: row.type, content: row.content, sourceDocumentId: row.sourceDocumentId, sourceTitle: row.sourceTitle, masteryState: mastery(row), reviewCount: row.reviewCount ?? 0, createdAt: row.createdAt.toISOString(), assessedAt: row.assessedAt?.toISOString() ?? null, lastReviewedAt: row.lastReviewedAt?.toISOString() ?? null, nextReviewAt: row.nextReviewAt?.toISOString() ?? null }; }
 
-export async function getPersonalCognitionCorpus(identity: Identity) { return (await corpusRows(identity)).filter(row => isCognitionType(row.type)).map(serialize); }
+export async function getPersonalCognitionCorpus(identity: Identity, input: { types?: CognitionType[]; cursor?: string; pageSize?: number } = {}): Promise<PersonalCorpusPage> {
+  const pageSize = Math.min(Math.max(input.pageSize ?? 24, 1), 50);
+  const rows = await prisma.$queryRaw<CorpusRow[]>(Prisma.sql`${corpusQuery(identity, input)} ORDER BY memory."createdAt" DESC, memory."id" DESC LIMIT ${pageSize + 1}`);
+  const page = rows.slice(0, pageSize);
+  return { items: page.map(serialize), nextCursor: rows.length > pageSize && page.length ? encodeCursor(page[page.length - 1]!) : undefined };
+}
 
 export async function getPersonalCognitionOverview(identity: Identity) {
   const rows = await corpusRows(identity), now = new Date();
@@ -56,7 +79,8 @@ export async function getPersonalWeakPoints(identity: Identity) {
   const assessments = assessedIds.length ? await prisma.$queryRaw<Array<{ memoryItemId: string; rubric: unknown }>>(Prisma.sql`SELECT DISTINCT ON (attempt."memoryItemId") attempt."memoryItemId", assessment."rubric" FROM "TeachBackAttempt" attempt JOIN "TeachBackAssessment" assessment ON assessment."attemptId"=attempt."id" AND assessment."workspaceId"=attempt."workspaceId" WHERE attempt."workspaceId"=${identity.workspaceId} AND attempt."userId"=${identity.userId} AND attempt."status"='ASSESSED'::"TeachBackAttemptStatus" AND attempt."memoryItemId" IN (${Prisma.join(assessedIds)}) ORDER BY attempt."memoryItemId", attempt."assessedAt" DESC, attempt."id" DESC`) : [];
   const aggregate = new Map<string, { criterionKey: string; notMetCount: number; partialCount: number; affected: Set<string> }>();
   for (const row of assessments) if (Array.isArray(row.rubric)) for (const item of row.rubric as Rubric) if (typeof item.key === "string" && (item.status === "NOT_MET" || item.status === "PARTIAL")) { const value = aggregate.get(item.key) ?? { criterionKey: item.key, notMetCount: 0, partialCount: 0, affected: new Set<string>() }; if (item.status === "NOT_MET") value.notMetCount++; else value.partialCount++; value.affected.add(row.memoryItemId); aggregate.set(item.key, value); }
-  return { weak: weak.map(serialize), unassessed: rows.filter(row => mastery(row) === "UNASSESSED").map(serialize), criteria: [...aggregate.values()].map(value => ({ criterionKey: value.criterionKey, notMetCount: value.notMetCount, partialCount: value.partialCount, affectedCognitionCount: value.affected.size })).sort((a, b) => b.notMetCount - a.notMetCount || b.partialCount - a.partialCount || a.criterionKey.localeCompare(b.criterionKey)) };
+  const unassessed = rows.filter(row => mastery(row) === "UNASSESSED");
+  return { weak: weak.slice(0, 50).map(serialize), unassessed: unassessed.slice(0, 50).map(serialize), totalWeak: weak.length, totalUnassessed: unassessed.length, criteria: [...aggregate.values()].map(value => ({ criterionKey: value.criterionKey, notMetCount: value.notMetCount, partialCount: value.partialCount, affectedCognitionCount: value.affected.size })).sort((a, b) => b.notMetCount - a.notMetCount || b.partialCount - a.partialCount || a.criterionKey.localeCompare(b.criterionKey)) };
 }
 
 export type RecommendationReason = "WEAK_MASTERY" | "DEVELOPING_MASTERY" | "UNASSESSED" | "OVERDUE" | "MAINTAIN_MASTERY" | "REVIEW_SOON";
@@ -77,8 +101,9 @@ export async function isActivePersonalCognition(identity: Identity, memoryItemId
 export async function recordManualCognitionReview(identity: Identity, input: { memoryItemId: string; eventId: string }) {
   const at = new Date();
   return prisma.$transaction(async tx => {
+    const lockKey = `${identity.workspaceId}:${identity.userId}:${input.memoryItemId}`;
+    await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
     if (!(await isActivePersonalCognition(identity, input.memoryItemId, tx as typeof prisma))) throw new Error("COGNITION_NOT_FOUND");
-    await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${input.eventId}, 0))`);
     const existing = await tx.userCognitionReviewEvent.findFirst({ where: { id: input.eventId, workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.memoryItemId } });
     if (existing) return { idempotent: true, eventId: existing.id };
     const latest = await tx.teachBackAttempt.findFirst({ where: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.memoryItemId, status: "ASSESSED" }, include: { assessment: true }, orderBy: [{ assessedAt: "desc" }, { id: "desc" }] });

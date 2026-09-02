@@ -6,6 +6,7 @@ import { findCrossBookCognitionConnections } from "../../lib/cognition-associati
 const password = "Phase13Password!";
 
 async function signUp(page: Page, email: string) {
+  await page.setExtraHTTPHeaders({ "x-forwarded-for": `203.0.113.${Math.abs([...email].reduce((sum, character) => sum + character.charCodeAt(0), 0)) % 250 + 1}` });
   await page.goto("/sign-up");
   await page.locator('input[name="name"]').fill("Phase Thirteen Reader");
   await page.locator('input[name="email"]').fill(email);
@@ -17,7 +18,7 @@ async function signUp(page: Page, email: string) {
   await expect(page).toHaveURL(/\/studio$/);
 }
 
-async function currentCognition(workspaceId: string, userId: string, label: string) {
+async function currentCognition(workspaceId: string, userId: string, label: string, createdAt = new Date()) {
   const suffix = randomUUID();
   const source = await prisma.source.create({ data: { workspaceId, kind: "FILE", displayName: `Phase 13 ${label}` } });
   const blob = await prisma.sourceBlob.create({ data: { workspaceId, sha256: suffix, sizeBytes: 1, mediaType: "text/plain", storageKey: `phase13/${suffix}` } });
@@ -31,7 +32,7 @@ async function currentCognition(workspaceId: string, userId: string, label: stri
   const chunkSet = await prisma.chunkSet.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkingVersion: "phase13", configuration: {}, configurationHash: suffix, status: "SUCCEEDED" } });
   const run = await prisma.bookAnalysisRun.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunkSet.id, jobId: analysisJob.id, pipelineVersion: "phase13", promptVersion: "phase13", provider: "fixture", model: "fixture", modelVersionKey: "fixture", idempotencyKey: `phase13:${suffix}`, analysisIdentityHash: `phase13:${suffix}`, status: "SUCCEEDED", analysisStage: "COMPLETED", completedAt: new Date() } });
   const artifact = await prisma.analysisArtifact.create({ data: { workspaceId, analysisRunId: run.id, chunkSetId: chunkSet.id, extractionId: extraction.id, scope: "BOOK", ordinal: 0, structuredOutput: {} } });
-  const item = await prisma.bookMemoryItem.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, analysisRunId: run.id, sourceArtifactId: artifact.id, type: "SUMMARY", ordinal: 0, content: `Phase 13 cognition ${label}`, contentHash: suffix, memoryKey: `${run.id}:0` } });
+  const item = await prisma.bookMemoryItem.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, analysisRunId: run.id, sourceArtifactId: artifact.id, type: "SUMMARY", ordinal: 0, content: `Phase 13 cognition ${label}`, contentHash: suffix, memoryKey: `${run.id}:0`, createdAt } });
   await prisma.bookMemoryEvidence.create({ data: { workspaceId, analysisRunId: run.id, extractionId: extraction.id, memoryItemId: item.id, sourceBlockId: block.id, startOffset: 0, endOffset: block.text.length } });
   await prisma.currentBookIntelligence.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunkSet.id, analysisRunId: run.id } });
   return { document, item, run };
@@ -108,4 +109,62 @@ test("real auth keeps personalized cognition private, durable, current, and cros
   expect(privateReview.status()).toBe(404);
   expect(await privateReview.json()).toEqual({ error: "COGNITION_NOT_FOUND" });
   await memberContext.close();
+});
+
+test("all pagination retains ALL mode and personal sections never appear", async ({ page }) => {
+  const email = `phase13-all-${Date.now()}@ai-cognitive-studio.test`;
+  await signUp(page, email);
+  const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } }), workspaceId = owner.memberships[0]!.workspaceId, rows = [] as Awaited<ReturnType<typeof currentCognition>>[];
+  for (let index = 0; index < 25; index += 1) rows.push(await currentCognition(workspaceId, owner.id, `all-page-${index}`, new Date(Date.UTC(2026, 8, 1, 0, 0, index))));
+  await page.goto("/studio/cognitions?view=all");
+  await expect(page.locator("h1", { hasText: "全部认知" })).toBeVisible();
+  await expect(page.getByText(rows[24]!.item.content, { exact: true })).toBeVisible();
+  await expect(page.getByLabel("我的认知概览")).toHaveCount(0);
+  await expect(page.getByLabel("今天建议复习")).toHaveCount(0);
+  await page.getByRole("link", { name: "继续浏览" }).click();
+  await expect(page).toHaveURL(/view=all.*cursor=|cursor=.*view=all/);
+  await expect(page.locator("h1", { hasText: "全部认知" })).toBeVisible();
+  await expect(page.getByText(rows[0]!.item.content, { exact: true })).toBeVisible();
+  await expect(page.getByLabel("我的认知概览")).toHaveCount(0);
+  await expect(page.getByLabel("今天建议复习")).toHaveCount(0);
+});
+
+test("review API keeps retries idempotent and returns private 404 semantics", async ({ page, browser }) => {
+  const email = `phase13-api-${Date.now()}@ai-cognitive-studio.test`;
+  await signUp(page, email);
+  const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } }), workspaceId = owner.memberships[0]!.workspaceId, owned = await currentCognition(workspaceId, owner.id, "api-owned");
+  await prisma.userCognitionState.create({ data: { workspaceId, userId: owner.id, memoryItemId: owned.item.id, state: "SAVED" } });
+  const eventId = randomUUID(), endpoint = `/api/studio/cognitions/${owned.item.id}/review`;
+  expect((await page.request.post(endpoint, { data: { eventId } })).status()).toBe(200);
+  expect((await page.request.post(endpoint, { data: { eventId } })).status()).toBe(200);
+  expect(await prisma.userCognitionReviewEvent.count({ where: { id: eventId } })).toBe(1);
+  expect((await prisma.userCognitionReviewState.findUniqueOrThrow({ where: { workspaceId_userId_memoryItemId: { workspaceId, userId: owner.id, memoryItemId: owned.item.id } } })).reviewCount).toBe(1);
+  const privateRequest = async (id: string) => { const response = await page.request.post(`/api/studio/cognitions/${id}/review`, { data: { eventId: randomUUID() } }); expect(response.status()).toBe(404); expect(await response.json()).toEqual({ error: "COGNITION_NOT_FOUND" }); };
+  const archived = await currentCognition(workspaceId, owner.id, "api-archived"); await prisma.userCognitionState.create({ data: { workspaceId, userId: owner.id, memoryItemId: archived.item.id, state: "ARCHIVED" } }); await privateRequest(archived.item.id);
+  const historical = await currentCognition(workspaceId, owner.id, "api-historical"); await prisma.userCognitionState.create({ data: { workspaceId, userId: owner.id, memoryItemId: historical.item.id, state: "SAVED" } }); await prisma.currentBookIntelligence.delete({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: historical.document.id, workspaceId } } }); await privateRequest(historical.item.id);
+  const nonPersonal = await currentCognition(workspaceId, owner.id, "api-non-personal"); await privateRequest(nonPersonal.item.id);
+  const foreignContext = await browser.newContext(), foreignPage = await foreignContext.newPage(), foreignEmail = `phase13-foreign-${Date.now()}@ai-cognitive-studio.test`;
+  await signUp(foreignPage, foreignEmail); const foreign = await prisma.user.findUniqueOrThrow({ where: { email: foreignEmail }, include: { memberships: true } }), foreignItem = await currentCognition(foreign.memberships[0]!.workspaceId, foreign.id, "api-foreign"); await privateRequest(foreignItem.item.id); await foreignContext.close();
+});
+
+test("review button retries a lost response with the same event ID", async ({ page }) => {
+  const email = `phase13-retry-${Date.now()}@ai-cognitive-studio.test`;
+  await signUp(page, email);
+  const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } }), workspaceId = owner.memberships[0]!.workspaceId, row = await currentCognition(workspaceId, owner.id, "retry");
+  await prisma.userCognitionState.create({ data: { workspaceId, userId: owner.id, memoryItemId: row.item.id, state: "SAVED" } });
+  const path = `/api/studio/cognitions/${row.item.id}/review`, eventIds: string[] = [];
+  page.on("request", request => { if (request.method() === "POST" && new URL(request.url()).pathname === path) eventIds.push((request.postDataJSON() as { eventId: string }).eventId); });
+  let loseFirst = true;
+  await page.route(`**${path}`, async route => { if (loseFirst) { loseFirst = false; await route.fetch(); await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "LOST_RESPONSE" }) }); } else await route.continue(); });
+  await page.goto("/studio/cognitions");
+  const lost = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === path && response.status() === 503);
+  await page.getByRole("button", { name: "标记已复习" }).first().click();
+  expect((await lost).status()).toBe(503);
+  await expect.poll(() => eventIds.length).toBe(1);
+  const retry = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === path);
+  await page.getByRole("button", { name: "标记已复习" }).first().click();
+  expect((await retry).status()).toBe(200);
+  expect(eventIds).toEqual([eventIds[0], eventIds[0]]);
+  expect(await prisma.userCognitionReviewEvent.count({ where: { id: eventIds[0] } })).toBe(1);
+  expect((await prisma.userCognitionReviewState.findUniqueOrThrow({ where: { workspaceId_userId_memoryItemId: { workspaceId, userId: owner.id, memoryItemId: row.item.id } } })).reviewCount).toBe(1);
 });
