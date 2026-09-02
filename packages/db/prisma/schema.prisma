@@ -218,6 +218,10 @@ enum TeachBackMasteryState {
   DEMONSTRATED
 }
 
+enum UserCognitionReviewEventKind {
+  MANUAL_REVIEW
+}
+
 enum PodcastEpisodeStatus {
   DRAFT
   GENERATING
@@ -747,6 +751,8 @@ model WorkspaceMember {
   user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   thinkingSessions ThinkingSession[]
   teachBackAttempts TeachBackAttempt[]
+  cognitionReviewStates UserCognitionReviewState[]
+  cognitionReviewEvents UserCognitionReviewEvent[]
 
   @@id([workspaceId, userId])
 }
@@ -1221,6 +1227,8 @@ model BookMemoryItem {
   podcastSegmentContext PodcastSegmentContextItem[]
   podcastEvidence       PodcastUtteranceEvidence[]
   cognitionStates       UserCognitionState[]
+  cognitionReviewStates UserCognitionReviewState[]
+  cognitionReviewEvents UserCognitionReviewEvent[]
   thinkingSessions      ThinkingSession[]
   teachBackAttempts     TeachBackAttempt[]
 
@@ -1245,6 +1253,41 @@ model UserCognitionState {
 
   @@unique([workspaceId, userId, memoryItemId])
   @@index([workspaceId, userId, state])
+}
+
+model UserCognitionReviewState {
+  id                    String                  @id @default(cuid())
+  workspaceId           String
+  userId                String
+  memoryItemId          String
+  reviewCount           Int                     @default(0)
+  lastReviewedAt        DateTime?
+  nextReviewAt          DateTime?
+  lastMasteryState      TeachBackMasteryState?
+  lastMasteryAssessedAt DateTime?
+  scheduleVersion       String                  @default("phase13-v1")
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
+  owner                 WorkspaceMember         @relation(fields: [workspaceId, userId], references: [workspaceId, userId], onDelete: Cascade)
+  memoryItem            BookMemoryItem          @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@unique([workspaceId, userId, memoryItemId])
+  @@index([workspaceId, userId, nextReviewAt])
+  @@index([workspaceId, userId, lastMasteryState])
+}
+
+model UserCognitionReviewEvent {
+  id           String                        @id
+  workspaceId  String
+  userId       String
+  memoryItemId String
+  kind         UserCognitionReviewEventKind @default(MANUAL_REVIEW)
+  createdAt    DateTime                      @default(now())
+  owner        WorkspaceMember               @relation(fields: [workspaceId, userId], references: [workspaceId, userId], onDelete: Cascade)
+  memoryItem   BookMemoryItem                @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, userId, memoryItemId, createdAt])
 }
 
 model ThinkingSession {

@@ -3,6 +3,8 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { parseProviderModelManifest, ProviderGatewayRepository, testCipher, validateRouteManifestSelection } from "@ai-cognitive/provider-gateway";
 import { assessmentSchema, createOrAssessTeachBackAttempt, deriveMasteryState, listMasteryCognitions, recoverPendingTeachBackAttempt, rubricForCognitionType, setTeachBackGatewayRuntimeForTests, teachBackAttemptDetail, validateTeachBackAssessment, type Criterion } from "../lib/teach-back";
+import { getPersonalCognitionCorpus, getPersonalCognitionOverview, getPersonalWeakPoints, getRecommendedReviews, reconcilePersonalCognitionReviewState, recordManualCognitionReview } from "../lib/personalized-cognition";
+import { findCrossBookCognitionConnections } from "../lib/cognition-associations";
 
 process.env.PROVIDER_GATEWAY_MODEL_MANIFEST = JSON.stringify({ providers: [{ providerKey: "phase12-fixture", displayName: "Phase 12 Fixture", protocol: "TEST", adapterVersion: "phase12", models: [{ modelId: "phase12-assessment", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }] }] });
 
@@ -82,12 +84,100 @@ afterEach(() => setTeachBackGatewayRuntimeForTests(undefined));
 afterAll(() => prisma.$disconnect());
 
 describe("Phase 12 real database service gates", () => {
+  it("keeps Phase 13 personal review state user-scoped, idempotent, and mastery-authoritative", async () => {
+    const data = await fixture(), identity = { workspaceId: data.workspace.id, userId: data.userA.id }, memoryItemId = data.first.item.id;
+    await prisma.userCognitionState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId, state: "SAVED" } });
+    const assessedAt = new Date("2026-09-01T00:00:00.000Z"), attemptId = randomUUID();
+    await prisma.teachBackAttempt.create({ data: { id: attemptId, workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId, content: "Persisted assessed explanation", status: "ASSESSED", assessedAt } });
+    await prisma.teachBackAssessment.create({ data: { workspaceId: identity.workspaceId, attemptId, masteryState: "NEEDS_REVIEW", rubric: [{ key: "COVERAGE", status: "NOT_MET", rationale: "Missing context", evidenceRefs: [] }], feedback: "Review", nextPrompt: null } });
+    const eventId = randomUUID();
+    await expect(recordManualCognitionReview(identity, { memoryItemId, eventId })).resolves.toEqual({ idempotent: false, eventId });
+    await expect(recordManualCognitionReview(identity, { memoryItemId, eventId })).resolves.toEqual({ idempotent: true, eventId });
+    expect(await prisma.userCognitionReviewEvent.count({ where: { id: eventId } })).toBe(1);
+    const concurrentEventId = randomUUID();
+    await Promise.all([recordManualCognitionReview(identity, { memoryItemId, eventId: concurrentEventId }), recordManualCognitionReview(identity, { memoryItemId, eventId: concurrentEventId })]);
+    expect(await prisma.userCognitionReviewEvent.count({ where: { id: concurrentEventId } })).toBe(1);
+    expect(await prisma.userCognitionReviewState.findUniqueOrThrow({ where: { workspaceId_userId_memoryItemId: { ...identity, memoryItemId } } })).toMatchObject({ reviewCount: 2, lastMasteryState: "NEEDS_REVIEW", scheduleVersion: "phase13-v1" });
+    await prisma.userCognitionReviewState.update({ where: { workspaceId_userId_memoryItemId: { ...identity, memoryItemId } }, data: { lastMasteryState: "DEMONSTRATED" } });
+    await reconcilePersonalCognitionReviewState(identity, memoryItemId);
+    expect(await prisma.userCognitionReviewState.findUniqueOrThrow({ where: { workspaceId_userId_memoryItemId: { ...identity, memoryItemId } } })).toMatchObject({ lastMasteryState: "NEEDS_REVIEW", lastMasteryAssessedAt: assessedAt });
+    await expect(getPersonalCognitionOverview(identity)).resolves.toMatchObject({ total: 1, needsReview: 1 });
+    await expect(getPersonalWeakPoints(identity)).resolves.toMatchObject({ criteria: [{ criterionKey: "COVERAGE", notMetCount: 1, partialCount: 0, affectedCognitionCount: 1 }] });
+    await expect(recordManualCognitionReview({ workspaceId: data.workspace.id, userId: data.userB.id }, { memoryItemId, eventId: randomUUID() })).rejects.toThrow("COGNITION_NOT_FOUND");
+    await prisma.userCognitionState.update({ where: { workspaceId_userId_memoryItemId: { ...identity, memoryItemId } }, data: { state: "ARCHIVED" } });
+    await expect(recordManualCognitionReview(identity, { memoryItemId, eventId: randomUUID() })).rejects.toThrow("COGNITION_NOT_FOUND");
+  });
+  it("builds the active personal corpus from saved, thinking-only, and Teach Back-only interactions", async () => {
+    const data = await fixture(), identity = { workspaceId: data.workspace.id, userId: data.userA.id };
+    const thinkingOnly = await data.cognition("thinking-only", false, true), teachBackOnly = await data.cognition("teachback-only", false, true), untouched = await data.cognition("untouched", false, true);
+    await prisma.userCognitionState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: data.first.item.id, state: "SAVED" } });
+    await prisma.thinkingSession.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: thinkingOnly.item.id } });
+    await prisma.teachBackAttempt.create({ data: { id: randomUUID(), workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: teachBackOnly.item.id, content: "Pending attempts are still a meaningful interaction." } });
+    expect((await getPersonalCognitionCorpus(identity)).items.map(item => item.id).sort()).toEqual([data.first.item.id, thinkingOnly.item.id, teachBackOnly.item.id].sort());
+    expect((await getPersonalCognitionCorpus({ workspaceId: identity.workspaceId, userId: data.userB.id })).items.map(item => item.id)).toEqual([]);
+    await prisma.userCognitionState.update({ where: { workspaceId_userId_memoryItemId: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: data.first.item.id } }, data: { state: "ARCHIVED" } });
+    expect((await getPersonalCognitionCorpus(identity)).items.map(item => item.id).sort()).toEqual([thinkingOnly.item.id, teachBackOnly.item.id].sort());
+    expect((await getPersonalCognitionCorpus(identity)).items.map(item => item.id)).not.toContain(untouched.item.id);
+  });
+  it("orders due recommendations by mastery and uses deterministic reason codes", async () => {
+    const data = await fixture(), identity = { workspaceId: data.workspace.id, userId: data.userA.id }, past = new Date("2020-01-01T00:00:00.000Z");
+    const developing = await data.cognition("developing", false, true), unassessed = await data.cognition("unassessed", false, true), demonstrated = await data.cognition("demonstrated", false, true);
+    const rows: Array<[typeof data.first, "NEEDS_REVIEW" | "DEVELOPING" | "DEMONSTRATED"]> = [[data.first, "NEEDS_REVIEW"], [developing, "DEVELOPING"], [demonstrated, "DEMONSTRATED"]];
+    for (const [item, masteryState] of rows) { const attemptId = randomUUID(); await prisma.userCognitionState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: item.item.id, state: "SAVED" } }); await prisma.teachBackAttempt.create({ data: { id: attemptId, workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: item.item.id, content: masteryState, status: "ASSESSED", assessedAt: past } }); await prisma.teachBackAssessment.create({ data: { workspaceId: identity.workspaceId, attemptId, masteryState, rubric: [], feedback: "fixture", nextPrompt: null } }); await prisma.userCognitionReviewState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: item.item.id, lastMasteryState: masteryState, lastMasteryAssessedAt: past, lastReviewedAt: past, nextReviewAt: past } }); }
+    await prisma.userCognitionState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: unassessed.item.id, state: "SAVED" } });
+    await prisma.userCognitionReviewState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: unassessed.item.id, lastReviewedAt: past, nextReviewAt: past } });
+    const recommendations = await getRecommendedReviews(identity, 4);
+    expect(recommendations.map(item => item.id)).toEqual([data.first.item.id, developing.item.id, unassessed.item.id, demonstrated.item.id]);
+    expect(recommendations.map(item => item.reason)).toEqual(["WEAK_MASTERY", "DEVELOPING_MASTERY", "UNASSESSED", "MAINTAIN_MASTERY"]);
+  });
+  it("diversifies the default recommendation queue across source documents", async () => {
+    const data = await fixture(), identity = { workspaceId: data.workspace.id, userId: data.userA.id }, past = new Date("2020-01-01T00:00:00.000Z");
+    const sameBook = await Promise.all([1, 2, 3].map(ordinal => prisma.bookMemoryItem.create({ data: { workspaceId: identity.workspaceId, sourceDocumentId: data.first.document.id, extractionId: data.first.run.extractionId, analysisRunId: data.first.run.id, sourceArtifactId: data.first.item.sourceArtifactId, type: "SUMMARY", ordinal, content: `Same book ${ordinal}`, contentHash: `${randomUUID()}-${ordinal}`, memoryKey: `${data.first.run.id}:phase13:${ordinal}` } })));
+    const otherBooks = await Promise.all(["diverse-a", "diverse-b", "diverse-c"].map(label => data.cognition(label, false, true)));
+    const items = [data.first.item, ...sameBook, ...otherBooks.map(value => value.item)];
+    for (const item of items) { await prisma.userCognitionState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: item.id, state: "SAVED" } }); await prisma.userCognitionReviewState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: item.id, lastReviewedAt: past, nextReviewAt: past } }); }
+    const queue = await getRecommendedReviews(identity, 5), perSource = new Map<string, number>();
+    for (const item of queue) perSource.set(item.sourceDocumentId, (perSource.get(item.sourceDocumentId) ?? 0) + 1);
+    expect(queue).toHaveLength(5); expect(Math.max(...perSource.values())).toBeLessThanOrEqual(2);
+  });
+  it("tolerates malformed legacy rubrics without losing the personal weak-point read", async () => {
+    const data = await fixture(), identity = { workspaceId: data.workspace.id, userId: data.userA.id }, attemptId = randomUUID();
+    await prisma.userCognitionState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: data.first.item.id, state: "SAVED" } });
+    await prisma.teachBackAttempt.create({ data: { id: attemptId, workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: data.first.item.id, content: "Legacy rubric fixture", status: "ASSESSED", assessedAt: new Date() } });
+    await prisma.teachBackAssessment.create({ data: { workspaceId: identity.workspaceId, attemptId, masteryState: "DEVELOPING", rubric: { legacy: true }, feedback: "fixture", nextPrompt: null } });
+    await expect(getPersonalWeakPoints(identity)).resolves.toMatchObject({ weak: [expect.objectContaining({ id: data.first.item.id, masteryState: "DEVELOPING" })], criteria: [] });
+  });
+  it("keeps personalization reads available with no Provider route configured", async () => {
+    const data = await fixture(), identity = { workspaceId: data.workspace.id, userId: data.userA.id };
+    await prisma.providerRouteBinding.deleteMany({ where: { workspaceId: identity.workspaceId } });
+    await prisma.userCognitionState.create({ data: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: data.first.item.id, state: "SAVED" } });
+    await expect(getPersonalCognitionOverview(identity)).resolves.toMatchObject({ total: 1, unassessed: 1 });
+    await expect(getPersonalWeakPoints(identity)).resolves.toMatchObject({ unassessed: [expect.objectContaining({ id: data.first.item.id })] });
+    await expect(getRecommendedReviews(identity)).resolves.toEqual([expect.objectContaining({ id: data.first.item.id })]);
+    await expect(findCrossBookCognitionConnections(identity, data.first.item.id)).resolves.toEqual([]);
+  });
+  it("keeps cross-book associations current-lineage gated and rejects incompatible embeddings", async () => {
+    const data = await fixture(), identity = { workspaceId: data.workspace.id, userId: data.userA.id };
+    const other = await data.cognition("cross-book", false, true), rejected = await data.cognition("rejected", false, true);
+    await prisma.bookMemoryEmbedding.createMany({ data: [
+      { workspaceId: identity.workspaceId, memoryItemId: data.first.item.id, analysisRunId: data.first.run.id, extractionId: data.first.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-source-${randomUUID()}`, dimensions: 3, vector: [1, 0, 0] },
+      { workspaceId: identity.workspaceId, memoryItemId: other.item.id, analysisRunId: other.run.id, extractionId: other.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-other-${randomUUID()}`, dimensions: 3, vector: [0.9, 0.1, 0] },
+      { workspaceId: identity.workspaceId, memoryItemId: other.item.id, analysisRunId: other.run.id, extractionId: other.run.extractionId, provider: "fixture", model: "different", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-incompatible-${randomUUID()}`, dimensions: 3, vector: [1, 0, 0] },
+      { workspaceId: identity.workspaceId, memoryItemId: rejected.item.id, analysisRunId: rejected.run.id, extractionId: rejected.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-low-${randomUUID()}`, dimensions: 3, vector: [0, 1, 0] },
+      { workspaceId: identity.workspaceId, memoryItemId: rejected.item.id, analysisRunId: rejected.run.id, extractionId: rejected.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-zero-${randomUUID()}`, dimensions: 3, vector: [0, 0, 0] },
+      { workspaceId: identity.workspaceId, memoryItemId: rejected.item.id, analysisRunId: rejected.run.id, extractionId: rejected.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-malformed-${randomUUID()}`, dimensions: 3, vector: { invalid: true } },
+    ] });
+    await expect(findCrossBookCognitionConnections(identity, data.first.item.id)).resolves.toEqual([expect.objectContaining({ id: other.item.id, semantics: "SEMANTICALLY_RELATED" })]);
+    await prisma.currentBookIntelligence.delete({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: other.document.id, workspaceId: identity.workspaceId } } });
+    await expect(findCrossBookCognitionConnections(identity, data.first.item.id)).resolves.toEqual([]);
+  });
   it("uses the zero-evidence prompt/schema path, persists source grounding, and recovers concurrent retries", async () => {
     const data = await fixture(); const identity = { workspaceId: data.workspace.id, userId: data.userA.id }; const prompts = installGateway({ fail: true }); const attemptId = randomUUID();
     await expect(createOrAssessTeachBackAttempt(identity, { memoryItemId: data.first.item.id, attemptId, content: "I can explain the cognition without inventing a source." })).rejects.toThrow("TEACH_BACK_PROVIDER_FAILED");
     await Promise.all([createOrAssessTeachBackAttempt(identity, { memoryItemId: data.first.item.id, attemptId, content: "I can explain the cognition without inventing a source." }), createOrAssessTeachBackAttempt(identity, { memoryItemId: data.first.item.id, attemptId, content: "I can explain the cognition without inventing a source." })]);
     expect(prompts.at(-1)).toContain("暂无可验证来源证据");
     const detail = await teachBackAttemptDetail(identity, attemptId); expect(detail?.sourceGrounding).toBe("NO_VERIFIABLE_EVIDENCE"); expect(await prisma.teachBackAssessment.count({ where: { attemptId } })).toBe(1);
+    expect(await prisma.userCognitionReviewState.findUniqueOrThrow({ where: { workspaceId_userId_memoryItemId: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: data.first.item.id } } })).toMatchObject({ reviewCount: 0, lastMasteryState: "DEMONSTRATED", scheduleVersion: "phase13-v1" });
     await expect(teachBackAttemptDetail({ workspaceId: data.workspace.id, userId: data.userB.id }, attemptId)).resolves.toBeNull();
     const crossWorkspace = { workspaceId: data.workspaceC.id, userId: data.userC.id }, replay = { memoryItemId: data.first.item.id, attemptId, content: "I can explain the cognition without inventing a source." };
     await expect(createOrAssessTeachBackAttempt(crossWorkspace, replay)).rejects.toThrow("COGNITION_NOT_CURRENT");

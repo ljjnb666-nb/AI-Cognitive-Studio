@@ -43,8 +43,8 @@ test("real Better Auth user browses versioned cognition, exact evidence, state, 
   const workspaceId = owner.memberships[0]!.workspaceId;
   const fixture = await currentCognition(workspaceId, owner.id);
 
-  await page.goto("/studio/cognitions");
-  await expect(page.getByRole("heading", { name: "我的认知" })).toBeVisible();
+  await page.goto("/studio/cognitions?view=all");
+  await expect(page.getByRole("heading", { name: "全部认知" })).toBeVisible();
   await expect(page.getByText(fixture.evidence.content, { exact: true })).toBeVisible();
   await page.getByText(fixture.evidence.content, { exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/studio/cognitions/${fixture.evidence.id}$`));
@@ -52,6 +52,9 @@ test("real Better Auth user browses versioned cognition, exact evidence, state, 
   await page.getByRole("button", { name: "保存认知" }).click();
   await expect(page.getByRole("button", { name: "已保存" })).toBeVisible();
   expect(await prisma.userCognitionState.findUnique({ where: { workspaceId_userId_memoryItemId: { workspaceId, userId: owner.id, memoryItemId: fixture.evidence.id } } })).toMatchObject({ state: "SAVED" });
+  await page.goto("/studio/cognitions");
+  await expect(page.locator("h1", { hasText: "我的认知" })).toBeVisible();
+  await expect(page.getByRole("link", { name: fixture.evidence.content, exact: true }).first()).toBeVisible();
 
   await page.goto(`/studio/library/${fixture.document.id}`);
   await page.getByRole("link", { name: "查看认知详情" }).first().click();
