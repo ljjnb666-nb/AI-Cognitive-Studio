@@ -199,6 +199,20 @@ async function capture(page: Page, name: string) {
   await page.screenshot({ path: resolve(directory, name), fullPage: true });
 }
 
+async function expectSearchIconInsideField(page: Page) {
+  const wrapper = page.locator(".search-input-wrapper");
+  const icon = wrapper.locator("svg");
+  const field = wrapper.locator("input.input-control-search");
+  await expect(field).toBeVisible();
+  const [iconBox, fieldBox] = await Promise.all([icon.boundingBox(), field.boundingBox()]);
+  expect(iconBox).not.toBeNull();
+  expect(fieldBox).not.toBeNull();
+  expect(iconBox!.x).toBeGreaterThanOrEqual(fieldBox!.x);
+  expect(iconBox!.x + iconBox!.width).toBeLessThanOrEqual(fieldBox!.x + fieldBox!.width);
+  expect(iconBox!.y).toBeGreaterThanOrEqual(fieldBox!.y);
+  expect(iconBox!.y + iconBox!.height).toBeLessThanOrEqual(fieldBox!.y + fieldBox!.height);
+}
+
 async function thinkingFixture(
   workspaceId: string,
   userId: string,
@@ -337,6 +351,7 @@ test("desktop navigation keeps one clear active destination", async ({
   await expect(primaryNavigation).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/studio\/library$/);
+  await expectSearchIconInsideField(page);
   for (const [path, label] of destinations) {
     await page.goto(path);
     await expect(
@@ -482,6 +497,7 @@ test("mobile Studio pages have usable navigation and no horizontal overflow", as
         .getByRole("navigation", { name: "Mobile navigation" })
         .locator('a[aria-current="page"]'),
     ).toHaveCount(1);
+    if (path === "/studio/library") await expectSearchIconInsideField(page);
   }
   const owner = await prisma.user.findUniqueOrThrow({
     where: { email },
@@ -636,6 +652,24 @@ test("captures the final Studio experience evidence", async ({
   for (const [path, name] of shots) {
     await page.goto(path);
     await expect(page.locator("main")).toBeVisible();
+    if (name === "01-home-desktop.png") {
+      await expect(page.getByText("短视频动态")).toBeVisible();
+    }
+    if (name === "02-library-desktop.png" || name === "17-library-populated-desktop.png") {
+      await expectSearchIconInsideField(page);
+    }
+    if (name === "07-podcasts-desktop.png") {
+      await expect(page.getByRole("heading", { name: "证据与判断" })).toBeVisible();
+    }
+    if (name === "08-videos-desktop.png") {
+      await expect(page.getByRole("heading", { name: "证据短视频" })).toBeVisible();
+    }
+    if (name === "18-provider-settings-desktop.png") {
+      await expect(page.getByRole("navigation", { name: "设置导航" }).locator('a[aria-current="page"]')).toHaveAccessibleName("Provider");
+      await expect(page.locator('nav[aria-label="主导航"] a[aria-current="page"]')).toHaveAccessibleName("设置");
+      await expect(page.getByText("未完成", { exact: false }).first()).toBeVisible();
+      await expect(page.locator("body")).not.toContainText("sk-");
+    }
     await capture(page, name);
   }
 });
