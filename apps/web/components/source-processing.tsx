@@ -42,8 +42,8 @@ export function SourceProcessing({ sourceDocumentId, ingestionStatus, analysisSt
   }, [message, router, terminal]);
   const failureCode = message ?? errorCode;
   const configurationError = needsProviderConfiguration(failureCode);
-  if (analysisStatus === "FAILED") return <section className="panel"><p className="error">{bookIntelligenceErrorMessage(errorCode)}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 Provider</Link>}<button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></div></section>;
-  if (configurationError) return <section className="panel"><p>{bookIntelligenceErrorMessage(failureCode)}</p><div className="actions"><Link className="button" href="/studio/settings/providers">配置 Provider</Link><button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></div></section>;
+  if (analysisStatus === "FAILED") return <section className="panel"><p className="error">深度理解失败：{bookIntelligenceErrorMessage(errorCode)}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 AI Provider</Link>}<button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></div></section>;
+  if (configurationError) return <section className="panel"><p>书籍解析完成。配置 AI Provider 后开始深度理解。</p><div className="actions"><Link className="button" href="/studio/settings/providers">配置 AI Provider</Link><button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></div></section>;
   if (message) return <section className="panel"><p className="error">{bookIntelligenceErrorMessage(message)}</p><button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></section>;
   return null;
 }

@@ -689,7 +689,7 @@ test("desktop navigation keeps one clear active destination", async ({
   await expect(
     page.getByText("需要先配置 Provider，才能继续理解这本书。"),
   ).toBeVisible();
-  await expect(page.getByRole("link", { name: "配置 Provider" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "配置 AI Provider" })).toBeVisible();
 });
 
 test("mobile Studio pages have usable navigation and no horizontal overflow", async ({

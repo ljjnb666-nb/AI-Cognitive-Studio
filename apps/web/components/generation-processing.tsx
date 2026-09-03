@@ -36,7 +36,7 @@ export function GenerationProcessing({ status, episodeId, hasAudio = false, audi
   const failed = audioStatus === "FAILED";
   const failureCode = audioError ?? audioErrorCode;
   const configurationError = failureCode === "AI_PROVIDER_CONFIGURATION_REQUIRED" || failureCode === "PODCAST_TTS_CONFIGURATION_REQUIRED";
-  if (failed) return <section className="panel"><p className="error">{mediaGenerationErrorMessage(audioErrorCode)}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 Provider</Link>}<button className="button secondary" onClick={() => void requestAudio(true)}>重试音频生成</button></div></section>;
+  if (failed) return <section className="panel"><p className="error">音频生成失败：{mediaGenerationErrorMessage(audioErrorCode)}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 Provider</Link>}<button className="button secondary" onClick={() => void requestAudio(true)}>重试音频生成</button></div></section>;
   if (audioError) return <section className="panel"><p className="error">{mediaGenerationErrorMessage(audioError)}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 Provider</Link>}<button className="button secondary" onClick={() => void requestAudio(true)}>重试音频生成</button></div></section>;
   return null;
 }
