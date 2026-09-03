@@ -143,6 +143,12 @@ jobs:
         run: pnpm test:phase14:release
         env:
           POSTGRES_HOST_PORT: "5432"
+      - name: Upload Phase 14 visual evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase14-visual-evidence-${{ github.sha }}
+          path: output/playwright/*.png
+          if-no-files-found: error
       - name: End-to-end tests
         run: pnpm test:e2e
       - name: Build

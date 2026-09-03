@@ -1,9 +1,12 @@
 import Link from "next/link";
 import { dashboard, statusLabel } from "@/lib/product";
 import { IndeterminateProgressBar } from "@/components/status-badge";
+import { resolveWebIdentity } from "@/lib/identity";
+import { getPersonalCognitionOverview, getRecommendedReviews } from "@/lib/personalized-cognition";
 
 export default async function StudioPage() {
-  const data = await dashboard();
+  const identity = await resolveWebIdentity();
+  const [data, overview, recommendations] = await Promise.all([dashboard(identity), getPersonalCognitionOverview(identity), getRecommendedReviews(identity, 1)]);
   const latestSource = data.sources[0];
   const latestPodcast = data.podcasts[0];
   const latestVideo = data.videos[0];
@@ -88,6 +91,8 @@ export default async function StudioPage() {
           </h2>
         </div>
       </section>
+
+      {overview && overview.total > 0 ? <section className="today-section card-panel" aria-label="今天"><div className="section-header"><h2 className="section-title">今天</h2><Link className="section-link" href="/studio/cognitions">查看我的认知 →</Link></div><div className="today-summary"><span>待复习 {overview.dueNow}</span><span>需要再梳理 {overview.needsReview}</span><span>正在形成 {overview.developing}</span></div>{recommendations[0] ? <Link className="today-next" href={`/studio/cognitions/${recommendations[0].id}`}>下一条：{recommendations[0].content.slice(0, 90)} <span>继续理解 →</span></Link> : null}</section> : null}
 
       <hr style={{ borderColor: "var(--surface-container-high)", margin: "0 0 48px 0", borderTop: "none" }} />
 

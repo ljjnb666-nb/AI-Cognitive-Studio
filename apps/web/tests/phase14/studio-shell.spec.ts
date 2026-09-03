@@ -50,8 +50,21 @@ async function capture(page: Page, name: string) {
   await page.screenshot({ path: resolve(directory, name), fullPage: true });
 }
 
+async function thinkingFixture(workspaceId: string, userId: string, memoryItemId: string) {
+  const id = randomUUID(), first = randomUUID(), second = randomUUID();
+  await prisma.thinkingSession.create({ data: { id, workspaceId, userId, memoryItemId } });
+  await prisma.thinkingSessionMessage.createMany({ data: [
+    { workspaceId, sessionId: id, role: "ASSISTANT", content: "先看看这条认知依赖什么证据？", ordinal: 0, replyToMessageId: `first:${id}` },
+    { workspaceId, sessionId: id, role: "USER", content: "它依赖可以回到原文核验的来源。", ordinal: 1, clientMessageId: first },
+    { workspaceId, sessionId: id, role: "ASSISTANT", content: "如果来源无法核验，结论会怎样？", ordinal: 2, replyToMessageId: first },
+    { workspaceId, sessionId: id, role: "USER", content: "那就应该保留不确定性，而不是延伸判断。", ordinal: 3, clientMessageId: second },
+    { workspaceId, sessionId: id, role: "ASSISTANT", content: "很好，再找一个反例来检验这个边界。", ordinal: 4, replyToMessageId: second },
+  ] });
+  return id;
+}
+
 test("desktop navigation keeps one clear active destination", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop", "desktop acceptance only");
+  test.skip(testInfo.project.name !== "desktop-1024", "desktop acceptance only");
   await signUp(page);
   for (const [path, label] of destinations) {
     await page.goto(path);
@@ -62,8 +75,12 @@ test("desktop navigation keeps one clear active destination", async ({ page }, t
 });
 
 test("mobile Studio pages have usable navigation and no horizontal overflow", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "mobile", "mobile acceptance only");
+  test.skip(testInfo.project.name !== "mobile-375", "mobile acceptance only");
   const email = await signUp(page);
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await page.goto("/studio/cognitions");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 375, height: 812 });
   for (const path of ["/studio", "/studio/library", "/studio/cognitions", "/studio/thinking", "/studio/podcasts", "/studio/settings/account"]) {
     await page.goto(path);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -72,7 +89,8 @@ test("mobile Studio pages have usable navigation and no horizontal overflow", as
   }
   const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
   const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
-  for (const [path, name] of [["/studio", "10-home-mobile.png"], ["/studio/cognitions", "11-cognitions-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}`, "12-cognition-detail-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "13-teach-back-mobile.png"], ["/studio", "14-mobile-navigation.png"]]) {
+  const sessionId = await thinkingFixture(owner.memberships[0]!.workspaceId, owner.id, fixture.cognition.id);
+  for (const [path, name] of [["/studio", "10-home-mobile.png"], ["/studio/cognitions", "11-cognitions-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}`, "12-cognition-detail-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "13-teach-back-mobile.png"], ["/studio", "14-mobile-navigation.png"], [`/studio/thinking/${sessionId}`, "15-thinking-detail-mobile.png"]]) {
     await page.goto(path);
     await expect(page.locator("main")).toBeVisible();
     await capture(page, name);
@@ -80,13 +98,14 @@ test("mobile Studio pages have usable navigation and no horizontal overflow", as
 });
 
 test("captures the final Studio experience evidence", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop", "desktop evidence only");
+  test.skip(testInfo.project.name !== "desktop-1440", "desktop evidence only");
   const email = await signUp(page);
   const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
   const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
-  const desktop = testInfo.project.name === "desktop";
+  const sessionId = await thinkingFixture(owner.memberships[0]!.workspaceId, owner.id, fixture.cognition.id);
+  const desktop = testInfo.project.name === "desktop-1440";
   const shots = desktop
-    ? [["/studio", "01-home-desktop.png"], ["/studio/library", "02-library-desktop.png"], ["/studio/cognitions", "03-cognitions-desktop.png"], [`/studio/cognitions/${fixture.cognition.id}`, "04-cognition-detail-desktop.png"], ["/studio/thinking", "05-thinking-desktop.png"], ["/studio/mastery", "06-mastery-desktop.png"], ["/studio/podcasts", "07-podcasts-desktop.png"], ["/studio/videos", "08-videos-desktop.png"], ["/studio/settings/account", "09-settings-desktop.png"]]
+    ? [["/studio", "01-home-desktop.png"], ["/studio/library", "02-library-desktop.png"], ["/studio/cognitions", "03-cognitions-desktop.png"], [`/studio/cognitions/${fixture.cognition.id}`, "04-cognition-detail-desktop.png"], ["/studio/thinking", "05-thinking-desktop.png"], ["/studio/mastery", "06-mastery-desktop.png"], ["/studio/podcasts", "07-podcasts-desktop.png"], ["/studio/videos", "08-videos-desktop.png"], ["/studio/settings/account", "09-settings-desktop.png"], [`/studio/thinking/${sessionId}`, "16-thinking-detail-desktop.png"], ["/studio/library", "17-library-populated-desktop.png"], ["/studio/settings/providers", "18-provider-settings-desktop.png"]]
     : [["/studio", "10-home-mobile.png"], ["/studio/cognitions", "11-cognitions-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}`, "12-cognition-detail-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "13-teach-back-mobile.png"], ["/studio", "14-mobile-navigation.png"]];
   for (const [path, name] of shots) {
     await page.goto(path);
