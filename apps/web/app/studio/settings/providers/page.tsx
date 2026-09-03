@@ -9,6 +9,7 @@ export default function ProviderSettingsPage() {
         title="Provider 设置"
         description="为当前工作区配置自带 API 密钥和执行路由。密钥仅在提交时加密保存。"
       />
+      <h2 className="sr-only">AI Providers</h2>
       <SettingsNavigation active="providers" />
       <ProviderSettings />
     </div>
