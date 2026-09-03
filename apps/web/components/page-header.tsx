@@ -14,15 +14,15 @@ export function PageHeader({
   children?: React.ReactNode;
 }) {
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 32, gap: 16, flexWrap: "wrap" }}>
+    <div className="page-header">
       <div>
-        {eyebrow && <div className="page-eyebrow" style={{ marginBottom: 4 }}>{eyebrow}</div>}
-        <h1 className="font-serif" style={{ fontSize: 32, fontWeight: 600, color: "var(--on-surface)", margin: 0 }}>
+        {eyebrow && <div className="page-eyebrow">{eyebrow}</div>}
+        <h1 className="page-title">
           {title}
         </h1>
-        {description && <p style={{ color: "var(--on-surface-variant)", fontSize: 14, margin: "6px 0 0 0" }}>{description}</p>}
+        {description && <p className="page-desc">{description}</p>}
       </div>
-      {(action || children) && <div style={{ display: "flex", gap: 12, alignItems: "center" }}>{action || children}</div>}
+      {(action || children) && <div className="page-header-actions">{action || children}</div>}
     </div>
   );
 }

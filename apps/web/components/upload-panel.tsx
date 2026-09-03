@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { uploadErrorMessage } from "@/lib/product-errors";
 
 const typeFor = (file: File) =>
   file.type ||
@@ -50,7 +51,7 @@ export function UploadPanel() {
       router.push(`/studio/library/${result.sourceDocumentId}`);
       router.refresh();
     } catch (error) {
-      setMessage(error instanceof Error ? `上传失败：${error.message}` : "上传失败，请重试");
+      setMessage(uploadErrorMessage(error instanceof Error ? error.message : undefined));
     } finally {
       setBusy(false);
     }

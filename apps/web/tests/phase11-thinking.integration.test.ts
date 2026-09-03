@@ -52,6 +52,45 @@ describe("Phase 11 Gateway in-progress recovery", () => {
   });
 });
 
+describe("Phase 11 consumed gateway recovery", () => {
+  it("fails closed when a consumed result has no destination and recovers only the matching committed destination", async () => {
+    const data = await fixture();
+    const identity = { workspaceId: data.workspace.id, userId: data.userA.id };
+    const consumedWithoutDestination = { resolveSnapshot: (...args: Parameters<typeof data.gateway.resolveSnapshot>) => data.gateway.resolveSnapshot(...args), execute: async () => ({ status: "ALREADY_PROCESSED" as const, invocationId: randomUUID(), textConsumed: true }) };
+
+    setThinkingGatewayRuntimeForTests(() => ({ gateway: consumedWithoutDestination, repository: data.repository }));
+    await expect(createThinkingSession(identity, data.first.item.id, randomUUID())).rejects.toThrow("THINKING_SESSION_CONSUMED_DESTINATION_MISSING");
+
+    const sessionId = randomUUID();
+    const createDestinationDuringConsume = {
+      resolveSnapshot: (...args: Parameters<typeof data.gateway.resolveSnapshot>) => data.gateway.resolveSnapshot(...args),
+      execute: async () => {
+        await prisma.thinkingSession.create({ data: { id: sessionId, workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: data.first.item.id } });
+        await prisma.thinkingSessionMessage.create({ data: { workspaceId: identity.workspaceId, sessionId, role: "ASSISTANT", content: "committed", ordinal: 0, replyToMessageId: `first:${sessionId}` } });
+        return { status: "ALREADY_PROCESSED" as const, invocationId: randomUUID(), textConsumed: true };
+      },
+    };
+    setThinkingGatewayRuntimeForTests(() => ({ gateway: createDestinationDuringConsume, repository: data.repository }));
+    await expect(createThinkingSession(identity, data.first.item.id, sessionId)).resolves.toEqual({ id: sessionId });
+
+    const missingReplyId = randomUUID();
+    setThinkingGatewayRuntimeForTests(() => ({ gateway: consumedWithoutDestination, repository: data.repository }));
+    await expect(appendThinkingResponse(identity, sessionId, missingReplyId, "missing reply")).rejects.toThrow("THINKING_SESSION_CONSUMED_DESTINATION_MISSING");
+
+    const committedReplyId = randomUUID();
+    const appendDestinationDuringConsume = {
+      resolveSnapshot: (...args: Parameters<typeof data.gateway.resolveSnapshot>) => data.gateway.resolveSnapshot(...args),
+      execute: async () => {
+        const user = await prisma.thinkingSessionMessage.findUniqueOrThrow({ where: { sessionId_clientMessageId: { sessionId, clientMessageId: committedReplyId } } });
+        await prisma.thinkingSessionMessage.create({ data: { workspaceId: identity.workspaceId, sessionId, role: "ASSISTANT", content: "committed reply", ordinal: user.ordinal + 1, replyToMessageId: user.id } });
+        return { status: "ALREADY_PROCESSED" as const, invocationId: randomUUID(), textConsumed: true };
+      },
+    };
+    setThinkingGatewayRuntimeForTests(() => ({ gateway: appendDestinationDuringConsume, repository: data.repository }));
+    await expect(appendThinkingResponse(identity, sessionId, committedReplyId, "committed reply")).resolves.toEqual({ id: sessionId });
+  });
+});
+
 describe("Phase 11 immutable idempotency payloads", () => {
   it("rejects changed content for one client message ID while allowing the same normalized retry", async () => {
     const data = await fixture();

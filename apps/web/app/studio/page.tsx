@@ -1,9 +1,12 @@
 import Link from "next/link";
 import { dashboard, statusLabel } from "@/lib/product";
 import { IndeterminateProgressBar } from "@/components/status-badge";
+import { resolveWebIdentity } from "@/lib/identity";
+import { getPersonalCognitionOverview, getRecommendedReviews } from "@/lib/personalized-cognition";
 
 export default async function StudioPage() {
-  const data = await dashboard();
+  const identity = await resolveWebIdentity();
+  const [data, overview, recommendations] = await Promise.all([dashboard(identity), getPersonalCognitionOverview(identity), getRecommendedReviews(identity, 1)]);
   const latestSource = data.sources[0];
   const latestPodcast = data.podcasts[0];
   const latestVideo = data.videos[0];
@@ -13,16 +16,16 @@ export default async function StudioPage() {
       {/* Home Hero: Current Analysis (当前分析) */}
       <section className="home-hero">
         <div>
-          <div className="page-eyebrow">当前分析</div>
+          <div className="page-eyebrow">继续</div>
           <h1 className="page-title font-serif" style={{ fontSize: 44, marginBottom: 16 }}>
-            {latestSource ? latestSource.title : "知识库暂无书籍"}
+            {latestSource ? latestSource.title : "从一本书开始。"}
           </h1>
           <p className="page-desc" style={{ marginBottom: 28 }}>
             {latestSource
               ? latestSource.hasIntelligence
                 ? "深度理解已完成。可以查看系统解读与原文证据，或继续生成播客和短视频。"
                 : "正在解析与理解原始文本，提取结构与证据。"
-              : "上传第一本书，开始解析与深度理解。"}
+              : "导入一本书，建立属于你的阅读、理解与表达路径。"}
           </p>
 
           <div style={{ display: "flex", gap: 12 }}>
@@ -52,7 +55,7 @@ export default async function StudioPage() {
                   <polyline points="17 8 12 3 7 8" />
                   <line x1="12" y1="3" x2="12" y2="15" />
                 </svg>
-                上传一本书
+                导入书籍
               </Link>
             )}
           </div>
@@ -62,7 +65,7 @@ export default async function StudioPage() {
         <div className="hero-book-card">
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <span className="font-mono" style={{ fontSize: 11, color: "var(--outline)", textTransform: "uppercase" }}>
-              {latestSource ? `${latestSource.mediaType} / ${latestSource.hasIntelligence ? "解析完毕" : statusLabel(latestSource.status, latestSource.errorCode)}` : "EMPTY / 待导入"}
+            {latestSource ? `${latestSource.mediaType} / ${latestSource.hasIntelligence ? "解析完毕" : statusLabel(latestSource.status, latestSource.errorCode)}` : "准备开始"}
             </span>
             {latestSource?.hasIntelligence && (
               <div
@@ -84,10 +87,12 @@ export default async function StudioPage() {
           </div>
 
           <h2 className="font-serif" style={{ fontSize: 24, fontWeight: 600, color: "var(--on-surface)", margin: "24px 0 0 0" }}>
-            {latestSource ? latestSource.title : "暂无当前分析书籍"}
+            {latestSource ? latestSource.title : "书、认知与表达会在这里相连"}
           </h2>
         </div>
       </section>
+
+      {overview && overview.total > 0 ? <section className="today-section card-panel" aria-label="今天"><div className="section-header"><h2 className="section-title">今天</h2><Link className="section-link" href="/studio/cognitions">查看我的认知 →</Link></div><div className="today-summary"><span>待复习 {overview.dueNow}</span><span>需要再梳理 {overview.needsReview}</span><span>正在形成 {overview.developing}</span></div>{recommendations[0] ? <Link className="today-next" href={`/studio/cognitions/${recommendations[0].id}`}>下一条：{recommendations[0].content.slice(0, 90)} <span>继续理解 →</span></Link> : null}</section> : null}
 
       <hr style={{ borderColor: "var(--surface-container-high)", margin: "0 0 48px 0", borderTop: "none" }} />
 
