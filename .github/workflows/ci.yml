@@ -143,6 +143,16 @@ jobs:
         run: pnpm test:phase14:release
         env:
           POSTGRES_HOST_PORT: "5432"
+      - name: Phase 15 Podcast Content Quality release gate (deterministic and no external AI calls)
+        run: pnpm test:phase15:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
+      - name: Upload Phase 15 podcast quality evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase15-podcast-quality-${{ github.event.pull_request.head.sha || github.sha }}
+          path: output/phase15
+          if-no-files-found: error
       - name: Upload Phase 14 visual evidence
         uses: actions/upload-artifact@v4
         with:

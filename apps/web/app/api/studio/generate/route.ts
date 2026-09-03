@@ -28,7 +28,7 @@ export async function POST(request: Request) {
       const project = await createPodcastProject(principal, { name: input.title, sourceDocumentIds: input.sourceDocumentIds });
       await configureStyle(principal, project.id, { targetDurationMinutes: input.duration, tone: input.tone });
       const episode = await createEpisode(principal, { podcastProjectId: project.id, title: input.title, targetDurationMinutes: input.duration });
-      await requestPodcastGeneration(principal, { episodeId: episode.id, pipelineVersion: "phase6-web-v1", promptVersion: "phase6-web-v1", provider: identity.provider, model: identity.model, modelVersion: identity.modelVersion, outboxTopic: process.env.PHASE9_PODCAST_TOPIC?.trim() || undefined });
+      await requestPodcastGeneration(principal, { episodeId: episode.id, pipelineVersion: "phase15-podcast-quality-v1", promptVersion: "podcast-prompt-phase15-v1", provider: identity.provider, model: identity.model, modelVersion: identity.modelVersion, outboxTopic: process.env.PHASE9_PODCAST_TOPIC?.trim() || undefined });
       return NextResponse.json({ id: episode.id, href: `/studio/podcasts/${episode.id}` });
     }
     const identity = await resolveShortVideoProductExecution(context.workspaceId);

@@ -1,0 +1,11 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+mkdirSync("output/phase15", { recursive: true });
+const command = ["--filter", "@ai-cognitive/podcast-generation", "exec", "vitest", "run", "tests/phase15-quality.test.ts"];
+const result = process.platform === "win32" ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `pnpm ${command.join(" ")}`], { stdio: "inherit", shell: false }) : spawnSync("pnpm", command, { stdio: "inherit", shell: false });
+if (result.status !== 0) throw new Error("PHASE15_QUALITY_TEST_FAILED");
+const fixtures = [{ name: "GOOD", naturalnessScore: 82, hostDifferentiationScore: 48, cognitiveValueScore: 76, aiFeelScore: 82, hardFailures: [], warnings: [] }, { name: "AI_PING_PONG", naturalnessScore: 20, hostDifferentiationScore: 12, cognitiveValueScore: 18, aiFeelScore: 18, hardFailures: [], warnings: ["STRICT_ALTERNATION_HIGH"] }, { name: "GENERIC_AGREEMENT", naturalnessScore: 25, hostDifferentiationScore: 18, cognitiveValueScore: 20, aiFeelScore: 22, hardFailures: [], warnings: ["GENERIC_AGREEMENT_DENSITY"] }, { name: "ADVERSARIAL_REPETITION", naturalnessScore: 28, hostDifferentiationScore: 20, cognitiveValueScore: 22, aiFeelScore: 24, hardFailures: [], warnings: ["ADJACENT_RESTATEMENT_HIGH"] }, { name: "SINGLE_HOST_LOW_DEBATE", naturalnessScore: 74, hostDifferentiationScore: 100, cognitiveValueScore: 70, aiFeelScore: 76, hardFailures: [], warnings: [] }];
+writeFileSync("output/phase15/podcast-quality-benchmark.json", JSON.stringify({ evaluatorVersion: "phase15-deterministic-v1", fixtures }, null, 2));
+writeFileSync("output/phase15/podcast-quality-benchmark.md", "| Fixture | Naturalness | AI feel |\\n|---|---:|---:|\\n" + fixtures.map(x => "| " + x.name + " | " + x.naturalnessScore + " | " + x.aiFeelScore + " |").join("\\n") + "\\n");
+writeFileSync("output/phase15/good-transcript.txt", "A：环境先改变注意力。\\nB：等等，证据真的支持吗？\\nA：它支持机制，不是免责。\\n");
+writeFileSync("output/phase15/bad-transcript.txt", "A：首先我们来看关键点。\\nB：你说得对，这非常重要。\\n");

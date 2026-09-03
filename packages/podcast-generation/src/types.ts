@@ -56,7 +56,7 @@ export type PodcastContextItem = {
   artifactId: string; chunkId?: string | null; type?: string; content: string; score: number; selectionReason: string;
   tokenEstimate: number; sourceBlockEvidenceSpans: Array<{ sourceBlockId: string; startOffset: number; endOffset: number; quoteText?: string | null }>;
 };
-export type ProviderMetadata = { stage: string; episodeId: string; segmentId?: string; provider: string; model: string; correlationId: string; tokenBudget: number };
+export type ProviderMetadata = { stage: string; episodeId: string; segmentId?: string; generationAttempt?: number; provider: string; model: string; correlationId: string; tokenBudget: number };
 export type PodcastTextReceipt = { operationKey: string; invocationId: string; snapshotId: string };
 export type PodcastTextConsumer = { consumerKind: string; consumerKey: string; consumerFingerprint: string };
 export interface PodcastGenerationProvider {
@@ -64,8 +64,8 @@ export interface PodcastGenerationProvider {
   plan(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; context: PodcastContextItem[] }): Promise<unknown>;
   designNarrative(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; plan: EpisodePlanOutput }): Promise<unknown>;
   outlineSegments(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; plan: EpisodePlanOutput; narrative: NarrativeOutput; availableMemoryIds: string[] }): Promise<unknown>;
-  draftSegment(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; plan: EpisodePlanOutput; narrative: NarrativeOutput; segment: SegmentOutlineOutput["segments"][number]; context: PodcastContextItem[] }): Promise<unknown>;
-  humanizeSegment(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; segment: SegmentOutlineOutput["segments"][number]; dialogue: DialogueOutput }): Promise<unknown>;
+  draftSegment(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; plan: EpisodePlanOutput; narrative: NarrativeOutput; segment: SegmentOutlineOutput["segments"][number]; context: PodcastContextItem[]; repairReasons?: string[] }): Promise<unknown>;
+  humanizeSegment(input: { metadata: ProviderMetadata; style: Record<string, unknown>; hosts: PodcastHostPersona[]; segment: SegmentOutlineOutput["segments"][number]; dialogue: DialogueOutput; qualityHints?: string[] }): Promise<unknown>;
 }
 /** Production providers retain receipts by deterministic operation key, not response identity. */
 export interface DurablePodcastGenerationProvider extends PodcastGenerationProvider {
