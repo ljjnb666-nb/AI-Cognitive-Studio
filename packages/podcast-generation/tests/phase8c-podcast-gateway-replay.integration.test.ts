@@ -173,6 +173,7 @@ describe("Phase 8C persisted Podcast Gateway replay", () => {
       if (point === "afterTextReceipt" && metadata.stage === "SEGMENT_DRAFTING" && attempt === 2 && !crashed) { crashed = true; throw new Error("CRASH_AFTER_QUALITY_ATTEMPT_2_RECEIPT"); }
     } })).rejects.toThrow("CRASH_AFTER_QUALITY_ATTEMPT_2_RECEIPT");
     expect(value.calls.get("SEGMENT_DRAFTING")).toBe(2);
+    expect((value.inputs.get("SEGMENT_DRAFTING") as { repairReasons?: string[] }).repairReasons).toContain("GENERIC_AGREEMENT_DENSITY");
     const firstReceipts = await prisma.providerInvocation.findMany({ where: { workspaceId: data.workspace.id, idempotencyKey: { contains: ":SEGMENT_DRAFTING:" } }, orderBy: { idempotencyKey: "asc" } });
     expect(firstReceipts.map(item => item.idempotencyKey)).toHaveLength(2);
     expect(firstReceipts.map(item => item.idempotencyKey)).toEqual(expect.arrayContaining([expect.stringContaining(":attempt:1"), expect.stringContaining(":attempt:2")]));
@@ -182,5 +183,22 @@ describe("Phase 8C persisted Podcast Gateway replay", () => {
     expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id, idempotencyKey: { contains: ":SEGMENT_DRAFTING:" } } })).toBe(2);
     const revisions = await prisma.podcastScriptRevision.findMany({ where: { episodeId: data.episode.id } });
     expect(revisions).toHaveLength(1);
+  }, 60_000);
+
+  it("keeps attempt one until atomic quality replacement and resumes from a materialized attempt two", async () => {
+    const data = await fixture();
+    const value = await production(data, (input, memory) => input.metadata.generationAttempt === 1
+      ? { utterances: [{ ordinal: 1, speakerHostId: input.hosts[0].id, text: "Grounded evidence supports durable recovery.", utteranceType: "STATEMENT", substantive: true, isDirectQuote: false, evidence: [{ memoryItemId: memory }] }, { ordinal: 2, speakerHostId: input.hosts[1].id, text: "你说得对，这非常重要。", utteranceType: "REACTION", substantive: false, isDirectQuote: false, evidence: [] }, { ordinal: 3, speakerHostId: input.hosts[0].id, text: "完全同意，这个观点很有意思。", utteranceType: "REACTION", substantive: false, isDirectQuote: false, evidence: [] }] }
+      : { utterances: [{ ordinal: 1, speakerHostId: input.hosts[0].id, text: "Grounded evidence supports durable recovery.", utteranceType: "STATEMENT", substantive: true, isDirectQuote: false, evidence: [{ memoryItemId: memory }] }, { ordinal: 2, speakerHostId: input.hosts[1].id, text: "How do we verify it?", utteranceType: "QUESTION", substantive: false, isDirectQuote: false, evidence: [] }] });
+    let beforeAttemptTwo = true, afterMaterialization = true;
+    await expect(processPodcastGenerationRun(data.requested.run.id, { ...value.deps, faultInjector: point => { if (point === "afterQualityDecision" && beforeAttemptTwo) { beforeAttemptTwo = false; throw new Error("CRASH_BEFORE_QUALITY_ATTEMPT_2"); } } })).rejects.toThrow("CRASH_BEFORE_QUALITY_ATTEMPT_2");
+    const first = await prisma.episodeSegment.findFirstOrThrow({ where: { podcastGenerationRunId: data.requested.run.id } });
+    expect([first.generationAttemptCount, await prisma.podcastUtterance.count({ where: { segmentId: first.id } })]).toEqual([1, 3]);
+    await resetForReplay(data.requested.run.id);
+    await expect(processPodcastGenerationRun(data.requested.run.id, { ...value.deps, faultInjector: point => { if (point === "afterQualityRedraftMaterialization" && afterMaterialization) { afterMaterialization = false; throw new Error("CRASH_AFTER_QUALITY_ATTEMPT_2_MATERIALIZATION"); } } })).rejects.toThrow("CRASH_AFTER_QUALITY_ATTEMPT_2_MATERIALIZATION");
+    const second = await prisma.episodeSegment.findUniqueOrThrow({ where: { id: first.id } });
+    expect([second.status, second.generationAttemptCount, await prisma.podcastUtterance.count({ where: { segmentId: second.id } })]).toEqual(["DRAFTED", 2, 2]);
+    await resetForReplay(data.requested.run.id); await processPodcastGenerationRun(data.requested.run.id, value.deps);
+    expect(await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } })).toBe(1);
   }, 60_000);
 });
