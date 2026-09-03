@@ -63,6 +63,14 @@ async function thinkingFixture(workspaceId: string, userId: string, memoryItemId
   return id;
 }
 
+async function mediaFixture(workspaceId: string, userId: string) {
+  const project = await prisma.podcastProject.create({ data: { workspaceId, name: "Phase 14 阅读播客" } });
+  const style = await prisma.podcastStyleProfile.create({ data: { workspaceId, podcastProjectId: project.id, version: 1 } });
+  await prisma.podcastEpisode.create({ data: { workspaceId, podcastProjectId: project.id, styleProfileId: style.id, title: "证据与判断", language: "zh-CN", targetDurationMinutes: 12, status: "READY" } });
+  await prisma.shortVideoProject.create({ data: { workspaceId, name: "证据短视频", description: "确定性视觉夹具" } });
+  await prisma.job.create({ data: { workspaceId, userId, type: "system.health-check", status: "SUCCEEDED", payload: {} } });
+}
+
 test("desktop navigation keeps one clear active destination", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-1024", "desktop acceptance only");
   const email = await signUp(page);
@@ -75,6 +83,7 @@ test("desktop navigation keeps one clear active destination", async ({ page }, t
   const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
   const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
   const sessionId = await thinkingFixture(owner.memberships[0]!.workspaceId, owner.id, fixture.cognition.id);
+  await mediaFixture(owner.memberships[0]!.workspaceId, owner.id);
   const attemptId = randomUUID();
   await prisma.teachBackAttempt.create({ data: { id: attemptId, workspaceId: owner.memberships[0]!.workspaceId, userId: owner.id, memoryItemId: fixture.cognition.id, content: "确定性复述夹具。" } });
   for (const [path, label] of [[`/studio/cognitions/${fixture.cognition.id}`, "我的认知"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "我的认知"], [`/studio/thinking/${sessionId}`, "思考"], ["/studio/mastery", "理解"], [`/studio/teach-back/${attemptId}`, "理解"], ["/studio/podcasts/new", "播客"], ["/studio/videos/new", "短视频"], ["/studio/settings/account", "设置"], ["/studio/settings/providers", "设置"]]) {
@@ -91,6 +100,7 @@ test("nested Studio routes retain one canonical active destination", async ({ pa
   const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
   const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
   const sessionId = await thinkingFixture(owner.memberships[0]!.workspaceId, owner.id, fixture.cognition.id);
+  await mediaFixture(owner.memberships[0]!.workspaceId, owner.id);
   const attemptId = randomUUID();
   await prisma.teachBackAttempt.create({ data: { id: attemptId, workspaceId: owner.memberships[0]!.workspaceId, userId: owner.id, memoryItemId: fixture.cognition.id, content: "确定性复述夹具。" } });
   for (const [path, label] of [[`/studio/cognitions/${fixture.cognition.id}`, "我的认知"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "我的认知"], [`/studio/thinking/${sessionId}`, "思考"], ["/studio/mastery", "理解"], [`/studio/teach-back/${attemptId}`, "理解"], ["/studio/podcasts/new", "播客"], ["/studio/videos/new", "短视频"], ["/studio/settings/account", "设置"], ["/studio/settings/providers", "设置"]]) {
