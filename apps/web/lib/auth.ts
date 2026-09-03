@@ -11,6 +11,11 @@ function requiredSecret(): string {
   return secret;
 }
 
+function rateLimitMaximum(): number {
+  const testMaximum = Number(process.env.BETTER_AUTH_TEST_RATE_LIMIT_MAX);
+  return Number.isInteger(testMaximum) && testMaximum > 10 ? testMaximum : 10;
+}
+
 function trustedOrigins(): string[] {
   const configured = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "").split(",").map((origin) => origin.trim()).filter(Boolean);
   if (process.env.NODE_ENV !== "production") configured.push(requiredAuthBaseUrl());
@@ -26,6 +31,6 @@ export const auth = betterAuth({
   trustedOrigins: trustedOrigins(),
   emailAndPassword: { enabled: true, minPasswordLength: 10, maxPasswordLength: 128 },
   session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24, cookieCache: { enabled: false } },
-  rateLimit: { enabled: true, window: 60, max: 10 },
+  rateLimit: { enabled: true, window: 60, max: rateLimitMaximum() },
   advanced: { useSecureCookies: new URL(requiredAuthBaseUrl()).protocol === "https:", disableCSRFCheck: false, disableOriginCheck: false },
 });

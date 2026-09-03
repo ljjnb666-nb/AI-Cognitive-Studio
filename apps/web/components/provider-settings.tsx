@@ -49,7 +49,7 @@ export function ProviderSettings() {
   };
 
   useEffect(() => {
-    queueMicrotask(() => void refresh().catch((error) => setMessage(error instanceof Error ? error.message : "PROVIDER_SETTINGS_LOAD_FAILED")));
+    queueMicrotask(() => void refresh().catch(() => setMessage(readableError("PROVIDER_SETTINGS_LOAD_FAILED"))));
   }, []);
 
   async function submit(payload: Record<string, unknown>) {
@@ -64,8 +64,8 @@ export function ProviderSettings() {
       const body = (await response.json()) as State & { error?: string };
       if (!response.ok) throw new Error(readableError(body.error ?? "PROVIDER_SETTINGS_SAVE_FAILED"));
       setState(body);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "PROVIDER_SETTINGS_SAVE_FAILED");
+    } catch {
+      setMessage(readableError("PROVIDER_SETTINGS_SAVE_FAILED"));
     } finally {
       setBusy(false);
     }
@@ -105,7 +105,7 @@ export function ProviderSettings() {
               </div>
               {item.missing.length > 0 && (
                 <p style={{ fontSize: 12, color: "var(--muted-terracotta)", margin: "8px 0 0 0" }}>
-                  缺失配置: {item.missing.join(", ")}
+                  需要配置 Provider 并完成所需执行路由。
                 </p>
               )}
             </div>

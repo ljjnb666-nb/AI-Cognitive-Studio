@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { mediaGenerationErrorMessage } from "@/lib/product-errors";
 
 export function GenerationProcessing({ status, episodeId, hasAudio = false, audioStatus, audioErrorCode }: { status: string; episodeId?: string; hasAudio?: boolean; audioStatus?: string | null; audioErrorCode?: string | null }) {
   const router = useRouter();
@@ -33,8 +34,9 @@ export function GenerationProcessing({ status, episodeId, hasAudio = false, audi
     return () => window.clearInterval(timer);
   }, [audioError, audioStatus, hasAudio, router, status]);
   const failed = audioStatus === "FAILED";
-  const configurationError = audioError === "AI_PROVIDER_CONFIGURATION_REQUIRED" || audioError === "PODCAST_TTS_CONFIGURATION_REQUIRED" || audioErrorCode === "AI_PROVIDER_CONFIGURATION_REQUIRED" || audioErrorCode === "PODCAST_TTS_CONFIGURATION_REQUIRED";
-  if (failed) return <section className="panel"><p className="error">音频生成失败{audioErrorCode ? `：${audioErrorCode}` : "。"}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 AI Provider</Link>}<button className="button secondary" onClick={() => void requestAudio(true)}>重试音频生成</button></div></section>;
-  if (audioError) return <section className="panel"><p className="error">音频生成请求失败：{audioError}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 AI Provider</Link>}<button className="button secondary" onClick={() => void requestAudio(true)}>重试音频生成</button></div></section>;
+  const failureCode = audioError ?? audioErrorCode;
+  const configurationError = failureCode === "AI_PROVIDER_CONFIGURATION_REQUIRED" || failureCode === "PODCAST_TTS_CONFIGURATION_REQUIRED";
+  if (failed) return <section className="panel"><p className="error">{mediaGenerationErrorMessage(audioErrorCode)}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 Provider</Link>}<button className="button secondary" onClick={() => void requestAudio(true)}>重试音频生成</button></div></section>;
+  if (audioError) return <section className="panel"><p className="error">{mediaGenerationErrorMessage(audioError)}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 Provider</Link>}<button className="button secondary" onClick={() => void requestAudio(true)}>重试音频生成</button></div></section>;
   return null;
 }

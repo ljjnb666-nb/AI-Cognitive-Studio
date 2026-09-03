@@ -5,6 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { prisma } from "@ai-cognitive/db";
 
 const password = "Phase14Password!";
+let phase14Email: string | undefined;
 const destinations = [
   ["/studio", "首页"],
   ["/studio/library", "知识库"],
@@ -18,6 +19,18 @@ const destinations = [
 ] as const;
 
 async function signUp(page: Page) {
+  if (phase14Email) {
+    await page.goto("/sign-in");
+    await page.locator('input[name="email"]').fill(phase14Email);
+    await page.locator('input[name="password"]').fill(password);
+    const response = page.waitForResponse((item) =>
+      item.url().endsWith("/api/auth/sign-in/email"),
+    );
+    await page.getByRole("button", { name: "登录并进入工作台" }).click();
+    expect((await response).status()).toBe(200);
+    await expect(page).toHaveURL(/\/studio$/);
+    return phase14Email;
+  }
   const email = `phase14-${Date.now()}@ai-cognitive-studio.test`;
   await page.goto("/sign-up");
   await page.locator('input[name="name"]').fill("Phase Fourteen Reader");
@@ -30,6 +43,7 @@ async function signUp(page: Page) {
   await page.getByRole("button", { name: "注册并进入 Studio" }).click();
   expect((await response).status()).toBe(200);
   await expect(page).toHaveURL(/\/studio$/);
+  phase14Email = email;
   return email;
 }
 
@@ -193,6 +207,104 @@ async function currentCognition(workspaceId: string, userId: string) {
   return { cognition };
 }
 
+async function sourceAwaitingAnalysis(workspaceId: string, userId: string) {
+  const suffix = randomUUID();
+  const source = await prisma.source.create({
+    data: { workspaceId, kind: "FILE", displayName: "Phase 14 error fixture.md" },
+  });
+  const blob = await prisma.sourceBlob.create({
+    data: {
+      workspaceId,
+      sha256: suffix,
+      sizeBytes: 1,
+      mediaType: "text/markdown",
+      storageKey: `phase14-errors/${suffix}`,
+    },
+  });
+  const document = await prisma.sourceDocument.create({
+    data: {
+      workspaceId,
+      sourceId: source.id,
+      sourceBlobId: blob.id,
+      version: 1,
+      sha256: suffix,
+      sizeBytes: 1,
+      mediaType: "text/markdown",
+      storageKey: blob.storageKey,
+    },
+  });
+  const job = await prisma.job.create({
+    data: { workspaceId, userId, type: "source.ingest", status: "SUCCEEDED", payload: {} },
+  });
+  const ingestion = await prisma.ingestionRun.create({
+    data: {
+      workspaceId,
+      sourceDocumentId: document.id,
+      jobId: job.id,
+      parserVersion: "phase14-errors",
+      normalizationVersion: "phase14-errors",
+      status: "SUCCEEDED",
+    },
+  });
+  const extraction = await prisma.documentExtraction.create({
+    data: {
+      workspaceId,
+      sourceDocumentId: document.id,
+      ingestionRunId: ingestion.id,
+      status: "SUCCEEDED",
+      parserName: "phase14-errors",
+      parserVersion: "phase14-errors",
+      normalizationVersion: "phase14-errors",
+    },
+  });
+  await prisma.currentDocumentExtraction.create({
+    data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id },
+  });
+  return { document, extraction, suffix };
+}
+
+async function failedBookAnalysis(
+  workspaceId: string,
+  userId: string,
+  errorCode: string,
+) {
+  const fixture = await sourceAwaitingAnalysis(workspaceId, userId);
+  const job = await prisma.job.create({
+    data: { workspaceId, userId, type: "book.analysis", status: "FAILED", payload: {} },
+  });
+  const chunkSet = await prisma.chunkSet.create({
+    data: {
+      workspaceId,
+      sourceDocumentId: fixture.document.id,
+      extractionId: fixture.extraction.id,
+      chunkingVersion: "phase14-errors",
+      configuration: {},
+      configurationHash: fixture.suffix,
+      status: "SUCCEEDED",
+    },
+  });
+  await prisma.bookAnalysisRun.create({
+    data: {
+      workspaceId,
+      sourceDocumentId: fixture.document.id,
+      extractionId: fixture.extraction.id,
+      chunkSetId: chunkSet.id,
+      jobId: job.id,
+      pipelineVersion: "phase14-errors",
+      promptVersion: "phase14-errors",
+      provider: "fixture",
+      model: "fixture",
+      modelVersionKey: "fixture",
+      idempotencyKey: `phase14-errors:${fixture.suffix}`,
+      analysisIdentityHash: `phase14-errors:${fixture.suffix}`,
+      status: "FAILED",
+      errorCode,
+      completedAt: new Date(),
+    },
+  });
+  return fixture.document.id;
+}
+
 async function capture(page: Page, name: string) {
   const directory = resolve(process.cwd(), "../../output/playwright");
   await mkdir(directory, { recursive: true });
@@ -211,6 +323,41 @@ async function expectSearchIconInsideField(page: Page) {
   expect(iconBox!.x + iconBox!.width).toBeLessThanOrEqual(fieldBox!.x + fieldBox!.width);
   expect(iconBox!.y).toBeGreaterThanOrEqual(fieldBox!.y);
   expect(iconBox!.y + iconBox!.height).toBeLessThanOrEqual(fieldBox!.y + fieldBox!.height);
+}
+
+async function expectNoHorizontalOverflow(page: Page) {
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+}
+
+async function expectMobileContentClearance(page: Page) {
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  const geometry = await page.evaluate(() => {
+    const main = document.querySelector("main");
+    const group = document.querySelector(".mobile-group-nav");
+    const bottom = document.querySelector(".mobile-nav");
+    if (!main || !group || !bottom) return null;
+    const bottomOfContent = Array.from(main.querySelectorAll("*"))
+      .filter((element) => {
+        const style = window.getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        return !element.closest(".mobile-nav, .mobile-group-nav") && style.display !== "none" && style.visibility !== "hidden" && box.height > 0;
+      })
+      .reduce((last, element) => Math.max(last, element.getBoundingClientRect().bottom), 0);
+    return {
+      contentBottom: bottomOfContent,
+      bottomTop: bottom.getBoundingClientRect().top,
+      groupPosition: window.getComputedStyle(group).position,
+    };
+  });
+  expect(geometry).not.toBeNull();
+  expect(geometry!.contentBottom).toBeLessThanOrEqual(geometry!.bottomTop);
+  expect(geometry!.groupPosition).not.toBe("fixed");
+  const finalButton = page.locator("main button:not([disabled])").last();
+  if (await finalButton.count()) await finalButton.click({ trial: true });
 }
 
 async function thinkingFixture(
@@ -460,6 +607,89 @@ test("desktop navigation keeps one clear active destination", async ({
       },
     }),
   ).toBe(1);
+
+  const file = {
+    name: "evidence.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("evidence"),
+  };
+  const sentinels = [
+    "INTERNAL_TEST_SENTINEL",
+    "DATABASE_PRIVATE_ERROR",
+    "PROVIDER_INTERNAL_SECRET_ERROR",
+  ];
+  async function uploadWith(mode: "start" | "complete" | "transport", code: string) {
+    await page.goto("/studio/library");
+    await page.unrouteAll();
+    await page.route("**/api/studio/upload", async (route) => {
+      const payload = route.request().postDataJSON() as { sessionId?: string };
+      if (mode === "complete" && payload.sessionId) {
+        await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: code }) });
+        return;
+      }
+      if (mode === "start") {
+        await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: code }) });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ sessionId: randomUUID(), upload: { url: "http://phase14.test/upload", headers: {} } }),
+      });
+    });
+    if (mode === "complete" || mode === "transport") {
+      await page.route("http://phase14.test/upload", async (route) => {
+        await route.fulfill({ status: mode === "transport" ? 500 : 200 });
+      });
+    }
+    await page.locator('input[type="file"]').setInputFiles(file);
+  }
+  await uploadWith("start", sentinels[0]!);
+  await expect(page.getByText("上传没有完成，请稍后重试。")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(sentinels[0]!);
+  await uploadWith("complete", sentinels[1]!);
+  await expect(page.getByText("上传没有完成，请稍后重试。")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(sentinels[1]!);
+  await uploadWith("transport", sentinels[2]!);
+  await expect(page.getByText("文件没有上传完成，请重新选择后再试。")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(sentinels[2]!);
+
+  await page.unrouteAll();
+  const pendingSource = await sourceAwaitingAnalysis(
+    owner.memberships[0]!.workspaceId,
+    owner.id,
+  );
+  await page.route("**/api/studio/book-intelligence", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: sentinels[0] }),
+    });
+  });
+  await page.goto(`/studio/library/${pendingSource.document.id}`);
+  await expect(page.getByText("暂时无法完成这一步，请稍后重试。")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(sentinels[0]!);
+
+  await page.unrouteAll();
+  const terminalFailure = await failedBookAnalysis(
+    owner.memberships[0]!.workspaceId,
+    owner.id,
+    sentinels[1]!,
+  );
+  await page.goto(`/studio/library/${terminalFailure}`);
+  await expect(page.getByText("暂时无法完成这一步，请稍后重试。")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText(sentinels[1]!);
+
+  const providerFailure = await failedBookAnalysis(
+    owner.memberships[0]!.workspaceId,
+    owner.id,
+    "AI_PROVIDER_CONFIGURATION_REQUIRED",
+  );
+  await page.goto(`/studio/library/${providerFailure}`);
+  await expect(
+    page.getByText("需要先配置 Provider，才能继续理解这本书。"),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "配置 Provider" })).toBeVisible();
 });
 
 test("mobile Studio pages have usable navigation and no horizontal overflow", async ({
@@ -542,6 +772,19 @@ test("mobile Studio pages have usable navigation and no horizontal overflow", as
     await expect(secondary).toBeVisible();
     await expect(secondary.locator('a[aria-current="page"]')).toHaveAccessibleName(child);
   }
+  for (const path of [
+    `/studio/cognitions/${fixture.cognition.id}`,
+    `/studio/cognitions/${fixture.cognition.id}/teach-back`,
+    `/studio/thinking/${sessionId}`,
+    "/studio/mastery",
+    "/studio/podcasts",
+    "/studio/videos",
+    "/studio/activity",
+    "/studio/settings/providers",
+  ]) {
+    await page.goto(path);
+    await expectMobileContentClearance(page);
+  }
   for (const [path, name] of [
     ["/studio", "10-home-mobile.png"],
     ["/studio/cognitions", "11-cognitions-mobile.png"],
@@ -561,6 +804,50 @@ test("mobile Studio pages have usable navigation and no horizontal overflow", as
     await capture(page, name);
   }
 });
+
+test("tablet project runs the configured 768px acceptance without mobile overlays", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "tablet-768", "tablet acceptance only");
+  expect(testInfo.project.use.viewport).toEqual({ width: 768, height: 1024 });
+  expect(testInfo.project.use.isMobile).not.toBe(true);
+  const email = await signUp(page);
+  const owner = await prisma.user.findUniqueOrThrow({
+    where: { email },
+    include: { memberships: true },
+  });
+  const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
+  const sessionId = await thinkingFixture(
+    owner.memberships[0]!.workspaceId,
+    owner.id,
+    fixture.cognition.id,
+  );
+  for (const path of [
+    "/studio",
+    "/studio/library",
+    "/studio/cognitions",
+    `/studio/cognitions/${fixture.cognition.id}`,
+    "/studio/thinking",
+    `/studio/thinking/${sessionId}`,
+    "/studio/mastery",
+    "/studio/podcasts",
+    "/studio/videos",
+    "/studio/settings/providers",
+  ]) {
+    await page.goto(path);
+    await expect(page.locator("main")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await expect(page.locator(".mobile-nav")).toBeHidden();
+    await expect(page.locator(".mobile-group-nav")).toBeHidden();
+  }
+  await page.goto(`/studio/thinking/${sessionId}`);
+  const transcript = await page.locator(".thinking-transcript").boundingBox();
+  const context = await page.locator(".thinking-context").boundingBox();
+  expect(transcript?.width).toBeGreaterThan(480);
+  expect(context?.width).toBeGreaterThan(480);
+  expect(Math.abs((transcript?.x ?? 0) - (context?.x ?? 0))).toBeLessThan(2);
+});
+
 
 test("captures the final Studio experience evidence", async ({
   page,

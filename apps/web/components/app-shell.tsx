@@ -35,9 +35,10 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
           <Link href="/studio/library#upload" className="btn btn-primary">导入书籍</Link>
         </header>
 
-        <main className="content-area">{children}</main>
-
-        <StudioNavigation mobile />
+        <main className="content-area">
+          <StudioNavigation mobile />
+          {children}
+        </main>
       </div>
     </div>
   );
