@@ -92,23 +92,14 @@ test("desktop navigation keeps one clear active destination", async ({ page }, t
     await expect(current).toHaveCount(1);
     await expect(current).toHaveAccessibleName(label);
   }
-});
-
-test("nested Studio routes retain one canonical active destination", async ({ page }, testInfo) => {
-  test.skip(true, "covered by the shared authenticated desktop navigation flow");
-  const email = await signUp(page);
-  const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
-  const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
-  const sessionId = await thinkingFixture(owner.memberships[0]!.workspaceId, owner.id, fixture.cognition.id);
-  await mediaFixture(owner.memberships[0]!.workspaceId, owner.id);
-  const attemptId = randomUUID();
-  await prisma.teachBackAttempt.create({ data: { id: attemptId, workspaceId: owner.memberships[0]!.workspaceId, userId: owner.id, memoryItemId: fixture.cognition.id, content: "确定性复述夹具。" } });
-  for (const [path, label] of [[`/studio/cognitions/${fixture.cognition.id}`, "我的认知"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "我的认知"], [`/studio/thinking/${sessionId}`, "思考"], ["/studio/mastery", "理解"], [`/studio/teach-back/${attemptId}`, "理解"], ["/studio/podcasts/new", "播客"], ["/studio/videos/new", "短视频"], ["/studio/settings/account", "设置"], ["/studio/settings/providers", "设置"]]) {
-    await page.goto(path);
-    const current = page.locator('nav[aria-label="主导航"] a[aria-current="page"]');
-    await expect(current).toHaveCount(1);
-    await expect(current).toHaveAccessibleName(label);
+  await page.goto(`/studio/cognitions/${fixture.cognition.id}`);
+  const teachBack = page.getByRole("link", { name: "用自己的话讲一遍" });
+  for (let tabPresses = 0; tabPresses < 80 && !(await teachBack.evaluate((element) => document.activeElement === element)); tabPresses += 1) {
+    await page.keyboard.press("Tab");
   }
+  await expect(teachBack).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(new RegExp(`/studio/cognitions/${fixture.cognition.id}/teach-back$`));
 });
 
 test("mobile Studio pages have usable navigation and no horizontal overflow", async ({ page }, testInfo) => {
