@@ -55,7 +55,7 @@ describe("Phase 10 cognition product read model", () => {
     expect(page2.items).toHaveLength(8);
     expect(new Set([...page1.items, ...page2.items].map((item) => item.id)).size).toBe(28);
     const detail = await cognitionDetail(identityA, current.id);
-    expect(detail?.evidence).toEqual([{ id: expect.any(String), excerpt: data.block.text.slice(0, 14), blockOrdinal: 0 }]);
+    expect(detail?.evidence).toEqual([{ id: expect.any(String), excerpt: data.block.text.slice(0, 14), blockOrdinal: 0, startOffset: 0, endOffset: 14 }]);
     expect(detail?.evidence.some((item) => item.id === malformed.id)).toBe(false);
     expect((await listCognitions(identityA, { types: ["CLAIM"] })).items.map((item) => item.id)).toEqual([current.id]);
     const foreign = await fixture();

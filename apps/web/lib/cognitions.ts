@@ -1,7 +1,17 @@
 import { Prisma, prisma } from "@ai-cognitive/db";
 import type { WebIdentityContext } from "./identity";
 
-const supportedTypes = ["SUMMARY", "CONCEPT", "ARGUMENT", "CLAIM", "QUOTE", "QUESTION", "COUNTERPOINT", "EXAMPLE", "STORY"] as const;
+const supportedTypes = [
+  "SUMMARY",
+  "CONCEPT",
+  "ARGUMENT",
+  "CLAIM",
+  "QUOTE",
+  "QUESTION",
+  "COUNTERPOINT",
+  "EXAMPLE",
+  "STORY",
+] as const;
 export type CognitionType = (typeof supportedTypes)[number];
 
 export const cognitionTypeLabels: Record<CognitionType, string> = {
@@ -16,7 +26,9 @@ export const cognitionTypeLabels: Record<CognitionType, string> = {
   STORY: "故事",
 };
 
-export function isCognitionType(value: string | undefined): value is CognitionType {
+export function isCognitionType(
+  value: string | undefined,
+): value is CognitionType {
   return Boolean(value && supportedTypes.includes(value as CognitionType));
 }
 
@@ -34,8 +46,15 @@ type CognitionRow = {
 function decodeCursor(value: string | undefined): Cursor | undefined {
   if (!value) return undefined;
   try {
-    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Cursor;
-    if (typeof parsed.id !== "string" || typeof parsed.createdAt !== "string" || Number.isNaN(Date.parse(parsed.createdAt))) return undefined;
+    const parsed = JSON.parse(
+      Buffer.from(value, "base64url").toString("utf8"),
+    ) as Cursor;
+    if (
+      typeof parsed.id !== "string" ||
+      typeof parsed.createdAt !== "string" ||
+      Number.isNaN(Date.parse(parsed.createdAt))
+    )
+      return undefined;
     return parsed;
   } catch {
     return undefined;
@@ -43,7 +62,9 @@ function decodeCursor(value: string | undefined): Cursor | undefined {
 }
 
 function encodeCursor(row: CognitionRow): string {
-  return Buffer.from(JSON.stringify({ id: row.id, createdAt: row.createdAt.toISOString() })).toString("base64url");
+  return Buffer.from(
+    JSON.stringify({ id: row.id, createdAt: row.createdAt.toISOString() }),
+  ).toString("base64url");
 }
 
 export function currentLineageJoin() {
@@ -67,10 +88,14 @@ export function currentLineageJoin() {
 }
 
 function cognitionTypeList(types: readonly CognitionType[]) {
-  return Prisma.join(types.map((type) => Prisma.sql`${type}::"BookMemoryItemType"`));
+  return Prisma.join(
+    types.map((type) => Prisma.sql`${type}::"BookMemoryItemType"`),
+  );
 }
 
-export type CognitionListItem = Omit<CognitionRow, "createdAt"> & { createdAt: string };
+export type CognitionListItem = Omit<CognitionRow, "createdAt"> & {
+  createdAt: string;
+};
 
 export async function listCognitions(
   identity: Pick<WebIdentityContext, "workspaceId" | "userId">,
@@ -79,7 +104,9 @@ export async function listCognitions(
   const pageSize = Math.min(Math.max(input.pageSize ?? 24, 1), 50);
   const cursor = decodeCursor(input.cursor);
   const selectedTypes = input.types?.filter(isCognitionType) ?? [];
-  const typeClause = selectedTypes.length ? Prisma.sql`AND memory."type" IN (${cognitionTypeList(selectedTypes)})` : Prisma.empty;
+  const typeClause = selectedTypes.length
+    ? Prisma.sql`AND memory."type" IN (${cognitionTypeList(selectedTypes)})`
+    : Prisma.empty;
   const cursorClause = cursor
     ? Prisma.sql`AND (memory."createdAt" < ${new Date(cursor.createdAt)} OR (memory."createdAt" = ${new Date(cursor.createdAt)} AND memory."id" < ${cursor.id}))`
     : Prisma.empty;
@@ -100,17 +127,32 @@ export async function listCognitions(
   `);
   const page = rows.slice(0, pageSize);
   return {
-    items: page.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() })),
-    nextCursor: rows.length > pageSize && page.length ? encodeCursor(page[page.length - 1]!) : undefined,
+    items: page.map((row) => ({
+      ...row,
+      createdAt: row.createdAt.toISOString(),
+    })),
+    nextCursor:
+      rows.length > pageSize && page.length
+        ? encodeCursor(page[page.length - 1]!)
+        : undefined,
   };
 }
 
 export type CognitionDetail = CognitionListItem & {
-  evidence: Array<{ id: string; excerpt: string; blockOrdinal: number }>;
+  evidence: Array<{
+    id: string;
+    excerpt: string;
+    blockOrdinal: number;
+    startOffset: number;
+    endOffset: number;
+  }>;
   related: Array<{ id: string; type: CognitionType; content: string }>;
 };
 
-async function currentCognitionRow(identity: Pick<WebIdentityContext, "workspaceId" | "userId">, cognitionId: string): Promise<CognitionRow | null> {
+async function currentCognitionRow(
+  identity: Pick<WebIdentityContext, "workspaceId" | "userId">,
+  cognitionId: string,
+): Promise<CognitionRow | null> {
   const rows = await prisma.$queryRaw<CognitionRow[]>(Prisma.sql`
     SELECT memory."id", memory."type", memory."content", memory."createdAt", memory."sourceDocumentId",
       source."displayName" AS "sourceTitle", (state."id" IS NOT NULL AND state."state" = 'SAVED'::"UserCognitionStateKind") AS "saved"
@@ -126,49 +168,119 @@ async function currentCognitionRow(identity: Pick<WebIdentityContext, "workspace
   return rows[0] ?? null;
 }
 
-export async function cognitionDetail(identity: Pick<WebIdentityContext, "workspaceId" | "userId">, cognitionId: string): Promise<CognitionDetail | null> {
+export async function cognitionDetail(
+  identity: Pick<WebIdentityContext, "workspaceId" | "userId">,
+  cognitionId: string,
+): Promise<CognitionDetail | null> {
   const row = await currentCognitionRow(identity, cognitionId);
   if (!row) return null;
   const [evidence, relations] = await Promise.all([
     prisma.bookMemoryEvidence.findMany({
       where: { memoryItemId: row.id, workspaceId: identity.workspaceId },
       include: { sourceBlock: { select: { text: true, ordinal: true } } },
-      orderBy: [{ sourceBlock: { ordinal: "asc" } }, { startOffset: "asc" }, { id: "asc" }],
+      orderBy: [
+        { sourceBlock: { ordinal: "asc" } },
+        { startOffset: "asc" },
+        { id: "asc" },
+      ],
       take: 24,
     }),
     prisma.bookMemoryRelation.findMany({
-      where: { workspaceId: identity.workspaceId, OR: [{ fromMemoryItemId: row.id }, { toMemoryItemId: row.id }] },
-      include: { fromMemoryItem: { select: { id: true, type: true, content: true } }, toMemoryItem: { select: { id: true, type: true, content: true } } },
+      where: {
+        workspaceId: identity.workspaceId,
+        OR: [{ fromMemoryItemId: row.id }, { toMemoryItemId: row.id }],
+      },
+      include: {
+        fromMemoryItem: { select: { id: true, type: true, content: true } },
+        toMemoryItem: { select: { id: true, type: true, content: true } },
+      },
       orderBy: { createdAt: "asc" },
       take: 12,
     }),
   ]);
   const validEvidence = evidence.flatMap((item) => {
     const { text } = item.sourceBlock;
-    if (item.startOffset < 0 || item.endOffset < item.startOffset || item.endOffset > text.length) return [];
-    return [{ id: item.id, excerpt: text.slice(item.startOffset, item.endOffset), blockOrdinal: item.sourceBlock.ordinal }];
+    if (
+      item.startOffset < 0 ||
+      item.endOffset < item.startOffset ||
+      item.endOffset > text.length
+    )
+      return [];
+    return [
+      {
+        id: item.id,
+        excerpt: text.slice(item.startOffset, item.endOffset),
+        blockOrdinal: item.sourceBlock.ordinal,
+        startOffset: item.startOffset,
+        endOffset: item.endOffset,
+      },
+    ];
   });
   const related = relations.flatMap((relation) => {
-    const item = relation.fromMemoryItemId === row.id ? relation.toMemoryItem : relation.fromMemoryItem;
-    return isCognitionType(item.type) ? [{ id: item.id, type: item.type, content: item.content }] : [];
+    const item =
+      relation.fromMemoryItemId === row.id
+        ? relation.toMemoryItem
+        : relation.fromMemoryItem;
+    return isCognitionType(item.type)
+      ? [{ id: item.id, type: item.type, content: item.content }]
+      : [];
   });
-  return { ...row, createdAt: row.createdAt.toISOString(), evidence: validEvidence, related };
+  return {
+    ...row,
+    createdAt: row.createdAt.toISOString(),
+    evidence: validEvidence,
+    related,
+  };
 }
 
-export async function updateCognitionUserState(identity: Pick<WebIdentityContext, "workspaceId" | "userId">, input: { cognitionId: string; saved: boolean }) {
-  const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: identity.workspaceId, userId: identity.userId } }, select: { userId: true } });
-  if (!membership || !(await currentCognitionRow(identity, input.cognitionId))) throw new Error("COGNITION_NOT_FOUND");
+export async function updateCognitionUserState(
+  identity: Pick<WebIdentityContext, "workspaceId" | "userId">,
+  input: { cognitionId: string; saved: boolean },
+) {
+  const membership = await prisma.workspaceMember.findUnique({
+    where: {
+      workspaceId_userId: {
+        workspaceId: identity.workspaceId,
+        userId: identity.userId,
+      },
+    },
+    select: { userId: true },
+  });
+  if (!membership || !(await currentCognitionRow(identity, input.cognitionId)))
+    throw new Error("COGNITION_NOT_FOUND");
   if (!input.saved) {
     await prisma.userCognitionState.upsert({
-      where: { workspaceId_userId_memoryItemId: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.cognitionId } },
-      create: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.cognitionId, state: "ARCHIVED" },
+      where: {
+        workspaceId_userId_memoryItemId: {
+          workspaceId: identity.workspaceId,
+          userId: identity.userId,
+          memoryItemId: input.cognitionId,
+        },
+      },
+      create: {
+        workspaceId: identity.workspaceId,
+        userId: identity.userId,
+        memoryItemId: input.cognitionId,
+        state: "ARCHIVED",
+      },
       update: { state: "ARCHIVED" },
     });
     return { saved: false };
   }
   await prisma.userCognitionState.upsert({
-    where: { workspaceId_userId_memoryItemId: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.cognitionId } },
-    create: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.cognitionId, state: "SAVED" },
+    where: {
+      workspaceId_userId_memoryItemId: {
+        workspaceId: identity.workspaceId,
+        userId: identity.userId,
+        memoryItemId: input.cognitionId,
+      },
+    },
+    create: {
+      workspaceId: identity.workspaceId,
+      userId: identity.userId,
+      memoryItemId: input.cognitionId,
+      state: "SAVED",
+    },
     update: { state: "SAVED" },
   });
   return { saved: true };
