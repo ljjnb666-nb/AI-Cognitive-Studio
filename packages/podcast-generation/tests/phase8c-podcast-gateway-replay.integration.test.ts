@@ -11,7 +11,7 @@ const manifest = JSON.stringify({ providers: [{ providerKey: "fixture", displayN
 const controls = { circuit: { admit: async () => undefined, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => undefined }, concurrency: { acquire: async (key: string) => ({ key, token: "test" }), release: async () => true }, validateEndpoint: async () => undefined };
 
 type Data = Awaited<ReturnType<typeof fixture>>;
-async function production(data: Data) {
+async function production(data: Data, draftOutput?: (input: any, memory: string) => any) {
   await prisma.podcastGenerationRun.update({ where: { id: data.requested.run.id }, data: { provider: "fixture", model: "fixture-model", modelVersion: null, modelVersionKey: "" } });
   const store = new ProviderGatewayRepository(prisma, parseKeyring(keyring)!);
   const connection = await store.createConnection({ workspaceId: data.workspace.id, userId: data.user.id }, { providerKey: "fixture", protocol: "TEST", displayName: "fixture" });
@@ -21,7 +21,8 @@ async function production(data: Data) {
   const runtime = createPodcastProductionGatewayRuntime({ ...process.env, PROVIDER_GATEWAY_KEYRING: keyring, PROVIDER_GATEWAY_MODEL_MANIFEST: manifest }, { ...controls, adapterResolver: () => ({ execute: async ({ request }: any) => {
     const input = JSON.parse(request.text.messages[0].content), stage = input.metadata.stage, hosts = input.hosts, memory = input.context?.find((item: any) => item.sourceBlockEvidenceSpans?.length)?.memoryItemId ?? input.context?.[0]?.memoryItemId ?? input.availableMemoryIds?.[0];
     calls.set(stage, (calls.get(stage) ?? 0) + 1); inputs.set(stage, input);
-    const structured = stage === "EPISODE_PLANNING" ? { centralQuestion: "Why durable replay?", listenerStartingPoint: "start", listenerTakeaway: "takeaway", coreThesis: "evidence", tensions: ["a"], surprisingIdeas: ["b"], misconceptions: ["c"], keyConcepts: ["d"], candidateStories: [], candidateExamples: ["e"], openQuestions: ["f"] } : stage === "NARRATIVE_DESIGN" ? { arcType: "arc", intellectualProgression: ["one", "two", "three"], openingMove: "open", closingMove: "close" } : stage === "SEGMENT_OUTLINE" ? { segments: [{ ordinal: 1, purpose: "purpose", internalLabel: "label", targetDurationSeconds: 30, narrativeFunction: "function", keyQuestions: ["why"], requiredMemoryIds: [memory], optionalMemoryIds: [] }] } : stage === "SEGMENT_DRAFTING" ? { utterances: [{ ordinal: 1, speakerHostId: hosts[0].id, text: "Grounded evidence supports durable recovery.", utteranceType: "STATEMENT", substantive: true, isDirectQuote: false, evidence: [{ memoryItemId: memory }] }, { ordinal: 2, speakerHostId: hosts[1].id, text: "How do we verify it?", utteranceType: "QUESTION", substantive: false, isDirectQuote: false, evidence: [] }] } : { utterances: input.dialogue.utterances.map((item: any) => ({ ordinal: item.ordinal, text: item.text })) };
+    const standardDraft = () => ({ utterances: [{ ordinal: 1, speakerHostId: hosts[0].id, text: "Grounded evidence supports durable recovery.", utteranceType: "STATEMENT", substantive: true, isDirectQuote: false, evidence: [{ memoryItemId: memory }] }, { ordinal: 2, speakerHostId: hosts[1].id, text: "How do we verify it?", utteranceType: "QUESTION", substantive: false, isDirectQuote: false, evidence: [] }] });
+    const structured = stage === "EPISODE_PLANNING" ? { centralQuestion: "Why durable replay?", listenerStartingPoint: "start", listenerTakeaway: "takeaway", coreThesis: "evidence", tensions: ["a"], surprisingIdeas: ["b"], misconceptions: ["c"], keyConcepts: ["d"], candidateStories: [], candidateExamples: ["e"], openQuestions: ["f"] } : stage === "NARRATIVE_DESIGN" ? { arcType: "arc", intellectualProgression: ["one", "two", "three"], openingMove: "open", closingMove: "close" } : stage === "SEGMENT_OUTLINE" ? { segments: [{ ordinal: 1, purpose: "purpose", internalLabel: "label", targetDurationSeconds: 30, narrativeFunction: "function", keyQuestions: ["why"], requiredMemoryIds: [memory], optionalMemoryIds: [] }] } : stage === "SEGMENT_DRAFTING" ? draftOutput?.(input, memory) ?? standardDraft() : { utterances: input.dialogue.utterances.map((item: any) => ({ ordinal: item.ordinal, text: item.text })) };
     outputs.set(stage, structured); return { response: { type: "STRUCTURED", structured }, usage: { inputTokens: 1, outputTokens: 1 } };
   } }) });
   return { runtime, store, calls, inputs, outputs, deps: { providerForRun: runtime.createProviderForRun, embeddingProvider: data.retrievalEmbeddings } };
@@ -153,4 +154,33 @@ describe("Phase 8C persisted Podcast Gateway replay", () => {
     await expect(changed.plan(input)).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(await accounting(data.workspace.id)).toEqual(before);
   });
+
+  it("recovers the second quality-directed draft receipt without a third paid operation", async () => {
+    const data = await fixture();
+    const value = await production(data, (input, memory) => input.metadata.generationAttempt === 1
+      ? { utterances: [
+        { ordinal: 1, speakerHostId: input.hosts[0].id, text: "Grounded evidence supports durable recovery.", utteranceType: "STATEMENT", substantive: true, isDirectQuote: false, evidence: [{ memoryItemId: memory }] },
+        { ordinal: 2, speakerHostId: input.hosts[1].id, text: "你说得对，这非常重要。", utteranceType: "REACTION", substantive: false, isDirectQuote: false, evidence: [] },
+        { ordinal: 3, speakerHostId: input.hosts[0].id, text: "完全同意，这个观点很有意思。", utteranceType: "REACTION", substantive: false, isDirectQuote: false, evidence: [] },
+      ] }
+      : { utterances: [
+        { ordinal: 1, speakerHostId: input.hosts[0].id, text: "Grounded evidence supports durable recovery.", utteranceType: "STATEMENT", substantive: true, isDirectQuote: false, evidence: [{ memoryItemId: memory }] },
+        { ordinal: 2, speakerHostId: input.hosts[1].id, text: "How do we verify it?", utteranceType: "QUESTION", substantive: false, isDirectQuote: false, evidence: [] },
+      ] });
+    let crashed = false;
+    await expect(processPodcastGenerationRun(data.requested.run.id, { ...value.deps, faultInjector: (point, metadata) => {
+      const attempt = (value.inputs.get("SEGMENT_DRAFTING") as { metadata?: { generationAttempt?: number } } | undefined)?.metadata?.generationAttempt;
+      if (point === "afterTextReceipt" && metadata.stage === "SEGMENT_DRAFTING" && attempt === 2 && !crashed) { crashed = true; throw new Error("CRASH_AFTER_QUALITY_ATTEMPT_2_RECEIPT"); }
+    } })).rejects.toThrow("CRASH_AFTER_QUALITY_ATTEMPT_2_RECEIPT");
+    expect(value.calls.get("SEGMENT_DRAFTING")).toBe(2);
+    const firstReceipts = await prisma.providerInvocation.findMany({ where: { workspaceId: data.workspace.id, idempotencyKey: { contains: ":SEGMENT_DRAFTING:" } }, orderBy: { idempotencyKey: "asc" } });
+    expect(firstReceipts.map(item => item.idempotencyKey)).toHaveLength(2);
+    expect(firstReceipts.map(item => item.idempotencyKey)).toEqual(expect.arrayContaining([expect.stringContaining(":attempt:1"), expect.stringContaining(":attempt:2")]));
+    await resetForReplay(data.requested.run.id);
+    await processPodcastGenerationRun(data.requested.run.id, value.deps);
+    expect(value.calls.get("SEGMENT_DRAFTING")).toBe(2);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id, idempotencyKey: { contains: ":SEGMENT_DRAFTING:" } } })).toBe(2);
+    const revisions = await prisma.podcastScriptRevision.findMany({ where: { episodeId: data.episode.id } });
+    expect(revisions).toHaveLength(1);
+  }, 60_000);
 });
