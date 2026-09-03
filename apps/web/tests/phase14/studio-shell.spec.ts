@@ -67,8 +67,8 @@ test("mobile Studio pages have usable navigation and no horizontal overflow", as
   for (const path of ["/studio", "/studio/library", "/studio/cognitions", "/studio/thinking", "/studio/podcasts", "/studio/settings/account"]) {
     await page.goto(path);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await expect(page.locator('nav[aria-label="移动端主导航"]')).toBeVisible();
-    await expect(page.locator('nav[aria-label="移动端主导航"] a[aria-current="page"]')).toHaveCount(1);
+    await expect(page.getByRole("navigation", { name: "Mobile navigation" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Mobile navigation" }).locator('a[aria-current="page"]')).toHaveCount(1);
   }
   const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
   const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);

@@ -15,7 +15,7 @@ function active(pathname: string, href: string) { return href === "/studio" ? pa
 function itemActive(pathname: string, item: Item) { return (item.matches ?? [item.href]).some((href) => active(pathname, href)); }
 export function StudioNavigation({ mobile: isMobile = false }: { mobile?: boolean }) {
   const pathname = usePathname(); const items = isMobile ? mobile : groups.flatMap(group => group.items);
-  if (isMobile) return <nav className="mobile-nav" aria-label="移动端主导航">{items.map(item => <NavLink key={item.href} item={item} active={itemActive(pathname, item)} mobile />)}</nav>;
+  if (isMobile) return <nav className="mobile-nav" aria-label="Mobile navigation">{items.map(item => <NavLink key={item.href} item={item} active={itemActive(pathname, item)} mobile />)}</nav>;
   return <nav className="sidebar-nav" aria-label="主导航">{groups.map(group => <div className="nav-group" key={group.label}><p>{group.label}</p>{group.items.map(item => <NavLink key={item.href} item={item} active={active(pathname, item.href)} />)}</div>)}</nav>;
 }
 function NavLink({ item, active: isActive, mobile }: { item: Item; active: boolean; mobile?: boolean }) { return <Link href={item.href} aria-current={isActive ? "page" : undefined} className={`${mobile ? "mobile-nav-item" : "sidebar-nav-item"}${isActive ? " active" : ""}`}><NavIcon name={item.icon} /><span>{item.label}</span></Link>; }
