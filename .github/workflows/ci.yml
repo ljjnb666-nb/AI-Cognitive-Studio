@@ -146,7 +146,7 @@ jobs:
       - name: Upload Phase 14 visual evidence
         uses: actions/upload-artifact@v4
         with:
-          name: phase14-visual-evidence-${{ github.sha }}
+          name: phase14-visual-evidence-${{ github.event.pull_request.head.sha || github.sha }}
           path: output/playwright/*.png
           if-no-files-found: error
       - name: End-to-end tests
