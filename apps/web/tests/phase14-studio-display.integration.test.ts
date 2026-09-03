@@ -5,7 +5,7 @@ describe("Phase 14 product display helpers", () => {
   it("maps mastery and every current rubric key into stable Chinese product language", () => {
     expect(displayMastery("NEEDS_REVIEW")).toBe("需要再梳理");
     expect(displayMastery("DEVELOPING")).toBe("正在形成");
-    expect(displayMastery("DEMONSTRATED")).toBe("已讲清楚");
+    expect(displayMastery("DEMONSTRATED")).toBe("已表现出理解");
     expect(["CORE_MEANING", "COVERAGE", "NO_OVERCLAIM", "DEFINITION", "DISTINCTION", "EXAMPLE", "CORE_CLAIM", "REASONING_LINK", "BOUNDARY_OR_COUNTEREXAMPLE", "PARAPHRASE", "IMPLICATION", "PROBLEM", "ASSUMPTIONS", "PRINCIPLE_LINK", "RELEVANT_DETAIL", "GENERALIZATION_BOUNDARY"].every((key) => rubricLabel(key) !== "理解要点")).toBe(true);
   });
 

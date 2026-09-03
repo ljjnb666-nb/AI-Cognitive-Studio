@@ -2,7 +2,7 @@ export const masteryLabel: Record<string, string> = {
   UNASSESSED: "尚未验证",
   NEEDS_REVIEW: "需要再梳理",
   DEVELOPING: "正在形成",
-  DEMONSTRATED: "已讲清楚",
+  DEMONSTRATED: "已表现出理解",
 };
 
 export const rubricCriterionLabel: Record<string, string> = {
