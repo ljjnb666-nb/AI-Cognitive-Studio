@@ -65,13 +65,40 @@ async function thinkingFixture(workspaceId: string, userId: string, memoryItemId
 
 test("desktop navigation keeps one clear active destination", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-1024", "desktop acceptance only");
-  await signUp(page);
+  const email = await signUp(page);
   for (const [path, label] of destinations) {
     await page.goto(path);
     await expect(page.locator('nav[aria-label="主导航"] a[aria-current="page"]')).toHaveCount(1);
     await expect(page.locator('nav[aria-label="主导航"] a[aria-current="page"]')).toHaveAccessibleName(label);
   }
   await expect(page.getByRole("link", { name: "导入书籍" })).toBeVisible();
+  const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
+  const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
+  const sessionId = await thinkingFixture(owner.memberships[0]!.workspaceId, owner.id, fixture.cognition.id);
+  const attemptId = randomUUID();
+  await prisma.teachBackAttempt.create({ data: { id: attemptId, workspaceId: owner.memberships[0]!.workspaceId, userId: owner.id, memoryItemId: fixture.cognition.id, content: "确定性复述夹具。" } });
+  for (const [path, label] of [[`/studio/cognitions/${fixture.cognition.id}`, "我的认知"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "我的认知"], [`/studio/thinking/${sessionId}`, "思考"], ["/studio/mastery", "理解"], [`/studio/teach-back/${attemptId}`, "理解"], ["/studio/podcasts/new", "播客"], ["/studio/videos/new", "短视频"], ["/studio/settings/account", "设置"], ["/studio/settings/providers", "设置"]]) {
+    await page.goto(path);
+    const current = page.locator('nav[aria-label="主导航"] a[aria-current="page"]');
+    await expect(current).toHaveCount(1);
+    await expect(current).toHaveAccessibleName(label);
+  }
+});
+
+test("nested Studio routes retain one canonical active destination", async ({ page }, testInfo) => {
+  test.skip(true, "covered by the shared authenticated desktop navigation flow");
+  const email = await signUp(page);
+  const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
+  const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
+  const sessionId = await thinkingFixture(owner.memberships[0]!.workspaceId, owner.id, fixture.cognition.id);
+  const attemptId = randomUUID();
+  await prisma.teachBackAttempt.create({ data: { id: attemptId, workspaceId: owner.memberships[0]!.workspaceId, userId: owner.id, memoryItemId: fixture.cognition.id, content: "确定性复述夹具。" } });
+  for (const [path, label] of [[`/studio/cognitions/${fixture.cognition.id}`, "我的认知"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "我的认知"], [`/studio/thinking/${sessionId}`, "思考"], ["/studio/mastery", "理解"], [`/studio/teach-back/${attemptId}`, "理解"], ["/studio/podcasts/new", "播客"], ["/studio/videos/new", "短视频"], ["/studio/settings/account", "设置"], ["/studio/settings/providers", "设置"]]) {
+    await page.goto(path);
+    const current = page.locator('nav[aria-label="主导航"] a[aria-current="page"]');
+    await expect(current).toHaveCount(1);
+    await expect(current).toHaveAccessibleName(label);
+  }
 });
 
 test("mobile Studio pages have usable navigation and no horizontal overflow", async ({ page }, testInfo) => {
