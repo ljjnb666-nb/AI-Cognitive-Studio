@@ -1,4 +1,8 @@
+import { randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { prisma } from "@ai-cognitive/db";
 
 const password = "Phase14Password!";
 const destinations = [
@@ -16,6 +20,34 @@ async function signUp(page: Page) {
   await page.getByRole("button", { name: "注册并进入 Studio" }).click();
   expect((await response).status()).toBe(200);
   await expect(page).toHaveURL(/\/studio$/);
+  return email;
+}
+
+async function currentCognition(workspaceId: string, userId: string) {
+  const suffix = randomUUID();
+  const source = await prisma.source.create({ data: { workspaceId, kind: "FILE", displayName: "Phase 14 evidence.md" } });
+  const blob = await prisma.sourceBlob.create({ data: { workspaceId, sha256: suffix, sizeBytes: 1, mediaType: "text/markdown", storageKey: `phase14/${suffix}` } });
+  const document = await prisma.sourceDocument.create({ data: { workspaceId, sourceId: source.id, sourceBlobId: blob.id, version: 1, sha256: suffix, sizeBytes: 1, mediaType: "text/markdown", storageKey: blob.storageKey } });
+  const ingestionJob = await prisma.job.create({ data: { workspaceId, userId, type: "source.ingest", status: "SUCCEEDED", payload: {} } });
+  const ingestion = await prisma.ingestionRun.create({ data: { workspaceId, sourceDocumentId: document.id, jobId: ingestionJob.id, parserVersion: "phase14", normalizationVersion: "phase14", status: "SUCCEEDED" } });
+  const extraction = await prisma.documentExtraction.create({ data: { workspaceId, sourceDocumentId: document.id, ingestionRunId: ingestion.id, status: "SUCCEEDED", parserName: "phase14", parserVersion: "phase14", normalizationVersion: "phase14" } });
+  const sourceText = "原文证据必须准确地回到读者可以核验的来源。";
+  const block = await prisma.sourceBlock.create({ data: { extractionId: extraction.id, ordinal: 0, kind: "PARAGRAPH", text: sourceText, contentHash: suffix } });
+  await prisma.currentDocumentExtraction.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id } });
+  const job = await prisma.job.create({ data: { workspaceId, userId, type: "book.analysis", status: "SUCCEEDED", payload: {} } });
+  const chunkSet = await prisma.chunkSet.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkingVersion: "phase14", configuration: {}, configurationHash: suffix, status: "SUCCEEDED" } });
+  const run = await prisma.bookAnalysisRun.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: "phase14", promptVersion: "phase14", provider: "fixture", model: "fixture", modelVersionKey: "fixture", idempotencyKey: `phase14:${suffix}`, analysisIdentityHash: `phase14:${suffix}`, status: "SUCCEEDED", analysisStage: "COMPLETED", completedAt: new Date() } });
+  const artifact = await prisma.analysisArtifact.create({ data: { workspaceId, analysisRunId: run.id, chunkSetId: chunkSet.id, extractionId: extraction.id, scope: "BOOK", ordinal: 0, structuredOutput: {} } });
+  const cognition = await prisma.bookMemoryItem.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, analysisRunId: run.id, sourceArtifactId: artifact.id, type: "CLAIM", ordinal: 0, content: "可验证的认知从准确的原文开始。", contentHash: suffix, memoryKey: `${run.id}:0` } });
+  await prisma.bookMemoryEvidence.create({ data: { workspaceId, analysisRunId: run.id, extractionId: extraction.id, memoryItemId: cognition.id, sourceBlockId: block.id, startOffset: 0, endOffset: sourceText.length } });
+  await prisma.currentBookIntelligence.create({ data: { workspaceId, sourceDocumentId: document.id, extractionId: extraction.id, chunkSetId: chunkSet.id, analysisRunId: run.id } });
+  return { cognition };
+}
+
+async function capture(page: Page, name: string) {
+  const directory = resolve(process.cwd(), "../../output/playwright");
+  await mkdir(directory, { recursive: true });
+  await page.screenshot({ path: resolve(directory, name), fullPage: true });
 }
 
 test("desktop navigation keeps one clear active destination", async ({ page }, testInfo) => {
@@ -31,11 +63,34 @@ test("desktop navigation keeps one clear active destination", async ({ page }, t
 
 test("mobile Studio pages have usable navigation and no horizontal overflow", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile", "mobile acceptance only");
-  await signUp(page);
+  const email = await signUp(page);
   for (const path of ["/studio", "/studio/library", "/studio/cognitions", "/studio/thinking", "/studio/podcasts", "/studio/settings/account"]) {
     await page.goto(path);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await expect(page.locator('nav[aria-label="移动端主导航"]')).toBeVisible();
     await expect(page.locator('nav[aria-label="移动端主导航"] a[aria-current="page"]')).toHaveCount(1);
+  }
+  const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
+  const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
+  for (const [path, name] of [["/studio", "10-home-mobile.png"], ["/studio/cognitions", "11-cognitions-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}`, "12-cognition-detail-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "13-teach-back-mobile.png"], ["/studio", "14-mobile-navigation.png"]]) {
+    await page.goto(path);
+    await expect(page.locator("main")).toBeVisible();
+    await capture(page, name);
+  }
+});
+
+test("captures the final Studio experience evidence", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "desktop evidence only");
+  const email = await signUp(page);
+  const owner = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
+  const fixture = await currentCognition(owner.memberships[0]!.workspaceId, owner.id);
+  const desktop = testInfo.project.name === "desktop";
+  const shots = desktop
+    ? [["/studio", "01-home-desktop.png"], ["/studio/library", "02-library-desktop.png"], ["/studio/cognitions", "03-cognitions-desktop.png"], [`/studio/cognitions/${fixture.cognition.id}`, "04-cognition-detail-desktop.png"], ["/studio/thinking", "05-thinking-desktop.png"], ["/studio/mastery", "06-mastery-desktop.png"], ["/studio/podcasts", "07-podcasts-desktop.png"], ["/studio/videos", "08-videos-desktop.png"], ["/studio/settings/account", "09-settings-desktop.png"]]
+    : [["/studio", "10-home-mobile.png"], ["/studio/cognitions", "11-cognitions-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}`, "12-cognition-detail-mobile.png"], [`/studio/cognitions/${fixture.cognition.id}/teach-back`, "13-teach-back-mobile.png"], ["/studio", "14-mobile-navigation.png"]];
+  for (const [path, name] of shots) {
+    await page.goto(path);
+    await expect(page.locator("main")).toBeVisible();
+    await capture(page, name);
   }
 });
