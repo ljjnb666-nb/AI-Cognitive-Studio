@@ -192,7 +192,7 @@ class Podcast implements PodcastGenerationProvider {
           i === 0
             ? "A grounded direct quote explains that evidence matters."
             : i === 5
-              ? "<break time='1s'/> AI API GPT-5 😀"
+              ? "&amp;lt;break time=&amp;quot;500ms&amp;quot;/&amp;gt; AI API GPT-5 😀"
               : `第 ${i + 1} 句：English AI API discussion。`,
         utteranceType,
         substantive: false,
@@ -518,7 +518,7 @@ describe("Phase 4 product chain", () =>
         100,
       ]);
       expect([plans.length, chunks.length]).toEqual([16, 16]);
-      expect(tts.calls.every((x) => !/<break\b|&lt;break\b/i.test(x.text))).toBe(true);
+      expect(tts.calls.every((x) => !/break/i.test(x.text))).toBe(true);
       expect(new Set(tts.calls.map((x) => x.voice.providerVoiceId))).toEqual(
         new Set(["voice-0", "voice-1"]),
       );

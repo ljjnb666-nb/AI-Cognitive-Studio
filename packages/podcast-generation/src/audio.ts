@@ -28,9 +28,18 @@ export type AudioDependencies = { provider?: SpeechSynthesisProvider; providerFo
 type Wav = { bytes: Uint8Array; pcm: Uint8Array; sampleRate: number; channels: number; bits: number; durationMs: number };
 type SnapshotUtterance = { id: string; segmentId: string; segmentOrdinal?: number; speakerHostId: string; text: string; utteranceType: string; estimatedDurationMs?: number };
 
+// Match only entity-encoded tag syntax: an encoded '<', a valid tag name and
+// attribute characters/entities, followed by an encoded '>'.  This deliberately
+// does not consume ordinary prose such as "2 &lt; 3".
+const ENCODED_TAG_LIKE = /&(?:amp;)?lt;\/?[A-Za-z][\w:-]*(?:[\s\w:./="'-]|&(?:amp;)?(?:quot|apos|#\d+|#x[0-9a-f]+);)*&(?:amp;)?gt;/gi;
+
+function stripMarkupNoise(text: string): string {
+  return text.replace(ENCODED_TAG_LIKE, "").replace(/<[^>]*>/g, "");
+}
+
 export function prepareSpokenText(text: string): { spokenText: string; replacements: string[] } {
   const replacements: string[] = [];
-  let spokenText = text.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/&lt;[^&]*&gt;/gi, "").replace(/<[^>]*>/g, "").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
+  let spokenText = stripMarkupNoise(text.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")).replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
   for (const [from, to] of [[/GPT-5/gi, "G P T 5"], [/OpenAI/gi, "Open A I"], [/LLM/gi, "L L M"], [/API/gi, "A P I"], [/\bAI\b/gi, "A I"], [/3\.5/g, "3 point 5"], [/50%/g, "50 percent"]] as const) {
     if (from.test(spokenText)) { spokenText = spokenText.replace(from, to); replacements.push(from.source); }
   }
