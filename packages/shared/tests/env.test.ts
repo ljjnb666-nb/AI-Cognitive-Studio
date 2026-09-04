@@ -38,4 +38,9 @@ describe("readEnvironment storage safety", () => {
     expect(readEnvironment(environment({ SOURCE_UPLOAD_COMPLETION_LEASE_MS: "1200" }))).toMatchObject({ SOURCE_UPLOAD_COMPLETION_LEASE_MS: 1200 });
     expect(() => readEnvironment(environment({ SOURCE_UPLOAD_COMPLETION_LEASE_MS: "0" }))).toThrow();
   });
+
+  it("defaults every worker and dispatcher bound to one and rejects unsafe values", () => {
+    expect(readEnvironment(environment())).toMatchObject({ WORKER_INGESTION_CONCURRENCY: 1, WORKER_BOOK_ANALYSIS_CONCURRENCY: 1, WORKER_PODCAST_GENERATION_CONCURRENCY: 1, WORKER_AUDIO_CONCURRENCY: 1, WORKER_SHORT_VIDEO_CONCURRENCY: 1, OUTBOX_DISPATCH_CONCURRENCY: 1 });
+    for (const value of ["0", "-1", "33", "NaN"]) expect(() => readEnvironment(environment({ WORKER_INGESTION_CONCURRENCY: value }))).toThrow();
+  });
 });

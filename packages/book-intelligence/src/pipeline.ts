@@ -520,7 +520,7 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
   }
 }
 
-export async function dispatchPendingBookAnalysis(queue: { add(name: string, payload: { analysisRunId: string }, options: { jobId: string }): Promise<unknown> }, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; beforeFinalize?: (eventId: string) => Promise<void> | void; topic?: string } = {}) {
+export async function dispatchPendingBookAnalysis(queue: { add(name: string, payload: { analysisRunId: string }, options: { jobId: string }): Promise<unknown> }, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; aggregateIds?: string[]; beforeFinalize?: (eventId: string) => Promise<void> | void; topic?: string } = {}) {
   const { topic = BOOK_ANALYSIS_TOPIC, ...dispatchOptions } = options;
   return dispatchPendingOutbox<{ analysisRunId: string; queueJobId?: string }>({ topic, queue, jobName: BOOK_ANALYSIS_JOB, parse: (payload) => payload as { analysisRunId: string; queueJobId?: string }, jobId: (payload) => payload.queueJobId ?? payload.analysisRunId, afterDispatch: async (tx, payload, jobId) => { const run = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: payload.analysisRunId } }); await tx.job.update({ where: { id: run.jobId }, data: { queueJobId: jobId } }); }, ...dispatchOptions });
 }

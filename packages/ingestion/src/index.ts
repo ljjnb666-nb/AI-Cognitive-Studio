@@ -164,7 +164,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
 }
 
 type IngestionQueue = { add(name: string, payload: { ingestionRunId: string }, options: { jobId: string }): Promise<unknown> };
-export type IngestionDispatchOptions = { batchSize?: number; leaseMs?: number; maxAttempts?: number; aggregateIds?: string[]; topic?: string; /** Test-only fault seam; runs after queue acceptance and before the DB finalize transaction. */ beforeFinalize?: (eventId: string) => Promise<void> | void };
+export type IngestionDispatchOptions = { batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; aggregateIds?: string[]; topic?: string; /** Test-only fault seam; runs after queue acceptance and before the DB finalize transaction. */ beforeFinalize?: (eventId: string) => Promise<void> | void };
 export async function dispatchPendingIngestion(queue: IngestionQueue, options: IngestionDispatchOptions = {}): Promise<number> {
   const { topic = INGESTION_TOPIC, ...dispatchOptions } = options;
   return dispatchPendingOutbox({ topic, queue, jobName: INGESTION_JOB, parse: (payload) => payload as { ingestionRunId: string }, jobId: (payload) => payload.ingestionRunId, afterDispatch: async (tx, payload, jobId) => { await tx.ingestionRun.update({ where: { id: payload.ingestionRunId }, data: { job: { update: { queueJobId: jobId } } } }); }, ...dispatchOptions });

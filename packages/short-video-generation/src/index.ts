@@ -1103,7 +1103,7 @@ export async function dispatchPendingShortVideoGeneration(
       options: { jobId: string },
     ): Promise<unknown>;
   },
-  options: { aggregateIds?: string[]; topic?: string } = {},
+  options: { aggregateIds?: string[]; dispatchConcurrency?: number; topic?: string } = {},
 ) {
   return dispatchPendingOutbox<{ shortVideoGenerationRunId: string }>({
     topic: options.topic ?? SHORT_VIDEO_GENERATION_TOPIC,
@@ -1118,6 +1118,7 @@ export async function dispatchPendingShortVideoGeneration(
     },
     jobId: (payload) => payload.shortVideoGenerationRunId,
     aggregateIds: options.aggregateIds,
+    dispatchConcurrency: options.dispatchConcurrency,
     afterDispatch: async (tx, payload, queueJobId) => {
       const run = await prisma.shortVideoGenerationRun.findUniqueOrThrow({
         where: { id: payload.shortVideoGenerationRunId },
