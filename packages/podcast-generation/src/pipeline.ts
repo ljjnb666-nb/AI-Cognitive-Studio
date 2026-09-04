@@ -18,16 +18,16 @@ import { buildDraftDestinationProjection, buildHumanizationDestinationProjection
 const PLANNING_CONTEXT_BUDGET = 4_000;
 const SEGMENT_CONTEXT_BUDGET = 2_400;
 type DurableStage = "EPISODE_PLANNING" | "NARRATIVE_DESIGN" | "SEGMENT_OUTLINE" | "SEGMENT_DRAFTING" | "HUMANIZATION" | "GROUNDING_VALIDATION" | "FINALIZING" | "COMPLETED";
-type FaultPoint = "afterPlanningRetrieval" | "afterTextReceipt" | "afterPlanning" | "afterNarrative" | "afterOutline" | "afterSegmentDraft" | "afterSegmentHumanization" | "afterSegmentGrounding" | "beforeFinalization";
+type FaultPoint = "afterPlanningRetrieval" | "afterTextReceipt" | "afterPlanning" | "afterNarrative" | "afterOutline" | "afterSegmentDraft" | "afterQualityDecision" | "afterQualityRedraftMaterialization" | "afterSegmentHumanization" | "afterSegmentGrounding" | "beforeFinalization";
 export type PodcastFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
 export type ProcessPodcastDependencies = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider>; faultInjector?: PodcastFaultInjector; correlationId?: string };
 const isDurable = (provider: PodcastGenerationProvider): provider is DurablePodcastGenerationProvider => "consumeTextResult" in provider && "verifyConsumedTextResult" in provider;
-const operationKey = (run: any, stage: string, segmentId?: string) => `${run.id}:${stage}${segmentId ? `:${segmentId}` : ""}`;
+const operationKey = (run: any, stage: string, segmentId?: string, generationAttempt?: number) => `${run.id}:${stage}${segmentId ? `:${segmentId}` : ""}${generationAttempt ? `:attempt:${generationAttempt}` : ""}`;
 const consumerFingerprint = (run: any, stage: string, destination: string, input: unknown, output: unknown) => podcastConsumerFingerprint({ run, stage, destination, input, output });
 
 const styleRecord = (style: any): Record<string, unknown> => podcastStyleSchema.parse({ language: style.language, tone: style.tone, depth: style.depth, pace: style.pace, hostCount: style.hostCount, targetDurationMinutes: style.targetDurationMinutes, targetAudience: style.targetAudience, formality: style.formality, humorLevel: style.humorLevel, debateLevel: style.debateLevel, storytellingLevel: style.storytellingLevel, interruptionLevel: style.interruptionLevel, disagreementLevel: style.disagreementLevel, technicalDepth: style.technicalDepth, summaryDensity: style.summaryDensity, exampleDensity: style.exampleDensity });
 const persona = (host: any): PodcastHostPersona => podcastHostPersonaSchema.parse({ id: host.id, displayName: host.displayName, role: host.role, speakingStyle: host.speakingStyle, knowledgeStyle: host.knowledgeStyle, temperament: host.temperament, skepticism: host.skepticism, humor: host.humor, verbosity: host.verbosity, questionStyle: host.questionStyle, disagreementStyle: host.disagreementStyle, preferredSentenceLength: host.preferredSentenceLength, fillerPreference: host.fillerPreference });
-const metadata = (run: any, stage: string, tokenBudget: number, segmentId?: string) => ({ stage, episodeId: run.episodeId, segmentId, provider: run.provider, model: run.model, correlationId: run.correlationId ?? run.id, tokenBudget });
+const metadata = (run: any, stage: string, tokenBudget: number, segmentId?: string, generationAttempt?: number) => ({ stage, episodeId: run.episodeId, segmentId, generationAttempt, provider: run.provider, model: run.model, correlationId: run.correlationId ?? run.id, tokenBudget });
 const parseJsonArray = <T>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
 
 async function loadRun(runId: string) { return prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId }, include: { sources: true, styleProfile: true, episode: true, plan: true, narrative: true, segments: { orderBy: { ordinal: "asc" } } } }); }
@@ -43,14 +43,15 @@ async function callProvider<T>(run: any, stage: keyof typeof PODCAST_PROVIDER_IN
   assertPodcastProviderInputBudget(input, PODCAST_PROVIDER_INPUT_BUDGETS[stage]);
   return invoke();
 }
-async function invokeText<T>(run: any, token: string, dependencies: ProcessPodcastDependencies, stage: keyof typeof PODCAST_PROVIDER_INPUT_BUDGETS, segmentId: string | undefined, input: unknown, invoke: () => Promise<unknown>, parse: (value: unknown) => T, destination: string, materialize: (tx: any, output: T) => Promise<void>, projection: (output: T) => unknown): Promise<{ output: T; consumed: boolean }> {
+async function invokeText<T>(run: any, token: string, dependencies: ProcessPodcastDependencies, stage: keyof typeof PODCAST_PROVIDER_INPUT_BUDGETS, segmentId: string | undefined, input: unknown, invoke: () => Promise<unknown>, parse: (value: unknown) => T, destination: string, materialize: (tx: any, output: T) => Promise<void>, projection: (output: T) => unknown, ownershipStage: DurableStage = stage): Promise<{ output: T; consumed: boolean }> {
   const output = parse(await callProvider(run, stage, input, invoke));
   // Test-only fault seam: a paid result is now durable, but no application row
   // has been materialized. It makes the ownership handoff boundary observable.
   await dependencies.faultInjector?.("afterTextReceipt", { podcastGenerationRunId: run.id, stage, segmentId: segmentId ?? null });
   if (!dependencies.provider || !isDurable(dependencies.provider)) return { output, consumed: false };
-  await dependencies.provider.consumeTextResult<T>(operationKey(run, stage, segmentId), { consumerKind: `PODCAST_${destination}`, consumerKey: segmentId ?? run.id, consumerFingerprint: consumerFingerprint(run, stage, destination, input, projection(output)) }, async ({ tx, output: raw }) => {
-    await assertOwnedPodcastRunInTransaction(tx as never, run.id, token, stage);
+  const attempt = (input as { metadata?: { generationAttempt?: number } }).metadata?.generationAttempt;
+  await dependencies.provider.consumeTextResult<T>(operationKey(run, stage, segmentId, attempt), { consumerKind: `PODCAST_${destination}`, consumerKey: segmentId ?? run.id, consumerFingerprint: consumerFingerprint(run, stage, destination, input, projection(output)) }, async ({ tx, output: raw }) => {
+    await assertOwnedPodcastRunInTransaction(tx as never, run.id, token, ownershipStage);
     await materialize(tx, parse(raw));
   });
   return { output, consumed: true };
@@ -58,7 +59,8 @@ async function invokeText<T>(run: any, token: string, dependencies: ProcessPodca
 
 async function verifyConsumedDestination(run: any, provider: PodcastGenerationProvider, stage: keyof typeof PODCAST_PROVIDER_INPUT_BUDGETS, segmentId: string | undefined, destination: string, input: unknown, output: unknown): Promise<void> {
   if (!isDurable(provider)) return;
-  const state = await provider.verifyConsumedTextResult(operationKey(run, stage, segmentId), { consumerKind: `PODCAST_${destination}`, consumerKey: segmentId ?? run.id, consumerFingerprint: consumerFingerprint(run, stage, destination, input, output) });
+  const attempt = (input as { metadata?: { generationAttempt?: number } }).metadata?.generationAttempt;
+  const state = await provider.verifyConsumedTextResult(operationKey(run, stage, segmentId, attempt), { consumerKind: `PODCAST_${destination}`, consumerKey: segmentId ?? run.id, consumerFingerprint: consumerFingerprint(run, stage, destination, input, output) });
   // A materialized destination is only safe to advance when it matches the
   // consumed, purged receipt exactly.  Treat an absent tombstone as unsafe too:
   // recreating/re-calling here could charge the same durable operation twice.
@@ -218,17 +220,21 @@ function expectedDraftProjection(run: any, segment: any, output: DialogueOutput,
   return buildDraftDestinationProjection(run, { ...segment, status: "DRAFTED" }, utterances);
 }
 
-async function draftSegment(run: any, segment: any, token: string, dependencies: ProcessPodcastDependencies) {
-  if (await prisma.podcastUtterance.count({ where: { segmentId: segment.id } })) {
+type DraftMode = "RESUME" | "QUALITY_REDRAFT";
+async function draftSegment(run: any, segment: any, token: string, dependencies: ProcessPodcastDependencies, options: { mode?: DraftMode; repairReasons?: string[] } = {}) {
+  const mode = options.mode ?? "RESUME";
+  if (mode === "RESUME" && await prisma.podcastUtterance.count({ where: { segmentId: segment.id } })) {
     const [context, plan, narrative, hosts, utterances] = await Promise.all([loadPersistedSegmentContext(segment), prisma.episodePlan.findUniqueOrThrow({ where: { podcastGenerationRunId: run.id } }), prisma.episodeNarrative.findUniqueOrThrow({ where: { podcastGenerationRunId: run.id } }), loadHosts(run), prisma.podcastUtterance.findMany({ where: { segmentId: segment.id }, include: { evidence: true }, orderBy: { ordinal: "asc" } })]);
-    const input = { metadata: metadata(run, "SEGMENT_DRAFTING", PODCAST_PROVIDER_INPUT_BUDGETS.SEGMENT_DRAFTING, segment.id), style: styleRecord(run.styleProfile), hosts: hosts.map(persona), plan: planOutput(plan), narrative: narrativeOutput(narrative), segment: segmentOutput(segment), context };
+    const input = { metadata: metadata(run, "SEGMENT_DRAFTING", PODCAST_PROVIDER_INPUT_BUDGETS.SEGMENT_DRAFTING, segment.id, segment.generationAttemptCount), style: styleRecord(run.styleProfile), hosts: hosts.map(persona), plan: planOutput(plan), narrative: narrativeOutput(narrative), segment: segmentOutput(segment), context };
     await verifyConsumedDestination(run, dependencies.provider!, "SEGMENT_DRAFTING", segment.id, "SEGMENT_DRAFT", input, buildDraftDestinationProjection(run, segment, utterances));
     return;
   }
   const context = await ensureSegmentContext(run, segment, token, dependencies);
   const [plan, narrative, hosts] = await Promise.all([prisma.episodePlan.findUniqueOrThrow({ where: { podcastGenerationRunId: run.id } }), prisma.episodeNarrative.findUniqueOrThrow({ where: { podcastGenerationRunId: run.id } }), loadHosts(run)]);
   await renewPodcastGenerationLease(run.id, token);
-  const input = { metadata: metadata(run, "SEGMENT_DRAFTING", PODCAST_PROVIDER_INPUT_BUDGETS.SEGMENT_DRAFTING, segment.id), style: styleRecord(run.styleProfile), hosts: hosts.map(persona), plan: planOutput(plan), narrative: narrativeOutput(narrative), segment: segmentOutput(segment), context };
+  const currentAttempt = (await prisma.episodeSegment.findUniqueOrThrow({ where: { id: segment.id } })).generationAttemptCount;
+  const attempt = currentAttempt + 1;
+  const input = { metadata: metadata(run, "SEGMENT_DRAFTING", PODCAST_PROVIDER_INPUT_BUDGETS.SEGMENT_DRAFTING, segment.id, attempt), style: styleRecord(run.styleProfile), hosts: hosts.map(persona), plan: planOutput(plan), narrative: narrativeOutput(narrative), segment: segmentOutput(segment), context, ...(mode === "QUALITY_REDRAFT" ? { repairReasons: options.repairReasons ?? [] } : {}) };
   const allowedHosts = new Set(hosts.map((host) => host.id)), allowedMemory = new Set(context.map((item) => item.memoryItemId));
   const projectionMemory = await prisma.bookMemoryItem.findMany({ where: { id: { in: [...allowedMemory] } }, include: { evidence: true } });
   const persist = async (tx: any, output: DialogueOutput) => {
@@ -236,6 +242,9 @@ async function draftSegment(run: any, segment: any, token: string, dependencies:
     const memoryIds = [...new Set(output.utterances.flatMap((item) => item.evidence.map((evidence) => evidence.memoryItemId)))];
     const memory: any[] = await tx.bookMemoryItem.findMany({ where: { id: { in: memoryIds } }, include: { evidence: true } });
     const memoryMap = new Map<string, any>(memory.map((item: any): [string, any] => [item.id, item]));
+    const current = await tx.episodeSegment.findUniqueOrThrow({ where: { id: segment.id } });
+    if (current.generationAttemptCount !== currentAttempt) throw new Error("PODCAST_GENERATION_ATTEMPT_RECONCILIATION_REQUIRED");
+    if (mode === "QUALITY_REDRAFT") await tx.podcastUtterance.deleteMany({ where: { segmentId: segment.id } });
     await tx.episodeSegment.update({ where: { id: segment.id }, data: { generationAttemptCount: { increment: 1 } } });
     for (const item of output.utterances) {
       const utterance = await tx.podcastUtterance.create({ data: { segmentId: segment.id, podcastGenerationRunId: run.id, workspaceId: run.workspaceId, podcastProjectId: run.podcastProjectId, episodeId: run.episodeId, speakerHostId: item.speakerHostId, ordinal: item.ordinal, draftText: item.text, text: item.text, utteranceType: item.utteranceType, substantive: item.substantive, isDirectQuote: item.isDirectQuote, estimatedDurationMs: estimateSpokenDurationMs(item.text) } });
@@ -252,9 +261,10 @@ async function draftSegment(run: any, segment: any, token: string, dependencies:
     }
     await tx.episodeSegment.update({ where: { id: segment.id }, data: { status: "DRAFTED" } });
   };
-  const generated = await invokeText(run, token, dependencies, "SEGMENT_DRAFTING", segment.id, input, () => dependencies.provider!.draftSegment(input), dialogueSchema.parse, "SEGMENT_DRAFT", persist, output => expectedDraftProjection(run, segment, output, context, projectionMemory));
+  const generated = await invokeText(run, token, dependencies, "SEGMENT_DRAFTING", segment.id, input, () => dependencies.provider!.draftSegment(input), dialogueSchema.parse, "SEGMENT_DRAFT", persist, output => expectedDraftProjection(run, segment, output, context, projectionMemory), mode === "QUALITY_REDRAFT" ? "GROUNDING_VALIDATION" : "SEGMENT_DRAFTING");
   if (!generated.consumed) await withOwnedPodcastTransaction(run.id, token, tx => persist(tx, generated.output));
-  await dependencies.faultInjector?.("afterSegmentDraft", { podcastGenerationRunId: run.id, segmentId: segment.id });
+  await dependencies.faultInjector?.("afterSegmentDraft", { podcastGenerationRunId: run.id, segmentId: segment.id, generationAttempt: attempt, mode });
+  if (mode === "QUALITY_REDRAFT") await dependencies.faultInjector?.("afterQualityRedraftMaterialization", { podcastGenerationRunId: run.id, segmentId: segment.id, generationAttempt: attempt });
 }
 
 async function runDrafting(run: any, token: string, dependencies: ProcessPodcastDependencies) {
@@ -268,14 +278,16 @@ async function humanizeSegment(run: any, segment: any, token: string, dependenci
   if (current.status === "HUMANIZED" || current.status === "GROUNDED") {
     const [utterances, hosts] = await Promise.all([prisma.podcastUtterance.findMany({ where: { segmentId: segment.id }, include: { evidence: true }, orderBy: { ordinal: "asc" } }), loadHosts(run)]);
     const dialogue = dialogueSchema.parse({ utterances: utterances.map((item) => ({ ordinal: item.ordinal, speakerHostId: item.speakerHostId, text: item.draftText, utteranceType: item.utteranceType, substantive: item.substantive, isDirectQuote: item.isDirectQuote, evidence: [...new Set(item.evidence.map((evidence) => evidence.memoryItemId))].map((memoryItemId) => ({ memoryItemId })) })) });
-    const input = { metadata: metadata(run, "HUMANIZATION", PODCAST_PROVIDER_INPUT_BUDGETS.HUMANIZATION, segment.id), style: styleRecord(run.styleProfile), hosts: hosts.map(persona), segment: segmentOutput(segment), dialogue };
+    const preQuality = evaluatePodcastScriptData(dialogue.utterances.map(item => ({ ...item, evidenceCount: item.evidence.length })), { style: styleRecord(run.styleProfile) });
+    const input = { metadata: metadata(run, "HUMANIZATION", PODCAST_PROVIDER_INPUT_BUDGETS.HUMANIZATION, segment.id, current.generationAttemptCount), style: styleRecord(run.styleProfile), hosts: hosts.map(persona), segment: segmentOutput(segment), dialogue, qualityHints: preQuality.warnings };
     await verifyConsumedDestination(run, dependencies.provider!, "HUMANIZATION", segment.id, "SEGMENT_HUMANIZATION", input, buildHumanizationDestinationProjection(run, current, utterances));
     return;
   }
   const utterances = await prisma.podcastUtterance.findMany({ where: { segmentId: segment.id }, include: { evidence: true }, orderBy: { ordinal: "asc" } });
   const dialogue: DialogueOutput = { utterances: utterances.map((item) => ({ ordinal: item.ordinal, speakerHostId: item.speakerHostId, text: item.text, utteranceType: item.utteranceType, substantive: item.substantive, isDirectQuote: item.isDirectQuote, evidence: [...new Set(item.evidence.map((evidence) => evidence.memoryItemId))].map((memoryItemId) => ({ memoryItemId })) })) };
   await renewPodcastGenerationLease(run.id, token);
-  const input = { metadata: metadata(run, "HUMANIZATION", PODCAST_PROVIDER_INPUT_BUDGETS.HUMANIZATION, segment.id), style: styleRecord(run.styleProfile), hosts: (await loadHosts(run)).map(persona), segment: segmentOutput(segment), dialogue };
+  const preQuality = evaluatePodcastScriptData(dialogue.utterances.map(item => ({ ...item, evidenceCount: item.evidence.length })), { style: styleRecord(run.styleProfile) });
+  const input = { metadata: metadata(run, "HUMANIZATION", PODCAST_PROVIDER_INPUT_BUDGETS.HUMANIZATION, segment.id, current.generationAttemptCount), style: styleRecord(run.styleProfile), hosts: (await loadHosts(run)).map(persona), segment: segmentOutput(segment), dialogue, qualityHints: preQuality.warnings };
   const persist = async (tx: any, output: HumanizationOutput) => {
     const currentUtterances = await tx.podcastUtterance.findMany({ where: { segmentId: segment.id }, include: { evidence: true }, orderBy: { ordinal: "asc" } });
     if (output.utterances.length !== currentUtterances.length || output.utterances.some((item, index) => item.ordinal !== currentUtterances[index]!.ordinal)) throw new Error("PODCAST_HUMANIZATION_STRUCTURE_CHANGED");
@@ -283,7 +295,7 @@ async function humanizeSegment(run: any, segment: any, token: string, dependenci
     for (let index = 0; index < currentUtterances.length; index++) await tx.podcastUtterance.update({ where: { id: currentUtterances[index]!.id }, data: { text: output.utterances[index]!.text, estimatedDurationMs: estimateSpokenDurationMs(output.utterances[index]!.text), humanizedAt: new Date() } });
     await tx.episodeSegment.update({ where: { id: segment.id }, data: { status: "HUMANIZED" } });
   };
-  const generated = await invokeText(run, token, dependencies, "HUMANIZATION", segment.id, input, () => dependencies.provider!.humanizeSegment(input), humanizationSchema.parse, "SEGMENT_HUMANIZATION", persist, output => buildHumanizationDestinationProjection(run, { ...current, status: "HUMANIZED" }, utterances.map((item, index) => ({ ...item, text: output.utterances[index]!.text, estimatedDurationMs: estimateSpokenDurationMs(output.utterances[index]!.text), humanizedAt: true }))));
+  const generated = await invokeText(run, token, dependencies, "HUMANIZATION", segment.id, input, () => dependencies.provider!.humanizeSegment(input), humanizationSchema.parse, "SEGMENT_HUMANIZATION", persist, output => buildHumanizationDestinationProjection(run, { ...current, status: "HUMANIZED" }, utterances.map((item, index) => ({ ...item, text: output.utterances[index]!.text, estimatedDurationMs: estimateSpokenDurationMs(output.utterances[index]!.text), humanizedAt: true }))), run.stage as DurableStage);
   if (!generated.consumed) await withOwnedPodcastTransaction(run.id, token, tx => persist(tx, generated.output));
   await dependencies.faultInjector?.("afterSegmentHumanization", { podcastGenerationRunId: run.id, segmentId: segment.id });
 }
@@ -312,20 +324,46 @@ async function groundingErrors(segmentId: string): Promise<string[]> {
   return errors;
 }
 
+async function qualityRepairReasons(segmentId: string, style: any): Promise<string[]> {
+  const utterances = await prisma.podcastUtterance.findMany({ where: { segmentId }, include: { evidence: true }, orderBy: { ordinal: "asc" } });
+  const result = evaluatePodcastScriptData(utterances.map((item) => ({ speakerHostId: item.speakerHostId, text: item.text, utteranceType: item.utteranceType, substantive: item.substantive, evidenceCount: item.evidence.length })), { style: styleRecord(style) });
+  return [
+    result.metrics.strictAlternationRate >= .9 && (result.metrics.genericAgreementRate >= .5 || result.metrics.adjacentRestatementRate >= .7) ? "STRICT_ALTERNATION_HIGH" : null,
+    result.metrics.genericAgreementRate >= .5 ? "GENERIC_AGREEMENT_DENSITY" : null,
+    result.metrics.adjacentRestatementRate >= .7 ? "ADJACENT_RESTATEMENT_HIGH" : null,
+    result.hardFailures.includes("AI_TASTE_SEVERE") ? "AI_TASTE_SEVERE" : null,
+  ].filter((item): item is string => Boolean(item));
+}
+
 async function runGrounding(run: any, token: string, dependencies: ProcessPodcastDependencies) {
   const segments = await prisma.episodeSegment.findMany({ where: { podcastGenerationRunId: run.id }, orderBy: { ordinal: "asc" } });
   for (const segment of segments) {
     let current = await prisma.episodeSegment.findUniqueOrThrow({ where: { id: segment.id } });
     if (current.status === "GROUNDED") continue;
-    let errors = await groundingErrors(segment.id);
+    if (current.status === "PLANNED") {
+      await draftSegment(run, current, token, dependencies);
+      current = await prisma.episodeSegment.findUniqueOrThrow({ where: { id: segment.id } });
+    }
+    if (current.status === "DRAFTED") {
+      if (await prisma.podcastUtterance.count({ where: { segmentId: segment.id } }) < 2) throw new Error("PODCAST_SEGMENT_DIALOGUE_MISSING");
+      await humanizeSegment(run, current, token, dependencies);
+      current = await prisma.episodeSegment.findUniqueOrThrow({ where: { id: segment.id } });
+    }
+    if (current.status !== "HUMANIZED") throw new Error(`PODCAST_SEGMENT_STATE_INVALID:${current.status}`);
+    let qualityReasons = await qualityRepairReasons(segment.id, run.styleProfile);
+    let errors = [...await groundingErrors(segment.id), ...qualityReasons];
     if (errors.length && current.generationAttemptCount < 2) {
-      await withOwnedPodcastTransaction(run.id, token, async (tx) => { await tx.podcastUtterance.deleteMany({ where: { segmentId: segment.id } }); await tx.episodeSegment.update({ where: { id: segment.id }, data: { status: "PLANNED" } }); });
-      await draftSegment(run, segment, token, dependencies);
-      await humanizeSegment(run, segment, token, dependencies);
-      errors = await groundingErrors(segment.id);
+      await dependencies.faultInjector?.("afterQualityDecision", { podcastGenerationRunId: run.id, segmentId: segment.id, generationAttempt: current.generationAttemptCount, repairReasons: qualityReasons });
+      await draftSegment(run, current, token, dependencies, { mode: "QUALITY_REDRAFT", repairReasons: qualityReasons });
+      current = await prisma.episodeSegment.findUniqueOrThrow({ where: { id: segment.id } });
+      await humanizeSegment(run, current, token, dependencies);
+      qualityReasons = await qualityRepairReasons(segment.id, run.styleProfile);
+      errors = [...await groundingErrors(segment.id), ...qualityReasons];
       current = await prisma.episodeSegment.findUniqueOrThrow({ where: { id: segment.id } });
     }
     if (errors.length) throw new Error(`PODCAST_GROUNDING_FAILED:${errors[0]}`);
+    const utteranceCount = await prisma.podcastUtterance.count({ where: { segmentId: segment.id } });
+    if (utteranceCount < 2) throw new Error("PODCAST_SEGMENT_DIALOGUE_MISSING");
     const duration = (await prisma.podcastUtterance.aggregate({ where: { segmentId: segment.id }, _sum: { estimatedDurationMs: true } }))._sum.estimatedDurationMs ?? 0;
     await withOwnedPodcastTransaction(run.id, token, (tx) => tx.episodeSegment.update({ where: { id: segment.id }, data: { status: "GROUNDED", estimatedDurationSeconds: Math.max(1, Math.ceil(duration / 1000)) } }));
     await dependencies.faultInjector?.("afterSegmentGrounding", { podcastGenerationRunId: run.id, segmentId: segment.id, attemptCount: current.generationAttemptCount });
@@ -336,11 +374,12 @@ async function runGrounding(run: any, token: string, dependencies: ProcessPodcas
 async function runFinalization(run: any, token: string, dependencies: ProcessPodcastDependencies) {
   await dependencies.faultInjector?.("beforeFinalization", { podcastGenerationRunId: run.id });
   const [segments, hosts] = await Promise.all([prisma.episodeSegment.findMany({ where: { podcastGenerationRunId: run.id }, include: { utterances: { include: { evidence: true }, orderBy: { ordinal: "asc" } } }, orderBy: { ordinal: "asc" } }), loadHosts(run)]);
-  if (!segments.length || segments.some((segment) => segment.status !== "GROUNDED")) throw new Error("PODCAST_SEGMENTS_NOT_GROUNDED");
+  if (!segments.length || segments.some((segment) => segment.status !== "GROUNDED" || segment.utterances.length < 2)) throw new Error("PODCAST_SEGMENTS_NOT_GROUNDED");
   const utterances = segments.flatMap((segment) => segment.utterances.map((item) => ({ id: item.id, segmentId: segment.id, segmentOrdinal: segment.ordinal, speakerHostId: item.speakerHostId, ordinal: item.ordinal, text: item.text, utteranceType: item.utteranceType, substantive: item.substantive, estimatedDurationMs: item.estimatedDurationMs, evidenceCount: item.evidence.length, evidenceMemoryIds: [...new Set(item.evidence.map((evidence) => evidence.memoryItemId))], evidence: item.evidence })));
+  if (!utterances.length) throw new Error("PODCAST_FINAL_DIALOGUE_MISSING");
   const estimatedDurationSeconds = Math.max(1, Math.ceil(utterances.reduce((sum, item) => sum + item.estimatedDurationMs, 0) / 1000));
   const sourceTexts = (await prisma.sourceBlock.findMany({ where: { extractionId: { in: run.sources.map((source: any) => source.extractionId) } }, orderBy: [{ extractionId: "asc" }, { ordinal: "asc" }], select: { text: true } })).map((block) => block.text);
-  const evaluation = evaluatePodcastScriptData(utterances, { contextWithinBudget: true, sourceTexts });
+  const evaluation = evaluatePodcastScriptData(utterances, { contextWithinBudget: true, sourceTexts, style: styleRecord(run.styleProfile) });
   if (evaluation.hardFailures.length) throw new Error(`PODCAST_FINAL_QUALITY_INVALID:${evaluation.hardFailures[0]}`);
   await withOwnedPodcastTransaction(run.id, token, async (tx) => {
     await tx.$queryRaw`SELECT "id" FROM "PodcastEpisode" WHERE "id" = ${run.episodeId} FOR UPDATE`;
@@ -350,7 +389,7 @@ async function runFinalization(run: any, token: string, dependencies: ProcessPod
       if (current) await tx.podcastScriptRevision.update({ where: { id: current.revisionId }, data: { status: "SUPERSEDED" } });
       revision = await tx.podcastScriptRevision.create({ data: { workspaceId: run.workspaceId, episodeId: run.episodeId, revisionNumber: (current?.revision.revisionNumber ?? 0) + 1, parentRevisionId: current?.revisionId, generationRunId: run.id, source: current ? "REGENERATED" : "GENERATED", status: "FINAL", estimatedDurationSeconds, scriptSnapshot: { episode: { id: run.episode.id, title: run.episode.title, language: run.episode.language }, hosts: hosts.map(persona), segments: segments.map((segment) => ({ id: segment.id, ordinal: segment.ordinal, purpose: segment.purpose, internalLabel: segment.internalLabel, estimatedDurationSeconds: segment.estimatedDurationSeconds })), utterances, generation: { runId: run.id, pipelineVersion: run.pipelineVersion, promptVersion: run.promptVersion, provider: run.provider, model: run.model, modelVersion: run.modelVersion } } as any } });
       await tx.currentPodcastScript.upsert({ where: { episodeId: run.episodeId }, create: { workspaceId: run.workspaceId, episodeId: run.episodeId, revisionId: revision.id }, update: { revisionId: revision.id } });
-      const evaluationRun = await tx.podcastEvaluationRun.create({ data: { workspaceId: run.workspaceId, episodeId: run.episodeId, revisionId: revision.id, evaluatorVersion: "phase3-deterministic-v2", status: "SUCCEEDED", completedAt: new Date() } });
+      const evaluationRun = await tx.podcastEvaluationRun.create({ data: { workspaceId: run.workspaceId, episodeId: run.episodeId, revisionId: revision.id, evaluatorVersion: "phase15-deterministic-v1", status: "SUCCEEDED", completedAt: new Date() } });
       await tx.podcastEvaluationResult.create({ data: { evaluationRunId: evaluationRun.id, ...evaluation } });
     }
     const completed = await tx.$executeRaw`UPDATE "PodcastGenerationRun" SET "status" = 'SUCCEEDED'::"PodcastGenerationStatus", "stage" = 'COMPLETED'::"PodcastGenerationStage", "completedAt" = NOW(), "errorCode" = NULL, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${run.id} AND "executionClaimToken" = ${token} AND "executionLeaseUntil" > NOW() AND "status" = 'RUNNING'::"PodcastGenerationStatus" AND "stage" = 'FINALIZING'::"PodcastGenerationStage"`;

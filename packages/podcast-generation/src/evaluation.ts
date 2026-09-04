@@ -1,80 +1,55 @@
 export type EvaluationUtterance = { speakerHostId: string; text: string; utteranceType: string; substantive?: boolean; evidenceCount?: number; evidenceMemoryIds?: string[]; segmentOrdinal?: number };
-const agreementPhrases = ["你说得非常对", "你说得对", "确实如此", "没错", "这个观点非常有意思", "这是一个非常重要的问题"];
-const transitionPhrases = ["总的来说", "综上所述", "接下来让我们", "首先", "其次", "最后"];
-const summaryPhrases = ["总而言之", "归根结底", "简单总结一下", "总结一下"];
-const biographyPatterns = [/我去年.{0,12}(创业|工作|经历)/u, /我朋友.{0,12}(正好|曾经|就是)/u, /I once worked at/iu, /when I worked at/iu];
-
-const occurrences = (text: string, phrases: string[]) => phrases.reduce((sum, phrase) => sum + Math.max(0, text.split(phrase).length - 1), 0);
-const words = (text: string) => text.toLowerCase().match(/[\p{Script=Han}]|[\p{L}\p{N}]+/gu) ?? [];
-const variance = (values: number[]) => { if (!values.length) return 0; const mean = values.reduce((a, b) => a + b, 0) / values.length; return values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length; };
-const jaccard = (a: Set<string>, b: Set<string>) => { const union = new Set([...a, ...b]); if (!union.size) return 1; return [...a].filter((item) => b.has(item)).length / union.size; };
-const clamp = (value: number) => Math.max(0, Math.min(100, value));
-const normalized = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-const windows = (value: string, size: number, step = Math.max(1, Math.floor(size / 3))) => { const result: string[] = []; for (let index = 0; index + size <= value.length; index += step) result.push(value.slice(index, index + size)); return result; };
-
-function sourceCopyRisk(utterances: EvaluationUtterance[], sourceTexts: string[]) {
-  const sources = sourceTexts.map(normalized).filter(Boolean);
-  if (!sources.length) return { risk: 0, utteranceRisk: 0, segmentRisk: 0, scriptRisk: 0 };
-  const sourceWindows = new Set(sources.flatMap((source) => windows(source, 60, 20)));
-  const overlap = (text: string) => { const candidate = normalized(text); if (candidate.length < 60) return 0; if (candidate.length >= 120 && sources.some((source) => source.includes(candidate))) return 1; const candidateWindows = windows(candidate, 60, 20); return candidateWindows.filter((window) => sourceWindows.has(window)).length / Math.max(1, candidateWindows.length); };
-  const utteranceRisk = Math.max(0, ...utterances.map((item) => overlap(item.text)));
-  const bySegment = new Map<number, string[]>();
-  for (const item of utterances) { const ordinal = item.segmentOrdinal ?? 0; bySegment.set(ordinal, [...(bySegment.get(ordinal) ?? []), item.text]); }
-  const segmentRisk = Math.max(0, ...[...bySegment.values()].map((items) => overlap(items.join(" "))));
-  const scriptRisk = overlap(utterances.map((item) => item.text).join(" "));
+export type EvaluationStyle = { hostCount?: number; debateLevel?: number; formality?: number; interruptionLevel?: number; summaryDensity?: number };
+const agreements = ["你说得非常对", "你说得对", "确实如此", "没错", "完全同意", "非常赞同", "这点非常重要", "你这个问题非常好", "这个观点很有意思", "确实是这样"];
+const transitions = ["总的来说", "综上所述", "接下来让我们", "首先", "其次", "最后", "一方面", "另一方面", "换句话说", "值得注意的是", "需要指出的是"];
+const meta = ["让我们深入探讨", "接下来我们来看", "这是一个值得深入思考的问题", "总结一下", "总体而言", "从这个角度来看", "这里有一个关键点"];
+const biography = [/我去年.{0,12}(创业|工作|经历)/u, /我朋友.{0,12}(正好|曾经|就是)/u, /I once worked at/iu, /when I worked at/iu];
+const words = (s: string) => s.toLowerCase().match(/[\p{Script=Han}]|[\p{L}\p{N}]+/gu) ?? [];
+const count = (s: string, ps: string[]) => ps.reduce((n, p) => n + Math.max(0, s.split(p).length - 1), 0);
+const clamp = (n: number) => Math.max(0, Math.min(100, n));
+const variance = (v: number[]) => { const m = v.reduce((a, b) => a + b, 0) / Math.max(1, v.length); return v.reduce((n, x) => n + (x - m) ** 2, 0) / Math.max(1, v.length); };
+const jac = (a: Set<string>, b: Set<string>) => { const u = new Set([...a, ...b]); return u.size ? [...a].filter(x => b.has(x)).length / u.size : 0; };
+const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+function sourceCopyRisk(us: EvaluationUtterance[], sources: string[]) {
+  const ss = sources.map(norm).filter(Boolean), pieces = (s: string) => Array.from({ length: Math.max(0, Math.ceil((s.length - 59) / 20)) }, (_, i) => s.slice(i * 20, i * 20 + 60)), pool = new Set(ss.flatMap(pieces));
+  const overlap = (s: string) => { const x = norm(s); if (x.length < 60) return 0; if (x.length >= 120 && ss.some(y => y.includes(x))) return 1; const p = pieces(x); return p.filter(y => pool.has(y)).length / Math.max(1, p.length); };
+  const bySegment = new Map<number, string[]>(); for (const u of us) bySegment.set(u.segmentOrdinal ?? 0, [...(bySegment.get(u.segmentOrdinal ?? 0) ?? []), u.text]);
+  const utteranceRisk = Math.max(0, ...us.map(u => overlap(u.text)));
+  const segmentRisk = Math.max(0, ...[...bySegment.values()].map(x => overlap(x.join(" "))));
+  const scriptRisk = overlap(us.map(u => u.text).join(" "));
   return { risk: Math.max(utteranceRisk, segmentRisk, scriptRisk), utteranceRisk, segmentRisk, scriptRisk };
 }
-
-export function evaluateNaturalness(utterances: EvaluationUtterance[]) {
-  const total = Math.max(1, utterances.length), text = utterances.map((item) => item.text).join("\n");
-  const byHost = new Map<string, EvaluationUtterance[]>();
-  for (const item of utterances) byHost.set(item.speakerHostId, [...(byHost.get(item.speakerHostId) ?? []), item]);
-  const speakerTurnShare = Object.fromEntries([...byHost].map(([host, turns]) => [host, turns.length / total]));
-  const averageTurnLengthByHost = Object.fromEntries([...byHost].map(([host, turns]) => [host, turns.reduce((sum, item) => sum + item.text.length, 0) / turns.length]));
-  const questionRateByHost = Object.fromEntries([...byHost].map(([host, turns]) => [host, turns.filter((item) => item.utteranceType === "QUESTION").length / turns.length]));
-  const reactionRateByHost = Object.fromEntries([...byHost].map(([host, turns]) => [host, turns.filter((item) => item.utteranceType === "REACTION").length / turns.length]));
-  const challengeRateByHost = Object.fromEntries([...byHost].map(([host, turns]) => [host, turns.filter((item) => item.utteranceType === "CHALLENGE").length / turns.length]));
-  const hostSets = [...byHost.values()].map((turns) => new Set(turns.flatMap((item) => words(item.text))));
-  const hostLexicalSimilarity = hostSets.length >= 2 ? jaccard(hostSets[0]!, hostSets[1]!) : 1;
-  const lengths = utterances.map((item) => item.text.length);
-  const repeatedNgrams = new Map<string, number>();
-  for (const item of utterances) { const tokens = words(item.text); for (let i = 0; i + 2 < tokens.length; i++) { const gram = tokens.slice(i, i + 3).join("|"); repeatedNgrams.set(gram, (repeatedNgrams.get(gram) ?? 0) + 1); } }
-  const repetitiveNGramRate = [...repeatedNgrams.values()].filter((count) => count > 1).length / Math.max(1, repeatedNgrams.size);
-  const agreementPhraseFrequency = occurrences(text, agreementPhrases) / total;
-  const transitionPhraseFrequency = occurrences(text, transitionPhrases) / total;
-  const summaryPhraseDensity = occurrences(text, summaryPhrases) / total;
-  const distributionDifference = byHost.size >= 2 ? Math.abs(Object.values(averageTurnLengthByHost)[0]! - Object.values(averageTurnLengthByHost)[1]!) / Math.max(1, ...Object.values(averageTurnLengthByHost)) : 0;
-  const hostDifferentiationScore = clamp(100 * (0.45 * (1 - hostLexicalSimilarity) + 0.3 * Math.min(1, distributionDifference * 2) + 0.25 * Math.min(1, Math.max(...Object.values(questionRateByHost), ...Object.values(reactionRateByHost), ...Object.values(challengeRateByHost)) * 3)));
-  const aiPenalty = agreementPhraseFrequency * 42 + transitionPhraseFrequency * 25 + summaryPhraseDensity * 20 + repetitiveNGramRate * 30;
-  const naturalnessScore = clamp(88 - aiPenalty + Math.min(10, Math.sqrt(variance(lengths)) / 3) + hostDifferentiationScore * 0.12);
-  return { naturalnessScore, hostDifferentiationScore, metrics: { speakerTurnShare, averageTurnLengthByHost, turnLengthVariance: variance(lengths), agreementPhraseFrequency, transitionPhraseFrequency, questionRateByHost, reactionRateByHost, challengeRateByHost, sentenceLengthVariance: variance(text.split(/[。！？.!?]/).filter(Boolean).map((part) => part.length)), hostLexicalSimilarity, summaryPhraseDensity, repetitiveNGramRate }, warnings: [agreementPhraseFrequency > 0.15 ? "GENERIC_AGREEMENT_DENSITY" : null, transitionPhraseFrequency > 0.2 ? "FORMAL_TRANSITION_DENSITY" : null, hostDifferentiationScore < 35 ? "HOSTS_TOO_SIMILAR" : null, variance(lengths) < 25 ? "TURN_LENGTHS_TOO_SYMMETRIC" : null].filter((item): item is string => !!item) };
+export function evaluateNaturalness(us: EvaluationUtterance[], style: EvaluationStyle = {}) {
+  const total = Math.max(1, us.length), text = us.map(u => u.text).join("\n"), byHost = new Map<string, EvaluationUtterance[]>(); for (const u of us) byHost.set(u.speakerHostId, [...(byHost.get(u.speakerHostId) ?? []), u]);
+  const entries = [...byHost.entries()], multi = (style.hostCount ?? entries.length) > 1 && entries.length > 1, lengths = us.map(u => u.text.length), rate = (xs: EvaluationUtterance[], t: string) => xs.filter(x => x.utteranceType === t).length / xs.length;
+  const speakerTurnShare = Object.fromEntries(entries.map(([h, x]) => [h, x.length / total]));
+  const averageTurnLengthByHost = Object.fromEntries(entries.map(([h, x]) => [h, x.reduce((n, u) => n + u.text.length, 0) / x.length]));
+  const questionRateByHost = Object.fromEntries(entries.map(([h, x]) => [h, rate(x, "QUESTION")])), reactionRateByHost = Object.fromEntries(entries.map(([h, x]) => [h, rate(x, "REACTION")])), challengeRateByHost = Object.fromEntries(entries.map(([h, x]) => [h, rate(x, "CHALLENGE")]));
+  let alt = 0, windows = 0; for (let i = 3; i < us.length; i++) { windows++; if (us[i]!.speakerHostId === us[i - 2]!.speakerHostId && us[i - 1]!.speakerHostId === us[i - 3]!.speakerHostId && us[i]!.speakerHostId !== us[i - 1]!.speakerHostId) alt++; }
+  // A four-turn ABAB is ordinary conversational coincidence.  AI-risk requires at least eight turns and five eligible windows.
+  const strictAlternationRate = multi && total >= 8 && windows >= 5 ? alt / windows : 0;
+  const periods = [...new Set(us.map(u => u.speakerHostId))].length > 2 && total >= 8 ? Array.from({ length: Math.min(12, entries.length) - 1 }, (_, index) => index + 2) : [];
+  const cyclicSpeakerPatternRate = Math.max(0, ...periods.map(period => us.slice(period).filter((u, index) => u.speakerHostId === us[index]!.speakerHostId).length / (total - period)));
+  const genericAgreementRate = us.filter(u => count(u.text, agreements) > 0).length / total, agreementOpeningRate = us.filter(u => agreements.some(p => u.text.trim().startsWith(p))).length / total, transitionPhraseFrequency = count(text, transitions) / total, metaPresenterPhraseRate = count(text, meta) / total;
+  const adjacentRestatementRate = us.slice(1).filter((u, i) => jac(new Set(words(u.text)), new Set(words(us[i]!.text))) >= .62).length / Math.max(1, total - 1), consecutiveSimilarLengthRate = us.slice(1).filter((u, i) => Math.abs(u.text.length - us[i]!.text.length) <= 8).length / Math.max(1, total - 1);
+  const challenges = us.map((u, i) => ({ u, i })).filter(x => x.u.utteranceType === "CHALLENGE"), challengeFollowThroughRate = challenges.length ? challenges.filter(({ u, i }) => us.slice(i + 1, i + 4).some(n => n.speakerHostId !== u.speakerHostId && (["CLARIFICATION", "QUESTION", "EXAMPLE", "CALLBACK"].includes(n.utteranceType) || (n.utteranceType === "STATEMENT" && Boolean(n.substantive) && (n.evidenceCount ?? 0) > 0)))).length / challenges.length : 1;
+  const callbacks = us.map((u, i) => ({ u, i })).filter(({ u }) => u.utteranceType === "CALLBACK");
+  const callbackCoverage = callbacks.length ? callbacks.filter(({ u, i }) => us.slice(0, Math.max(0, i - 1)).some(previous => jac(new Set(words(u.text)), new Set(words(previous.text))) >= .2 || (u.evidenceMemoryIds ?? []).some(id => (previous.evidenceMemoryIds ?? []).includes(id)))).length / callbacks.length : 1;
+  const lexical = entries.map(([, x]) => new Set(x.flatMap(u => words(u.text)))), pairs = lexical.flatMap((set, index) => lexical.slice(index + 1).map(other => jac(set, other))), hostLexicalSimilarity = multi ? pairs.reduce((sum, value) => sum + value, 0) / Math.max(1, pairs.length) : 0, avg = Object.values(averageTurnLengthByHost), averageTurnLengthDifference = multi ? (Math.max(...avg) - Math.min(...avg)) / Math.max(1, Math.max(...avg)) : 0;
+  const diff = (x: Record<string, number>) => { const v = Object.values(x); return multi ? Math.max(...v) - Math.min(...v) : 0; }, questionBehaviorDifference = diff(questionRateByHost), challengeBehaviorDifference = diff(challengeRateByHost), reactionBehaviorDifference = diff(reactionRateByHost);
+  const hostDifferentiationScore = multi ? clamp(100 * (.30 * (1 - hostLexicalSimilarity) + .25 * averageTurnLengthDifference + .20 * questionBehaviorDifference + .15 * challengeBehaviorDifference + .10 * reactionBehaviorDifference)) : 100;
+  const grams = new Map<string, number>(); for (const u of us) { const ts = words(u.text); for (let i = 0; i + 2 < ts.length; i++) { const g = ts.slice(i, i + 3).join("|"); grams.set(g, (grams.get(g) ?? 0) + 1); } } const repetitiveNGramRate = [...grams.values()].filter(x => x > 1).length / Math.max(1, grams.size);
+  const shortTurnRate = lengths.filter(x => x <= 12).length / total, mediumTurnRate = lengths.filter(x => x > 12 && x <= 75).length / total, longTurnRate = lengths.filter(x => x > 75).length / total, shortReactionRate = us.filter(u => u.utteranceType === "REACTION" && u.text.length <= 24).length / total, rhetoricalQuestionDensity = us.filter(u => /(?:那么问题来了|这意味着什么呢|为什么这么说呢)[？?]/u.test(u.text)).length / total;
+  const formalAllowance = (style.formality ?? 5) >= 7 ? .6 : 1, transitionWarningThreshold = (style.formality ?? 5) >= 7 ? .55 : .35, penalty = genericAgreementRate * 24 + agreementOpeningRate * 18 + strictAlternationRate * 22 + cyclicSpeakerPatternRate * 22 + transitionPhraseFrequency * 10 * formalAllowance + metaPresenterPhraseRate * 18 + adjacentRestatementRate * 20 + consecutiveSimilarLengthRate * 12 + repetitiveNGramRate * 18 + rhetoricalQuestionDensity * 12;
+  const naturalnessScore = clamp(92 - penalty + Math.min(7, Math.sqrt(variance(lengths)) / 4) + (shortReactionRate && (style.interruptionLevel ?? 5) > 2 ? 2 : 0));
+  const summaryPhraseDensity = count(text, ["总而言之", "归根结底", "简单总结一下", "总结一下"]) / total;
+  const warnings = [strictAlternationRate > .7 ? "STRICT_ALTERNATION_HIGH" : null, cyclicSpeakerPatternRate > .7 ? "CYCLIC_SPEAKER_PATTERN_HIGH" : null, genericAgreementRate > .18 ? "GENERIC_AGREEMENT_DENSITY" : null, transitionPhraseFrequency > transitionWarningThreshold ? "FORMAL_TRANSITION_DENSITY" : null, metaPresenterPhraseRate > .12 ? "META_PRESENTER_DENSITY" : null, adjacentRestatementRate > .35 ? "ADJACENT_RESTATEMENT_HIGH" : null, consecutiveSimilarLengthRate > .7 ? "TURN_LENGTHS_TOO_SYMMETRIC" : null, multi && hostDifferentiationScore < 35 ? "HOSTS_TOO_SIMILAR" : null, challenges.length && challengeFollowThroughRate < .5 ? "CHALLENGE_ABANDONED" : null, multi && total >= 8 && !shortReactionRate && (style.interruptionLevel ?? 5) > 2 ? "SHORT_REACTIONS_MISSING" : null, (style.summaryDensity ?? 5) < 4 && summaryPhraseDensity > .25 ? "SUMMARY_DENSITY_HIGH" : null, (style.debateLevel ?? 5) >= 7 && multi && total >= 8 && !challenges.length ? "CHALLENGES_MISSING" : null].filter((x): x is string => !!x);
+  return { naturalnessScore, hostDifferentiationScore, metrics: { speakerTurnShare, averageTurnLengthByHost, turnLengthVariance: variance(lengths), agreementPhraseFrequency: genericAgreementRate, transitionPhraseFrequency, questionRateByHost, reactionRateByHost, challengeRateByHost, sentenceLengthVariance: variance(text.split(/[。！？.!?]/).filter(Boolean).map(x => x.length)), hostLexicalSimilarity, summaryPhraseDensity, repetitiveNGramRate, strictAlternationRate, cyclicSpeakerPatternRate, genericAgreementRate, agreementOpeningRate, metaPresenterPhraseRate, adjacentRestatementRate, challengeFollowThroughRate, callbackCoverage, rhetoricalQuestionDensity, shortReactionRate, shortTurnRate, mediumTurnRate, longTurnRate, consecutiveSimilarLengthRate, questionBehaviorDifference, averageTurnLengthDifference, challengeBehaviorDifference, reactionBehaviorDifference }, warnings };
 }
-
-export function evaluatePodcastScriptData(utterances: EvaluationUtterance[], options: { sourceTexts?: string[]; contextWithinBudget?: boolean } = {}) {
-  const natural = evaluateNaturalness(utterances);
-  const substantive = utterances.filter((item) => item.substantive);
-  const grounded = substantive.filter((item) => (item.evidenceCount ?? 0) > 0);
-  const groundingScore = substantive.length ? grounded.length / substantive.length * 100 : 100;
-  const fabricated = utterances.filter((item) => biographyPatterns.some((pattern) => pattern.test(item.text)));
-  const distinctEvidence = new Set(grounded.flatMap((item) => item.evidenceMemoryIds ?? []));
-  const questionCoverage = utterances.some((item) => item.utteranceType === "QUESTION") ? 1 : 0;
-  const challengeCoverage = utterances.some((item) => item.utteranceType === "CHALLENGE") ? 1 : 0;
-  const synthesisCoverage = utterances.some((item) => item.utteranceType === "CALLBACK" || item.utteranceType === "CLARIFICATION") ? 1 : 0;
-  const substantiveRatio = substantive.length / Math.max(1, utterances.length);
-  const evidenceDiversity = Math.min(1, distinctEvidence.size / Math.max(1, substantive.length));
-  const cognitiveValueScore = clamp(100 * (0.35 * groundingScore / 100 + 0.2 * Math.min(1, substantiveRatio * 2) + 0.2 * evidenceDiversity + 0.1 * questionCoverage + 0.1 * challengeCoverage + 0.05 * synthesisCoverage) - natural.metrics.repetitiveNGramRate * 20);
-  const segmentOrdinals = utterances.map((item) => item.segmentOrdinal).filter((value): value is number => typeof value === "number");
-  const distinctSegments = [...new Set(segmentOrdinals)].sort((a, b) => a - b);
-  const contiguousSegments = distinctSegments.every((ordinal, index) => ordinal === index + 1);
-  const emptyOrOrphanPenalty = utterances.length && distinctSegments.length ? 0 : 35;
-  const opening = utterances[0]?.utteranceType;
-  const closing = utterances.at(-1)?.utteranceType;
-  const openingProgression = opening === "QUESTION" || opening === "STATEMENT" || opening === "CHALLENGE" ? 1 : 0.5;
-  const closingProgression = closing === "CALLBACK" || closing === "CLARIFICATION" || closing === "QUESTION" ? 1 : 0.5;
-  const structuralCoherenceScore = clamp(100 * (0.3 * (contiguousSegments ? 1 : 0) + 0.2 * openingProgression + 0.2 * closingProgression + 0.15 * synthesisCoverage + 0.15 * Math.min(1, distinctSegments.length / 2)) - emptyOrOrphanPenalty - natural.metrics.repetitiveNGramRate * 25);
-  const copy = sourceCopyRisk(utterances, options.sourceTexts ?? []);
-  const sourceCopyRiskScore = clamp(100 * (1 - copy.risk));
-  const hardFailures = [groundingScore < 100 ? "UNSUPPORTED_SUBSTANTIVE_CLAIM" : null, fabricated.length ? "FABRICATED_BIOGRAPHY" : null, options.contextWithinBudget === false ? "CONTEXT_BUDGET_VIOLATION" : null, copy.risk >= 0.8 ? "SOURCE_COPY_HARD_GATE" : null].filter((item): item is string => !!item);
-  const warnings = [...natural.warnings, copy.risk >= 0.35 ? "SOURCE_COPY_OVERLAP" : null].filter((item): item is string => !!item);
-  return { naturalnessScore: natural.naturalnessScore, groundingScore, hostDifferentiationScore: natural.hostDifferentiationScore, cognitiveValueScore, structuralCoherenceScore, repetitionScore: clamp(100 - natural.metrics.repetitiveNGramRate * 100), aiFeelScore: clamp(natural.naturalnessScore - natural.metrics.agreementPhraseFrequency * 20), sourceCopyRiskScore, contextBudgetScore: options.contextWithinBudget === false ? 0 : 100, fabricationBoundaryScore: fabricated.length ? 0 : 100, metrics: { ...natural.metrics, proxyScoreVersion: "phase3-deterministic-v2", substantiveGroundedRatio: groundingScore / 100, distinctEvidenceCoverage: distinctEvidence.size, questionCoverage, challengeCoverage, synthesisCoverage, contiguousSegments, sourceCopy: copy }, hardFailures, warnings };
+export function evaluatePodcastScriptData(us: EvaluationUtterance[], options: { sourceTexts?: string[]; contextWithinBudget?: boolean; style?: EvaluationStyle } = {}) {
+  const natural = evaluateNaturalness(us, options.style), substantive = us.filter(u => u.substantive), grounded = substantive.filter(u => (u.evidenceCount ?? 0) > 0), groundingScore = substantive.length ? grounded.length / substantive.length * 100 : 100, fabricated = us.filter(u => biography.some(p => p.test(u.text))), evidence = new Set(grounded.flatMap(u => u.evidenceMemoryIds ?? [])), substantiveRatio = substantive.length / Math.max(1, us.length);
+  const cognitiveValueScore = clamp(100 * (.35 * groundingScore / 100 + .22 * Math.min(1, substantiveRatio * 2) + .18 * Math.min(1, evidence.size / Math.max(1, substantive.length)) + .1 * (us.some(u => u.utteranceType === "QUESTION") ? 1 : 0) + .1 * natural.metrics.challengeFollowThroughRate + .05 * natural.metrics.callbackCoverage) - natural.metrics.adjacentRestatementRate * 20);
+  const copy = sourceCopyRisk(us, options.sourceTexts ?? []), sourceCopyRiskScore = clamp(100 * (1 - copy.risk)), aiFeelScore = clamp(100 - ((100 - natural.naturalnessScore) * .7 + natural.metrics.strictAlternationRate * 15 + natural.metrics.cyclicSpeakerPatternRate * 15 + natural.metrics.genericAgreementRate * 8 + natural.metrics.metaPresenterPhraseRate * 10));
+  const hardFailures = [groundingScore < 100 ? "UNSUPPORTED_SUBSTANTIVE_CLAIM" : null, fabricated.length ? "FABRICATED_BIOGRAPHY" : null, options.contextWithinBudget === false ? "CONTEXT_BUDGET_VIOLATION" : null, copy.risk >= .8 ? "SOURCE_COPY_HARD_GATE" : null, aiFeelScore < 15 ? "AI_TASTE_SEVERE" : null, us.length >= 8 && Object.values(natural.metrics.speakerTurnShare).some(x => x > .94) && (options.style?.hostCount ?? 2) > 1 ? "HOST_COLLAPSE" : null, us.length >= 30 && natural.metrics.repetitiveNGramRate > .99 ? "EXTREME_REPETITION" : null].filter((x): x is string => !!x);
+  return { naturalnessScore: natural.naturalnessScore, groundingScore, hostDifferentiationScore: natural.hostDifferentiationScore, cognitiveValueScore, structuralCoherenceScore: clamp(100 - natural.metrics.adjacentRestatementRate * 30 - natural.metrics.repetitiveNGramRate * 25), repetitionScore: clamp(100 - natural.metrics.repetitiveNGramRate * 100), aiFeelScore, sourceCopyRiskScore, contextBudgetScore: options.contextWithinBudget === false ? 0 : 100, fabricationBoundaryScore: fabricated.length ? 0 : 100, metrics: { ...natural.metrics, proxyScoreVersion: "phase15-deterministic-v1", substantiveGroundedRatio: groundingScore / 100, distinctEvidenceCoverage: evidence.size, sourceCopy: copy }, hardFailures, warnings: [...natural.warnings, copy.risk >= .35 ? "SOURCE_COPY_OVERLAP" : null].filter((x): x is string => !!x) };
 }

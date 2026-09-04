@@ -49,6 +49,8 @@
     "test:phase12:release": "node scripts/run-phase12-release.mjs",
     "test:phase13:release": "node scripts/run-phase13-release.mjs",
     "test:phase14:release": "node scripts/run-phase14-release.mjs",
+    "test:phase15:quality": "node scripts/run-phase15-quality.mjs",
+    "test:phase15:release": "node scripts/run-phase15-release.mjs",
     "build": "node --env-file-if-exists=.env scripts/run-pnpm-with-root-env.mjs -r --if-present build",
     "db:generate": "pnpm --filter @ai-cognitive/db prisma:generate:root",
     "db:migrate": "pnpm --filter @ai-cognitive/db prisma:migrate:root",
