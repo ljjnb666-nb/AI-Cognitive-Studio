@@ -30,7 +30,7 @@ type SnapshotUtterance = { id: string; segmentId: string; segmentOrdinal?: numbe
 
 export function prepareSpokenText(text: string): { spokenText: string; replacements: string[] } {
   const replacements: string[] = [];
-  let spokenText = text.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/<[^>]*>/g, "").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
+  let spokenText = text.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/&lt;[^&]*&gt;/gi, "").replace(/<[^>]*>/g, "").replace(/[*_`]/g, "").replace(/\s+/g, " ").trim();
   for (const [from, to] of [[/GPT-5/gi, "G P T 5"], [/OpenAI/gi, "Open A I"], [/LLM/gi, "L L M"], [/API/gi, "A P I"], [/\bAI\b/gi, "A I"], [/3\.5/g, "3 point 5"], [/50%/g, "50 percent"]] as const) {
     if (from.test(spokenText)) { spokenText = spokenText.replace(from, to); replacements.push(from.source); }
   }
