@@ -12,10 +12,11 @@ const stageInstructions: Record<PodcastPromptStage, string> = {
   HUMANIZATION: "Improve only editable connective tissue, rhythm, punctuation, concise reactions, and stiffness. Do not change substantive claims, evidence-backed utterances, direct quotes, evidence, speaker identity, or dialogue structure. Remove presenter language without adding filler or fabricated details.",
 };
 
-export function buildPodcastSystemInstruction(stage: PodcastPromptStage, input?: { hosts?: PodcastHostPersona[]; repairReasons?: string[] }): string {
+export function buildPodcastSystemInstruction(stage: PodcastPromptStage, input?: { hosts?: PodcastHostPersona[]; repairReasons?: string[]; targetDurationMinutes?: number }): string {
   const personaContract = stage === "SEGMENT_DRAFTING" && input?.hosts?.length
     ? ` Persisted host behavior: ${input.hosts.map((host) => `${host.displayName}: ${host.speakingStyle}; ${host.knowledgeStyle}; skeptical=${host.skepticism}; verbosity=${host.verbosity}; questions=${host.questionStyle}; disagreement=${host.disagreementStyle}; sentence=${host.preferredSentenceLength}; filler=${host.fillerPreference}`).join(" | ")}.`
     : "";
   const repair = input?.repairReasons?.length ? ` Deterministic repair targets: ${input.repairReasons.join(", ")}. Address them without weakening grounding.` : "";
-  return `${stageInstructions[stage]} ${invariant}${personaContract}${repair}`;
+  const duration = stage === "SEGMENT_OUTLINE" && input?.targetDurationMinutes ? input.targetDurationMinutes <= 15 ? " Duration contract: 15 minutes means a narrow coherent thesis with fewer primary concepts." : input.targetDurationMinutes >= 60 ? " Duration contract: 60 minutes means greater conceptual and evidence diversity, never repeated recap." : " Duration contract: 30 minutes means normal depth with a coherent central thesis." : "";
+  return `${stageInstructions[stage]} ${invariant}${personaContract}${repair}${duration}`;
 }

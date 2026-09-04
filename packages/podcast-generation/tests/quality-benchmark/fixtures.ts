@@ -38,6 +38,7 @@ export const qualityBenchmarkFixtures: QualityBenchmarkFixture[] = [
   { name: "16-three-host-natural", utterances: [grounded("a", "环境决定哪些选项先被看见。", "t1"), u("b", "我想追问它的边界。", "QUESTION"), grounded("c", "证据只说明概率变化，不能替代个人判断。", "t2"), u("a", "这正好避免了决定论。", "CLARIFICATION"), u("b", "那实践上先观察触发条件。", "REACTION"), grounded("c", "再用小调整检验结果是否偏移。", "t3")], style: { hostCount: 3, debateLevel: 5 } },
   { name: "17-fake-callback", utterances: [grounded("a", "环境影响注意力。", "cb1"), u("b", "这个机制需要证据。", "QUESTION"), u("a", "顺便说一句，天气不错。", "CALLBACK")], style: { hostCount: 2 } },
   { name: "18-adversarial-random-fillers", utterances: Array.from({ length: 10 }, (_, i) => u(i % 3 === 0 ? "a" : "b", "嗯，等等，其实环境环境环境，选择选择选择。", "REACTION")), style: { hostCount: 2 } },
+  { name: "19-three-host-mechanical-cycle", utterances: Array.from({ length: 9 }, (_, i) => u(["a", "b", "c"][i % 3]!, "我同意这个观点。", "REACTION")), style: { hostCount: 3 }, expectedWarnings: ["CYCLIC_SPEAKER_PATTERN_HIGH"] },
 ];
 
 export const fixtureByName = (name: string) => qualityBenchmarkFixtures.find(fixture => fixture.name === name)!;
