@@ -33,6 +33,9 @@ describe("Phase 15 quality", () => {
   it("uses all hosts and respects style-aware callback and challenge behavior", () => {
     const three = evaluateFixture(fixtureByName("16-three-host-natural")), fakeCallback = evaluateFixture(fixtureByName("17-fake-callback")), realCallback = evaluateFixture(fixtureByName("01-natural-asymmetric-dialogue"));
     expect(Object.keys(three.metrics.speakerTurnShare)).toHaveLength(3); expect(Object.keys(three.metrics.questionRateByHost)).toHaveLength(3); expect(three.hostDifferentiationScore).toBeGreaterThan(0); expect(fakeCallback.metrics.callbackCoverage).toBeLessThan(realCallback.metrics.callbackCoverage);
+    const threeHostFixture = fixtureByName("16-three-host-natural");
+    const changedHostC = evaluatePodcastScriptData(threeHostFixture.utterances.map(item => item.speakerHostId === "c" ? { ...item, text: "可是证据真的支持这个结论吗？", utteranceType: "QUESTION" as const, substantive: false, evidenceCount: 0 } : item), { style: threeHostFixture.style });
+    expect(changedHostC.metrics.speakerTurnShare.c).toBe(three.metrics.speakerTurnShare.c); expect(changedHostC.metrics.questionRateByHost.c).not.toBe(three.metrics.questionRateByHost.c); expect(changedHostC.hostDifferentiationScore).not.toBe(three.hostDifferentiationScore);
     expect(evaluateNaturalness([{ speakerHostId: "a", text: "首先，边界需要说清。", utteranceType: "STATEMENT" }], { hostCount: 1, formality: 9 }).hostDifferentiationScore).toBe(100); expect(evaluateFixture(fixtureByName("09-natural-low-debate")).warnings).not.toContain("CHALLENGES_MISSING"); expect(evaluateFixture(fixtureByName("18-adversarial-random-fillers")).naturalnessScore).toBeLessThan(70);
   });
 

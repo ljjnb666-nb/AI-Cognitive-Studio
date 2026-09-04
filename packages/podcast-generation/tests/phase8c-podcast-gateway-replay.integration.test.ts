@@ -201,4 +201,18 @@ describe("Phase 8C persisted Podcast Gateway replay", () => {
     await resetForReplay(data.requested.run.id); await processPodcastGenerationRun(data.requested.run.id, value.deps);
     expect(await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } })).toBe(1);
   }, 60_000);
+
+  it("fails closed for the legacy planned empty-attempt state instead of grounding or publishing it", async () => {
+    const data = await fixture(), value = await production(data);
+    await expect(processPodcastGenerationRun(data.requested.run.id, { ...value.deps, faultInjector: point => { if (point === "afterSegmentDraft") throw new Error("CRASH_AFTER_ATTEMPT_ONE"); } })).rejects.toThrow("CRASH_AFTER_ATTEMPT_ONE");
+    const segment = await prisma.episodeSegment.findFirstOrThrow({ where: { podcastGenerationRunId: data.requested.run.id } });
+    await prisma.podcastUtterance.deleteMany({ where: { segmentId: segment.id } });
+    await prisma.episodeSegment.update({ where: { id: segment.id }, data: { status: "PLANNED", generationAttemptCount: 1 } });
+    await prisma.podcastGenerationRun.update({ where: { id: data.requested.run.id }, data: { status: "QUEUED", stage: "GROUNDING_VALIDATION", executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, errorCode: null } });
+    expect([segment.generationAttemptCount, await prisma.podcastUtterance.count({ where: { segmentId: segment.id } })]).toEqual([1, 0]);
+    await expect(processPodcastGenerationRun(data.requested.run.id, value.deps)).rejects.toThrow();
+    const failedRun = await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } });
+    const failedSegment = await prisma.episodeSegment.findUniqueOrThrow({ where: { id: segment.id } });
+    expect([failedRun.status, failedRun.stage]).not.toEqual(["SUCCEEDED", "COMPLETED"]); expect(failedSegment.status).not.toBe("GROUNDED"); expect(await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } })).toBe(0);
+  }, 60_000);
 });
