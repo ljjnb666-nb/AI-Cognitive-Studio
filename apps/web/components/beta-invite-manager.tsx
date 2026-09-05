@@ -11,7 +11,13 @@ export function BetaInviteManager() {
   const [token, setToken] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   async function refresh() { const response = await fetch("/api/studio/beta/invites", { cache: "no-store" }); if (response.ok) setInvites((await response.json()).invites); }
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/studio/beta/invites", { cache: "no-store" }).then(async (response) => {
+      if (response.ok && !cancelled) setInvites((await response.json()).invites);
+    });
+    return () => { cancelled = true; };
+  }, []);
   async function create() {
     setMessage(""); setToken(null);
     const response = await fetch("/api/studio/beta/invites", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cohort, expiresAt }) });
