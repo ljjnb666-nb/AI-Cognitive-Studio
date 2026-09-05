@@ -3,11 +3,11 @@ import { BOOK_ANALYSIS_JOB, dispatchPendingBookAnalysis, processBookAnalysisRun,
 import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
 
 export const BOOK_ANALYSIS_QUEUE = "book.analysis";
-export type BookAnalysisQueueOptions = { prefix?: string };
+export type BookAnalysisQueueOptions = { prefix?: string; concurrency?: number };
 export function createBookAnalysisWorker(environment: Environment, dependencies?: ProcessBookAnalysisDependencies, options: BookAnalysisQueueOptions = {}) {
   if (!dependencies?.analysisProvider && !dependencies?.analysisProviderForRun) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED");
   if (!dependencies.embeddingGateway && !dependencies.embeddingGatewayForRun) throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_NOT_CONFIGURED");
-  return new Worker<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, async (job) => processBookAnalysisRun(job.data.analysisRunId, dependencies), { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) });
+  return new Worker<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, async (job) => processBookAnalysisRun(job.data.analysisRunId, dependencies), { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_BOOK_ANALYSIS_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) });
 }
 export function createBookAnalysisQueue(environment: Environment, options: BookAnalysisQueueOptions = {}) { return new Queue<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) }); }
 export function dispatchBookAnalysisWithQueue(queue: Queue<{ analysisRunId: string }>, options?: Parameters<typeof dispatchPendingBookAnalysis>[1]): Promise<number> { return dispatchPendingBookAnalysis(queue, options); }

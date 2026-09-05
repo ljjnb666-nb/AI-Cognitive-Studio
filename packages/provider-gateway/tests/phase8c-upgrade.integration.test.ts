@@ -92,7 +92,10 @@ describe("Phase 8C 2A to 2B upgrade acceptance", () => {
       await db.providerInvocationAttempt.create({ data: { id: attemptId, workspaceId, invocationId, attemptNumber: 1, status: "SUCCEEDED", completedAt: new Date() } });
       const encrypted = cipher.encryptEmbeddingResult(JSON.stringify({ vectors, dimensions: 3 }), { workspaceId, invocationId, attemptId, snapshotId, providerKey: "openai", modelId: "upgrade" });
       await db.$executeRawUnsafe('INSERT INTO "ProviderEmbeddingResult" ("id","workspaceId","invocationId","attemptId","snapshotId","ciphertext","iv","authTag","keyVersion","vectorCount","dimensions") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', randomUUID(), workspaceId, invocationId, attemptId, snapshotId, encrypted.ciphertext, encrypted.iv, encrypted.authTag, encrypted.keyVersion, 2, 3);
-      await db.providerUsageEvent.create({ data: { workspaceId, invocationId, attemptId, attemptNumber: 1, providerKey: "openai", modelId: "upgrade", capability: "EMBEDDING", routeSlot: "EMBEDDING", status: "SUCCEEDED", embeddingInputTokens: 2 } });
+      // This deliberately stays raw: the isolated 30-migration fixture predates
+      // current optional usage columns, while the test uses the current client to
+      // verify that the subsequent migration upgrade remains compatible.
+      await db.$executeRawUnsafe('INSERT INTO "ProviderUsageEvent" ("id","workspaceId","invocationId","attemptId","attemptNumber","providerKey","modelId","capability","routeSlot","status","embeddingInputTokens") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,CAST($10 AS "ProviderUsageStatus"),$11)', randomUUID(), workspaceId, invocationId, attemptId, 1, "openai", "upgrade", "EMBEDDING", "EMBEDDING", "SUCCEEDED", 2);
       stage("UPGRADE_STAGE_06_RECOVER_PRE_UPGRADE");
       expect(await recover2AReceipt(db, cipher, { workspaceId, invocationId, snapshotId, attemptId, modelId: "upgrade" })).toMatchObject({ kind: "RECOVERABLE", response: { vectors } });
       await db.$disconnect(); db = undefined;

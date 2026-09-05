@@ -667,6 +667,7 @@ model ProviderUsageEvent {
   routeSlot             String
   status                ProviderUsageStatus
   inputTokens           Int?
+  cachedInputTokens     Int?
   outputTokens          Int?
   embeddingInputTokens  Int?
   speechInputCharacters Int?

@@ -16,7 +16,7 @@ import {
 } from "@ai-cognitive/shared/server";
 
 export const SHORT_VIDEO_GENERATION_QUEUE = "short-video.generation";
-export type ShortVideoGenerationQueueOptions = { prefix?: string };
+export type ShortVideoGenerationQueueOptions = { prefix?: string; concurrency?: number };
 export type ShortVideoRuntimeAdapter = {
   provider?: ShortVideoProvider;
   embeddingProvider?: EmbeddingProvider;
@@ -62,7 +62,7 @@ export function createShortVideoGenerationWorker(
         throw error;
       }
     },
-    { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) },
+    { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_SHORT_VIDEO_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) },
   );
 }
 export function createShortVideoGenerationQueue(environment: Environment, options: ShortVideoGenerationQueueOptions = {}) {
