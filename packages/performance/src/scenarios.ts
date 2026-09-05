@@ -13,7 +13,7 @@ export const phase16ScenarioProfiles = [
 
 export function calculatePhase16Scenarios() {
   return phase16ScenarioProfiles.map(profile => {
-    const cost = estimateProviderCost(phase16PricingCatalog, profile.usage);
+    const cost = estimateProviderCost(phase16PricingCatalog, { ...profile.usage, usageQuality: "LOCAL_DETERMINISTIC_ESTIMATE" });
     if (cost.estimatedCostMicros === null || (cost.quality !== "ACTUAL_PROVIDER_USAGE" && cost.quality !== "LOCAL_DETERMINISTIC_ESTIMATE")) throw new Error(`PHASE16_SCENARIO_UNPRICED:${profile.scenario}`);
     return { scenario: profile.scenario, scenarioType: "SYNTHETIC_ESTIMATE" as const, ...profile.usage, estimatedCostMicros: cost.estimatedCostMicros, pricingCatalogVersion: cost.pricingCatalogVersion, usageQuality: cost.quality };
   });

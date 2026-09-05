@@ -1,5 +1,7 @@
 import { prisma } from "@ai-cognitive/db";
 import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createProductionProviderGateway, DeterministicFakeProviderAdapter, ProviderExecutionRepository, ProviderRegistry } from "../src/index.js";
 
@@ -8,6 +10,15 @@ async function workspace() { const id = randomUUID(); workspaces.push(id); retur
 afterEach(async () => { vi.restoreAllMocks(); for (const id of workspaces.splice(0)) { await prisma.providerUsageEvent.deleteMany({ where: { workspaceId: id } }); await prisma.providerInvocationAttempt.deleteMany({ where: { workspaceId: id } }); await prisma.providerInvocation.deleteMany({ where: { workspaceId: id } }); await prisma.providerExecutionSnapshot.deleteMany({ where: { workspaceId: id } }); await prisma.workspace.delete({ where: { id } }); } }); afterAll(async () => prisma.$disconnect());
 
 describe("gateway post-remote accounting safety", () => {
+  it("records production Gateway adapter latency and an idempotent redelivery without another paid operation", async () => {
+    const ws = await workspace(); const registry = new ProviderRegistry(); const capability = { modelId: "fixture-1", families: ["TEXT_GENERATION"] as const, confidence: "VERIFIED" as const }; registry.register({ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "test", models: [capability] }); const adapter = new DeterministicFakeProviderAdapter("delayed"); const repository = new ProviderExecutionRepository();
+    const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: async () => undefined }, { resolve: async () => ({ source: "PLATFORM" as const, providerKey: "fixture", protocol: "TEST" as const, modelId: "fixture-1", adapterVersion: "test", capability, configuration: {} }) }, () => adapter, { authorize: async () => undefined, assertRouteUsable: async () => undefined, validateEndpoint: async () => undefined, assertBudget: () => undefined, repository, circuit: { admit: async () => undefined, recordSuccess: async () => undefined, recordRetryableFailure: async () => undefined }, rate: { admit: async () => undefined }, concurrency: { acquire: async key => ({ key, token: "lease" }), release: async () => true } });
+    const request = (idempotencyKey: string) => ({ workspaceId: ws.id, routeSlot: "BOOK_CHUNK_ANALYSIS" as const, correlationId: idempotencyKey, idempotencyKey, inputHash: "a".repeat(64), capability: { family: "TEXT_GENERATION" as const } });
+    for (const key of ["latency-a", "latency-b", "latency-c"]) await expect(gateway.execute(request(key), { userId: "owner" })).resolves.toMatchObject({ status: "SUCCEEDED" });
+    const beforeRedelivery = adapter.calls; await expect(gateway.execute(request("latency-a"), { userId: "owner" })).resolves.toMatchObject({ status: "ALREADY_PROCESSED" }); expect(adapter.calls).toBe(beforeRedelivery);
+    const usage = await prisma.providerUsageEvent.findMany({ where: { workspaceId: ws.id }, orderBy: { createdAt: "asc" }, select: { latencyMs: true } }); expect(usage).toHaveLength(3); expect(usage.every(event => typeof event.latencyMs === "number" && event.latencyMs >= 1)).toBe(true);
+    const evidencePath = process.env.PHASE16_GATEWAY_EVIDENCE_PATH; if (evidencePath) { mkdirSync(dirname(evidencePath), { recursive: true }); writeFileSync(evidencePath, `${JSON.stringify({ source: "production-gateway+deterministic-provider-adapter", providerLatencyMs: usage.map(event => event.latencyMs), logicalPaidOperationsBeforeRedelivery: beforeRedelivery, logicalPaidOperationsAfterRedelivery: adapter.calls, redeliveryExtraPaidLogicalOperations: adapter.calls - beforeRedelivery }, null, 2)}\n`); }
+  });
   it.each(["attempt outcome", "logical invocation"])("never replays a remote success when %s persistence fails", async fault => {
     const ws = await workspace(); const registry = new ProviderRegistry(); const capability = { modelId: "fixture-1", families: ["TEXT_GENERATION"] as const, confidence: "VERIFIED" as const }; registry.register({ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "test", models: [capability] }); const adapter = new DeterministicFakeProviderAdapter(); const repository = new ProviderExecutionRepository();
     vi.spyOn(repository, fault === "attempt outcome" ? "recordAttemptOutcome" : "completeInvocation").mockRejectedValueOnce(new Error(`${fault} persistence fault`));
