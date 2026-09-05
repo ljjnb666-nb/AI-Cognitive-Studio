@@ -155,6 +155,8 @@ jobs:
           if-no-files-found: error
       - name: Phase 16 Performance & Cost Efficiency release gate
         run: pnpm test:phase16:release
+        env:
+          PHASE16_ARTIFACT_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Upload Phase 16 performance and cost evidence
         uses: actions/upload-artifact@v4
         with:

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "exports": { ".": "./src/index.ts" },
-  "scripts": { "lint": "eslint src tests", "typecheck": "tsc --noEmit", "build": "tsc --noEmit", "test": "vitest run" },
+  "scripts": { "lint": "eslint src tests", "typecheck": "tsc --noEmit", "build": "tsc --noEmit", "test": "vitest run tests/performance.test.ts tests/phase16-evidence.test.ts", "test:integration": "vitest run tests/provider-usage.integration.test.ts" },
   "dependencies": { "@ai-cognitive/db": "workspace:*" },
   "devDependencies": { "@eslint/js": "^9.39.1", "@types/node": "^24.10.1", "eslint": "^9.39.1", "typescript": "^5.9.3", "typescript-eslint": "^8.46.4", "vitest": "^4.0.8" }
 }
