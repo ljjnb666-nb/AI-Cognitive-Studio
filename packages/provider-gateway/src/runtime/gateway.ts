@@ -60,7 +60,7 @@ class ProviderGatewayCore {
     await this.execution.authorize?.(principal, request); if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); assertInputHash(request);
     this.validatePayload(request); let snapshot: ExecutionSnapshot;
     if (request.speech && this.execution.repository) { const existing = await this.execution.repository.findExistingSpeechInvocationForRequest(request); snapshot = existing ? await this.execution.repository.loadExecutionSnapshot(request.workspaceId, existing.snapshotId) : await this.resolveSnapshot(request); } else snapshot = await this.resolveSnapshot(request);
-    if (request.embedding) validateEmbeddingInput(request.embedding, snapshot.capability); if (request.speech) validateSpeechInput(request.speech, snapshot.capability, request.budget?.maxSpeechCharacters); assertBudget(request); this.execution.assertBudget?.(request); await this.execution.validateEndpoint?.(snapshot); await this.execution.assertRouteUsable?.(snapshot);
+    assertBudget(request); this.execution.assertBudget?.(request); if (request.embedding) validateEmbeddingInput(request.embedding, snapshot.capability); if (request.speech) validateSpeechInput(request.speech, snapshot.capability, request.budget?.maxSpeechCharacters); await this.execution.validateEndpoint?.(snapshot); await this.execution.assertRouteUsable?.(snapshot);
     const fingerprint = canonicalGatewayRequestFingerprint(snapshot, request);
     const claim = this.execution.repository ? await this.execution.repository.claimExecution(snapshot, { idempotencyKey: request.idempotencyKey, fingerprint }) : { kind: "OWNER" as const, invocationId: undefined, claimToken: undefined, snapshotId: undefined };
     if (claim.kind !== "OWNER") {
