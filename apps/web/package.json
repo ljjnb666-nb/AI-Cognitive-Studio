@@ -16,6 +16,7 @@
     "@ai-cognitive/db": "workspace:*",
     "@ai-cognitive/ingestion": "workspace:*",
     "@ai-cognitive/podcast-generation": "workspace:*",
+    "@ai-cognitive/product-analytics": "workspace:*",
     "@ai-cognitive/provider-gateway": "workspace:*",
     "@ai-cognitive/shared": "workspace:*",
     "@ai-cognitive/short-video-generation": "workspace:*",

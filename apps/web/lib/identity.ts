@@ -4,6 +4,7 @@ import { prisma } from "@ai-cognitive/db";
 import { browserIdentityMode } from "./identity-policy";
 import { auth } from "./auth";
 import { ensurePersonalWorkspace } from "./onboarding";
+import { assertStudioBetaAccess } from "@ai-cognitive/product-analytics";
 
 export type WebIdentityContext = {
   userId: string;
@@ -37,6 +38,9 @@ export const resolveWebIdentity = cache(async (): Promise<WebIdentityContext> =>
       ? (process.env.WEB_TEST_HARNESS_EMAIL ?? "phase6-browser@ai-cognitive-studio.test")
       : (process.env.WEB_DEV_BOOTSTRAP_EMAIL ?? "local-product@ai-cognitive-studio.test"));
   } catch (error) {
+    // Closed Beta denial is never a development-bootstrap fallback. In
+    // particular, it must remain before any workspace provisioning path.
+    if (error instanceof Error && (error.message === "BETA_ACCESS_REQUIRED" || error.message === "BETA_ACCESS_MODE_INVALID")) throw error;
     if (mode === "REQUIRED" || (error instanceof Error && error.message === "WEB_IDENTITY_REQUIRED")) throw error;
     // Fallback bootstrap identity when database or auth session is not active in dev/test
     return developmentIdentity();
@@ -44,6 +48,9 @@ export const resolveWebIdentity = cache(async (): Promise<WebIdentityContext> =>
 });
 
 async function resolveAuthenticatedIdentity(userId: string, requestedWorkspaceId?: string): Promise<WebIdentityContext> {
+  // Access is checked before provisioning, so an authenticated non-invitee
+  // cannot create a personal Workspace merely by visiting Studio.
+  await assertStudioBetaAccess(userId);
   const user = await ensurePersonalWorkspace(userId);
   const validRequested = requestedWorkspaceId && user.memberships.some((membership) => membership.workspaceId === requestedWorkspaceId) ? requestedWorkspaceId : undefined;
   const workspaceId = validRequested ?? (user.defaultWorkspaceId && user.memberships.some((membership) => membership.workspaceId === user.defaultWorkspaceId) ? user.defaultWorkspaceId : user.memberships[0].workspaceId);

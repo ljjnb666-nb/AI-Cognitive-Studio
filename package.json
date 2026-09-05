@@ -53,6 +53,10 @@
     "test:phase15:release": "node scripts/run-phase15-release.mjs",
     "test:phase16:performance": "node scripts/run-phase16-performance.mjs",
     "test:phase16:release": "node scripts/run-phase16-release.mjs",
+    "test:phase17:metrics": "pnpm --filter @ai-cognitive/product-analytics test",
+    "test:phase17:e2e": "pnpm --filter @ai-cognitive/web exec playwright test --config playwright.phase17.config.ts",
+    "test:phase17:release": "node scripts/run-phase17-release.mjs",
+    "beta:operator": "tsx scripts/beta-operator.ts",
     "build": "node --env-file-if-exists=.env scripts/run-pnpm-with-root-env.mjs -r --if-present build",
     "db:generate": "pnpm --filter @ai-cognitive/db prisma:generate:root",
     "db:migrate": "pnpm --filter @ai-cognitive/db prisma:migrate:root",
@@ -60,6 +64,7 @@
     "db:studio": "pnpm --filter @ai-cognitive/db prisma:studio:root"
   },
   "devDependencies": {
+    "tsx": "^4.23.11",
     "typescript": "^5.9.3"
   }
 }

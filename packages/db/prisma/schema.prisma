@@ -345,6 +345,38 @@ enum ShortVideoSceneType {
   ENDING
 }
 
+enum BetaParticipantRole {
+  TESTER
+  OPERATOR
+}
+
+enum BetaParticipantStatus {
+  ACTIVE
+  WITHDRAWN
+  REMOVED
+}
+
+enum BetaFeedbackCategory {
+  BUG
+  CONFUSION
+  QUALITY
+  FEATURE
+  OTHER
+}
+
+enum BetaFeedbackDimension {
+  OVERALL
+  PODCAST_NATURALNESS
+  PODCAST_VALUE
+  COGNITION_VALUE
+  USABILITY
+}
+
+enum BetaFeedbackStatus {
+  NEW
+  REVIEWED
+}
+
 model User {
   id                 String               @id @default(cuid())
   email              String               @unique
@@ -361,6 +393,9 @@ model User {
   sessions           Session[]
   cognitionStates    UserCognitionState[]
   defaultWorkspace   Workspace?           @relation("DefaultWorkspace", fields: [defaultWorkspaceId], references: [id], onDelete: SetNull)
+  betaParticipant    BetaParticipant?
+  redeemedBetaInvites BetaInvite[]        @relation("BetaInviteRedeemer")
+  productEvents      ProductEvent[]
 
   @@index([defaultWorkspaceId])
 }
@@ -401,6 +436,85 @@ model Workspace {
   providerAuditEvents        ProviderAuditEvent[]
   cognitionStates            UserCognitionState[]
   defaultForUsers            User[]                      @relation("DefaultWorkspace")
+  productEvents              ProductEvent[]
+  betaFeedback               BetaFeedback[]
+}
+
+/// Closed Beta access is product access, never a second authentication identity.
+model BetaParticipant {
+  id             String                @id @default(cuid())
+  userId         String                @unique
+  cohort         String
+  role           BetaParticipantRole   @default(TESTER)
+  status         BetaParticipantStatus @default(ACTIVE)
+  consentVersion String
+  consentedAt    DateTime
+  enrolledAt     DateTime               @default(now())
+  withdrawnAt    DateTime?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events         ProductEvent[]
+  feedback       BetaFeedback[]
+
+  @@index([userId, status])
+}
+
+/// Only the SHA-256 digest of a high-entropy invite code is durable.
+model BetaInvite {
+  id               String    @id @default(cuid())
+  tokenHash        String    @unique
+  cohort           String
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  redeemedAt       DateTime?
+  redeemedByUserId String?
+  createdAt        DateTime  @default(now())
+  redeemedByUser   User?     @relation("BetaInviteRedeemer", fields: [redeemedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([tokenHash])
+}
+
+model ProductEvent {
+  id            String          @id @default(cuid())
+  participantId String
+  userId        String
+  workspaceId   String
+  eventName     String
+  clientEventId String
+  sessionId     String?
+  entityType    String?
+  entityId      String?
+  route         String?
+  properties    Json            @default("{}")
+  occurredAt    DateTime        @default(now())
+  participant   BetaParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace     Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([participantId, clientEventId])
+  @@index([participantId, eventName, occurredAt])
+  @@index([workspaceId, occurredAt])
+}
+
+model BetaFeedback {
+  id            String               @id @default(cuid())
+  participantId String
+  workspaceId   String?
+  category      BetaFeedbackCategory
+  dimension     BetaFeedbackDimension?
+  rating        Int?
+  message       String?
+  entityType    String?
+  entityId      String?
+  route         String?
+  status        BetaFeedbackStatus   @default(NEW)
+  createdAt     DateTime             @default(now())
+  reviewedAt    DateTime?
+  participant   BetaParticipant      @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  workspace     Workspace?           @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([participantId, createdAt])
 }
 
 model ProviderConnection {

@@ -6,6 +6,7 @@ export default async function StudioLayout({ children }: { children: React.React
   try {
     await resolveWebIdentity();
   } catch (error) {
+    if (error instanceof Error && error.message === "BETA_ACCESS_REQUIRED") redirect("/beta/access");
     if (process.env.NODE_ENV === "production") {
       redirect("/sign-in");
     }

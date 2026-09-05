@@ -1,0 +1,15 @@
+{
+  "name": "@ai-cognitive/product-analytics",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "lint": "eslint src tests",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.mts"
+  },
+  "dependencies": { "@ai-cognitive/db": "workspace:*", "zod": "^4.1.12" },
+  "devDependencies": { "@eslint/js": "^9.39.1", "@types/node": "^24.10.1", "eslint": "^9.39.1", "typescript": "^5.9.3", "typescript-eslint": "^8.46.4", "vitest": "^4.0.8" }
+}
