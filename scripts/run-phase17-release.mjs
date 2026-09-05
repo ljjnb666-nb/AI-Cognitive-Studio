@@ -14,10 +14,10 @@ try {
   command(["test:phase17:metrics"]); command(["--filter", "@ai-cognitive/web", "test:integration"]); command(["--filter", "@ai-cognitive/web", "build"]); command(["--filter", "@ai-cognitive/web", "exec", "playwright", "test", "--config", "playwright.phase17.config.ts"]);
   command(["exec", "tsx", "scripts/generate-phase17-artifact.ts"]);
   mkdirSync("output/phase17", { recursive: true });
-  writeFileSync("output/phase17/release-status.json", `${JSON.stringify({ status: "PASSED", database, migrationDeploys: 2, artifactGitSha }, null, 2)}\n`);
+  writeFileSync("output/phase17/release-status.json", `${JSON.stringify({ status: "PASSED", gitSha: artifactGitSha, metricsVersion: "phase17-metrics-v1", eventTaxonomyVersion: "phase17-events-v1", consentVersion: "phase17-beta-consent-v1", fixtureType: "SYNTHETIC_COHORT", participantCount: 18, asOf: "2026-01-15T12:00:00.000Z", notRealUserData: true, database, migrationDeploys: 2 }, null, 2)}\n`);
 } catch (error) {
   mkdirSync("output/phase17", { recursive: true });
-  writeFileSync("output/phase17/release-status.json", `${JSON.stringify({ status: "FAILED", database, artifactGitSha, error: error instanceof Error ? error.message : String(error) }, null, 2)}\n`);
+  writeFileSync("output/phase17/release-status.json", `${JSON.stringify({ status: "FAILED", gitSha: artifactGitSha, metricsVersion: "phase17-metrics-v1", eventTaxonomyVersion: "phase17-events-v1", consentVersion: "phase17-beta-consent-v1", fixtureType: "SYNTHETIC_COHORT", participantCount: 18, asOf: "2026-01-15T12:00:00.000Z", notRealUserData: true, database, error: error instanceof Error ? error.message : String(error) }, null, 2)}\n`);
   throw error;
 } finally {
   postgres(`DROP DATABASE IF EXISTS ${database} WITH (FORCE);`);

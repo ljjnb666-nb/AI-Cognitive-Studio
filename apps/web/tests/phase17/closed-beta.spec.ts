@@ -22,4 +22,16 @@ test("enforced beta blocks provisioning until consented invite redemption, then 
   await expect(page).toHaveURL(/\/studio$/);
   await expect.poll(async () => (await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } })).memberships.length).toBe(1);
   await expect(page.getByRole("button", { name: "反馈 / Feedback" })).toBeVisible();
+  await page.getByRole("button", { name: "反馈 / Feedback" }).click();
+  await page.getByLabel("告诉我们哪里需要改进（可选）").fill("phase17 durable feedback");
+  await page.getByRole("button", { name: "提交" }).click();
+  await expect(page.getByRole("status")).toHaveText("感谢反馈。");
+  const beta = await prisma.betaParticipant.findUniqueOrThrow({ where: { userId: user.id } });
+  await expect.poll(() => prisma.betaFeedback.count({ where: { participantId: beta.id, message: "phase17 durable feedback" } })).toBe(1);
+  await prisma.betaParticipant.update({ where: { id: beta.id }, data: { role: "OPERATOR" } });
+  await page.goto("/studio/beta");
+  await expect(page.getByRole("heading", { name: "Beta 概览" })).toBeVisible();
+  await prisma.betaParticipant.update({ where: { id: beta.id }, data: { role: "TESTER" } });
+  await page.goto("/studio/beta");
+  await expect(page).toHaveURL(/\/studio$/);
 });
