@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const root = process.cwd(), database = "ai_cognitive_studio_phase16_test", port = process.env.POSTGRES_HOST_PORT ?? (process.platform === "win32" ? "5433" : "5432"), key = randomBytes(32).toString("base64");
-const environment = { ...process.env, NODE_ENV: "test", DATABASE_URL: `postgresql://app:app@localhost:${port}/${database}?schema=public`, DATABASE_URL_TEST: `postgresql://app:app@localhost:${port}/${database}?schema=public`, BETTER_AUTH_SECRET: "phase16-test-secret-must-be-at-least-32-characters", BETTER_AUTH_URL: "http://localhost:3001", BETTER_AUTH_TRUSTED_ORIGINS: "http://localhost:3001", BETTER_AUTH_ALLOW_LOCALHOST_HTTP_FOR_TESTS: "true", BETTER_AUTH_TEST_RATE_LIMIT_MAX: "1000", WEB_DEV_BOOTSTRAP_IDENTITY: "false", PROVIDER_GATEWAY_KEYRING: JSON.stringify({ activeVersion: "v1", keys: { v1: key } }), ...(process.platform === "win32" ? { PHASE15_POSTGRES_CONTAINER: process.env.PHASE15_POSTGRES_CONTAINER ?? "ai-cognitive-studio-postgres-1" } : {}) };
+const environment = { ...process.env, NODE_ENV: "test", DATABASE_URL: `postgresql://app:app@localhost:${port}/${database}?schema=public`, DATABASE_URL_TEST: `postgresql://app:app@localhost:${port}/${database}?schema=public`, BETTER_AUTH_SECRET: "phase16-test-secret-must-be-at-least-32-characters", BETTER_AUTH_URL: "http://localhost:3001", BETTER_AUTH_TRUSTED_ORIGINS: "http://localhost:3001", BETTER_AUTH_ALLOW_LOCALHOST_HTTP_FOR_TESTS: "true", BETTER_AUTH_TEST_RATE_LIMIT_MAX: "1000", WEB_DEV_BOOTSTRAP_IDENTITY: "false", PROVIDER_GATEWAY_KEYRING: JSON.stringify({ activeVersion: "v1", keys: { v1: key } }), PHASE16_REQUIRE_PRODUCT_EVIDENCE: "true", PHASE16_PHASE4_EVIDENCE_PATH: `${root}/output/phase16-input/phase4.json`, PHASE16_PHASE5_EVIDENCE_PATH: `${root}/output/phase16-input/phase5.json`, ...(process.platform === "win32" ? { PHASE15_POSTGRES_CONTAINER: process.env.PHASE15_POSTGRES_CONTAINER ?? "ai-cognitive-studio-postgres-1" } : {}) };
 function command(args) { const result = process.platform === "win32" ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `pnpm ${args.join(" ")}`], { cwd: root, env: environment, stdio: "inherit", shell: false }) : spawnSync("pnpm", args, { cwd: root, env: environment, stdio: "inherit", shell: false }); if (result.status !== 0) throw new Error(`PHASE16_COMMAND_FAILED:pnpm ${args.join(" ")}`); }
 function postgres(sql) { if (process.env.PHASE16_POSTGRES_CONTAINER) return execFileSync("docker", ["exec", "-i", process.env.PHASE16_POSTGRES_CONTAINER, "psql", "-U", "app", "-d", "postgres", "-c", sql], { cwd: root, env: environment, stdio: "inherit" }); if (process.platform === "win32") return execFileSync("docker", ["compose", "exec", "-T", "postgres", "psql", "-U", "app", "-d", "postgres", "-c", sql], { cwd: root, env: environment, stdio: "inherit" }); return execFileSync("psql", ["-h", "localhost", "-p", port, "-U", "app", "-d", "postgres", "-c", sql], { cwd: root, env: { ...environment, PGPASSWORD: "app" }, stdio: "inherit" }); }
 function postgresJson(sql) { const args = process.env.PHASE16_POSTGRES_CONTAINER ? ["exec", "-i", process.env.PHASE16_POSTGRES_CONTAINER, "psql", "-U", "app", "-d", database, "-t", "-A", "-c", sql] : process.platform === "win32" ? ["compose", "exec", "-T", "postgres", "psql", "-U", "app", "-d", database, "-t", "-A", "-c", sql] : ["-h", "localhost", "-p", port, "-U", "app", "-d", database, "-t", "-A", "-c", sql]; const commandName = process.env.PHASE16_POSTGRES_CONTAINER || process.platform === "win32" ? "docker" : "psql"; return execFileSync(commandName, args, { cwd: root, env: { ...environment, PGPASSWORD: "app" } }).toString("utf8").trim(); }
@@ -11,15 +11,18 @@ function seedQueryPlanRows() { postgresJson(`INSERT INTO "Workspace" ("id", "nam
 try {
   postgres(`DROP DATABASE IF EXISTS ${database} WITH (FORCE);`); postgres(`CREATE DATABASE ${database};`);
   command(["db:migrate:deploy"]); command(["db:migrate:deploy"]);
-  command(["test:phase16:performance"]);
-  const benchmark = JSON.parse(readFileSync("output/phase16/performance-cost-benchmark.json", "utf8"));
+  mkdirSync("output/phase16-input", { recursive: true });
   const expectedGitSha = environment.PHASE16_ARTIFACT_GIT_SHA ?? environment.GITHUB_SHA;
-  if (expectedGitSha && benchmark.gitSha !== expectedGitSha) throw new Error("PHASE16_ARTIFACT_HEAD_MISMATCH");
   command(["--filter", "@ai-cognitive/performance", "test:integration"]);
   command(["--filter", "@ai-cognitive/provider-gateway", "test:phase8a"]);
   command(["--filter", "@ai-cognitive/ingestion", "exec", "--", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/outbox-dispatch.integration.test.ts"]);
   command(["--filter", "@ai-cognitive/worker", "exec", "--", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/phase16-concurrency.integration.test.ts"]);
   command(["test:phase15:release"]);
+  command(["test:phase4:e2e"]);
+  command(["test:phase5:e2e"]);
+  command(["test:phase16:performance"]);
+  const benchmark = JSON.parse(readFileSync("output/phase16/performance-cost-benchmark.json", "utf8"));
+  if (expectedGitSha && benchmark.gitSha !== expectedGitSha) throw new Error("PHASE16_ARTIFACT_HEAD_MISMATCH");
   seedQueryPlanRows();
   const aggregationQuery = "EXPLAIN (FORMAT JSON) SELECT \"routeSlot\", count(*) FROM \"ProviderUsageEvent\" WHERE \"workspaceId\" = 'phase16-query-plan' AND \"createdAt\" >= TIMESTAMP '2026-01-01T00:00:00.000Z' AND \"createdAt\" < TIMESTAMP '2026-02-01T00:00:00.000Z' GROUP BY \"routeSlot\";";
   const outboxQuery = "EXPLAIN (FORMAT JSON) SELECT \"id\" FROM \"OutboxEvent\" WHERE \"topic\" = 'source.ingestion.requested' AND (\"status\" = 'PENDING'::\"OutboxStatus\" OR (\"status\" = 'PROCESSING'::\"OutboxStatus\" AND \"leaseUntil\" < CURRENT_TIMESTAMP)) AND \"attemptCount\" < 5 ORDER BY \"createdAt\" ASC FOR UPDATE SKIP LOCKED LIMIT 50;";
