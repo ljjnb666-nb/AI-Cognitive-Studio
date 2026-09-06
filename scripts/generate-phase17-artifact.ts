@@ -8,6 +8,16 @@ async function main() {
   const fixture = await seedSyntheticClosedBetaCohort(asOf);
   if (fixture.participantCount !== PHASE17_SYNTHETIC_PARTICIPANT_COUNT) throw new Error("PHASE17_SYNTHETIC_COHORT_SIZE_INVALID");
   const metrics = await computeClosedBetaMetrics(asOf);
+  const assertions = [
+    fixture.participantCount === 18, metrics.activatedParticipants > 0,
+    metrics.activationWithin24hEligible > 0, metrics.activationWithin24hCount <= metrics.activationWithin24hEligible,
+    metrics.d1.eligible > 0, metrics.d7.eligible > 0, metrics.meaningfulD1.eligible > 0, metrics.meaningfulD7.eligible > 0,
+    metrics.podcast.startedPairs > 0, metrics.podcast.completedPairs > 0, metrics.cognition.saveUsers > 0,
+    metrics.thinking.completedUsers > 0, metrics.teachBack.assessedUsers > 0,
+    metrics.podcast.naturalness.sampleCount > 0, metrics.podcast.value.sampleCount > 0,
+    metrics.timeToActivationMilliseconds.negativeCount === 0,
+  ];
+  if (assertions.some((value) => !value)) throw new Error("PHASE17_ARTIFACT_RELEASE_ASSERTION_FAILED");
   const header = { gitSha, metricsVersion: METRICS_VERSION, eventTaxonomyVersion: EVENT_TAXONOMY_VERSION, consentVersion: BETA_CONSENT_VERSION, fixtureType: "SYNTHETIC_COHORT", participantCount: PHASE17_SYNTHETIC_PARTICIPANT_COUNT, asOf: asOf.toISOString(), notRealUserData: true };
   const privacyContract = { version: BETA_CONSENT_VERSION, storage: "first-party PostgreSQL only", eventProperties: "strict allowlist; 2 KiB maximum", inviteTokens: "SHA-256 digest only; raw code is response-only", withdrawal: "ProductEvent and BetaFeedback deleted; core product data retained" };
   const eventTaxonomy = { version: EVENT_TAXONOMY_VERSION, events: CLIENT_EVENT_NAMES.map((eventName) => ({ eventName, entityRequired: eventName.startsWith("PODCAST_PLAYBACK_"), entityType: eventName.startsWith("PODCAST_PLAYBACK_") ? "PODCAST_AUDIO_REVISION" : null })) };

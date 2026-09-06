@@ -41,24 +41,23 @@ export async function computeClosedBetaMetrics(asOf: Date) {
   for (const item of intelligence) if (item.job.userId && item.completedAt && (!analysis.has(item.job.userId) || item.completedAt < analysis.get(item.job.userId)!)) analysis.set(item.job.userId, item.completedAt);
   for (const item of events) if (item.eventName === "PODCAST_PLAYBACK_25") { const participant = byId.get(item.participantId); if (participant) earliest(participant.userId, item.occurredAt); }
   for (const item of cognitions) earliest(item.userId, item.createdAt);
-  for (const item of thinking) earliest(item.userId, item.createdAt);
-  for (const item of teachBack) earliest(item.userId, item.createdAt);
+  for (const item of thinking) if (item.completedAt && valid(byUser.get(item.userId), item.completedAt)) earliest(item.userId, item.completedAt);
+  for (const item of teachBack) if (item.assessedAt && valid(byUser.get(item.userId), item.assessedAt)) earliest(item.userId, item.assessedAt);
   const activation = participants.flatMap((participant) => { const a = analysis.get(participant.userId), b = first.get(participant.userId); return a && b ? [{ participant, at: a > b ? a : b }] : []; }).filter(({ participant, at }) => at >= participant.enrolledAt);
 
   const sessionEvents = new Map<string, Date[]>(), meaningfulEvents = new Map<string, Date[]>();
   const add = (target: Map<string, Date[]>, id: string, at: Date) => target.set(id, [...(target.get(id) ?? []), at]);
   for (const item of events) { if (item.eventName === "STUDIO_SESSION_STARTED") add(sessionEvents, item.participantId, item.occurredAt); if (item.eventName === "PODCAST_PLAYBACK_25") add(meaningfulEvents, item.participantId, item.occurredAt); }
   for (const item of [...cognitions, ...reviews]) { const participant = byUser.get(item.userId); if (participant) add(meaningfulEvents, participant.id, item.createdAt); }
-  for (const item of thinking) { const participant = byUser.get(item.userId); if (participant) add(meaningfulEvents, participant.id, item.createdAt); }
-  for (const item of teachBack) { const participant = byUser.get(item.userId); if (participant) add(meaningfulEvents, participant.id, item.createdAt); }
-  for (const item of intelligence) { const participant = item.job.userId ? byUser.get(item.job.userId) : undefined; if (participant && item.completedAt) add(meaningfulEvents, participant.id, item.completedAt); }
+  for (const item of thinking) { const participant = byUser.get(item.userId); if (participant && item.completedAt && valid(participant, item.completedAt)) add(meaningfulEvents, participant.id, item.completedAt); }
+  for (const item of teachBack) { const participant = byUser.get(item.userId); if (participant && item.assessedAt && valid(participant, item.assessedAt)) add(meaningfulEvents, participant.id, item.assessedAt); }
   const retention = (afterHours: number, source: Map<string, Date[]>) => { const eligible = activation.filter(({ at }) => at.getTime() + (afterHours + 24) * HOUR <= asOf.getTime()); const retained = eligible.filter(({ participant, at }) => (source.get(participant.id) ?? []).some((value) => inWindow(value, new Date(at.getTime() + afterHours * HOUR), new Date(at.getTime() + (afterHours + 24) * HOUR)))).length; return { eligible: eligible.length, retained, rate: rate(retained, eligible.length) }; };
 
   const pairs = new Map<string, { startedAt?: Date; completed: boolean }>();
   for (const item of [...events].sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime())) if (item.entityId) { const key = `${item.participantId}:${item.entityId}`, current = pairs.get(key) ?? { completed: false }; if (item.eventName === "PODCAST_PLAYBACK_STARTED" && !current.startedAt) current.startedAt = item.occurredAt; if ((item.eventName === "PODCAST_PLAYBACK_90" || item.eventName === "PODCAST_PLAYBACK_ENDED") && current.startedAt && item.occurredAt >= current.startedAt) current.completed = true; pairs.set(key, current); }
   const startedPairs = [...pairs.values()].filter((item) => item.startedAt); const completedPairs = startedPairs.filter((item) => item.completed);
   const activationEligible24 = participants.filter((item) => item.enrolledAt.getTime() + 24 * HOUR <= asOf.getTime());
-  const activation24 = activation.filter(({ participant, at }) => at <= new Date(participant.enrolledAt.getTime() + 24 * HOUR));
+  const activation24 = activation.filter(({ participant, at }) => participant.enrolledAt.getTime() + 24 * HOUR <= asOf.getTime() && at <= new Date(participant.enrolledAt.getTime() + 24 * HOUR));
   const values = activation.map(({ participant, at }) => at.getTime() - participant.enrolledAt.getTime()).filter((value) => value >= 0).sort((a, b) => a - b);
   const naturalness = feedback.flatMap((item) => item.dimension === "PODCAST_NATURALNESS" && item.rating ? [item.rating] : []); const value = feedback.flatMap((item) => item.dimension === "PODCAST_VALUE" && item.rating ? [item.rating] : []);
   const cohort = Object.fromEntries([...new Set(participants.map((item) => item.cohort))].sort().map((name) => { const enrolled = participants.filter((item) => item.cohort === name).length, activated = activation.filter(({ participant }) => participant.cohort === name).length; return [name, { enrolled, activated, activationRate: rate(activated, enrolled) }]; }));

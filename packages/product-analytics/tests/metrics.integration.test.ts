@@ -13,11 +13,17 @@ describe("phase 17 metrics integrity synthetic cohort", () => {
     expect(first.enrolledParticipants).toBe(18);
     expect(first.activationWithin24hEligible).toBeLessThan(18);
     expect(first.activationWithin24hCount).toBeGreaterThan(0);
+    expect(first.activationWithin24hCount).toBeLessThanOrEqual(first.activationWithin24hEligible);
     expect(first.timeToActivationMilliseconds.negativeCount).toBe(0);
     expect(first.meaningfulD1.rate).not.toBe(first.d1.rate);
     expect(first.podcast.completedPairs).toBe(2);
     expect(first.podcast.startedPairs).toBe(3);
     expect(first.podcast.naturalness.distribution[1]).toBe(0);
+    expect(first.podcast.value.sampleCount).toBeGreaterThan(0);
+    expect(first.thinking.startedUsers).toBeGreaterThan(0);
+    expect(first.thinking.completedUsers).toBeGreaterThan(0);
+    expect(first.teachBack.startedUsers).toBeGreaterThan(0);
+    expect(first.teachBack.assessedUsers).toBeGreaterThan(0);
   });
 
   it("enforces the event and feedback entity semantics before durable writes", () => {

@@ -82,7 +82,16 @@ export async function seedSyntheticClosedBetaCohort(asOf = PHASE17_SYNTHETIC_AS_
   await cognition(people[8]!, hours(people[8]!.enrolledAt, 13));
   await event(people[9]!, "PODCAST_PLAYBACK_90", hours(people[9]!.enrolledAt, 2), "cmphase17audio0000000000002"); await event(people[9]!, "PODCAST_PLAYBACK_STARTED", hours(people[9]!.enrolledAt, 3), "cmphase17audio0000000000002");
   await event(people[10]!, "PODCAST_PLAYBACK_STARTED", hours(people[10]!.enrolledAt, 2), "cmphase17audio0000000000003"); await event(people[10]!, "PODCAST_PLAYBACK_ENDED", hours(people[10]!.enrolledAt, 4), "cmphase17audio0000000000003");
+  const thinkingMemory = await createLineage(people[11]!, hours(people[11]!.enrolledAt, 1));
+  await prisma.thinkingSession.create({ data: { workspaceId: people[11]!.workspaceId, userId: people[11]!.userId, memoryItemId: thinkingMemory.id, status: "ACTIVE", createdAt: hours(people[11]!.enrolledAt, 2) } });
+  const completedThinkingMemory = await createLineage(people[12]!, hours(people[12]!.enrolledAt, 1));
+  await prisma.thinkingSession.create({ data: { workspaceId: people[12]!.workspaceId, userId: people[12]!.userId, memoryItemId: completedThinkingMemory.id, status: "COMPLETED", createdAt: hours(people[12]!.enrolledAt, 2), completedAt: hours(people[12]!.enrolledAt, 3) } });
+  const teachBackMemory = await createLineage(people[13]!, hours(people[13]!.enrolledAt, 1));
+  await prisma.teachBackAttempt.create({ data: { id: randomUUID(), workspaceId: people[13]!.workspaceId, userId: people[13]!.userId, memoryItemId: teachBackMemory.id, content: "synthetic", status: "PENDING_ASSESSMENT", createdAt: hours(people[13]!.enrolledAt, 2) } });
+  const assessedTeachBackMemory = await createLineage(people[14]!, hours(people[14]!.enrolledAt, 1));
+  await prisma.teachBackAttempt.create({ data: { id: randomUUID(), workspaceId: people[14]!.workspaceId, userId: people[14]!.userId, memoryItemId: assessedTeachBackMemory.id, content: "synthetic", status: "ASSESSED", createdAt: hours(people[14]!.enrolledAt, 2), assessedAt: hours(people[14]!.enrolledAt, 3) } });
   await prisma.betaFeedback.create({ data: { participantId: people[0]!.id, workspaceId: people[0]!.workspaceId, category: "QUALITY", dimension: "PODCAST_NATURALNESS", rating: 4, entityType: "PODCAST_AUDIO_REVISION", entityId: "cmphase17audio0000000000001", createdAt: hours(people[0]!.enrolledAt, 32) } });
+  await prisma.betaFeedback.create({ data: { participantId: people[0]!.id, workspaceId: people[0]!.workspaceId, category: "QUALITY", dimension: "PODCAST_VALUE", rating: 5, entityType: "PODCAST_AUDIO_REVISION", entityId: "cmphase17audio0000000000001", createdAt: hours(people[0]!.enrolledAt, 32) } });
   await prisma.betaFeedback.create({ data: { participantId: people[8]!.id, workspaceId: people[8]!.workspaceId, category: "QUALITY", dimension: "PODCAST_VALUE", rating: 1, entityType: "PODCAST_AUDIO_REVISION", entityId: "cmphase17audio0000000000004", createdAt: hours(people[8]!.enrolledAt, 13) } });
   return { asOf, participantCount: people.length, people };
 }
