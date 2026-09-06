@@ -111,27 +111,47 @@ describe("phase 17 metrics integrity synthetic cohort", () => {
     expect(metrics.meaningfulD7.retained).toBe(0);
   });
 
-  it("includes activation plus 24 hours and excludes activation plus 48 hours from D1", async () => {
+  it("retains a participant with only a session at activation plus 24 hours in D1", async () => {
     const enrolledAt = new Date("2026-03-01T12:00:00.000Z"), activationAt = at(enrolledAt, 2);
     const fixture = await boundaryParticipant("d1-boundary", enrolledAt);
     const activation = await fixture.lineage(at(enrolledAt, 1));
     await prisma.userCognitionState.create({ data: { workspaceId: fixture.workspace.id, userId: fixture.user.id, memoryItemId: activation.memory.id, state: "SAVED", createdAt: activationAt } });
     await fixture.event("STUDIO_SESSION_STARTED", at(activationAt, 24));
-    await fixture.event("STUDIO_SESSION_STARTED", at(activationAt, 48));
     const metrics = await computeClosedBetaMetrics(at(activationAt, 49));
     expect(metrics.d1.eligible).toBe(1);
     expect(metrics.d1.retained).toBe(1);
   });
 
-  it("includes activation plus 168 hours and excludes activation plus 192 hours from D7", async () => {
+  it("excludes a participant with only a session at activation plus 48 hours from D1", async () => {
+    const enrolledAt = new Date("2026-03-01T12:00:00.000Z"), activationAt = at(enrolledAt, 2);
+    const fixture = await boundaryParticipant("d1-end-boundary", enrolledAt);
+    const activation = await fixture.lineage(at(enrolledAt, 1));
+    await prisma.userCognitionState.create({ data: { workspaceId: fixture.workspace.id, userId: fixture.user.id, memoryItemId: activation.memory.id, state: "SAVED", createdAt: activationAt } });
+    await fixture.event("STUDIO_SESSION_STARTED", at(activationAt, 48));
+    const metrics = await computeClosedBetaMetrics(at(activationAt, 49));
+    expect(metrics.d1.eligible).toBe(1);
+    expect(metrics.d1.retained).toBe(0);
+  });
+
+  it("retains a participant with only a session at activation plus 168 hours in D7", async () => {
     const enrolledAt = new Date("2026-03-01T12:00:00.000Z"), activationAt = at(enrolledAt, 2);
     const fixture = await boundaryParticipant("d7-boundary", enrolledAt);
     const activation = await fixture.lineage(at(enrolledAt, 1));
     await prisma.userCognitionState.create({ data: { workspaceId: fixture.workspace.id, userId: fixture.user.id, memoryItemId: activation.memory.id, state: "SAVED", createdAt: activationAt } });
     await fixture.event("STUDIO_SESSION_STARTED", at(activationAt, 168));
-    await fixture.event("STUDIO_SESSION_STARTED", at(activationAt, 192));
     const metrics = await computeClosedBetaMetrics(at(activationAt, 193));
     expect(metrics.d7.eligible).toBe(1);
     expect(metrics.d7.retained).toBe(1);
+  });
+
+  it("excludes a participant with only a session at activation plus 192 hours from D7", async () => {
+    const enrolledAt = new Date("2026-03-01T12:00:00.000Z"), activationAt = at(enrolledAt, 2);
+    const fixture = await boundaryParticipant("d7-end-boundary", enrolledAt);
+    const activation = await fixture.lineage(at(enrolledAt, 1));
+    await prisma.userCognitionState.create({ data: { workspaceId: fixture.workspace.id, userId: fixture.user.id, memoryItemId: activation.memory.id, state: "SAVED", createdAt: activationAt } });
+    await fixture.event("STUDIO_SESSION_STARTED", at(activationAt, 192));
+    const metrics = await computeClosedBetaMetrics(at(activationAt, 193));
+    expect(metrics.d7.eligible).toBe(1);
+    expect(metrics.d7.retained).toBe(0);
   });
 });
