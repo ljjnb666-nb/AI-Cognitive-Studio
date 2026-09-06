@@ -4,11 +4,15 @@ import { AccountMenu } from "./account-menu";
 import { StudioNavigation } from "./studio-navigation";
 
 import { PageHeader } from "./page-header";
+import { BetaSessionTracker } from "./beta-session-tracker";
+import { BetaFeedbackButton } from "./beta-feedback-button";
+import { betaTelemetryEnabledForUser } from "@ai-cognitive/product-analytics";
 
 export { PageHeader };
 
 export async function AppShell({ children }: { children: React.ReactNode }) {
   const identity = await resolveWebIdentity();
+  const betaTelemetryEnabled = await betaTelemetryEnabledForUser(identity.userId);
   const workspaces = identity.workspaces;
   const workspace = workspaces.find((item) => item.id === identity.workspaceId) ?? workspaces[0];
   if (!workspace) throw new Error("WEB_IDENTITY_WORKSPACE_REQUIRED");
@@ -22,6 +26,7 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
             <div className="brand-subtitle">认知工作室</div>
           </div>
           <StudioNavigation />
+          {betaTelemetryEnabled ? <BetaFeedbackButton /> : null}
         </div>
 
         <div className="sidebar-footer">
@@ -36,6 +41,7 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         <main className="content-area">
+          {betaTelemetryEnabled ? <BetaSessionTracker /> : null}
           <StudioNavigation mobile />
           {children}
         </main>

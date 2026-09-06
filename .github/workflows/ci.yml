@@ -157,6 +157,16 @@ jobs:
         run: pnpm test:phase16:release
         env:
           PHASE16_ARTIFACT_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Phase 17 Closed Beta core release gate
+        run: pnpm test:phase17:release
+        env:
+          PHASE17_ARTIFACT_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Upload Phase 17 closed beta evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase17-closed-beta-${{ github.event.pull_request.head.sha || github.sha }}
+          path: output/phase17
+          if-no-files-found: error
       - name: Upload Phase 16 performance and cost evidence
         uses: actions/upload-artifact@v4
         with:

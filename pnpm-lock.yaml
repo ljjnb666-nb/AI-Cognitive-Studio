@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      tsx:
+        specifier: ^4.23.11
+        version: 4.23.11
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -26,6 +29,9 @@ importers:
       '@ai-cognitive/podcast-generation':
         specifier: workspace:*
         version: link:../../packages/podcast-generation
+      '@ai-cognitive/product-analytics':
+        specifier: workspace:*
+        version: link:../../packages/product-analytics
       '@ai-cognitive/provider-gateway':
         specifier: workspace:*
         version: link:../../packages/provider-gateway
@@ -355,6 +361,34 @@ importers:
       dotenv:
         specifier: ^16.6.1
         version: 16.6.1
+      eslint:
+        specifier: ^9.39.1
+        version: 9.39.5(jiti@2.7.0)
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      typescript-eslint:
+        specifier: ^8.46.4
+        version: 8.66.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)
+      vitest:
+        specifier: ^4.0.8
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.11))
+
+  packages/product-analytics:
+    dependencies:
+      '@ai-cognitive/db':
+        specifier: workspace:*
+        version: link:../db
+      zod:
+        specifier: ^4.1.12
+        version: 4.4.3
+    devDependencies:
+      '@eslint/js':
+        specifier: ^9.39.1
+        version: 9.39.5
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.13.3
       eslint:
         specifier: ^9.39.1
         version: 9.39.5(jiti@2.7.0)
@@ -2371,6 +2405,7 @@ packages:
   eslint@9.39.5:
     resolution: {integrity: sha512-DgZS62aPLXKlnxILS/AYCoRvHaZeXceIzlXPkkGGzJWSow1aEk0lbTlxUSlyjC8jcaKxAdOnTDz+o1JFSBsyjw==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'

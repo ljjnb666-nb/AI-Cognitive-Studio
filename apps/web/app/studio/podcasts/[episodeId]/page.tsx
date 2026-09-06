@@ -4,12 +4,16 @@ import { prisma } from "@ai-cognitive/db";
 import { PageHeader } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { GenerationProcessing } from "@/components/generation-processing";
+import { PodcastPlayer } from "@/components/podcast-player";
+import { PodcastQualityFeedback } from "@/components/podcast-quality-feedback";
 import { resolveWebIdentity } from "@/lib/identity";
 import { podcastStageLabel, statusLabel } from "@/lib/product";
+import { betaTelemetryEnabledForUser } from "@ai-cognitive/product-analytics";
 
 export default async function PodcastDetail({ params }: { params: Promise<{ episodeId: string }> }) {
   const { episodeId } = await params;
   const ctx = await resolveWebIdentity();
+  const betaTelemetryEnabled = await betaTelemetryEnabledForUser(ctx.userId);
 
   const episode = await prisma.podcastEpisode.findFirst({
     where: { id: episodeId, workspaceId: ctx.workspaceId },
@@ -89,14 +93,8 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
           <h2 className="section-title" style={{ marginBottom: 16 }}>
             播放节目
           </h2>
-          <audio
-            controls
-            preload="metadata"
-            src={`/api/studio/media/audio/${episode.currentAudio.revision.id}`}
-            style={{ width: "100%", borderRadius: 4 }}
-          >
-            你的浏览器不支持音频播放。
-          </audio>
+          <PodcastPlayer revisionId={episode.currentAudio.revision.id} telemetryEnabled={betaTelemetryEnabled} />
+          {betaTelemetryEnabled ? <PodcastQualityFeedback revisionId={episode.currentAudio.revision.id} /> : null}
           <div style={{ marginTop: 12 }}>
             <a
               href={`/api/studio/media/audio/${episode.currentAudio.revision.id}`}

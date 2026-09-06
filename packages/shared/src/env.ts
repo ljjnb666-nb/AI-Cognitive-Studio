@@ -24,6 +24,7 @@ const environmentSchema = z.object({
   SOURCE_MAX_PDF_PAGES: z.coerce.number().int().positive().default(2000),
   SOURCE_PARSE_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  BETA_ACCESS_MODE: z.enum(["OFF", "ENFORCED"]).default("OFF"),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;
