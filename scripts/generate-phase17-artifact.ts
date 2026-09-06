@@ -11,7 +11,7 @@ async function main() {
   const assertions = [
     fixture.participantCount === 18, metrics.activatedParticipants > 0,
     metrics.activationWithin24hEligible > 0, metrics.activationWithin24hCount <= metrics.activationWithin24hEligible,
-    metrics.d1.eligible > 0, metrics.d7.eligible > 0, metrics.meaningfulD1.eligible > 0, metrics.meaningfulD7.eligible > 0,
+    metrics.d1.eligible > 0, metrics.d7.eligible > 0, metrics.d7.retained > 0, metrics.meaningfulD1.eligible > 0, metrics.meaningfulD7.eligible > 0, metrics.meaningfulD7.retained > 0,
     metrics.podcast.startedPairs > 0, metrics.podcast.completedPairs > 0, metrics.cognition.saveUsers > 0,
     metrics.thinking.completedUsers > 0, metrics.teachBack.assessedUsers > 0,
     metrics.podcast.naturalness.sampleCount > 0, metrics.podcast.value.sampleCount > 0,
