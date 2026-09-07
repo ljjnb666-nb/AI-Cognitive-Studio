@@ -1,7 +1,7 @@
 import { ProviderGatewayError } from "../errors.js";
 import type { CapabilityFamily, ProtocolFamily } from "../types.js";
 export type AuthScheme = "BEARER" | "X_API_KEY" | "X_GOOG_API_KEY";
-export type ProviderProfile = { providerKey: "openai" | "anthropic" | "gemini" | "deepseek" | "qwen" | "minimax" | "cohere" | "voyage"; family: CapabilityFamily; protocol: ProtocolFamily; endpoint: string; authScheme: AuthScheme; anthropicVersion?: string };
+export type ProviderProfile = { providerKey: string; family: CapabilityFamily; protocol: ProtocolFamily; endpoint: string; authScheme: AuthScheme; anthropicVersion?: string };
 /** Endpoints are deployment-approved profiles, never user-controlled base URLs. */
 export const builtInProviderProfiles: readonly ProviderProfile[] = [
   { providerKey: "openai", family: "TEXT_GENERATION", protocol: "OPENAI_RESPONSES", endpoint: "https://api.openai.com/v1/responses", authScheme: "BEARER" },
@@ -11,6 +11,7 @@ export const builtInProviderProfiles: readonly ProviderProfile[] = [
   { providerKey: "gemini", family: "TEXT_GENERATION", protocol: "GEMINI_NATIVE", endpoint: "https://generativelanguage.googleapis.com/v1beta", authScheme: "X_GOOG_API_KEY" },
   { providerKey: "gemini", family: "EMBEDDING", protocol: "GEMINI_EMBEDDINGS", endpoint: "https://generativelanguage.googleapis.com/v1beta", authScheme: "X_GOOG_API_KEY" },
   { providerKey: "deepseek", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.deepseek.com/chat/completions", authScheme: "BEARER" },
+  { providerKey: "zhipu", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions", authScheme: "BEARER" },
   { providerKey: "qwen", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", authScheme: "BEARER" },
   { providerKey: "minimax", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.minimax.io/v1/chat/completions", authScheme: "BEARER" },
   { providerKey: "cohere", family: "EMBEDDING", protocol: "COHERE_EMBEDDINGS_V2", endpoint: "https://api.cohere.com/v2/embed", authScheme: "BEARER" },
@@ -24,5 +25,9 @@ function qwenProfile(family: CapabilityFamily, configuration: Readonly<Record<st
   if ((region === "BEIJING" || region === "SINGAPORE") && typeof workspaceId === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(workspaceId)) { const location = region === "BEIJING" ? "cn-beijing" : "ap-southeast-1"; return { providerKey: "qwen", family, protocol: "OPENAI_COMPATIBLE", endpoint: `https://${workspaceId}.${location}.maas.aliyuncs.com/compatible-mode/v1/${suffix}`, authScheme: "BEARER" }; }
   return undefined;
 }
-export function approvedProfile(providerKey: string, family: CapabilityFamily, endpoint: string | undefined, configuration: Readonly<Record<string, unknown>> = {}): ProviderProfile | undefined { const profile = providerKey === "qwen" ? qwenProfile(family, configuration) : builtInProviderProfiles.find(item => item.providerKey === providerKey && item.family === family); return profile && (!endpoint || endpoint === profile.endpoint) ? profile : undefined; }
+export function approvedProfile(providerKey: string, family: CapabilityFamily, endpoint: string | undefined, configuration: Readonly<Record<string, unknown>> = {}): ProviderProfile | undefined {
+  if (providerKey === "openai-compatible" && family === "TEXT_GENERATION" && endpoint) return { providerKey, family, protocol: "OPENAI_COMPATIBLE", endpoint, authScheme: "BEARER" };
+  const profile = providerKey === "qwen" ? qwenProfile(family, configuration) : builtInProviderProfiles.find(item => item.providerKey === providerKey && item.family === family);
+  return profile && (!endpoint || endpoint === profile.endpoint) ? profile : undefined;
+}
 export function authHeaders(scheme: AuthScheme, credential: string | undefined): Record<string, string> { if (!credential) throw new ProviderGatewayError("AUTHENTICATION_FAILED"); return scheme === "BEARER" ? { authorization: `Bearer ${credential}` } : scheme === "X_API_KEY" ? { "x-api-key": credential } : { "x-goog-api-key": credential }; }

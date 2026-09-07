@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
-import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, parseKeyring, parseProviderModelManifest, validateProviderEndpoint, type ProviderGateway } from "@ai-cognitive/provider-gateway";
+import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, resolveCredentialKeyring, resolveProviderCatalog, validateProviderEndpoint, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 
 type ThinkingGatewayRuntime = ReturnType<typeof assembleThinkingGatewayRuntime>;
@@ -8,8 +8,8 @@ let cachedRuntime: ThinkingGatewayRuntime | undefined;
 
 /** Canonical workspace-BYOK Gateway composition for request-scoped thinking turns. */
 function assembleThinkingGatewayRuntime(environment: NodeJS.ProcessEnv) {
-  const cipher = parseKeyring(environment.PROVIDER_GATEWAY_KEYRING); if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
-  const manifest = parseProviderModelManifest(environment.PROVIDER_GATEWAY_MODEL_MANIFEST), registry = new ProviderRegistry(); for (const provider of manifest.providers) registry.register(provider);
+  const cipher = resolveCredentialKeyring(environment); if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
+  const manifest = resolveProviderCatalog(environment.PROVIDER_GATEWAY_MODEL_MANIFEST), registry = new ProviderRegistry(); for (const provider of manifest.providers) registry.register(provider);
   const store = new ProviderGatewayRepository(prisma, cipher), repository = new ProviderExecutionRepository(prisma, cipher), authorizer = new WorkspaceMembershipExecutionAuthorizer(prisma), redis = createRedisConnection(environment.REDIS_URL ?? "");
   const browserFixture = environment.NODE_ENV === "test" && environment.THINKING_SESSION_TEST_GATEWAY === "true";
   const adapters = browserFixture

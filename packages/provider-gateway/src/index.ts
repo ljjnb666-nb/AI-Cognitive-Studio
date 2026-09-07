@@ -2,6 +2,7 @@ export * from "./types.js";
 export * from "./errors.js";
 export * from "./registry.js";
 export * from "./model-manifest.js";
+export * from "./provider-catalog/index.js";
 export * from "./routing/resolver.js";
 export * from "./routing/snapshot.js";
 export * from "./credentials/cipher.js";

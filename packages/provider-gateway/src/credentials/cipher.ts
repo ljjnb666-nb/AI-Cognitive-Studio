@@ -1,4 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { ProviderGatewayError } from "../errors.js";
 
 export type CredentialAad = { workspaceId: string; connectionId: string; credentialVersionId: string; providerKey: string };
@@ -28,3 +30,19 @@ export class VersionedAesGcmCipher implements CredentialCipher {
   private decryptWithAad(value: EncryptedCredential, aad: Buffer): string { const key = this.keys.get(value.keyVersion); if (!key) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Unknown embedding result key version"); const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(value.iv, "base64")); decipher.setAAD(aad); decipher.setAuthTag(Buffer.from(value.authTag, "base64")); return Buffer.concat([decipher.update(Buffer.from(value.ciphertext, "base64")), decipher.final()]).toString("utf8"); }
 }
 export function parseKeyring(input: string | undefined): VersionedAesGcmCipher | undefined { if (!input) return undefined; let value: unknown; try { value = JSON.parse(input); } catch { throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Invalid provider gateway keyring"); } const record = value as { activeVersion?: unknown; keys?: unknown }; if (typeof record.activeVersion !== "string" || !record.keys || typeof record.keys !== "object") throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Invalid provider gateway keyring"); const keys = new Map(Object.entries(record.keys as Record<string, unknown>).map(([version, encoded]) => { if (typeof encoded !== "string") throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Invalid provider gateway key"); return [version, Buffer.from(encoded, "base64")]; })); return new VersionedAesGcmCipher(record.activeVersion, keys); }
+
+/** Resolve the deployment keyring, or initialize one durable local-development key exactly when credentials are first saved. */
+export function resolveCredentialKeyring(environment: { NODE_ENV?: string; PROVIDER_GATEWAY_KEYRING?: string; PROVIDER_GATEWAY_LOCAL_KEYRING_PATH?: string }, options: { initializeLocal?: boolean } = {}): VersionedAesGcmCipher | undefined {
+  const configured = parseKeyring(environment.PROVIDER_GATEWAY_KEYRING);
+  if (configured) return configured;
+  if (environment.NODE_ENV === "production") return undefined;
+  const path = resolve(environment.PROVIDER_GATEWAY_LOCAL_KEYRING_PATH ?? ".runtime/secrets/provider-gateway-keyring.json");
+  if (existsSync(path)) return parseKeyring(readFileSync(path, "utf8"));
+  if (!options.initializeLocal) return undefined;
+  const encoded = randomBytes(32).toString("base64"), value = JSON.stringify({ activeVersion: "local-v1", keys: { "local-v1": encoded } });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, value, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  try { chmodSync(path, 0o600); } catch { /* Windows may not support POSIX mode bits. */ }
+  process.emitWarning("A local Provider credential keyring was created. Keep .runtime/secrets intact; deleting it makes saved local API keys undecryptable.", { code: "PROVIDER_GATEWAY_LOCAL_KEYRING_CREATED" });
+  return parseKeyring(value)!;
+}
