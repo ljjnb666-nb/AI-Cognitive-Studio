@@ -1,7 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { ProviderGatewayError } from "../errors.js";
 
 export type CredentialAad = { workspaceId: string; connectionId: string; credentialVersionId: string; providerKey: string };
@@ -37,8 +36,8 @@ export function resolveCredentialKeyring(environment: { NODE_ENV?: string; PROVI
   const configured = parseKeyring(environment.PROVIDER_GATEWAY_KEYRING);
   if (configured) return configured;
   if (environment.NODE_ENV === "production") return undefined;
-  // Resolve from this package, not process.cwd(), so independently started Web and Worker processes share one local vault.
-  const runtimeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+  // pnpm preserves INIT_CWD as the project invocation directory. It is stable across Web and Worker package processes.
+  const runtimeRoot = resolve(process.env.INIT_CWD ?? process.cwd());
   const path = resolve(environment.PROVIDER_GATEWAY_LOCAL_KEYRING_PATH ?? resolve(runtimeRoot, ".runtime/secrets/provider-gateway-keyring.json"));
   if (existsSync(path)) return parseKeyring(readFileSync(path, "utf8"));
   if (!options.initializeLocal) return undefined;
