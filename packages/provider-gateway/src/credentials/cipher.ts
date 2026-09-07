@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ProviderGatewayError } from "../errors.js";
 
 export type CredentialAad = { workspaceId: string; connectionId: string; credentialVersionId: string; providerKey: string };
@@ -36,12 +37,19 @@ export function resolveCredentialKeyring(environment: { NODE_ENV?: string; PROVI
   const configured = parseKeyring(environment.PROVIDER_GATEWAY_KEYRING);
   if (configured) return configured;
   if (environment.NODE_ENV === "production") return undefined;
-  const path = resolve(environment.PROVIDER_GATEWAY_LOCAL_KEYRING_PATH ?? ".runtime/secrets/provider-gateway-keyring.json");
+  // Resolve from this package, not process.cwd(), so independently started Web and Worker processes share one local vault.
+  const runtimeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const path = resolve(environment.PROVIDER_GATEWAY_LOCAL_KEYRING_PATH ?? resolve(runtimeRoot, ".runtime/secrets/provider-gateway-keyring.json"));
   if (existsSync(path)) return parseKeyring(readFileSync(path, "utf8"));
   if (!options.initializeLocal) return undefined;
   const encoded = randomBytes(32).toString("base64"), value = JSON.stringify({ activeVersion: "local-v1", keys: { "local-v1": encoded } });
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, value, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  try { writeFileSync(path, value, { encoding: "utf8", mode: 0o600, flag: "wx" }); }
+  catch (error) {
+    // Another first save won the race. Its durable keyring is authoritative for both requests.
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return parseKeyring(readFileSync(path, "utf8"))!;
+    throw error;
+  }
   try { chmodSync(path, 0o600); } catch { /* Windows may not support POSIX mode bits. */ }
   process.emitWarning("A local Provider credential keyring was created. Keep .runtime/secrets intact; deleting it makes saved local API keys undecryptable.", { code: "PROVIDER_GATEWAY_LOCAL_KEYRING_CREATED" });
   return parseKeyring(value)!;

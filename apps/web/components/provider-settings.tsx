@@ -63,7 +63,8 @@ export function ProviderSettings() {
       });
       const body = (await response.json()) as State & { error?: string };
       if (!response.ok) throw new Error(body.error ?? "PROVIDER_SETTINGS_SAVE_FAILED");
-      if ("test" in body) { setMessage("连接测试通过，确认后点击保存 Provider。"); return; }
+      if ("test" in body) { const state = (body as { test: { state: string } }).test.state; setMessage(state === "VALID" ? "✓ API Key 可用，确认后点击保存 Provider。" : state === "AUTHENTICATION_FAILED" ? "API Key 无效或已失效。" : state === "TIMEOUT" ? "连接超时，请稍后重试。" : state === "UNSUPPORTED_TEST" ? "该自定义服务无法自动验证，可直接保存后测试实际调用。" : "无法连接该服务，请检查地址和网络。"); return; }
+      if ("autoConfigure" in body) { const result = (body as { autoConfigure: { bound: string[]; skipped: string[] } }).autoConfigure; setState(body); setMessage(result.bound.length ? `已自动配置 ${result.bound.length} 个推荐用途。${result.skipped.length ? "其余用途需要兼容模型或语音设置。" : ""}` : "当前模型没有可自动配置的用途，请在高级设置中选择兼容模型。"); return; }
       setState(body);
     } catch (error) {
       setMessage(readableError(error instanceof Error ? error.message : "PROVIDER_SETTINGS_SAVE_FAILED"));
@@ -155,6 +156,7 @@ export function ProviderSettings() {
 
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
                 <CredentialRotation connectionId={connection.id} busy={busy} submit={submit} />
+                <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit({ action: "AUTO_CONFIGURE_ROUTES", connectionId: connection.id })} style={{ height: 36, fontSize: 13 }}>自动配置推荐用途</button>
 
                 {connection.credential.id && connection.credential.status === "ACTIVE" && (
                   <button
@@ -185,8 +187,9 @@ export function ProviderSettings() {
         </div>
       </section>
 
-      {/* 4. Route Bindings (All 8 Slots) */}
-      <section className="card-panel">
+      {/* Engineering controls remain available, but are intentionally hidden from the normal setup flow. */}
+      <details className="card-panel">
+        <summary style={{ cursor: "pointer", fontWeight: 600 }}>高级设置</summary>
           <h2 className="section-title" style={{ marginBottom: 20 }}>
           配置用途
         </h2>
@@ -204,7 +207,7 @@ export function ProviderSettings() {
             />
           ))}
         </div>
-      </section>
+      </details>
 
       {message && (
         <p aria-live="polite" className="form-error">
@@ -228,7 +231,6 @@ function ConnectionForm({
   const defaultEndpoints: Record<string, string> = { openai: "https://api.openai.com/v1/responses", anthropic: "https://api.anthropic.com/v1/messages", gemini: "https://generativelanguage.googleapis.com/v1beta", deepseek: "https://api.deepseek.com/chat/completions", zhipu: "https://open.bigmodel.cn/api/paas/v4/chat/completions" };
   const [showAdvanced, setShowAdvanced] = useState(false);
   const provider = providers.find((item) => item.providerKey === providerKey);
-  const protocols = provider ? [...new Set([provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})])] : [];
 
   return (
     <form
@@ -255,17 +257,7 @@ function ConnectionForm({
         </select>
       </div>
 
-      {protocols.length > 1 && <div className="form-group">
-        <label className="form-label">协议 (Protocol)</label>
-        <select className="select-control" name="protocol">
-          {protocols.map((proto) => (
-            <option value={proto} key={proto}>
-              {proto}
-            </option>
-          ))}
-        </select>
-      </div>}
-      {protocols.length === 1 && <input type="hidden" name="protocol" value={protocols[0]} />}
+      <input type="hidden" name="protocol" value={provider?.protocol ?? ""} />
 
       <div className="form-group">
         <label className="form-label">名称</label>
@@ -274,7 +266,7 @@ function ConnectionForm({
 
       <div className="form-group">
         <label className="form-label">Base URL</label>
-        <input className="input-control font-mono" name="endpoint" type="url" required defaultValue={defaultEndpoints[providerKey] ?? ""} placeholder="https://api.example.com/v1" />
+        <input className="input-control font-mono" name="endpoint" type="url" required readOnly={providerKey !== "openai-compatible"} defaultValue={defaultEndpoints[providerKey] ?? ""} placeholder="https://api.example.com/v1" />
       </div>
 
       <div className="form-group">

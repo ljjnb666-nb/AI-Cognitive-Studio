@@ -26,4 +26,13 @@ describe("Beta provider setup catalog", () => {
       expect(resolveCredentialKeyring({ NODE_ENV: "production", PROVIDER_GATEWAY_KEYRING: undefined, PROVIDER_GATEWAY_LOCAL_KEYRING_PATH: path }, { initializeLocal: true })).toBeUndefined();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+
+  it("converges concurrent first initialization on one durable local key", async () => {
+    const root = mkdtempSync(join(tmpdir(), "provider-keyring-race-")), path = join(root, "secrets", "keyring.json"), environment = { NODE_ENV: "development", PROVIDER_GATEWAY_KEYRING: undefined, PROVIDER_GATEWAY_LOCAL_KEYRING_PATH: path };
+    try {
+      const [first, second] = await Promise.all([Promise.resolve().then(() => resolveCredentialKeyring(environment, { initializeLocal: true })!), Promise.resolve().then(() => resolveCredentialKeyring(environment, { initializeLocal: true })!)]);
+      const encrypted = first.encrypt("shared", { workspaceId: "w", connectionId: "c", credentialVersionId: "v", providerKey: "openai" });
+      expect(second.decrypt(encrypted, { workspaceId: "w", connectionId: "c", credentialVersionId: "v", providerKey: "openai" })).toBe("shared");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 });

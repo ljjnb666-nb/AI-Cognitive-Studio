@@ -14,7 +14,8 @@ const revokeCredential = z.object({ action: z.literal("REVOKE_CREDENTIAL"), cred
 const setEnabled = z.object({ action: z.literal("SET_ENABLED"), connectionId: z.string().cuid(), enabled: z.boolean() });
 const setRoute = z.object({ action: z.literal("SET_ROUTE"), routeSlot: z.enum(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"]), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200), configuration: jsonRecord });
 const testConnection = z.object({ action: z.literal("TEST_CONNECTION"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000) });
-const bodySchema = z.discriminatedUnion("action", [createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection]);
+const autoConfigureRoutes = z.object({ action: z.literal("AUTO_CONFIGURE_ROUTES"), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200).optional() });
+const bodySchema = z.discriminatedUnion("action", [createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection, autoConfigureRoutes]);
 
 function safeConnection(connection: { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credentialVersions: { id: string; displayHint: string | null; status: string }[] }) {
   const credential = connection.credentialVersions[0];
@@ -28,15 +29,37 @@ async function response(workspaceId: string) {
   ]);
   return NextResponse.json({ manifest: sanitizedProviderManifest(productManifest()), connections: connections.map(safeConnection), routes: routes.map(route => ({ id: route.id, routeSlot: route.routeSlot, connectionId: route.connectionId, modelId: route.modelId, configuration: safeConfiguration(route.configuration), connection: route.connection })), readiness });
 }
+function connectionTestUrl(input: z.infer<typeof testConnection>): string | undefined {
+  const endpoint = new URL(input.endpoint);
+  if (input.providerKey === "openai" || input.providerKey === "deepseek" || input.providerKey === "zhipu") return new URL("models", endpoint.pathname.endsWith("/") ? endpoint : new URL(`${endpoint.pathname}/../`, endpoint)).toString();
+  if (input.providerKey === "gemini") return new URL("models", endpoint.pathname.endsWith("/") ? endpoint : new URL(`${endpoint.pathname}/`, endpoint)).toString();
+  if (input.providerKey === "anthropic") return "https://api.anthropic.com/v1/models";
+  return undefined;
+}
 async function testSubmittedConnection(input: z.infer<typeof testConnection>, manifest: ReturnType<typeof productManifest>) {
   const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
   if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
   await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } });
+  const url = connectionTestUrl(input); if (!url) return { state: "UNSUPPORTED_TEST" as const };
   const headers: Record<string, string> = input.providerKey === "anthropic" ? { "x-api-key": input.secret, "anthropic-version": "2023-06-01" } : input.providerKey === "gemini" ? { "x-goog-api-key": input.secret } : { authorization: `Bearer ${input.secret}` };
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 5_000);
-  try { const result = await fetch(input.endpoint, { method: "HEAD", headers, signal: controller.signal, redirect: "error" }); if (result.status === 401 || result.status === 403) throw new Error("AUTHORIZATION_FAILED"); if (!result.ok && result.status !== 405) throw new Error("TEST_CONNECTION_FAILED"); return { ok: true, status: result.status }; }
-  catch (error) { if (error instanceof Error && (error.message === "AUTHORIZATION_FAILED" || error.message === "TEST_CONNECTION_FAILED")) throw error; throw new Error("TEST_CONNECTION_FAILED"); }
+  try { const result = await fetch(url, { method: "GET", headers, signal: controller.signal, redirect: "error" }); if (result.status === 401 || result.status === 403) return { state: "AUTHENTICATION_FAILED" as const }; if (!result.ok) return { state: "PROVIDER_REJECTED" as const }; return { state: "VALID" as const }; }
+  catch (error) { return { state: error instanceof DOMException && error.name === "AbortError" ? "TIMEOUT" as const : "ENDPOINT_UNREACHABLE" as const }; }
   finally { clearTimeout(timer); }
+}
+const textSlots: RouteSlot[] = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "PODCAST_SCRIPT", "SHORT_VIDEO_SCRIPT", "THINKING_SESSION"];
+async function autoConfigure(context: { workspaceId: string; userId: string }, input: z.infer<typeof autoConfigureRoutes>, manifest: ReturnType<typeof productManifest>, repository: ProviderGatewayRepository) {
+  const connection = await prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.connectionId, workspaceId: context.workspaceId } } });
+  if (!connection) throw new Error("AUTHORIZATION_FAILED");
+  const provider = manifest.providers.find(item => item.providerKey === connection.providerKey); if (!provider) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
+  const chosen = input.modelId ? provider.models.find(model => model.modelId === input.modelId) : provider.models.find(model => model.families.includes("TEXT_GENERATION"));
+  if (!chosen) throw new Error("CAPABILITY_MISMATCH");
+  const bound: string[] = [], skipped: string[] = [];
+  if (chosen.families.includes("TEXT_GENERATION")) for (const routeSlot of textSlots) { try { validateRouteManifestSelection(manifest, { routeSlot, providerKey: connection.providerKey, protocol: connection.protocol, modelId: chosen.modelId }); await repository.setRoute(context, { routeSlot, connectionId: connection.id, modelId: chosen.modelId, configuration: {} }); bound.push(routeSlot); } catch { skipped.push(routeSlot); } }
+  if (chosen.families.includes("TEXT_GENERATION") && chosen.structuredOutput === "STRICT_JSON_SCHEMA") { try { validateRouteManifestSelection(manifest, { routeSlot: "TEACH_BACK_ASSESSMENT", providerKey: connection.providerKey, protocol: connection.protocol, modelId: chosen.modelId }); await repository.setRoute(context, { routeSlot: "TEACH_BACK_ASSESSMENT", connectionId: connection.id, modelId: chosen.modelId, configuration: {} }); bound.push("TEACH_BACK_ASSESSMENT"); } catch { skipped.push("TEACH_BACK_ASSESSMENT"); } }
+  // Embedding and speech are intentionally not guessed from a text-only connection: their protocol and voice requirements remain capability-gated.
+  for (const routeSlot of ["EMBEDDING", "PODCAST_TTS", "SHORT_VIDEO_TTS"] as const) skipped.push(routeSlot);
+  return { bound, skipped };
 }
 function failure(error: unknown) {
   const message = error instanceof Error ? error.message.split(":")[0] : "";
@@ -61,6 +84,7 @@ export async function POST(request: Request) {
     const cipher = resolveCredentialKeyring(process.env, { initializeLocal: input.action === "CREATE_CONNECTION_WITH_CREDENTIAL" || input.action === "SET_CREDENTIAL" });
     if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
     const repository = new ProviderGatewayRepository(prisma, cipher);
+    if (input.action === "AUTO_CONFIGURE_ROUTES") { const configured = await autoConfigure(context, input, manifest, repository); return NextResponse.json({ ...(await (await response(context.workspaceId)).json()), autoConfigure: configured }); }
     if (input.action === "CREATE_CONNECTION" || input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") {
       assertSafeConfiguration(input.configuration);
       await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } });
