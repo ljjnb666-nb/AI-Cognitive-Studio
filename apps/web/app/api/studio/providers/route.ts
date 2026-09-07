@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { ProviderGatewayError, ProviderGatewayRepository, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayError, ProviderGatewayRepository, builtInProviderProfiles, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
@@ -48,17 +48,31 @@ async function testSubmittedConnection(input: z.infer<typeof testConnection>, ma
   finally { clearTimeout(timer); }
 }
 const textSlots: RouteSlot[] = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "PODCAST_SCRIPT", "SHORT_VIDEO_SCRIPT", "THINKING_SESSION"];
-async function autoConfigure(context: { workspaceId: string; userId: string }, input: z.infer<typeof autoConfigureRoutes>, manifest: ReturnType<typeof productManifest>, repository: ProviderGatewayRepository) {
+async function autoConfigure(context: { workspaceId: string; userId: string }, input: z.infer<typeof autoConfigureRoutes>, manifest: ReturnType<typeof productManifest>, repository: ProviderGatewayRepository, cipher: NonNullable<ReturnType<typeof resolveCredentialKeyring>>) {
   const connection = await prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.connectionId, workspaceId: context.workspaceId } } });
   if (!connection) throw new Error("AUTHORIZATION_FAILED");
   const provider = manifest.providers.find(item => item.providerKey === connection.providerKey); if (!provider) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
   const chosen = input.modelId ? provider.models.find(model => model.modelId === input.modelId) : provider.models.find(model => model.families.includes("TEXT_GENERATION"));
   if (!chosen) throw new Error("CAPABILITY_MISMATCH");
   const bound: string[] = [], skipped: string[] = [];
-  if (chosen.families.includes("TEXT_GENERATION")) for (const routeSlot of textSlots) { try { validateRouteManifestSelection(manifest, { routeSlot, providerKey: connection.providerKey, protocol: connection.protocol, modelId: chosen.modelId }); await repository.setRoute(context, { routeSlot, connectionId: connection.id, modelId: chosen.modelId, configuration: {} }); bound.push(routeSlot); } catch { skipped.push(routeSlot); } }
-  if (chosen.families.includes("TEXT_GENERATION") && chosen.structuredOutput === "STRICT_JSON_SCHEMA") { try { validateRouteManifestSelection(manifest, { routeSlot: "TEACH_BACK_ASSESSMENT", providerKey: connection.providerKey, protocol: connection.protocol, modelId: chosen.modelId }); await repository.setRoute(context, { routeSlot: "TEACH_BACK_ASSESSMENT", connectionId: connection.id, modelId: chosen.modelId, configuration: {} }); bound.push("TEACH_BACK_ASSESSMENT"); } catch { skipped.push("TEACH_BACK_ASSESSMENT"); } }
-  // Embedding and speech are intentionally not guessed from a text-only connection: their protocol and voice requirements remain capability-gated.
-  for (const routeSlot of ["EMBEDDING", "PODCAST_TTS", "SHORT_VIDEO_TTS"] as const) skipped.push(routeSlot);
+  const credential = await prisma.providerCredentialVersion.findFirst({ where: { workspaceId: context.workspaceId, connectionId: connection.id, status: "ACTIVE" }, orderBy: { credentialVersion: "desc" } });
+  if (!credential) throw new Error("AUTHORIZATION_FAILED");
+  const secret = cipher.decrypt(credential, { workspaceId: context.workspaceId, connectionId: connection.id, credentialVersionId: credential.id, providerKey: connection.providerKey });
+  const connectionFor = async (family: "TEXT_GENERATION" | "EMBEDDING" | "SPEECH") => {
+    const protocol = provider.capabilityProtocols?.[family] ?? provider.protocol;
+    if (connection.protocol === protocol) return connection;
+    const existing = await prisma.providerConnection.findFirst({ where: { workspaceId: context.workspaceId, providerKey: connection.providerKey, protocol, status: "ACTIVE", credentialVersions: { some: { status: "ACTIVE" } } }, orderBy: { createdAt: "asc" } });
+    if (existing) return existing;
+    const endpoint = builtInProviderProfiles.find(profile => profile.providerKey === connection.providerKey && profile.family === family && profile.protocol === protocol)?.endpoint;
+    if (!endpoint) throw new Error("CAPABILITY_MISMATCH");
+    return (await repository.createConnectionWithCredential(context, { providerKey: connection.providerKey, protocol, displayName: `${provider.displayName}（${family === "TEXT_GENERATION" ? "文本" : family === "EMBEDDING" ? "向量" : "语音"}）`, endpoint, secret, configuration: {} })).connection;
+  };
+  if (chosen.families.includes("TEXT_GENERATION")) { const textConnection = await connectionFor("TEXT_GENERATION"); for (const routeSlot of textSlots) { try { validateRouteManifestSelection(manifest, { routeSlot, providerKey: connection.providerKey, protocol: textConnection.protocol, modelId: chosen.modelId }); await repository.setRoute(context, { routeSlot, connectionId: textConnection.id, modelId: chosen.modelId, configuration: {} }); bound.push(routeSlot); } catch { skipped.push(routeSlot); } }
+    if (chosen.structuredOutput === "STRICT_JSON_SCHEMA") { try { validateRouteManifestSelection(manifest, { routeSlot: "TEACH_BACK_ASSESSMENT", providerKey: connection.providerKey, protocol: textConnection.protocol, modelId: chosen.modelId }); await repository.setRoute(context, { routeSlot: "TEACH_BACK_ASSESSMENT", connectionId: textConnection.id, modelId: chosen.modelId, configuration: {} }); bound.push("TEACH_BACK_ASSESSMENT"); } catch { skipped.push("TEACH_BACK_ASSESSMENT"); } } }
+  const embedding = provider.models.find(model => model.families.includes("EMBEDDING"));
+  if (embedding) try { const embeddingConnection = await connectionFor("EMBEDDING"); validateRouteManifestSelection(manifest, { routeSlot: "EMBEDDING", providerKey: connection.providerKey, protocol: embeddingConnection.protocol, modelId: embedding.modelId }); await repository.setRoute(context, { routeSlot: "EMBEDDING", connectionId: embeddingConnection.id, modelId: embedding.modelId, configuration: {} }); bound.push("EMBEDDING"); } catch { skipped.push("EMBEDDING"); }
+  // Speech needs user-approved voice metadata and is therefore never auto-bound merely because a key is valid.
+  for (const routeSlot of ["PODCAST_TTS", "SHORT_VIDEO_TTS"] as const) skipped.push(routeSlot);
   return { bound, skipped };
 }
 function failure(error: unknown) {
@@ -84,7 +98,7 @@ export async function POST(request: Request) {
     const cipher = resolveCredentialKeyring(process.env, { initializeLocal: input.action === "CREATE_CONNECTION_WITH_CREDENTIAL" || input.action === "SET_CREDENTIAL" });
     if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
     const repository = new ProviderGatewayRepository(prisma, cipher);
-    if (input.action === "AUTO_CONFIGURE_ROUTES") { const configured = await autoConfigure(context, input, manifest, repository); return NextResponse.json({ ...(await (await response(context.workspaceId)).json()), autoConfigure: configured }); }
+    if (input.action === "AUTO_CONFIGURE_ROUTES") { const configured = await autoConfigure(context, input, manifest, repository, cipher); return NextResponse.json({ ...(await (await response(context.workspaceId)).json()), autoConfigure: configured }); }
     if (input.action === "CREATE_CONNECTION" || input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") {
       assertSafeConfiguration(input.configuration);
       await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } });
