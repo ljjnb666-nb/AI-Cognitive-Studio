@@ -266,7 +266,7 @@ function ConnectionForm({
 
       <div className="form-group">
         <label className="form-label">Base URL</label>
-        <input className="input-control font-mono" name="endpoint" type="url" required readOnly={providerKey !== "openai-compatible"} defaultValue={defaultEndpoints[providerKey] ?? ""} placeholder="https://api.example.com/v1" />
+        <input className="input-control font-mono" name="endpoint" type="url" required readOnly={Boolean(defaultEndpoints[providerKey])} defaultValue={defaultEndpoints[providerKey] ?? ""} placeholder="https://api.example.com/v1" />
       </div>
 
       <div className="form-group">
@@ -367,7 +367,7 @@ function RouteForm({
     >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
         <h4 style={{ fontSize: 14, fontWeight: 600, color: "var(--on-surface)", margin: 0 }}>
-          {slotLabel}
+          {slotLabel} ({slot})
         </h4>
         {existing && <StatusBadge value="已绑定" />}
       </div>

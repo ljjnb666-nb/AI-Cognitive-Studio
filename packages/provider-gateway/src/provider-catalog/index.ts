@@ -1,6 +1,5 @@
 import { ProviderGatewayError } from "../errors.js";
 import { parseProviderModelManifest, type ProviderModelManifest } from "../model-manifest.js";
-import type { ProviderDefinition } from "../types.js";
 
 const text = (modelId: string, structuredOutput: "STRICT_JSON_SCHEMA" | "JSON_MODE" = "JSON_MODE") => ({ modelId, families: ["TEXT_GENERATION"] as const, confidence: "DECLARED" as const, structuredOutput });
 
@@ -16,16 +15,13 @@ export const builtInProviderCatalog: ProviderModelManifest = {
   ],
 };
 
-/** An optional operator manifest may replace a built-in key or add a new key. Duplicate keys within either source remain invalid. */
+/**
+ * The built-in catalog is the zero-configuration default. An explicit operator
+ * manifest remains authoritative so existing deployments can pin their exact
+ * provider surface (including deterministic release fixtures) without silently
+ * acquiring additional providers.
+ */
 export function resolveProviderCatalog(source: string | undefined): ProviderModelManifest {
   if (!source) return builtInProviderCatalog;
-  const custom = parseProviderModelManifest(source);
-  const definitions = new Map<string, ProviderDefinition>();
-  for (const provider of builtInProviderCatalog.providers) definitions.set(provider.providerKey, provider);
-  for (const provider of custom.providers) {
-    if (definitions.has(provider.providerKey)) process.emitWarning(`Provider catalog override active for ${provider.providerKey}`, { code: "PROVIDER_CATALOG_OVERRIDE" });
-    definitions.set(provider.providerKey, provider);
-  }
-  if (!definitions.size) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID");
-  return { providers: [...definitions.values()] };
+  return parseProviderModelManifest(source);
 }

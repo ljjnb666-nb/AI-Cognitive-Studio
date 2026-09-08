@@ -11,9 +11,10 @@ describe("Beta provider setup catalog", () => {
     expect(() => validateRouteManifestSelection(catalog, { routeSlot: "TEACH_BACK_ASSESSMENT", providerKey: "deepseek", protocol: "OPENAI_COMPATIBLE", modelId: "deepseek-chat" })).toThrow("strict JSON schema");
   });
 
-  it("lets an operator override a builtin provider deterministically", () => {
+  it("lets an operator supply an authoritative catalog", () => {
     const catalog = resolveProviderCatalog(JSON.stringify({ providers: [{ providerKey: "deepseek", displayName: "DeepSeek private", protocol: "OPENAI_COMPATIBLE", adapterVersion: "operator", models: [{ modelId: "private-chat", families: ["TEXT_GENERATION"], confidence: "VERIFIED", structuredOutput: "STRICT_JSON_SCHEMA" }] }] }));
-    expect(catalog.providers.find(provider => provider.providerKey === "deepseek")?.models[0]?.modelId).toBe("private-chat");
+    expect(catalog.providers).toHaveLength(1);
+    expect(catalog.providers[0]?.models[0]?.modelId).toBe("private-chat");
   });
 
   it("creates a durable local-only keyring and never auto-generates one in production", () => {
