@@ -29,6 +29,12 @@ async function response(workspaceId: string) {
   ]);
   return NextResponse.json({ manifest: sanitizedProviderManifest(productManifest()), connections: connections.map(safeConnection), routes: routes.map(route => ({ id: route.id, routeSlot: route.routeSlot, connectionId: route.connectionId, modelId: route.modelId, configuration: safeConfiguration(route.configuration), connection: route.connection })), readiness });
 }
+async function resolveProviderHostname(hostname: string): Promise<readonly string[]> {
+  // The Phase 9 browser harness deliberately uses this non-routable namespace;
+  // keep the production resolver and SSRF policy unchanged for every real host.
+  if (process.env.NODE_ENV === "test" && hostname.endsWith(".example.test")) return ["198.18.0.1"];
+  return (await import("node:dns/promises")).resolve4(hostname);
+}
 function connectionTestUrl(input: z.infer<typeof testConnection>): string | undefined {
   const endpoint = new URL(input.endpoint);
   if (input.providerKey === "openai" || input.providerKey === "deepseek" || input.providerKey === "zhipu") return new URL("models", endpoint.pathname.endsWith("/") ? endpoint : new URL(`${endpoint.pathname}/../`, endpoint)).toString();
@@ -39,7 +45,7 @@ function connectionTestUrl(input: z.infer<typeof testConnection>): string | unde
 async function testSubmittedConnection(input: z.infer<typeof testConnection>, manifest: ReturnType<typeof productManifest>) {
   const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
   if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
-  await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } });
+  await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: resolveProviderHostname } });
   const url = connectionTestUrl(input); if (!url) return { state: "UNSUPPORTED_TEST" as const };
   const headers: Record<string, string> = input.providerKey === "anthropic" ? { "x-api-key": input.secret, "anthropic-version": "2023-06-01" } : input.providerKey === "gemini" ? { "x-goog-api-key": input.secret } : { authorization: `Bearer ${input.secret}` };
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 5_000);
@@ -101,7 +107,7 @@ export async function POST(request: Request) {
     if (input.action === "AUTO_CONFIGURE_ROUTES") { const configured = await autoConfigure(context, input, manifest, repository, cipher); return NextResponse.json({ ...(await (await response(context.workspaceId)).json()), autoConfigure: configured }); }
     if (input.action === "CREATE_CONNECTION" || input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") {
       assertSafeConfiguration(input.configuration);
-      await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } });
+      await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: resolveProviderHostname } });
       const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
       if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
       if (input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") await repository.createConnectionWithCredential(context, input);
