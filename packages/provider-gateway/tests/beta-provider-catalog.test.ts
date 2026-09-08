@@ -2,13 +2,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveCredentialKeyring, resolveProviderCatalog, validateRouteManifestSelection } from "../src/index.js";
+import { builtInProviderTestEndpoint, resolveCredentialKeyring, resolveProviderCatalog, validateRouteManifestSelection } from "../src/index.js";
 
 describe("Beta provider setup catalog", () => {
   it("loads useful built-ins without an operator manifest and preserves Teach Back strictness", () => {
     const catalog = resolveProviderCatalog(undefined);
     expect(catalog.providers.map(provider => provider.providerKey)).toEqual(expect.arrayContaining(["openai", "anthropic", "gemini", "deepseek", "zhipu", "openai-compatible"]));
-    expect(() => validateRouteManifestSelection(catalog, { routeSlot: "TEACH_BACK_ASSESSMENT", providerKey: "deepseek", protocol: "OPENAI_COMPATIBLE", modelId: "deepseek-chat" })).toThrow("strict JSON schema");
+    expect(catalog.providers.find(provider => provider.providerKey === "deepseek")?.models.map(model => model.modelId)).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    expect(() => validateRouteManifestSelection(catalog, { routeSlot: "TEACH_BACK_ASSESSMENT", providerKey: "deepseek", protocol: "OPENAI_COMPATIBLE", modelId: "deepseek-v4-flash" })).toThrow("strict JSON schema");
+  });
+
+  it("uses explicit provider validation URLs instead of rewriting execution paths", () => {
+    expect(Object.fromEntries(["openai", "anthropic", "gemini", "deepseek", "zhipu"].map(key => [key, builtInProviderTestEndpoint(key)]))).toEqual({ openai: "https://api.openai.com/v1/models", anthropic: "https://api.anthropic.com/v1/models", gemini: "https://generativelanguage.googleapis.com/v1beta/models", deepseek: "https://api.deepseek.com/models", zhipu: "https://open.bigmodel.cn/api/paas/v4/models" });
+    expect(builtInProviderTestEndpoint("deepseek")).not.toContain("/chat/models");
   });
 
   it("lets an operator supply an authoritative catalog", () => {

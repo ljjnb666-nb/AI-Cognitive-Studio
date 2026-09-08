@@ -179,6 +179,10 @@ jobs:
           name: phase14-visual-evidence-${{ github.event.pull_request.head.sha || github.sha }}
           path: output/playwright/*.png
           if-no-files-found: error
+      - name: Beta Provider UX real-flow release gate (no external AI calls)
+        run: pnpm test:beta-repair:provider-ux:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
       - name: End-to-end tests
         run: pnpm test:e2e
       - name: Build

@@ -8,7 +8,8 @@ export const builtInProviderCatalog: ProviderModelManifest = {
     { providerKey: "openai", displayName: "OpenAI", protocol: "OPENAI_RESPONSES", capabilityProtocols: { EMBEDDING: "OPENAI_EMBEDDINGS", SPEECH: "CUSTOM_SPEECH" }, adapterVersion: "builtin-v1", models: [text("gpt-4o-mini", "STRICT_JSON_SCHEMA"), { modelId: "text-embedding-3-small", families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: 1536 }, { modelId: "gpt-4o-mini-tts", families: ["SPEECH"], confidence: "DECLARED", speechFormats: ["mp3", "wav", "opus", "aac", "flac", "pcm"] }] },
     { providerKey: "anthropic", displayName: "Anthropic", protocol: "ANTHROPIC_COMPATIBLE", adapterVersion: "builtin-v1", models: [text("claude-3-5-haiku-latest", "STRICT_JSON_SCHEMA")] },
     { providerKey: "gemini", displayName: "Google Gemini", protocol: "GEMINI_NATIVE", capabilityProtocols: { EMBEDDING: "GEMINI_EMBEDDINGS" }, adapterVersion: "builtin-v1", models: [text("gemini-2.0-flash", "STRICT_JSON_SCHEMA"), { modelId: "text-embedding-004", families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: 768 }] },
-    { providerKey: "deepseek", displayName: "DeepSeek", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v1", models: [text("deepseek-chat", "JSON_MODE")] },
+    // Explicit versioned public IDs keep the catalog deterministic and easy to update.
+    { providerKey: "deepseek", displayName: "DeepSeek", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v2", models: [text("deepseek-v4-flash", "JSON_MODE"), text("deepseek-v4-pro", "JSON_MODE")] },
     { providerKey: "zhipu", displayName: "智谱 GLM", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v1", models: [text("glm-4-flash", "JSON_MODE")] },
     { providerKey: "openai-compatible", displayName: "OpenAI 兼容服务 / 自定义", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v1", models: [text("custom-model", "JSON_MODE")] },
   ],

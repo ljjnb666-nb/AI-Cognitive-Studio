@@ -2,6 +2,22 @@ import { ProviderGatewayError } from "../errors.js";
 import type { CapabilityFamily, ProtocolFamily } from "../types.js";
 export type AuthScheme = "BEARER" | "X_API_KEY" | "X_GOOG_API_KEY";
 export type ProviderProfile = { providerKey: string; family: CapabilityFamily; protocol: ProtocolFamily; endpoint: string; authScheme: AuthScheme; anthropicVersion?: string };
+export type ProviderTestEndpoint = { providerKey: "openai" | "anthropic" | "gemini" | "deepseek" | "zhipu"; endpoint: string };
+
+/**
+ * Lightweight, provider-owned validation resources. These are deliberately
+ * not derived from user-supplied execution paths: `/chat/completions` does
+ * not imply a sibling `/chat/models` resource.
+ */
+export const builtInProviderTestEndpoints: readonly ProviderTestEndpoint[] = [
+  { providerKey: "openai", endpoint: "https://api.openai.com/v1/models" },
+  { providerKey: "anthropic", endpoint: "https://api.anthropic.com/v1/models" },
+  { providerKey: "gemini", endpoint: "https://generativelanguage.googleapis.com/v1beta/models" },
+  { providerKey: "deepseek", endpoint: "https://api.deepseek.com/models" },
+  { providerKey: "zhipu", endpoint: "https://open.bigmodel.cn/api/paas/v4/models" },
+];
+export function builtInProviderTestEndpoint(providerKey: string): string | undefined { return builtInProviderTestEndpoints.find(item => item.providerKey === providerKey)?.endpoint; }
+
 /** Endpoints are deployment-approved profiles, never user-controlled base URLs. */
 export const builtInProviderProfiles: readonly ProviderProfile[] = [
   { providerKey: "openai", family: "TEXT_GENERATION", protocol: "OPENAI_RESPONSES", endpoint: "https://api.openai.com/v1/responses", authScheme: "BEARER" },

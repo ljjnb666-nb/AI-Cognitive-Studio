@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { ProviderGatewayError, ProviderGatewayRepository, builtInProviderProfiles, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayError, ProviderGatewayRepository, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
@@ -36,17 +36,15 @@ async function resolveProviderHostname(hostname: string): Promise<readonly strin
   return (await import("node:dns/promises")).resolve4(hostname);
 }
 function connectionTestUrl(input: z.infer<typeof testConnection>): string | undefined {
-  const endpoint = new URL(input.endpoint);
-  if (input.providerKey === "openai" || input.providerKey === "deepseek" || input.providerKey === "zhipu") return new URL("models", endpoint.pathname.endsWith("/") ? endpoint : new URL(`${endpoint.pathname}/../`, endpoint)).toString();
-  if (input.providerKey === "gemini") return new URL("models", endpoint.pathname.endsWith("/") ? endpoint : new URL(`${endpoint.pathname}/`, endpoint)).toString();
-  if (input.providerKey === "anthropic") return "https://api.anthropic.com/v1/models";
-  return undefined;
+  return builtInProviderTestEndpoint(input.providerKey);
 }
 async function testSubmittedConnection(input: z.infer<typeof testConnection>, manifest: ReturnType<typeof productManifest>) {
   const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
   if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
   await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: resolveProviderHostname } });
   const url = connectionTestUrl(input); if (!url) return { state: "UNSUPPORTED_TEST" as const };
+  // The isolated development release harness replaces only the remote HTTP boundary.
+  if (process.env.NODE_ENV !== "production" && process.env.BETA_PROVIDER_UX_TEST_CONNECTION_TRANSPORT === "deterministic") return { state: "VALID" as const };
   const headers: Record<string, string> = input.providerKey === "anthropic" ? { "x-api-key": input.secret, "anthropic-version": "2023-06-01" } : input.providerKey === "gemini" ? { "x-goog-api-key": input.secret } : { authorization: `Bearer ${input.secret}` };
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 5_000);
   try { const result = await fetch(url, { method: "GET", headers, signal: controller.signal, redirect: "error" }); if (result.status === 401 || result.status === 403) return { state: "AUTHENTICATION_FAILED" as const }; if (!result.ok) return { state: "PROVIDER_REJECTED" as const }; return { state: "VALID" as const }; }
