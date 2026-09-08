@@ -32,7 +32,7 @@ async function response(workspaceId: string) {
 async function resolveProviderHostname(hostname: string): Promise<readonly string[]> {
   // The Phase 9 browser harness deliberately uses this non-routable namespace;
   // keep the production resolver and SSRF policy unchanged for every real host.
-  if (process.env.NODE_ENV === "test" && hostname.endsWith(".example.test")) return ["198.18.0.1"];
+  if (process.env.PHASE9_BULLMQ_PREFIX && hostname.endsWith(".example.test")) return ["198.18.0.1"];
   return (await import("node:dns/promises")).resolve4(hostname);
 }
 function connectionTestUrl(input: z.infer<typeof testConnection>): string | undefined {
