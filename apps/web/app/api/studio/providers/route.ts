@@ -79,7 +79,7 @@ function failure(error: unknown) {
   const message = error instanceof Error ? error.message.split(":")[0] : "";
   const code = error instanceof ProviderGatewayError && error.code !== "INTERNAL_PROVIDER_ERROR" ? error.code : ["PROVIDER_GATEWAY_MODEL_MANIFEST_MISSING", "PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID", "PROVIDER_GATEWAY_KEYRING_MISSING", "PROVIDER_CONNECTION_ENDPOINT_INVALID", "PROVIDER_CONNECTION_PROTOCOL_INVALID", "CAPABILITY_MISMATCH", "AUTHORIZATION_FAILED", "TEST_CONNECTION_FAILED"].includes(message) ? message : error instanceof ProviderGatewayError ? "INTERNAL_PROVIDER_ERROR" : message || "PROVIDER_SETTINGS_REQUEST_FAILED";
   const status = code === "WEB_IDENTITY_REQUIRED" ? 401 : code === "AUTHORIZATION_FAILED" || code.includes("ACCESS_DENIED") ? 403 : 400;
-  return NextResponse.json({ error: code === "INTERNAL_PROVIDER_ERROR" ? "PROVIDER_GATEWAY_KEYRING_MISSING" : code }, { status });
+  return NextResponse.json({ error: code === "INTERNAL_PROVIDER_ERROR" ? "PROVIDER_SETTINGS_REQUEST_FAILED" : code }, { status });
 }
 
 export async function GET() {
