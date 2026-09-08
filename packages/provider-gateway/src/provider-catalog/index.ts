@@ -1,4 +1,3 @@
-import { ProviderGatewayError } from "../errors.js";
 import { parseProviderModelManifest, type ProviderModelManifest } from "../model-manifest.js";
 
 const text = (modelId: string, structuredOutput: "STRICT_JSON_SCHEMA" | "JSON_MODE" = "JSON_MODE") => ({ modelId, families: ["TEXT_GENERATION"] as const, confidence: "DECLARED" as const, structuredOutput });
