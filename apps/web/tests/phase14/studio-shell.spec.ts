@@ -356,8 +356,26 @@ async function expectMobileContentClearance(page: Page) {
   expect(geometry).not.toBeNull();
   expect(geometry!.contentBottom).toBeLessThanOrEqual(geometry!.bottomTop);
   expect(geometry!.groupPosition).not.toBe("fixed");
-  const finalButton = page.locator("main button:not([disabled])").last();
-  if (await finalButton.count()) await finalButton.click({ trial: true });
+  const finalButton = page.locator("main button:not([disabled]):visible").last();
+  if (await finalButton.count()) {
+    await finalButton.scrollIntoViewIfNeeded();
+    const actionability = await finalButton.evaluate((button) => {
+      const rect = button.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const target = document.elementFromPoint(centerX, centerY);
+      return {
+        inViewport:
+          rect.width > 0 &&
+          rect.height > 0 &&
+          rect.top >= 0 &&
+          rect.bottom <= window.innerHeight,
+        receivesPointerEvents: target === button || button.contains(target),
+      };
+    });
+    expect(actionability.inViewport).toBe(true);
+    expect(actionability.receivesPointerEvents).toBe(true);
+  }
 }
 
 async function thinkingFixture(
