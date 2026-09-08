@@ -3,6 +3,9 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests/phase9",
   testMatch: "**/*.spec.ts",
+  // The beta suite intentionally proves a zero-configuration built-in provider;
+  // Phase 9 instead installs its deterministic fixture manifest.
+  testIgnore: "beta-provider-ux.spec.ts",
   timeout: 90_000,
   expect: { timeout: 20_000 },
   outputDir: "../../output/playwright/phase9",
