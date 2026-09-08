@@ -105,6 +105,7 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   expect(initialCredential.ciphertext).not.toContain(secret);
   expect(await page.content()).not.toContain(secret);
 
+  await page.getByText("高级设置", { exact: true }).click();
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"]) {
     const route = routeForm(page, slot);
     if (slot.endsWith("TTS")) await route.getByRole("button", { name: "展开高级路由配置 JSON" }).click();
