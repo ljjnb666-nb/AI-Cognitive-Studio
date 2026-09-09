@@ -6,7 +6,7 @@ import { join } from "node:path";
 const harnessToken = process.env.WEB_TEST_HARNESS_TOKEN!;
 const heartbeatKey = "ai-cognitive:worker:processing";
 const recoverySource = join(process.cwd(), "..", "..", "output", "phase18-1", "worker-down-source-id.txt");
-const recoveryEvidence = "证据不是装饰，而是判断的起点。";
+const recoveryEvidence = "RECOVERY_EVIDENCE_MARKER: durable source recovery is grounded.";
 
 function testPdf(lines: string[]) {
   const escape = (value: string) => value.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
