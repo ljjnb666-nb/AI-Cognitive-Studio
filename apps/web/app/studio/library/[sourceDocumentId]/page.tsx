@@ -21,7 +21,7 @@ export default async function SourcePage({ params }: { params: Promise<{ sourceD
   const analysisStatus = item.analysisRuns[0]?.status;
   const errorCode = item.ingestionRuns[0]?.errorCode ?? item.analysisRuns[0]?.errorCode;
   const workerAvailability = await processingWorkerAvailability();
-  const processingState = deriveProcessingState({ ingestion: item.ingestionRuns[0], analysis: item.analysisRuns[0], hasIntelligence: Boolean(item.currentIntelligence), workerAvailability });
+  const processingState = deriveProcessingState({ ingestion: item.ingestionRuns[0], analysis: item.analysisRuns[0], hasIntelligence: Boolean(item.currentIntelligence), workerAvailability, staleAfterMs: Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000) });
 
   return (
     <BookDetailView

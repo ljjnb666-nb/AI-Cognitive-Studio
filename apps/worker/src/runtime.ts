@@ -1,7 +1,7 @@
 import type { EmbeddingProvider, ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
 import type { PodcastGenerationProvider, DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
 import { logger } from "@ai-cognitive/shared";
-import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
+import type { Environment } from "@ai-cognitive/shared/server";
 import type { Worker } from "bullmq";
 import { createBookAnalysisWorker, createBookAnalysisQueue, dispatchBookAnalysisWithQueue } from "./book-analysis.js";
 import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPodcastGenerationWithQueue } from "./podcast-generation.js";
@@ -10,6 +10,7 @@ import { createShortVideoGenerationWorker, createShortVideoGenerationQueue, disp
 import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue } from "./source-ingestion.js";
 import { createHealthCheckWorker } from "./worker.js";
 import { createBookProductionGatewayRuntime, createPodcastAudioProductionGatewayRuntime, createPodcastProductionGatewayRuntime, createShortVideoProductionGatewayRuntime, type BookGatewayRuntime, type BookProductionGatewayRuntimeOverrides, type PodcastAudioGatewayRuntime, type PodcastGatewayRuntime, type ShortVideoGatewayRuntime } from "./provider-gateway-runtime.js";
+import { startProcessingHeartbeat } from "./processing-heartbeat.js";
 
 export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider> };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
@@ -38,7 +39,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const bookConfigured = source.BOOK_ANALYSIS_PROVIDER?.trim();
   // Workspace BYOK is resolved per run. A gateway-capable worker must not be
   // hidden behind the legacy process-global provider toggle.
-  const bookEnabled = Boolean(options.bookDependencies || bookConfigured || source.PROVIDER_GATEWAY_KEYRING?.trim());
+  const gatewayConfigured = Boolean(source.PROVIDER_GATEWAY_KEYRING?.trim() && source.PROVIDER_GATEWAY_MODEL_MANIFEST?.trim());
+  const bookEnabled = Boolean(options.bookDependencies || bookConfigured || gatewayConfigured);
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
   try {
   if (!podcastAdapter && source.PODCAST_GENERATION_PROVIDER?.trim()) {
@@ -67,10 +69,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   let stopping = false;
   const active = new Set<Promise<void>>();
   const schedules: NodeJS.Timeout[] = [];
-  const heartbeat = createRedisConnection(environment.REDIS_URL);
-  const beat = () => heartbeat.set("ai-cognitive:worker:processing", JSON.stringify({ version: process.env.npm_package_version ?? "unknown", startedAt: new Date().toISOString(), capabilities: { ingestion: true, bookAnalysis: Boolean(bookWorker) } }), "EX", 30).catch(error => logger.warn("worker.heartbeat.failed", { error: error instanceof Error ? error.message : String(error) }));
-  await beat();
-  schedules.push(setInterval(() => { void beat(); }, 10_000));
+  const heartbeat = startProcessingHeartbeat(environment.REDIS_URL, { ingestion: true, bookAnalysis: Boolean(bookWorker) });
+  await heartbeat.beat().catch(error => logger.warn("worker.heartbeat.failed", { error: error instanceof Error ? error.message : String(error) }));
   const dispatch = (name: string, work: () => Promise<unknown>) => {
     let running = false;
     const run = async () => {
@@ -93,7 +93,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   await Promise.all(initial.map((run) => run()));
   logger.info("worker.started", { queue: "system.health-check", podcastGenerationEnabled: Boolean(podcastWorker) });
   let closePromise: Promise<void> | undefined;
-  return { healthWorker, ingestionWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.quit().catch(() => undefined); await ingestionQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); await ingestionWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+  return { healthWorker, ingestionWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.close().catch(() => undefined); await ingestionQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); await ingestionWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
     await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close();
     throw error;
