@@ -7,6 +7,21 @@ const harnessToken = process.env.WEB_TEST_HARNESS_TOKEN!;
 const heartbeatKey = "ai-cognitive:worker:processing";
 const recoverySource = join(process.cwd(), "..", "..", "output", "phase18-1", "worker-down-source-id.txt");
 
+function testPdf(lines: string[]) {
+  const escape = (value: string) => value.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
+  const stream = ["BT", "/F1 12 Tf", "72 740 Td", ...lines.flatMap((line, index) => [index ? "0 -18 Td" : "", `(${escape(line)}) Tj`]).filter(Boolean), "ET"].join("\n");
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+  ];
+  let pdf = "%PDF-1.4\n", offset = Buffer.byteLength(pdf), xref = "0000000000 65535 f \n";
+  for (const [index, object] of objects.entries()) { xref += `${String(offset).padStart(10, "0")} 00000 n \n`; const serialized = `${index + 1} 0 obj\n${object}\nendobj\n`; pdf += serialized; offset += Buffer.byteLength(serialized); }
+  return Buffer.from(`${pdf}xref\n0 ${objects.length + 1}\n${xref}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${offset}\n%%EOF\n`);
+}
+
 test("worker-down upload becomes a recoverable degraded processing state without mocked requests", async ({ page }) => {
   test.skip(process.env.PHASE18_1_WORKER_DOWN_ONLY !== "true", "only runs before the Worker runtime starts");
   const redis = createRedisConnection(process.env.REDIS_URL!);
@@ -15,7 +30,7 @@ test("worker-down upload becomes a recoverable degraded processing state without
   try {
     await page.goto("/studio/library");
     await page.waitForLoadState("networkidle");
-    await page.locator('input[type="file"]').setInputFiles({ name: "worker-down.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n") });
+    await page.locator('input[type="file"]').setInputFiles({ name: "worker-down.pdf", mimeType: "application/pdf", buffer: testPdf(["Worker-down recovery fixture", "This is a valid PDF source document."]) });
     await expect(page).toHaveURL(/\/studio\/library\//, { timeout: 30_000 });
     const sourceDocumentId = new URL(page.url()).pathname.split("/").pop();
     if (!sourceDocumentId) throw new Error("PHASE18_1_SOURCE_ID_MISSING");
