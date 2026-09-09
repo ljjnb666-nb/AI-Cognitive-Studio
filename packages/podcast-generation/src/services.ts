@@ -7,7 +7,7 @@ export const PODCAST_GENERATION_TOPIC = "podcast.generation.requested";
 export type TrustedRequestContext = { workspaceId: string; userId: string };
 const stable = (value: unknown): string => JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
-const workspaceOperationLimit = () => process.env.NODE_ENV === "test" ? 16 : Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
+const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
 async function assertMembership(context: TrustedRequestContext) { if (!await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context } })) throw new Error("WORKSPACE_ACCESS_DENIED"); }
 const defaultHosts = [
   { ordinal: 1, displayName: "林川", role: "analytical explainer", speakingStyle: "model-building with layered explanations", knowledgeStyle: "conceptual synthesis", temperament: "calm and curious", skepticism: 4, humor: 3, verbosity: 7, questionStyle: "rhetorical framing", disagreementStyle: "clarifies definitions before disagreeing", preferredSentenceLength: "medium-long", fillerPreference: "rare reflective pauses" },

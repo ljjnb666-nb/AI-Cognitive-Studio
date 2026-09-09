@@ -15,8 +15,9 @@ try {
   command(["--filter", "@ai-cognitive/web", "exec", "vitest", "run", "tests/readiness.test.ts"]);
   command(["--filter", "@ai-cognitive/ingestion", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/outbox-dispatch.integration.test.ts"]);
   command(["--filter", "@ai-cognitive/provider-gateway", "test:phase8a"]);
+  command(["--filter", "@ai-cognitive/podcast-generation", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/audio-durability.integration.test.ts"]);
   command(["--filter", "@ai-cognitive/web", "build"]);
   mkdirSync("output/phase18", { recursive: true });
-  writeFileSync("output/phase18/production-hardening-evidence.json", `${JSON.stringify({ sha, migrationResult: "DEPLOY_TWICE_PASSED", readinessResult: "PASS", duplicateDelivery: "EXISTING_OUTBOX_REGRESSION_PASS", crashRecovery: "EXISTING_DURABILITY_REGRESSION_PASS", retryExhaustion: "GATEWAY_BOUNDED_RETRY_PASS", providerFailureIsolation: "GATEWAY_CLASSIFICATION_PASS", secretLeakScan: "PASS", tenantIsolation: "PASS", concurrencySafety: "REAL_POSTGRES_ADVISORY_LOCK_PASS", productionConfig: "PASS", restoreSmoke: "DOCUMENTED_NOT_AUTOMATED" }, null, 2)}\n`);
+  writeFileSync("output/phase18/production-hardening-evidence.json", `${JSON.stringify({ sha, migrationResult: "DEPLOY_TWICE_PASSED", readinessResult: "PASS", duplicateDelivery: "EXISTING_OUTBOX_REGRESSION_PASS", crashRecovery: "EXISTING_DURABILITY_REGRESSION_PASS", retryExhaustion: "GATEWAY_BOUNDED_RETRY_PASS", providerFailureIsolation: "GATEWAY_CLASSIFICATION_PASS", audioAdmission: "REAL_POSTGRES_BUSINESS_PATH_PASS", secretLeakScan: "PASS", tenantIsolation: "PASS", concurrencySafety: "REAL_POSTGRES_ADVISORY_LOCK_PASS", productionConfig: "PASS", restoreSmoke: "DOCUMENTED_NOT_AUTOMATED" }, null, 2)}\n`);
 } catch (error) { mkdirSync("output/phase18", { recursive: true }); writeFileSync("output/phase18/production-hardening-evidence.json", `${JSON.stringify({ sha, status: "FAILED", error: error instanceof Error ? error.message : String(error) }, null, 2)}\n`); throw error; }
 finally { postgres(`DROP DATABASE IF EXISTS ${database} WITH (FORCE);`); }
