@@ -6,6 +6,7 @@ import { join } from "node:path";
 const harnessToken = process.env.WEB_TEST_HARNESS_TOKEN!;
 const heartbeatKey = "ai-cognitive:worker:processing";
 const recoverySource = join(process.cwd(), "..", "..", "output", "phase18-1", "worker-down-source-id.txt");
+const recoveryEvidence = "证据不是装饰，而是判断的起点。";
 
 function testPdf(lines: string[]) {
   const escape = (value: string) => value.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
@@ -31,7 +32,7 @@ test("worker-down upload becomes a recoverable degraded processing state without
   try {
     await page.goto("/studio/library");
     await page.waitForLoadState("networkidle");
-    await page.locator('input[type="file"]').setInputFiles({ name: "worker-down.pdf", mimeType: "application/pdf", buffer: testPdf(Array.from({ length: 30 }, (_, index) => `Worker-down recovery fixture ${index + 1}: grounded source evidence is preserved across durable processing recovery. `.repeat(4))) });
+    await page.locator('input[type="file"]').setInputFiles({ name: "worker-down.pdf", mimeType: "application/pdf", buffer: testPdf(Array.from({ length: 30 }, (_, index) => `${index === 0 ? `${recoveryEvidence} ` : ""}Worker-down recovery fixture ${index + 1}: grounded source evidence is preserved across durable processing recovery. `.repeat(4))) });
     await expect(page).toHaveURL(/\/studio\/library\//, { timeout: 30_000 });
     const sourceDocumentId = new URL(page.url()).pathname.split("/").pop();
     if (!sourceDocumentId) throw new Error("PHASE18_1_SOURCE_ID_MISSING");
@@ -57,7 +58,9 @@ test("worker recovery processes the same degraded upload and renders grounded in
   const recheck = page.getByRole("button", { name: "重新检查状态" });
   if (await recheck.count()) await recheck.click();
   await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 90_000 });
-  await expect(page.getByText("暂无可展示的原文证据。")).toHaveCount(0);
+  await expect(page.getByText(recoveryEvidence).first()).toBeVisible();
+  await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
+  await expect(page.locator(".evidence-item.active").filter({ hasText: recoveryEvidence })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("worker-recovery-desktop.png"), fullPage: true });
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 } });
   try { await mobile.addCookies([{ name: "acs_phase6_harness", value: harnessToken, url: "http://localhost:3001", httpOnly: true, sameSite: "Lax" }]); const mobilePage = await mobile.newPage(); await mobilePage.goto(`/studio/library/${sourceDocumentId}`); await expect(mobilePage.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 30_000 }); await mobilePage.screenshot({ path: testInfo.outputPath("worker-recovery-mobile.png"), fullPage: true }); }
