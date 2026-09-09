@@ -84,6 +84,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   if (existing && existing.status !== "FAILED") return { run: existing, job: existing.job };
   if (existing) {
     const requeued = await prisma.$transaction(async (tx) => {
+      await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
       const updated = await tx.bookAnalysisRun.updateMany({ where: { id: existing.id, status: "FAILED" }, data: { status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null } });
       if (updated.count !== 1) return null;
       const retryJob = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey: `book:${analysisIdentityHash}:retry:${existing.job.attemptCount + 1}`, correlationId: input.correlationId } });

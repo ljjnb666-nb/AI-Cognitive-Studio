@@ -141,6 +141,22 @@ afterEach(async () => {
 afterAll(() => prisma.$disconnect());
 
 describe("durable Phase 2 orchestration", () => {
+  it("applies workspace admission atomically to the actual failed-analysis retry path", async () => {
+    const data = await fixture();
+    await prisma.$transaction([prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED", completedAt: new Date(), errorCode: "TEST_FAILURE" } }), prisma.job.update({ where: { id: data.job.id }, data: { status: "FAILED", completedAt: new Date() } })]);
+    const priorEnvironment = process.env.NODE_ENV, priorLimit = process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT;
+    process.env.NODE_ENV = "production"; process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = "2";
+    try {
+      await prisma.job.createMany({ data: ["one", "two"].map(marker => ({ workspaceId: data.workspace.id, type: "book.analysis", idempotencyKey: `phase18-active-${marker}-${crypto.randomUUID()}`, payload: {} })) });
+      const before = await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }), prisma.job.count({ where: { workspaceId: data.workspace.id, type: "book.analysis" } }), prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })]);
+      await expect(requestBookAnalysis({ workspaceId: data.workspace.id, sourceDocumentId: data.document.id, pipelineVersion: data.run.pipelineVersion, promptVersion: data.run.promptVersion, provider: data.run.provider, model: data.run.model, modelVersion: data.run.modelVersion ?? undefined })).rejects.toThrow("WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED");
+      const after = await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }), prisma.job.count({ where: { workspaceId: data.workspace.id, type: "book.analysis" } }), prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })]);
+      expect([after[0].status, after[0].jobId, after[1], after[2]]).toEqual(["FAILED", before[0].jobId, before[1], before[2]]);
+      await prisma.job.updateMany({ where: { workspaceId: data.workspace.id, type: "book.analysis", status: "QUEUED" }, data: { status: "SUCCEEDED", completedAt: new Date() } });
+      const retried = await requestBookAnalysis({ workspaceId: data.workspace.id, sourceDocumentId: data.document.id, pipelineVersion: data.run.pipelineVersion, promptVersion: data.run.promptVersion, provider: data.run.provider, model: data.run.model, modelVersion: data.run.modelVersion ?? undefined });
+      expect([retried.run.status, retried.job.type, await prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })]).toEqual(["QUEUED", "book.analysis", before[2] + 1]);
+    } finally { process.env.NODE_ENV = priorEnvironment; if (priorLimit === undefined) delete process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT; else process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = priorLimit; }
+  });
   it("has one claim winner, permits stale reclaim, rejects stale persistence, and does not increment a claim loser", async () => {
     const data = await fixture();
     const barrier = new BarrierProvider();
