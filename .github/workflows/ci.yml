@@ -163,6 +163,8 @@ jobs:
           PHASE17_ARTIFACT_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Phase 18 production hardening release gate
         run: pnpm test:phase18:release
+        env:
+          PHASE18_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Upload Phase 18 production hardening evidence
         uses: actions/upload-artifact@v4
         with:
