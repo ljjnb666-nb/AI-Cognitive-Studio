@@ -44,6 +44,7 @@ const environment = {
   WEB_TEST_HARNESS_TOKEN: randomUUID(),
   WEB_TEST_HARNESS_EMAIL: "phase6-browser@ai-cognitive-studio.test",
   PHASE6_BULLMQ_PREFIX: `phase6-${randomUUID()}`,
+  SOURCE_PARSE_TIMEOUT_MS: "1000",
   BOOK_ANALYSIS_PROVIDER: "phase6-analysis",
   BOOK_ANALYSIS_MODEL: "fixture",
   PODCAST_GENERATION_PROVIDER: "phase6-podcast",
@@ -98,6 +99,10 @@ try {
   minio(`mc alias set phase6 http://localhost:9000 ${environment.S3_ACCESS_KEY} ${environment.S3_SECRET_KEY} && (mc rb --force phase6/${environment.S3_BUCKET} || true) && mc mb phase6/${environment.S3_BUCKET}`);
   command("pnpm", ["db:migrate:deploy"]);
   command("pnpm", ["--filter", "@ai-cognitive/web", "build"]);
+  // This browser pass deliberately has no worker runtime. It proves that a
+  // durable upload becomes an honest, recoverable degraded state instead of
+  // remaining an infinite queued badge.
+  command("pnpm", ["--filter", "@ai-cognitive/web", "exec", "playwright", "test", "--config", "playwright.phase6.config.ts", "tests/phase6/processing-recovery.spec.ts"]);
   const readyFile = join(root, "output", "playwright", "phase6-runtime.ready");
   await rm(readyFile, { force: true });
   worker = spawn(process.execPath, [tsxCli, join(root, "apps", "web", "tests", "phase6", "runtime.ts")], { cwd: root, env: { ...environment, PHASE6_RUNTIME_READY_FILE: readyFile }, stdio: ["inherit", "inherit", "inherit", "ipc"], shell: false });
