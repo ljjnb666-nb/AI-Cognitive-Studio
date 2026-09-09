@@ -22,6 +22,7 @@ export type StorageProvider = {
   copyObject(sourceKey: string, targetKey: string): Promise<void>;
   deleteObject(key: string): Promise<void>;
   objectExists(key: string): Promise<boolean>;
+  bucketExists?(): Promise<boolean>;
 };
 
 export type S3Config = { endpoint: string; publicEndpoint?: string; region: string; bucket: string; accessKey: string; secretKey: string; forcePathStyle: boolean };

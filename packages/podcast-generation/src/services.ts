@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { prisma } from "@ai-cognitive/db";
+import { admitWorkspaceExpensiveOperation, prisma } from "@ai-cognitive/db";
 import { evaluatePodcastScriptData, type EvaluationUtterance } from "./evaluation.js";
 
 export const PODCAST_GENERATION_JOB = "podcast.generation";
@@ -7,6 +7,7 @@ export const PODCAST_GENERATION_TOPIC = "podcast.generation.requested";
 export type TrustedRequestContext = { workspaceId: string; userId: string };
 const stable = (value: unknown): string => JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
 async function assertMembership(context: TrustedRequestContext) { if (!await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context } })) throw new Error("WORKSPACE_ACCESS_DENIED"); }
 const defaultHosts = [
   { ordinal: 1, displayName: "林川", role: "analytical explainer", speakingStyle: "model-building with layered explanations", knowledgeStyle: "conceptual synthesis", temperament: "calm and curious", skepticism: 4, humor: 3, verbosity: 7, questionStyle: "rhetorical framing", disagreementStyle: "clarifies definitions before disagreeing", preferredSentenceLength: "medium-long", fillerPreference: "rare reflective pauses" },
@@ -75,6 +76,7 @@ export async function requestPodcastGeneration(context: TrustedRequestContext, i
   if (existing) return { run: existing, job: existing.job };
   try {
     return await prisma.$transaction(async (tx) => {
+      await admitWorkspaceExpensiveOperation(tx, context.workspaceId, workspaceOperationLimit());
       const job = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: PODCAST_GENERATION_JOB, payload: { episodeId: episode.id }, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.podcastGenerationRun.create({ data: { workspaceId: context.workspaceId, podcastProjectId: episode.podcastProjectId, episodeId: episode.id, styleProfileId: episode.styleProfileId, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersion: input.modelVersion, modelVersionKey, hostConfigurationHash, hostConfigurationVersion, generationIdentityHash, idempotencyKey, correlationId: input.correlationId } });
       await tx.podcastGenerationSource.createMany({ data: current.map((item) => ({ podcastGenerationRunId: run.id, workspaceId: context.workspaceId, episodeId: episode.id, sourceDocumentId: item.sourceDocumentId, extractionId: item.extractionId, chunkSetId: item.chunkSetId, analysisRunId: item.analysisRunId })) });

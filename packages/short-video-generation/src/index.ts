@@ -22,7 +22,7 @@ export {
   type ExternalProcessDiagnostic,
   type VideoRenderFailureDetails,
 } from "./process-diagnostics.js";
-import { prisma } from "@ai-cognitive/db";
+import { admitWorkspaceExpensiveOperation, prisma } from "@ai-cognitive/db";
 import {
   buildBookContextForIntelligence,
   estimateAnalysisTokens,
@@ -45,6 +45,7 @@ const sha256 = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
 const HEARTBEAT_MS = 30_000;
 export const SHORT_VIDEO_GENERATION_JOB = "short-video.generation";
+const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
 export const SHORT_VIDEO_GENERATION_TOPIC = "short-video.generation.requested";
 export const SHORT_VIDEO_PROVIDER_INPUT_BUDGET = 4_000;
 export const SHORT_VIDEO_SCENE_TYPES = [
@@ -318,6 +319,7 @@ export async function requestShortVideoGeneration(
   if (existing) return { run: existing, job: existing.job };
   try {
     return await prisma.$transaction(async (tx) => {
+      await admitWorkspaceExpensiveOperation(tx, context.workspaceId, workspaceOperationLimit());
       const job = await tx.job.create({
         data: {
           workspaceId: context.workspaceId,
