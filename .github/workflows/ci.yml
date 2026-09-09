@@ -165,6 +165,17 @@ jobs:
         run: pnpm test:phase18:release
         env:
           PHASE18_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Phase 18.1 source processing repair release gate
+        run: pnpm test:phase18-1:release
+        env:
+          PHASE18_1_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          POSTGRES_HOST_PORT: "5432"
+      - name: Upload Phase 18.1 processing repair evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase18-1-release-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: output/phase18-1
+          if-no-files-found: error
       - name: Upload Phase 18 production hardening evidence
         uses: actions/upload-artifact@v4
         with:
