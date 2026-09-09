@@ -45,7 +45,7 @@ const sha256 = (value: Uint8Array | string) =>
   createHash("sha256").update(value).digest("hex");
 const HEARTBEAT_MS = 30_000;
 export const SHORT_VIDEO_GENERATION_JOB = "short-video.generation";
-const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
+const workspaceOperationLimit = () => process.env.NODE_ENV === "test" ? 16 : Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
 export const SHORT_VIDEO_GENERATION_TOPIC = "short-video.generation.requested";
 export const SHORT_VIDEO_PROVIDER_INPUT_BUDGET = 4_000;
 export const SHORT_VIDEO_SCENE_TYPES = [

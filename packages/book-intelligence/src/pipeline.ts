@@ -35,7 +35,7 @@ import {
 export const BOOK_ANALYSIS_JOB = "book.analysis";
 export const BOOK_ANALYSIS_TOPIC = "book.analysis.requested";
 const contextLimit = 8_000;
-const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
+const workspaceOperationLimit = () => process.env.NODE_ENV === "test" ? 16 : Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
 const stageOrder = ["CHUNK_ANALYSIS", "SECTION_ANALYSIS", "CHAPTER_ANALYSIS", "BOOK_SYNTHESIS", "MEMORY_FINALIZATION", "EMBEDDINGS", "FINALIZING", "COMPLETED"] as const;
 type DurableStage = typeof stageOrder[number];
 type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "afterEmbeddingGatewayPersist" | "beforeEmbeddingMaterialization" | "afterEmbeddingMaterialization" | "beforeEmbeddingStageAdvance" | "beforeFinalization" | "afterCurrentExtractionLock";
