@@ -17,4 +17,7 @@ describe("Phase 18.1 product processing state", () => {
     expect(deriveProcessingState({ ingestion: { ...run("RUNNING"), startedAt: new Date("2026-01-01T00:00:00.000Z") }, workerAvailability: "DEGRADED", hasIntelligence: false, now })).toBe("PROCESSING_DEGRADED");
     expect(processingWaitLabel(new Date("2026-01-01T00:02:00.000Z"), now)).toBe("已等待 1 分钟");
   });
+  it("treats immutable current intelligence as succeeded regardless of stale historical runs", () => {
+    expect(deriveProcessingState({ ingestion: run("FAILED"), analysis: run("FAILED"), workerAvailability: "DEGRADED", hasIntelligence: true, now })).toBe("SUCCEEDED");
+  });
 });
