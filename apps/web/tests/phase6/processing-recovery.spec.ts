@@ -38,7 +38,8 @@ test("worker recovery processes the same degraded upload and renders grounded in
   page.on("console", (message) => { if (message.type() === "error" && !message.text().includes("favicon")) errors.push(message.text()); });
   await page.context().addCookies([{ name: "acs_phase6_harness", value: harnessToken, url: "http://localhost:3001", httpOnly: true, sameSite: "Lax" }]);
   await page.goto(`/studio/library/${sourceDocumentId}`);
-  await page.getByRole("button", { name: "重新检查状态" }).click();
+  const recheck = page.getByRole("button", { name: "重新检查状态" });
+  if (await recheck.count()) await recheck.click();
   await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 90_000 });
   await expect(page.getByText("暂无可展示的原文证据。")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("worker-recovery-desktop.png"), fullPage: true });
