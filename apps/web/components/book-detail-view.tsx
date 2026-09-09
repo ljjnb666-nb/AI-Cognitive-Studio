@@ -58,6 +58,7 @@ type Props = {
     errorCode?: string | null;
     processingState: string;
     workerAvailability: string;
+    processingSince?: string | null;
   };
   memories: MemoryItemData[];
   structureNodes: StructureNodeData[];
@@ -129,6 +130,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
               errorCode={item.errorCode}
               processingState={item.processingState}
               workerAvailability={item.workerAvailability}
+              processingSince={item.processingSince}
             />
           </div>
         )}

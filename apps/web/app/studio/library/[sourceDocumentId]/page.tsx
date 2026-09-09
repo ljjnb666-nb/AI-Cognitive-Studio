@@ -36,6 +36,7 @@ export default async function SourcePage({ params }: { params: Promise<{ sourceD
         errorCode,
         processingState,
         workerAvailability,
+        processingSince: (item.analysisRuns[0]?.startedAt ?? item.analysisRuns[0]?.createdAt ?? item.ingestionRuns[0]?.startedAt ?? item.ingestionRuns[0]?.createdAt)?.toISOString() ?? null,
       }}
       memories={memories as any}
       structureNodes={structureNodes as any}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveProcessingState } from "../lib/processing-state";
+import { deriveProcessingState, processingWaitLabel } from "../lib/processing-state";
 
 const now = new Date("2026-01-01T00:03:00.000Z");
 const run = (status: string, createdAt = new Date("2026-01-01T00:00:00.000Z")) => ({ status, createdAt });
@@ -12,5 +12,9 @@ describe("Phase 18.1 product processing state", () => {
   it("only calls a stale queued run degraded when the worker is absent", () => {
     expect(deriveProcessingState({ ingestion: run("QUEUED"), workerAvailability: "AVAILABLE", hasIntelligence: false, now })).toBe("QUEUED_FOR_INGESTION");
     expect(deriveProcessingState({ ingestion: run("QUEUED"), workerAvailability: "DEGRADED", hasIntelligence: false, now })).toBe("PROCESSING_DEGRADED");
+  });
+  it("marks a stale running run degraded only when the worker heartbeat is absent", () => {
+    expect(deriveProcessingState({ ingestion: { ...run("RUNNING"), startedAt: new Date("2026-01-01T00:00:00.000Z") }, workerAvailability: "DEGRADED", hasIntelligence: false, now })).toBe("PROCESSING_DEGRADED");
+    expect(processingWaitLabel(new Date("2026-01-01T00:02:00.000Z"), now)).toBe("已等待 1 分钟");
   });
 });
