@@ -102,7 +102,9 @@ try {
   // This browser pass deliberately has no worker runtime. It proves that a
   // durable upload becomes an honest, recoverable degraded state instead of
   // remaining an infinite queued badge.
+  environment.PHASE18_1_WORKER_DOWN_ONLY = "true";
   command("pnpm", ["--filter", "@ai-cognitive/web", "exec", "playwright", "test", "--config", "playwright.phase6.config.ts", "tests/phase6/processing-recovery.spec.ts"]);
+  delete environment.PHASE18_1_WORKER_DOWN_ONLY;
   const readyFile = join(root, "output", "playwright", "phase6-runtime.ready");
   await rm(readyFile, { force: true });
   worker = spawn(process.execPath, [tsxCli, join(root, "apps", "web", "tests", "phase6", "runtime.ts")], { cwd: root, env: { ...environment, PHASE6_RUNTIME_READY_FILE: readyFile }, stdio: ["inherit", "inherit", "inherit", "ipc"], shell: false });
