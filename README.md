@@ -32,6 +32,11 @@ pnpm dev
 files. CI and production supply configuration through their process environment;
 those explicit values take precedence over values in a local `.env` file.
 
+`pnpm dev` starts both the Web and background Worker runtimes. `pnpm dev:web`
+starts only Web and therefore cannot parse uploads or perform AI analysis; the
+Studio processing panel will eventually report the worker as unavailable.
+`pnpm dev:worker` starts only the background runtime.
+
 `pnpm db:migrate` is the local development command. It runs `prisma migrate dev`, which creates and applies a development migration when the Prisma schema changes. Do not use it in CI or deployment.
 
 For CI and deployment, apply only checked-in migrations:

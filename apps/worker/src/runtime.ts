@@ -1,7 +1,7 @@
 import type { EmbeddingProvider, ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
 import type { PodcastGenerationProvider, DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
 import { logger } from "@ai-cognitive/shared";
-import type { Environment } from "@ai-cognitive/shared/server";
+import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
 import type { Worker } from "bullmq";
 import { createBookAnalysisWorker, createBookAnalysisQueue, dispatchBookAnalysisWithQueue } from "./book-analysis.js";
 import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPodcastGenerationWithQueue } from "./podcast-generation.js";
@@ -36,6 +36,9 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const queueOptions = options.bullmqPrefix ? { prefix: options.bullmqPrefix } : undefined;
   const workerOptions = (concurrency: number) => ({ ...(queueOptions ?? {}), concurrency });
   const bookConfigured = source.BOOK_ANALYSIS_PROVIDER?.trim();
+  // Workspace BYOK is resolved per run. A gateway-capable worker must not be
+  // hidden behind the legacy process-global provider toggle.
+  const bookEnabled = Boolean(options.bookDependencies || bookConfigured || source.PROVIDER_GATEWAY_KEYRING?.trim());
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
   try {
   if (!podcastAdapter && source.PODCAST_GENERATION_PROVIDER?.trim()) {
@@ -43,8 +46,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
     podcastAdapter = { providerForRun: input => runtime.createProviderForRun(input), embeddingProviderForRun: input => runtime.createEmbeddingProviderForRun(input) };
   }
   const audioAdapter = audioConfigured ? options.audioAdapter ?? { providerForRun: input => (productionPodcastAudioGatewayRuntime ??= createPodcastAudioProductionGatewayRuntime(source, options.bookProductionGatewayOverrides)).createSpeechProviderForRun(input) } : undefined;
-  const productionBookDependencies = bookConfigured && !options.bookDependencies ? (() => { const runtime = productionBookGatewayRuntime = createBookProductionGatewayRuntime(source, options.bookProductionGatewayOverrides); return { analysisProviderForRun: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => runtime.createAnalysisProvider(input), embeddingGatewayForRun: (input: { workspaceId: string; userId: string; analysisRunId: string }) => ({ gateway: runtime.gateway, repository: runtime.repository, userId: input.userId }) }; })() : undefined;
-  const bookWorker = bookConfigured ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY)) : undefined;
+  const productionBookDependencies = bookEnabled && !options.bookDependencies ? (() => { const runtime = productionBookGatewayRuntime = createBookProductionGatewayRuntime(source, options.bookProductionGatewayOverrides); return { analysisProviderForRun: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => runtime.createAnalysisProvider(input), embeddingGatewayForRun: (input: { workspaceId: string; userId: string; analysisRunId: string }) => ({ gateway: runtime.gateway, repository: runtime.repository, userId: input.userId }) }; })() : undefined;
+  const bookWorker = bookEnabled ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY)) : undefined;
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);
   const ingestionWorker = createSourceIngestionWorker(environment, workerOptions(environment.WORKER_INGESTION_CONCURRENCY));
   if (!bookWorker) logger.info("worker.book_analysis.disabled", { reason: "BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED" });
@@ -64,6 +67,10 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   let stopping = false;
   const active = new Set<Promise<void>>();
   const schedules: NodeJS.Timeout[] = [];
+  const heartbeat = createRedisConnection(environment.REDIS_URL);
+  const beat = () => heartbeat.set("ai-cognitive:worker:processing", JSON.stringify({ version: process.env.npm_package_version ?? "unknown", startedAt: new Date().toISOString(), capabilities: { ingestion: true, bookAnalysis: Boolean(bookWorker) } }), "EX", 30).catch(error => logger.warn("worker.heartbeat.failed", { error: error instanceof Error ? error.message : String(error) }));
+  await beat();
+  schedules.push(setInterval(() => { void beat(); }, 10_000));
   const dispatch = (name: string, work: () => Promise<unknown>) => {
     let running = false;
     const run = async () => {
@@ -86,7 +93,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   await Promise.all(initial.map((run) => run()));
   logger.info("worker.started", { queue: "system.health-check", podcastGenerationEnabled: Boolean(podcastWorker) });
   let closePromise: Promise<void> | undefined;
-  return { healthWorker, ingestionWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await ingestionQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); await ingestionWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+  return { healthWorker, ingestionWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.quit().catch(() => undefined); await ingestionQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); await ingestionWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
     await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close();
     throw error;
