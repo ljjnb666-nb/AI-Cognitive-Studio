@@ -161,6 +161,16 @@ jobs:
         run: pnpm test:phase17:release
         env:
           PHASE17_ARTIFACT_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Phase 18 production hardening release gate
+        run: pnpm test:phase18:release
+        env:
+          PHASE18_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Upload Phase 18 production hardening evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase18-production-hardening-${{ github.event.pull_request.head.sha || github.sha }}
+          path: output/phase18
+          if-no-files-found: error
       - name: Upload Phase 17 closed beta evidence
         uses: actions/upload-artifact@v4
         with:

@@ -27,7 +27,7 @@ describe("readEnvironment storage safety", () => {
   });
 
   it("accepts non-dummy production credentials", () => {
-    expect(readEnvironment(environment({ NODE_ENV: "production", S3_ACCESS_KEY: "production-access-key", S3_SECRET_KEY: "production-secret-key" }))).toMatchObject({ NODE_ENV: "production" });
+    expect(readEnvironment(environment({ NODE_ENV: "production", S3_ACCESS_KEY: "production-access-key", S3_SECRET_KEY: "production-secret-key", BETTER_AUTH_SECRET: "production-auth-secret-that-is-long-enough", BETTER_AUTH_URL: "https://studio.example.com", PROVIDER_GATEWAY_KEYRING: '{"activeVersion":"v1","keys":{"v1":"safe"}}' }))).toMatchObject({ NODE_ENV: "production" });
   });
 
   it("allows local credentials outside production and parses the public endpoint", () => {
@@ -42,5 +42,12 @@ describe("readEnvironment storage safety", () => {
   it("defaults every worker and dispatcher bound to one and rejects unsafe values", () => {
     expect(readEnvironment(environment())).toMatchObject({ WORKER_INGESTION_CONCURRENCY: 1, WORKER_BOOK_ANALYSIS_CONCURRENCY: 1, WORKER_PODCAST_GENERATION_CONCURRENCY: 1, WORKER_AUDIO_CONCURRENCY: 1, WORKER_SHORT_VIDEO_CONCURRENCY: 1, OUTBOX_DISPATCH_CONCURRENCY: 1 });
     for (const value of ["0", "-1", "33", "NaN"]) expect(() => readEnvironment(environment({ WORKER_INGESTION_CONCURRENCY: value }))).toThrow();
+  });
+
+  it("fails closed for production auth, keyring, and test-only escape hatches", () => {
+    const production = environment({ NODE_ENV: "production", S3_ACCESS_KEY: "production-access-key", S3_SECRET_KEY: "production-secret-key", BETTER_AUTH_SECRET: "production-auth-secret-that-is-long-enough", BETTER_AUTH_URL: "https://studio.example.com", PROVIDER_GATEWAY_KEYRING: '{"activeVersion":"v1","keys":{"v1":"safe"}}' });
+    expect(readEnvironment(production).WORKSPACE_EXPENSIVE_OPERATION_LIMIT).toBe(2);
+    expect(() => readEnvironment({ ...production, BETA_PROVIDER_UX_TEST_CONNECTION_TRANSPORT: "deterministic" })).toThrow("UNSAFE_PRODUCTION_TEST_ESCAPE_HATCH");
+    expect(() => readEnvironment({ ...production, PROVIDER_GATEWAY_KEYRING: "" })).toThrow("MISSING_PRODUCTION_PROVIDER_GATEWAY_KEYRING");
   });
 });

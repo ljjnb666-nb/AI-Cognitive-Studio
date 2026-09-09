@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { prisma } from "../../db/src/index.js";
+import { admitWorkspaceExpensiveOperation, prisma } from "../../db/src/index.js";
 import { logger } from "@ai-cognitive/shared";
 import {
   estimateAnalysisTokens,
@@ -35,6 +35,7 @@ import {
 export const BOOK_ANALYSIS_JOB = "book.analysis";
 export const BOOK_ANALYSIS_TOPIC = "book.analysis.requested";
 const contextLimit = 8_000;
+const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
 const stageOrder = ["CHUNK_ANALYSIS", "SECTION_ANALYSIS", "CHAPTER_ANALYSIS", "BOOK_SYNTHESIS", "MEMORY_FINALIZATION", "EMBEDDINGS", "FINALIZING", "COMPLETED"] as const;
 type DurableStage = typeof stageOrder[number];
 type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "afterEmbeddingGatewayPersist" | "beforeEmbeddingMaterialization" | "afterEmbeddingMaterialization" | "beforeEmbeddingStageAdvance" | "beforeFinalization" | "afterCurrentExtractionLock";
@@ -83,6 +84,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   if (existing && existing.status !== "FAILED") return { run: existing, job: existing.job };
   if (existing) {
     const requeued = await prisma.$transaction(async (tx) => {
+      await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
       const updated = await tx.bookAnalysisRun.updateMany({ where: { id: existing.id, status: "FAILED" }, data: { status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null } });
       if (updated.count !== 1) return null;
       const retryJob = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey: `book:${analysisIdentityHash}:retry:${existing.job.attemptCount + 1}`, correlationId: input.correlationId } });
@@ -97,6 +99,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   const idempotencyKey = `book:${analysisIdentityHash}`;
   try {
     return await prisma.$transaction(async (tx) => {
+      await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
       const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersion: input.modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash } });
       await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id, queueJobId: job.id } } });
