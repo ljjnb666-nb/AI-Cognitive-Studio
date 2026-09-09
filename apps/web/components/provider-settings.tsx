@@ -10,15 +10,9 @@ type Route = { id: string; routeSlot: string; connectionId: string; modelId: str
 type State = { manifest: { providers: Provider[] }; connections: Connection[]; routes: Route[]; readiness: Record<string, { state: string; missing: string[] }> };
 
 const routeSlots = [
-  { slot: "BOOK_CHUNK_ANALYSIS", label: "书籍切块分析 (BOOK_CHUNK_ANALYSIS)" },
-  { slot: "BOOK_REDUCTION_ANALYSIS", label: "书籍归纳分析 (BOOK_REDUCTION_ANALYSIS)" },
-  { slot: "BOOK_SYNTHESIS", label: "书籍综合理解 (BOOK_SYNTHESIS)" },
-  { slot: "EMBEDDING", label: "向量嵌入 (EMBEDDING)" },
-  { slot: "THINKING_SESSION", label: "思考会话 (THINKING_SESSION)" },
-  { slot: "PODCAST_SCRIPT", label: "播客脚本生成 (PODCAST_SCRIPT)" },
-  { slot: "PODCAST_TTS", label: "播客语音合成 (PODCAST_TTS)" },
-  { slot: "SHORT_VIDEO_SCRIPT", label: "短视频脚本生成 (SHORT_VIDEO_SCRIPT)" },
-  { slot: "SHORT_VIDEO_TTS", label: "短视频语音合成 (SHORT_VIDEO_TTS)" },
+  { slot: "BOOK_CHUNK_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_REDUCTION_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_SYNTHESIS", label: "书籍理解" },
+  { slot: "EMBEDDING", label: "向量检索" }, { slot: "THINKING_SESSION", label: "思考" }, { slot: "TEACH_BACK_ASSESSMENT", label: "Teach Back 评估" },
+  { slot: "PODCAST_SCRIPT", label: "播客脚本" }, { slot: "PODCAST_TTS", label: "语音合成" }, { slot: "SHORT_VIDEO_SCRIPT", label: "短视频脚本" }, { slot: "SHORT_VIDEO_TTS", label: "短视频语音合成" },
 ];
 
 const readinessLabels: Record<string, string> = {
@@ -28,13 +22,19 @@ const readinessLabels: Record<string, string> = {
   shortVideo: "短视频生成",
 };
 const providerErrorMessages: Record<string, string> = {
-  PROVIDER_GATEWAY_KEYRING_MISSING: "Provider 密钥存储尚未配置，请联系管理员。",
+  PROVIDER_SETTINGS_LOAD_FAILED: "加载 Provider 设置失败，请刷新后重试。",
+  PROVIDER_SETTINGS_SAVE_FAILED: "保存 Provider 设置失败，请检查输入后重试。",
+  PROVIDER_GATEWAY_MODEL_MANIFEST_MISSING: "服务目录暂不可用，请联系部署管理员。",
+  PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID: "服务目录配置无效，请联系部署管理员。",
+  PROVIDER_GATEWAY_KEYRING_MISSING: "凭据保护服务未配置，暂时无法保存 API Key。",
   PROVIDER_CONNECTION_ENDPOINT_INVALID: "请输入有效的 HTTPS API Endpoint。",
   AUTHORIZATION_FAILED: "当前账户无权修改此工作区的 Provider。",
   PROVIDER_CONNECTION_PROTOCOL_INVALID: "请选择当前 Provider 支持的协议。",
   PROVIDER_CONFIGURATION_SECRET_FORBIDDEN: "高级配置不能包含密钥或凭据。",
+  CAPABILITY_MISMATCH: "所选模型不支持该用途；Teach Back 需要支持严格 JSON 输出的模型。",
+  TEST_CONNECTION_FAILED: "连接测试未通过。请检查 API Key、地址和网络后重试。",
 };
-function readableError(code: string): string { return providerErrorMessages[code] ?? "保存 Provider 设置失败，请检查输入后重试。"; }
+function readableError(code: string): string { return providerErrorMessages[code] ?? "操作未完成，请检查输入后重试。"; }
 
 export function ProviderSettings() {
   const [state, setState] = useState<State | null>(null);
@@ -62,10 +62,12 @@ export function ProviderSettings() {
         body: JSON.stringify(payload),
       });
       const body = (await response.json()) as State & { error?: string };
-      if (!response.ok) throw new Error(readableError(body.error ?? "PROVIDER_SETTINGS_SAVE_FAILED"));
+      if (!response.ok) throw new Error(body.error ?? "PROVIDER_SETTINGS_SAVE_FAILED");
+      if ("test" in body) { const state = (body as { test: { state: string } }).test.state; setMessage(state === "VALID" ? "✓ API Key 可用，确认后点击保存 Provider。" : state === "AUTHENTICATION_FAILED" ? "API Key 无效或已失效。" : state === "TIMEOUT" ? "连接超时，请稍后重试。" : state === "UNSUPPORTED_TEST" ? "该自定义服务无法自动验证，可直接保存后测试实际调用。" : "无法连接该服务，请检查地址和网络。"); return; }
+      if ("autoConfigure" in body) { const result = (body as { autoConfigure: { bound: string[]; skipped: string[] } }).autoConfigure; setState(body); setMessage(result.bound.length ? `已自动配置 ${result.bound.length} 个推荐用途。${result.skipped.length ? "其余用途需要兼容模型或语音设置。" : ""}` : "当前模型没有可自动配置的用途，请在高级设置中选择兼容模型。"); return; }
       setState(body);
-    } catch {
-      setMessage(readableError("PROVIDER_SETTINGS_SAVE_FAILED"));
+    } catch (error) {
+      setMessage(readableError(error instanceof Error ? error.message : "PROVIDER_SETTINGS_SAVE_FAILED"));
     } finally {
       setBusy(false);
     }
@@ -154,6 +156,7 @@ export function ProviderSettings() {
 
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
                 <CredentialRotation connectionId={connection.id} busy={busy} submit={submit} />
+                <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit({ action: "AUTO_CONFIGURE_ROUTES", connectionId: connection.id })} style={{ height: 36, fontSize: 13 }}>自动配置推荐用途</button>
 
                 {connection.credential.id && connection.credential.status === "ACTIVE" && (
                   <button
@@ -184,10 +187,11 @@ export function ProviderSettings() {
         </div>
       </section>
 
-      {/* 4. Route Bindings (All 8 Slots) */}
-      <section className="card-panel">
-        <h2 className="section-title" style={{ marginBottom: 20 }}>
-          执行路由绑定 (All 8 Slots)
+      {/* Engineering controls remain available, but are intentionally hidden from the normal setup flow. */}
+      <details className="card-panel">
+        <summary style={{ cursor: "pointer", fontWeight: 600 }}>高级设置</summary>
+          <h2 className="section-title" style={{ marginBottom: 20 }}>
+          配置用途
         </h2>
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           {routeSlots.map(({ slot, label }) => (
@@ -203,7 +207,7 @@ export function ProviderSettings() {
             />
           ))}
         </div>
-      </section>
+      </details>
 
       {message && (
         <p aria-live="polite" className="form-error">
@@ -224,9 +228,9 @@ function ConnectionForm({
   submit(payload: Record<string, unknown>): Promise<void>;
 }) {
   const [providerKey, setProviderKey] = useState(providers[0]?.providerKey ?? "");
+  const defaultEndpoints: Record<string, string> = { openai: "https://api.openai.com/v1/responses", anthropic: "https://api.anthropic.com/v1/messages", gemini: "https://generativelanguage.googleapis.com/v1beta", deepseek: "https://api.deepseek.com/chat/completions", zhipu: "https://open.bigmodel.cn/api/paas/v4/chat/completions" };
   const [showAdvanced, setShowAdvanced] = useState(false);
   const provider = providers.find((item) => item.providerKey === providerKey);
-  const protocols = provider ? [...new Set([provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})])] : [];
 
   return (
     <form
@@ -246,35 +250,23 @@ function ConnectionForm({
     >
       <div className="form-group">
         <label className="form-label">提供商 (Provider)</label>
-        <select className="select-control" value={providerKey} onChange={(e) => setProviderKey(e.target.value)}>
+        <select className="select-control" value={providerKey} onChange={(e) => { setProviderKey(e.target.value); const endpoint = document.querySelector<HTMLInputElement>('input[name="endpoint"]'); if (endpoint && defaultEndpoints[e.target.value]) endpoint.value = defaultEndpoints[e.target.value]; }}>
           {providers.map((p) => (
-            <option value={p.providerKey} key={p.providerKey}>
-              {p.displayName} ({p.providerKey})
-            </option>
+            <option value={p.providerKey} key={p.providerKey}>{p.displayName}</option>
           ))}
         </select>
       </div>
 
-      {protocols.length > 1 && <div className="form-group">
-        <label className="form-label">协议 (Protocol)</label>
-        <select className="select-control" name="protocol">
-          {protocols.map((proto) => (
-            <option value={proto} key={proto}>
-              {proto}
-            </option>
-          ))}
-        </select>
-      </div>}
-      {protocols.length === 1 && <input type="hidden" name="protocol" value={protocols[0]} />}
+      <input type="hidden" name="protocol" value={provider?.protocol ?? ""} />
 
       <div className="form-group">
-        <label className="form-label">显示名称</label>
-        <input className="input-control" name="displayName" required maxLength={160} placeholder="例如: 生产模型 Gateway" />
+        <label className="form-label">名称</label>
+        <input className="input-control" name="displayName" required maxLength={160} placeholder="例如：我的 DeepSeek" />
       </div>
 
       <div className="form-group">
-        <label className="form-label">HTTPS 执行端点 (必填)</label>
-        <input className="input-control font-mono" name="endpoint" type="url" required placeholder="https://api.example.com/v1" />
+        <label className="form-label">Base URL</label>
+        <input className="input-control font-mono" name="endpoint" type="url" required readOnly={Boolean(defaultEndpoints[providerKey])} defaultValue={defaultEndpoints[providerKey] ?? ""} placeholder="https://api.example.com/v1" />
       </div>
 
       <div className="form-group">
@@ -311,9 +303,10 @@ function ConnectionForm({
         </div>
       )}
 
-      <button type="submit" className="btn btn-primary" disabled={busy || !provider} style={{ justifySelf: "start" }}>
-        {busy ? "保存中…" : "保存 Provider"}
-      </button>
+      <div style={{ display: "flex", gap: 12 }}>
+        <button type="button" className="btn btn-secondary" disabled={busy || !provider} onClick={(event) => { const form = event.currentTarget.form; if (!form || !form.reportValidity()) return; void submit({ action: "TEST_CONNECTION", providerKey, protocol: new FormData(form).get("protocol"), endpoint: new FormData(form).get("endpoint"), secret: new FormData(form).get("secret") }); }}>测试连接</button>
+        <button type="submit" className="btn btn-primary" disabled={busy || !provider}>{busy ? "保存中…" : "保存 Provider"}</button>
+      </div>
     </form>
   );
 }
@@ -374,7 +367,7 @@ function RouteForm({
     >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
         <h4 style={{ fontSize: 14, fontWeight: 600, color: "var(--on-surface)", margin: 0 }}>
-          {slotLabel}
+          {slotLabel} ({slot})
         </h4>
         {existing && <StatusBadge value="已绑定" />}
       </div>
@@ -392,14 +385,8 @@ function RouteForm({
         </div>
 
         <div className="form-group">
-          <label className="form-label">模型 (Model ID)</label>
-          <select className="select-control font-mono" name="modelId" defaultValue={existing?.modelId}>
-            {models.map((m) => (
-              <option value={m.modelId} key={m.modelId}>
-                {m.modelId}
-              </option>
-            ))}
-          </select>
+          <label className="form-label">模型</label>
+          {connection?.providerKey === "openai-compatible" ? <input className="input-control" name="modelId" required defaultValue={existing?.modelId} placeholder="输入服务商提供的模型 ID" /> : <select className="select-control" name="modelId" defaultValue={existing?.modelId}>{models.map((m) => <option value={m.modelId} key={m.modelId}>{m.modelId}</option>)}</select>}
         </div>
       </div>
 

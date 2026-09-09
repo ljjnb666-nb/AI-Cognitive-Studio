@@ -1,7 +1,7 @@
 import "server-only";
 
 import { prisma } from "@ai-cognitive/db";
-import { parseProviderModelManifest, routeSlotCapabilities, sanitizedProviderManifest, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { resolveProviderCatalog, routeSlotCapabilities, sanitizedProviderManifest, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
 
 const bookSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
 const requiredSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"] as const;
@@ -11,7 +11,7 @@ type RouteWithConnection = { routeSlot: string; modelId: string; configuration: 
 export type ProductRouteIdentity = { provider: string; model: string; modelVersion?: string; configuration: JsonRecord };
 export type PodcastVoice = { ordinal: number; providerVoiceId: string; voiceVersion: string; speakingRate: number; pitch: number; style?: string; language?: string; outputFormat: string };
 
-export function productManifest() { return parseProviderModelManifest(process.env.PROVIDER_GATEWAY_MODEL_MANIFEST); }
+export function productManifest() { return resolveProviderCatalog(process.env.PROVIDER_GATEWAY_MODEL_MANIFEST); }
 export function safeConfiguration(value: unknown): JsonRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as JsonRecord;
