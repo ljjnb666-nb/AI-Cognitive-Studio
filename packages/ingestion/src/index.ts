@@ -168,7 +168,11 @@ export function createIngestionService(storage: StorageProvider, options = { max
         if (locked.length !== 1) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
         const latest = await tx.ingestionRun.findFirst({ where: { sourceDocumentId, workspaceId: context.workspaceId }, orderBy: { createdAt: "desc" }, include: { job: true } });
         if (latest && ["QUEUED", "RUNNING", "SUCCEEDED"].includes(latest.status)) return { run: latest, created: false };
-        const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId }, idempotencyKey: `ingest:${sourceDocumentId}:retry:${latest?.job.attemptCount ?? 0}` } });
+          // Recovery identity belongs to the durable source lineage, never to a
+          // particular Job's delivery attempts. The source row lock makes this
+          // count a serialized, monotonic generation number.
+          const generation = await tx.ingestionRun.count({ where: { sourceDocumentId, workspaceId: context.workspaceId } });
+          const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId }, idempotencyKey: `ingest:${sourceDocumentId}:retry:${generation}` } });
         const run = await tx.ingestionRun.create({ data: { sourceDocumentId, workspaceId: context.workspaceId, jobId: job.id, parserVersion: latest?.parserVersion ?? "recovery", normalizationVersion: latest?.normalizationVersion ?? CANONICAL_NORMALIZATION_VERSION } });
         await tx.outboxEvent.create({ data: { topic: completion.outboxTopic ?? INGESTION_TOPIC, aggregateId: run.id, payload: { ingestionRunId: run.id } } });
         return { run, created: true };

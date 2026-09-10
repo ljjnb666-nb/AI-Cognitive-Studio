@@ -450,6 +450,24 @@ describe("completeUpload", () => {
     await expect(prisma.outboxEvent.count({ where: { aggregateId: active[0]!.id, topic: "source.ingestion.requested" } })).resolves.toBe(1);
   });
 
+  it("creates distinct serialized recovery generations after each failed retry", async () => {
+    const value = await createCompletedFixture(), service = createIngestionService(new FakeStorageProvider());
+    const originalJob = await prisma.job.create({ data: { workspaceId: value.workspace.id, userId: value.user.id, type: "source.ingest", status: "FAILED", payload: {}, idempotencyKey: `failed-generations:${value.document.id}` } });
+    await prisma.ingestionRun.create({ data: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id, jobId: originalJob.id, status: "FAILED", parserVersion: "test", normalizationVersion: "test", completedAt: new Date() } });
+    const keys: string[] = [];
+    for (let generation = 1; generation <= 3; generation++) {
+      const attempts = await Promise.all(Array.from({ length: 5 }, () => service.recoverIngestionForUser({ workspaceId: value.workspace.id, userId: value.user.id }, value.document.id)));
+      expect(attempts.filter((attempt) => attempt.created)).toHaveLength(1);
+      const active = attempts.find((attempt) => attempt.created)!.run;
+      const job = await prisma.job.findUniqueOrThrow({ where: { id: active.jobId } });
+      keys.push(job.idempotencyKey);
+      await expect(prisma.outboxEvent.count({ where: { aggregateId: active.id, topic: "source.ingestion.requested" } })).resolves.toBe(1);
+      await prisma.$transaction([prisma.ingestionRun.update({ where: { id: active.id }, data: { status: "FAILED", completedAt: new Date() } }), prisma.job.update({ where: { id: active.jobId }, data: { status: "FAILED", completedAt: new Date() } })]);
+    }
+    expect(new Set(keys).size).toBe(3);
+    await expect(prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id, status: "FAILED" } })).resolves.toBe(4);
+  });
+
   it("refuses cross-workspace recovery without mutating the source", async () => {
     const value = await createCompletedFixture(), other = await createWorkspaceFixture(), service = createIngestionService(new FakeStorageProvider());
     await expect(service.recoverIngestionForUser({ workspaceId: other.workspace.id, userId: other.user.id }, value.document.id)).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { StatusBadge } from "./status-badge";
 import { SourceProcessing } from "./source-processing";
+import type { ProcessingWorkerAvailability, WorkerAvailability } from "@/lib/processing-state";
 
 const categoryNames: Record<string, string> = {
   SUMMARY: "核心观点",
@@ -57,7 +58,7 @@ type Props = {
     analysisStatus?: string | null;
     errorCode?: string | null;
     processingState: string;
-    workerAvailability: string;
+    workerAvailability: WorkerAvailability | ProcessingWorkerAvailability;
     processingSince?: string | null;
   };
   memories: MemoryItemData[];

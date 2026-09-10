@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveProcessingState, processingWaitLabel } from "../lib/processing-state";
+import { processingAvailabilityFromHeartbeat } from "../lib/worker-heartbeat";
 
 const now = new Date("2026-01-01T00:03:00.000Z");
 const run = (status: string, createdAt = new Date("2026-01-01T00:00:00.000Z")) => ({ status, createdAt });
@@ -19,5 +20,15 @@ describe("Phase 18.1 product processing state", () => {
   });
   it("treats immutable current intelligence as succeeded regardless of stale historical runs", () => {
     expect(deriveProcessingState({ ingestion: run("FAILED"), analysis: run("FAILED"), workerAvailability: "DEGRADED", hasIntelligence: true, now })).toBe("SUCCEEDED");
+  });
+  it("requires current intelligence even when the analysis run says succeeded", () => {
+    expect(deriveProcessingState({ ingestion: run("SUCCEEDED"), analysis: run("SUCCEEDED"), workerAvailability: "AVAILABLE", hasIntelligence: false, now })).toBe("PROCESSING_DEGRADED");
+    expect(deriveProcessingState({ ingestion: run("SUCCEEDED"), analysis: run("SUCCEEDED"), workerAvailability: "AVAILABLE", hasIntelligence: true, now })).toBe("SUCCEEDED");
+  });
+  it("uses the capability matching the current pipeline and rejects malformed heartbeat data", () => {
+    const availability = processingAvailabilityFromHeartbeat(JSON.stringify({ capabilities: { ingestion: true, bookAnalysis: false, podcastGeneration: false, podcastAudio: false, shortVideoGeneration: false } }));
+    expect(deriveProcessingState({ ingestion: run("QUEUED"), workerAvailability: availability, hasIntelligence: false, now })).toBe("QUEUED_FOR_INGESTION");
+    expect(deriveProcessingState({ ingestion: run("SUCCEEDED"), analysis: run("QUEUED"), workerAvailability: availability, hasIntelligence: false, now })).toBe("PROCESSING_DEGRADED");
+    expect(processingAvailabilityFromHeartbeat("not-json").bookAnalysis).toBe("UNKNOWN");
   });
 });

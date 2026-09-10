@@ -11,6 +11,7 @@ import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSource
 import { createHealthCheckWorker } from "./worker.js";
 import { createBookProductionGatewayRuntime, createPodcastAudioProductionGatewayRuntime, createPodcastProductionGatewayRuntime, createShortVideoProductionGatewayRuntime, type BookGatewayRuntime, type BookProductionGatewayRuntimeOverrides, type PodcastAudioGatewayRuntime, type PodcastGatewayRuntime, type ShortVideoGatewayRuntime } from "./provider-gateway-runtime.js";
 import { startProcessingHeartbeat } from "./processing-heartbeat.js";
+import { resolveCredentialKeyring, resolveProviderCatalog } from "@ai-cognitive/provider-gateway";
 
 export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider> };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
@@ -22,6 +23,14 @@ export function resolvePodcastRuntimeAdapter(source: NodeJS.ProcessEnv, injected
   if (!injected) throw new Error(`PODCAST_GENERATION_PROVIDER_UNSUPPORTED:${configured}`);
   if (injected.provider && injected.provider.identity.provider !== configured) throw new Error(`PODCAST_GENERATION_PROVIDER_UNSUPPORTED:${configured}`);
   return injected;
+}
+
+/** Uses the Provider Gateway's own runtime prerequisites; manifests are optional. */
+export function resolveBookWorkerCapability(source: NodeJS.ProcessEnv): boolean {
+  // Parse an explicit manifest even when a keyring is absent: malformed operator
+  // configuration must fail fast rather than silently disabling the worker.
+  resolveProviderCatalog(source.PROVIDER_GATEWAY_MODEL_MANIFEST);
+  return Boolean(resolveCredentialKeyring(source));
 }
 
 export async function startWorkerRuntime(environment: Environment, options: WorkerRuntimeOptions = {}) {
@@ -39,7 +48,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const bookConfigured = source.BOOK_ANALYSIS_PROVIDER?.trim();
   // Workspace BYOK is resolved per run. A gateway-capable worker must not be
   // hidden behind the legacy process-global provider toggle.
-  const gatewayConfigured = Boolean(source.PROVIDER_GATEWAY_KEYRING?.trim() && source.PROVIDER_GATEWAY_MODEL_MANIFEST?.trim());
+  const gatewayConfigured = resolveBookWorkerCapability(source);
   const bookEnabled = Boolean(options.bookDependencies || bookConfigured || gatewayConfigured);
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
   try {

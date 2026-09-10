@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { afterEach, expect, test } from "vitest";
-import { resolvePodcastRuntimeAdapter } from "../src/runtime.js";
+import { resolveBookWorkerCapability, resolvePodcastRuntimeAdapter } from "../src/runtime.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const workerProcesses: ReturnType<typeof spawn>[] = [];
 
@@ -49,4 +52,13 @@ test("exits cleanly after the platform termination signal", async () => {
 test("podcast runtime configuration is disabled when absent and fails explicitly when unsupported", () => {
   expect(resolvePodcastRuntimeAdapter({})).toBeUndefined();
   expect(() => resolvePodcastRuntimeAdapter({ PODCAST_GENERATION_PROVIDER: "unsupported-vendor" })).toThrow("PODCAST_GENERATION_PROVIDER_UNSUPPORTED:unsupported-vendor");
+});
+
+test("book worker capability reuses Gateway keyring and catalog semantics", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "acs-keyring-")), "keyring.json"), keyring = JSON.stringify({ activeVersion: "v1", keys: { v1: Buffer.alloc(32).toString("base64") } });
+  writeFileSync(path, keyring);
+  expect(resolveBookWorkerCapability({ NODE_ENV: "development", PROVIDER_GATEWAY_LOCAL_KEYRING_PATH: path })).toBe(true);
+  expect(resolveBookWorkerCapability({ NODE_ENV: "production", PROVIDER_GATEWAY_KEYRING: keyring })).toBe(true);
+  expect(resolveBookWorkerCapability({ NODE_ENV: "production" })).toBe(false);
+  expect(resolveBookWorkerCapability({ NODE_ENV: "production", PROVIDER_GATEWAY_KEYRING: keyring, PROVIDER_GATEWAY_MODEL_MANIFEST: JSON.stringify({ providers: [] }) })).toBe(true);
 });

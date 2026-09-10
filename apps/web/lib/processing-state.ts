@@ -1,32 +1,35 @@
 export type WorkerAvailability = "AVAILABLE" | "DEGRADED" | "UNKNOWN";
+export type ProcessingWorkerAvailability = { ingestion: WorkerAvailability; bookAnalysis: WorkerAvailability; podcastGeneration: WorkerAvailability; podcastAudio: WorkerAvailability; shortVideoGeneration: WorkerAvailability };
 export type ProcessingState = "NOT_STARTED" | "QUEUED_FOR_INGESTION" | "INGESTING" | "WAITING_FOR_ANALYSIS" | "ANALYSIS_QUEUED" | "ANALYZING" | "SUCCEEDED" | "INGESTION_FAILED" | "ANALYSIS_FAILED" | "PROCESSING_DEGRADED";
 
 type Run = { status?: string | null; createdAt?: Date | null; startedAt?: Date | null; updatedAt?: Date | null; completedAt?: Date | null; executionLeaseUntil?: Date | null } | null | undefined;
 
 /** Pure, server-derived product state.  A missing durable run is never queued. */
-export function deriveProcessingState(input: { ingestion?: Run; analysis?: Run; hasIntelligence: boolean; workerAvailability: WorkerAvailability; now?: Date; staleAfterMs?: number }): ProcessingState {
-  if (input.hasIntelligence || input.analysis?.status === "SUCCEEDED") return "SUCCEEDED";
+export function deriveProcessingState(input: { ingestion?: Run; analysis?: Run; hasIntelligence: boolean; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; now?: Date; staleAfterMs?: number }): ProcessingState {
+  if (input.hasIntelligence) return "SUCCEEDED";
+  const availability = (capability: "ingestion" | "bookAnalysis") => typeof input.workerAvailability === "string" ? input.workerAvailability : input.workerAvailability[capability];
   const ingestion = input.ingestion;
   if (!ingestion) return "NOT_STARTED";
   if (ingestion.status === "FAILED" || ingestion.status === "REJECTED" || ingestion.status === "OCR_REQUIRED" || ingestion.status === "PASSWORD_REQUIRED") return "INGESTION_FAILED";
   if (ingestion.status === "RUNNING") {
     const age = (input.now ?? new Date()).getTime() - (ingestion.startedAt ?? ingestion.createdAt ?? new Date()).getTime();
-    return age > (input.staleAfterMs ?? 120_000) && input.workerAvailability !== "AVAILABLE" ? "PROCESSING_DEGRADED" : "INGESTING";
+    return age > (input.staleAfterMs ?? 120_000) && availability("ingestion") !== "AVAILABLE" ? "PROCESSING_DEGRADED" : "INGESTING";
   }
   if (ingestion.status !== "SUCCEEDED") {
     const age = (input.now ?? new Date()).getTime() - (ingestion.updatedAt ?? ingestion.createdAt ?? new Date()).getTime();
-    return age > (input.staleAfterMs ?? 120_000) && input.workerAvailability !== "AVAILABLE" ? "PROCESSING_DEGRADED" : "QUEUED_FOR_INGESTION";
+    return age > (input.staleAfterMs ?? 120_000) && availability("ingestion") !== "AVAILABLE" ? "PROCESSING_DEGRADED" : "QUEUED_FOR_INGESTION";
   }
   const analysis = input.analysis;
   if (!analysis) return "WAITING_FOR_ANALYSIS";
+  if (analysis.status === "SUCCEEDED") return "PROCESSING_DEGRADED";
   if (analysis.status === "FAILED") return "ANALYSIS_FAILED";
   if (analysis.status === "RUNNING") {
     const age = (input.now ?? new Date()).getTime() - (analysis.startedAt ?? analysis.createdAt ?? new Date()).getTime();
-    return age > (input.staleAfterMs ?? 120_000) && input.workerAvailability !== "AVAILABLE" ? "PROCESSING_DEGRADED" : "ANALYZING";
+    return age > (input.staleAfterMs ?? 120_000) && availability("bookAnalysis") !== "AVAILABLE" ? "PROCESSING_DEGRADED" : "ANALYZING";
   }
   if (analysis.status === "QUEUED") {
     const age = (input.now ?? new Date()).getTime() - (analysis.updatedAt ?? analysis.createdAt ?? new Date()).getTime();
-    return age > (input.staleAfterMs ?? 120_000) && input.workerAvailability !== "AVAILABLE" ? "PROCESSING_DEGRADED" : "ANALYSIS_QUEUED";
+    return age > (input.staleAfterMs ?? 120_000) && availability("bookAnalysis") !== "AVAILABLE" ? "PROCESSING_DEGRADED" : "ANALYSIS_QUEUED";
   }
   return "WAITING_FOR_ANALYSIS";
 }
