@@ -460,6 +460,7 @@ describe("completeUpload", () => {
       expect(attempts.filter((attempt) => attempt.created)).toHaveLength(1);
       const active = attempts.find((attempt) => attempt.created)!.run;
       const job = await prisma.job.findUniqueOrThrow({ where: { id: active.jobId } });
+      if (!job.idempotencyKey) throw new Error("RECOVERY_GENERATION_KEY_MISSING");
       keys.push(job.idempotencyKey);
       await expect(prisma.outboxEvent.count({ where: { aggregateId: active.id, topic: "source.ingestion.requested" } })).resolves.toBe(1);
       await prisma.$transaction([prisma.ingestionRun.update({ where: { id: active.id }, data: { status: "FAILED", completedAt: new Date() } }), prisma.job.update({ where: { id: active.jobId }, data: { status: "FAILED", completedAt: new Date() } })]);
