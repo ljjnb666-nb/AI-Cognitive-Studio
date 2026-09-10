@@ -29,7 +29,7 @@ export const builtInProviderProfiles: readonly ProviderProfile[] = [
   { providerKey: "deepseek", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.deepseek.com/chat/completions", authScheme: "BEARER" },
   { providerKey: "zhipu", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions", authScheme: "BEARER" },
   { providerKey: "qwen", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", authScheme: "BEARER" },
-  { providerKey: "minimax", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.minimax.io/v1/chat/completions", authScheme: "BEARER" },
+  { providerKey: "minimax", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.minimax.io/v1/text/chatcompletion_v2", authScheme: "BEARER" },
   { providerKey: "cohere", family: "EMBEDDING", protocol: "COHERE_EMBEDDINGS_V2", endpoint: "https://api.cohere.com/v2/embed", authScheme: "BEARER" },
   { providerKey: "voyage", family: "EMBEDDING", protocol: "VOYAGE_EMBEDDINGS", endpoint: "https://api.voyageai.com/v1/embeddings", authScheme: "BEARER" },
 ];

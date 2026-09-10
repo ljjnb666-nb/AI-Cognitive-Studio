@@ -97,7 +97,13 @@ export async function providerReadiness(workspaceId: string) {
   const manifest = productManifest(), routes = await routesForWorkspace(workspaceId);
   const tryIdentity = (slot: RouteSlot) => { try { routeIdentity(manifest, routes, slot); return undefined; } catch (error) { return error instanceof Error ? error.message : "AI_PROVIDER_CONFIGURATION_REQUIRED"; } };
   const missing = (slots: readonly RouteSlot[]) => slots.map(tryIdentity).filter((item): item is string => Boolean(item));
-  const bookMissing = missing(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"]);
+  // Text and embeddings are independent Book Intelligence dependencies.  Do
+  // not report a text-complete workspace as ready merely because its embedding
+  // route is absent or unusable.
+  const bookMissing = (["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"] as const).flatMap(slot => {
+    const error = tryIdentity(slot);
+    return !error ? [] : slot === "EMBEDDING" ? ["BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"] : [error];
+  });
   try { await resolveBookRouteIdentity(workspaceId); } catch (error) { bookMissing.push(error instanceof Error ? error.message : "BOOK_ROUTE_IDENTITY_INCONSISTENT"); }
   const podcastMissing = missing(["PODCAST_SCRIPT", "EMBEDDING"]);
   const audioMissing = missing(["PODCAST_TTS"]);

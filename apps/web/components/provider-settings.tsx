@@ -121,6 +121,7 @@ export function ProviderSettings() {
           添加 AI Provider
         </h2>
         <p style={{ color: "var(--on-surface-variant)", fontSize: 14, margin: "0 0 20px" }}>添加你自己的 AI Provider。API Key 会加密保存，之后不会再次显示明文。</p>
+        <p style={{ color: "var(--on-surface-variant)", fontSize: 13, margin: "0 0 20px" }}>推荐书籍理解组合：MiniMax-M3 用于书籍分段分析、归并与综合理解；Gemini Embedding 2 用于语义向量与内容关联。</p>
         <ConnectionForm providers={state.manifest.providers} busy={busy} submit={submit} />
       </section>
 
@@ -228,7 +229,7 @@ function ConnectionForm({
   submit(payload: Record<string, unknown>): Promise<void>;
 }) {
   const [providerKey, setProviderKey] = useState(providers[0]?.providerKey ?? "");
-  const defaultEndpoints: Record<string, string> = { openai: "https://api.openai.com/v1/responses", anthropic: "https://api.anthropic.com/v1/messages", gemini: "https://generativelanguage.googleapis.com/v1beta", deepseek: "https://api.deepseek.com/chat/completions", zhipu: "https://open.bigmodel.cn/api/paas/v4/chat/completions" };
+  const defaultEndpoints: Record<string, string> = { openai: "https://api.openai.com/v1/responses", anthropic: "https://api.anthropic.com/v1/messages", gemini: "https://generativelanguage.googleapis.com/v1beta", deepseek: "https://api.deepseek.com/chat/completions", zhipu: "https://open.bigmodel.cn/api/paas/v4/chat/completions", minimax: "https://api.minimax.io/v1/text/chatcompletion_v2" };
   const [showAdvanced, setShowAdvanced] = useState(false);
   const provider = providers.find((item) => item.providerKey === providerKey);
 

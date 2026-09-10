@@ -38,9 +38,15 @@ async function resolveProviderHostname(hostname: string): Promise<readonly strin
 function connectionTestUrl(input: z.infer<typeof testConnection>): string | undefined {
   return builtInProviderTestEndpoint(input.providerKey);
 }
+function assertFixedMiniMaxEndpoint(providerKey: string, endpoint: string) {
+  if (providerKey !== "minimax") return;
+  const expected = builtInProviderProfiles.find(profile => profile.providerKey === "minimax" && profile.family === "TEXT_GENERATION")?.endpoint;
+  if (!expected || endpoint !== expected) throw new Error("PROVIDER_CONNECTION_ENDPOINT_INVALID");
+}
 async function testSubmittedConnection(input: z.infer<typeof testConnection>, manifest: ReturnType<typeof productManifest>) {
   const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
   if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
+  assertFixedMiniMaxEndpoint(input.providerKey, input.endpoint);
   await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: resolveProviderHostname } });
   const url = connectionTestUrl(input); if (!url) return { state: "UNSUPPORTED_TEST" as const };
   // The isolated development release harness replaces only the remote HTTP boundary.
@@ -105,6 +111,7 @@ export async function POST(request: Request) {
     if (input.action === "AUTO_CONFIGURE_ROUTES") { const configured = await autoConfigure(context, input, manifest, repository, cipher); return NextResponse.json({ ...(await (await response(context.workspaceId)).json()), autoConfigure: configured }); }
     if (input.action === "CREATE_CONNECTION" || input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") {
       assertSafeConfiguration(input.configuration);
+      assertFixedMiniMaxEndpoint(input.providerKey, input.endpoint);
       await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: resolveProviderHostname } });
       const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
       if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
