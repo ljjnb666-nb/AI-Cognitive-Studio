@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deriveProcessingState, processingWaitLabel } from "../lib/processing-state";
 import { processingAvailabilityFromHeartbeat } from "../lib/worker-heartbeat";
+import { submitProcessingRecovery } from "../lib/processing-recovery";
 
 const now = new Date("2026-01-01T00:03:00.000Z");
 const run = (status: string, createdAt = new Date("2026-01-01T00:00:00.000Z")) => ({ status, createdAt });
@@ -30,5 +31,12 @@ describe("Phase 18.1 product processing state", () => {
     expect(deriveProcessingState({ ingestion: run("QUEUED"), workerAvailability: availability, hasIntelligence: false, now })).toBe("QUEUED_FOR_INGESTION");
     expect(deriveProcessingState({ ingestion: run("SUCCEEDED"), analysis: run("QUEUED"), workerAvailability: availability, hasIntelligence: false, now })).toBe("PROCESSING_DEGRADED");
     expect(processingAvailabilityFromHeartbeat("not-json").bookAnalysis).toBe("UNKNOWN");
+    expect(availability).toMatchObject({ podcastGeneration: "DEGRADED", podcastAudio: "DEGRADED", shortVideoGeneration: "DEGRADED" });
+  });
+  it("keeps recovery errors safe and does not treat a failed response as a refreshable success", async () => {
+    const failed = await submitProcessingRecovery("source", async () => new Response('{"error":"Prisma connection secret"}', { status: 500 }));
+    const unavailable = await submitProcessingRecovery("source", async () => { throw new Error("redis password"); });
+    const succeeded = await submitProcessingRecovery("source", async () => new Response(null, { status: 202 }));
+    expect([failed, unavailable, succeeded]).toEqual(["PROCESSING_RECOVERY_FAILED", "PROCESSING_RECOVERY_FAILED", "RECOVERED"]);
   });
 });

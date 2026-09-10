@@ -7,6 +7,7 @@ import {
   bookIntelligenceErrorMessage,
   needsProviderConfiguration,
 } from "@/lib/product-errors";
+import { submitProcessingRecovery } from "@/lib/processing-recovery";
 import { processingCopy, processingWaitLabel, type ProcessingState, type ProcessingWorkerAvailability, type WorkerAvailability } from "@/lib/processing-state";
 
 type Props = { sourceDocumentId: string; ingestionStatus?: string | null; analysisStatus?: string | null; errorCode?: string | null; processingState: string; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; processingSince?: string | null };
@@ -44,7 +45,7 @@ export function SourceProcessing({ sourceDocumentId, ingestionStatus, analysisSt
     return () => { stopped = true; if (timer) window.clearTimeout(timer); };
   }, [message, router, terminal]);
   const [recovering, setRecovering] = useState(false);
-  const recover = useCallback(async () => { if (recovering) return; setRecovering(true); try { const response = await fetch(`/api/studio/processing/${sourceDocumentId}/recover`, { method: "POST" }); if (!response.ok) { setMessage("PROCESSING_RECOVERY_FAILED"); return; } router.refresh(); } catch { setMessage("PROCESSING_RECOVERY_FAILED"); } finally { setRecovering(false); } }, [recovering, router, sourceDocumentId]);
+  const recover = useCallback(async () => { if (recovering) return; setRecovering(true); try { const result = await submitProcessingRecovery(sourceDocumentId); if (result !== "RECOVERED") { setMessage(result); return; } router.refresh(); } finally { setRecovering(false); } }, [recovering, router, sourceDocumentId]);
   const failureCode = message ?? errorCode;
   const configurationError = needsProviderConfiguration(failureCode);
   if (analysisStatus === "FAILED") return <section className="panel"><p className="error">深度理解失败：{bookIntelligenceErrorMessage(errorCode)}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 AI Provider</Link>}<button className="button secondary" aria-label="重试分析" onClick={() => void requestAnalysis(true)}>重试深度理解</button></div></section>;
