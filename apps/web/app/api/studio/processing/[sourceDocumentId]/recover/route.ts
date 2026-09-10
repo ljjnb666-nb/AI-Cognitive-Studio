@@ -27,7 +27,12 @@ export async function POST(_: Request, { params }: { params: Promise<{ sourceDoc
     } else if (status.recoveryAction === "RETRY_ANALYSIS") {
       if (status.state === "WAITING_FOR_ANALYSIS") await requestAnalysis(identity, sourceDocumentId);
       else await recoverBookAnalysisForUser(identity, sourceDocumentId, { outboxTopic: process.env.PHASE9_BOOK_TOPIC?.trim() || undefined });
-    } else if (status.recoveryAction === "REPAIR_CURRENT_INTELLIGENCE") await recoverBookAnalysisForUser(identity, sourceDocumentId);
+    } else if (status.recoveryAction === "REPAIR_CURRENT_INTELLIGENCE") {
+      // A completed historical extraction is never promoted. Start analysis
+      // only for the durable current extraction, without replaying ingestion.
+      if (item.analysisRuns[0]?.extractionId !== item.currentExtraction?.extractionId) await requestAnalysis(identity, sourceDocumentId);
+      else await recoverBookAnalysisForUser(identity, sourceDocumentId);
+    }
     return NextResponse.json({ result: "RECOVERY_ACCEPTED", recoveryAction: status.recoveryAction });
   } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "PROCESSING_RECOVERY_FAILED"; return NextResponse.json({ error: code.includes("ACCESS_DENIED") ? code : "PROCESSING_RECOVERY_FAILED" }, { status: code.includes("ACCESS_DENIED") ? 403 : 400 }); }
 }

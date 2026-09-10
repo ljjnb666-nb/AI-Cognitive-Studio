@@ -425,6 +425,36 @@ export async function requestBookAnalysisForUser(context: TrustedBookAnalysisReq
   return requestBookAnalysisCore({ ...input, workspaceId: context.workspaceId }, context.userId);
 }
 
+/** The same durable proof required before any run may become current. */
+async function assertCurrentIntelligenceEligible(tx: any, run: any, context: StageContext, embeddingIdentityHash: string, requireSucceeded = true, requireCurrentExtraction = true) {
+  if (requireSucceeded && run.status !== "SUCCEEDED") throw new Error("BOOK_ANALYSIS_NOT_SUCCEEDED");
+  const [currentExtraction] = await tx.$queryRaw<Array<{ extractionId: string }>>`
+    SELECT "extractionId" FROM "CurrentDocumentExtraction"
+    WHERE "sourceDocumentId" = ${run.sourceDocumentId} AND "workspaceId" = ${run.workspaceId} FOR UPDATE
+  `;
+  if (requireCurrentExtraction && currentExtraction?.extractionId !== run.extractionId) throw new Error("BOOK_ANALYSIS_CURRENT_EXTRACTION_MISMATCH");
+  const sectionNodes = context.nodes.filter((node) => node.kind === "SECTION" && chunksForNode(context.chunks, node).length);
+  const sectionArtifacts = await tx.analysisArtifact.findMany({ where: { analysisRunId: run.id, scope: "SECTION" } });
+  const nodeById = new Map(context.nodes.map((node) => [node.id, node]));
+  const chapterNodes = context.nodes.filter((node) => node.kind === "CHAPTER" && (sectionArtifacts.some((section: any) => { const sectionNode = nodeById.get(section.structureNodeId ?? ""); return sectionNode && sectionNode.startBlockOrdinal >= node.startBlockOrdinal && sectionNode.endBlockOrdinal <= node.endBlockOrdinal; }) || context.chunks.some((chunk) => { const range = (chunk.metadata as { blockOrdinalRange?: [number, number] } | null)?.blockOrdinalRange; return range && range[0] >= node.startBlockOrdinal && range[1] <= node.endBlockOrdinal; })));
+  const memoryPlans = await buildMemoryPlans(run);
+  const requiredMemoryKeys = memoryPlans.filter((plan) => plan.candidate.type !== "QUOTE" || acceptedEvidence(plan, context).some((span) => { try { validateQuote(context.blockMap.get(span.sourceBlockId)!, span); return true; } catch { return false; } })).map((plan) => plan.memoryKey);
+  const [chunks, sections, chapters, books, artifacts, memories, chunkEmbeddings, memoryEmbeddings] = await Promise.all([
+    tx.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "CHUNK", chunkId: { in: context.chunks.map((chunk) => chunk.id) } } }),
+    tx.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "SECTION", structureNodeId: { in: sectionNodes.map((node) => node.id) } } }),
+    tx.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "CHAPTER", structureNodeId: { in: chapterNodes.map((node) => node.id) } } }),
+    tx.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "BOOK", summary: { not: "" } } }),
+    tx.analysisArtifact.findMany({ where: { analysisRunId: run.id }, select: { id: true, scope: true, parentId: true } }),
+    tx.bookMemoryItem.count({ where: { analysisRunId: run.id, memoryKey: { in: requiredMemoryKeys } } }),
+    tx.documentChunkEmbedding.count({ where: { chunkId: { in: context.chunks.map((chunk) => chunk.id) }, embeddingIdentityHash } }),
+    tx.bookMemoryEmbedding.count({ where: { analysisRunId: run.id, embeddingIdentityHash } }),
+  ]);
+  const finalizationArtifacts = artifacts as any[];
+  const artifactById = new Map(finalizationArtifacts.map((artifact) => [artifact.id, artifact]));
+  const allChunksReachBook = finalizationArtifacts.filter((artifact) => artifact.scope === "CHUNK").every((artifact) => { let cursor = artifact; for (let depth = 0; depth < 4 && cursor.parentId; depth++) { const parent = artifactById.get(cursor.parentId); if (!parent) return false; if (parent.scope === "BOOK") return true; cursor = parent; } return false; });
+  if (chunks !== context.chunks.length || sections !== sectionNodes.length || chapters !== chapterNodes.length || books !== 1 || !allChunksReachBook || memories !== requiredMemoryKeys.length || chunkEmbeddings !== context.chunks.length || memoryEmbeddings !== memories) throw new Error("BOOK_ANALYSIS_FINALIZATION_INCOMPLETE");
+}
+
 /**
  * Stage-aware recovery.  It deliberately operates on the latest durable
  * analysis lineage and never recreates ingestion.  A completed run whose
@@ -434,7 +464,10 @@ export async function requestBookAnalysisForUser(context: TrustedBookAnalysisReq
 export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisRequestContext, sourceDocumentId: string, options: { outboxTopic?: string } = {}) {
   const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { userId: true } });
   if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
-  return prisma.$transaction(async (tx) => {
+  // Re-finalization deliberately serializes on the source document.  Give
+  // concurrent HTTP retries a bounded window to acquire a pooled connection
+  // and that lock instead of failing before the durable idempotency barrier.
+  const recover = () => prisma.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "SourceDocument" WHERE "id" = ${sourceDocumentId} AND "workspaceId" = ${context.workspaceId} FOR UPDATE`;
     if (locked.length !== 1) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
     const run = await tx.bookAnalysisRun.findFirst({ where: { sourceDocumentId, workspaceId: context.workspaceId }, orderBy: { createdAt: "desc" }, include: { job: true } });
@@ -443,6 +476,9 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
       const current = await tx.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId, workspaceId: context.workspaceId } } });
       // Never replace a newer valid marker during a late recovery.
       if (current) return { run, action: "REPAIR_CURRENT_INTELLIGENCE" as const, repaired: false, created: false };
+      const embeddingIdentityHash = (run.job.result as { embeddingIdentityHash?: unknown } | null)?.embeddingIdentityHash;
+      if (typeof embeddingIdentityHash !== "string") throw new Error("BOOK_ANALYSIS_FINALIZATION_INCOMPLETE");
+      await assertCurrentIntelligenceEligible(tx, run, await loadStageContext(run), embeddingIdentityHash);
       await tx.currentBookIntelligence.create({ data: { workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, extractionId: run.extractionId, chunkSetId: run.chunkSetId, analysisRunId: run.id } });
       return { run, action: "REPAIR_CURRENT_INTELLIGENCE" as const, repaired: true, created: false };
     }
@@ -456,7 +492,24 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
     const recovered = await tx.bookAnalysisRun.update({ where: { id: run.id }, data: { jobId: retryJob.id, status: "QUEUED", analysisStage: "QUEUED", errorCode: null, startedAt: new Date(), completedAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
     await tx.outboxEvent.create({ data: { topic: options.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id, queueJobId: retryJob.id } } });
     return { run: recovered, action: "RETRY_ANALYSIS" as const, repaired: false, created: true };
-  });
+  }, { maxWait: 10_000, timeout: 15_000 });
+
+  // Five concurrent browser/HTTP retries can briefly exceed the deliberately
+  // small production connection pool while each request waits on the same
+  // source-document lock.  P2024 is acquisition pressure, not a lineage
+  // failure; retrying it preserves the durable transaction as the sole
+  // idempotency barrier rather than making a caller choose a weaker path.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await recover();
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+      if (code !== "P2024" || attempt >= 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
 }
 
 async function runFinalizingStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
@@ -478,6 +531,7 @@ async function runFinalizingStage(run: any, token: string, dependencies: ActiveB
   await withOwnedAnalysisTransaction(run.id, token, async (tx) => {
     const ownedRun = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } });
     if (ownedRun.analysisStage !== "FINALIZING") throw new Error(BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST);
+    await assertCurrentIntelligenceEligible(tx, run, context, identity.hash, false, false);
     const [currentExtraction] = await tx.$queryRaw<Array<{ extractionId: string }>>`
       SELECT "extractionId"
       FROM "CurrentDocumentExtraction"
@@ -498,7 +552,13 @@ async function runFinalizingStage(run: any, token: string, dependencies: ActiveB
     const artifactById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
     const allChunksReachBook = artifacts.filter((artifact) => artifact.scope === "CHUNK").every((artifact) => { let cursor = artifact; for (let depth = 0; depth < 4 && cursor.parentId; depth++) { const parent = artifactById.get(cursor.parentId); if (!parent) return false; if (parent.scope === "BOOK") return true; cursor = parent; } return false; });
     if (chunks !== context.chunks.length || sections !== sectionNodes.length || chapters !== chapterNodes.length || books !== 1 || !allChunksReachBook || memories !== requiredMemoryKeys.length || chunkEmbeddings !== context.chunks.length || memoryEmbeddings !== memories) throw new Error("BOOK_ANALYSIS_FINALIZATION_INCOMPLETE");
-    if (currentExtraction?.extractionId === run.extractionId) await tx.currentBookIntelligence.upsert({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId } }, create: { workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, extractionId: run.extractionId, chunkSetId: run.chunkSetId, analysisRunId: run.id }, update: { extractionId: run.extractionId, chunkSetId: run.chunkSetId, analysisRunId: run.id } });
+    if (currentExtraction?.extractionId === run.extractionId) {
+      const marker = await tx.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId } } });
+      const markedRun = marker ? await tx.bookAnalysisRun.findUnique({ where: { id: marker.analysisRunId }, select: { createdAt: true } }) : null;
+      // A delayed earlier generation must not displace a newer valid current result.
+      if (!marker) await tx.currentBookIntelligence.create({ data: { workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, extractionId: run.extractionId, chunkSetId: run.chunkSetId, analysisRunId: run.id } });
+      else if (!markedRun || markedRun.createdAt <= run.createdAt) await tx.currentBookIntelligence.update({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId } }, data: { extractionId: run.extractionId, chunkSetId: run.chunkSetId, analysisRunId: run.id } });
+    }
     await tx.$executeRaw`UPDATE "BookAnalysisRun" SET "status" = 'SUCCEEDED'::"AnalysisRunStatus", "analysisStage" = 'COMPLETED'::"AnalysisRunStage", "completedAt" = NOW(), "errorCode" = NULL, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${run.id}`;
     await tx.job.update({ where: { id: run.jobId }, data: { result: { analysisRunId: run.id, chunkSetId: run.chunkSetId, embeddingVersion: identity.embeddingVersion, embeddingIdentityHash: identity.hash } } });
     await tx.$executeRaw`UPDATE "Job" SET "status" = 'SUCCEEDED'::"JobStatus", "progress" = 100, "error" = NULL, "completedAt" = NOW() WHERE "id" = ${run.jobId}`;

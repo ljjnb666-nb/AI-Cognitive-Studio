@@ -32,6 +32,8 @@ The single server-derived processing contract returns `processingState`, `proces
 
 `CurrentBookIntelligence` is the durable product-success invariant. A succeeded analysis without that marker is degraded at the Book Analysis stage and recovery re-finalizes the marker from the existing successful run under the source-document lock. It preserves exact workspace, source document, extraction, chunk-set, analysis-run, and provider lineage, does not replay ingestion or provider work, and never overwrites an already-current marker.
 
+Re-finalization uses the same eligibility proof as normal finalization: the analysis must be successful for the current extraction and its complete artifact tree, required memory/evidence, and document and memory embedding materializations must all be present under the recorded embedding identity. A status-only row or an analysis for an older extraction cannot become current. If the current extraction changed, recovery requests Book Analysis for that current extraction without replaying ingestion.
+
 Periodic heartbeat failures are diagnostic: each timer write catches its own rejection and reports only a stable safe error code. A later heartbeat continues normally, and close is idempotent.
 
 Processing heartbeat currently represents one logical homogeneous processing-worker capability profile. Heterogeneous horizontally scaled workers require per-worker heartbeat identity and capability aggregation before that deployment model is supported.

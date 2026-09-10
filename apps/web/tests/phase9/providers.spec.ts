@@ -194,8 +194,8 @@ test("unconfigured authenticated workspace ingests without paid Book work, then 
   const settingsPage = await page.context().newPage();
   await configureAllRoutes(settingsPage, "Recovery Gateway", "phase9-recovery-secret");
   await settingsPage.close();
-  const request = page.waitForResponse(response => response.url().includes("/api/studio/book-intelligence") && response.request().method() === "POST");
-  await page.getByRole("button", { name: "重试分析" }).click();
+  const request = page.waitForResponse(response => response.url().includes(`/api/studio/processing/${sourceDocumentId}/recover`) && response.request().method() === "POST");
+  await page.getByRole("button", { name: "恢复深度理解" }).click();
   expect((await request).ok()).toBeTruthy();
   await expect.poll(() => prisma.currentBookIntelligence.count({ where: { workspaceId } }), { timeout: 120_000 }).toBe(1);
 });
@@ -217,10 +217,10 @@ test("a real failed Book analysis exposes an explicit browser retry without re-u
   await page.reload();
   await expect.poll(async () => (await prisma.bookAnalysisRun.findFirst({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 120_000 }).toBe("FAILED");
   await expect(page.getByText("深度理解失败")).toBeVisible();
-  await expect(page.getByRole("button", { name: "重试分析" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"]) await setRoute(page, slot, good.id, slot === "EMBEDDING" ? "phase9-embed" : "phase9-text");
-  const retry = page.waitForResponse(response => response.url().includes("/api/studio/book-intelligence") && response.request().method() === "POST");
-  await page.getByRole("button", { name: "重试分析" }).click();
+  const retry = page.waitForResponse(response => response.url().includes(`/api/studio/processing/${sourceDocumentId}/recover`) && response.request().method() === "POST");
+  await page.getByRole("button", { name: "恢复深度理解" }).click();
   const retryResponse = await retry, retryBody = await retryResponse.json();
   expect(retryResponse.ok(), JSON.stringify(retryBody)).toBeTruthy();
   await expect.poll(() => prisma.currentBookIntelligence.count({ where: { workspaceId } }), { timeout: 120_000 }).toBe(1);

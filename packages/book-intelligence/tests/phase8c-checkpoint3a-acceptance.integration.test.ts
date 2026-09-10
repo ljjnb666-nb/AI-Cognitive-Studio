@@ -3,7 +3,7 @@ import { ProviderExecutionRepository, ProviderGatewayRepository, testCipher } fr
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { materializeChunkSet } from "../src/persistence.js";
-import { processBookAnalysisRun, requestBookAnalysisForUser, type ProcessBookAnalysisDependencies } from "../src/pipeline.js";
+import { processBookAnalysisRun, recoverBookAnalysisForUser, requestBookAnalysisForUser, type ProcessBookAnalysisDependencies } from "../src/pipeline.js";
 import type { AnalysisProvider, AnalysisResponse } from "../src/analysis.js";
 import { DeterministicFakeEmbeddingProvider, embeddingIdentityWithHash } from "../src/embeddings.js";
 import { materializeBookMemoryEmbeddings, materializeDocumentChunkEmbeddings } from "../src/gateway-materialization.js";
@@ -87,6 +87,40 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBeGreaterThan(0);
     expect(await prisma.bookMemoryEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBeGreaterThan(0);
     expect(await receipt(data.workspace.id)).toMatchObject({ consumerKind: "BOOK_ANALYSIS_EMBEDDINGS", consumerKey: data.run.id, ciphertext: null, iv: null, authTag: null, keyVersion: null, consumedAt: expect.any(Date), purgedAt: expect.any(Date) });
+  });
+
+  it("V31-01/04 re-finalizes only a complete current successful lineage without provider or ingestion replay", async () => {
+    const data = await fixture(); await processBookAnalysisRun(data.run.id, deps(data));
+    await prisma.currentBookIntelligence.delete({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } } });
+    const calls = data.gateway.remoteCallCount(), ingestion = await prisma.ingestionRun.count({ where: { sourceDocumentId: data.document.id } });
+    const results = await Promise.all(Array.from({ length: 5 }, () => recoverBookAnalysisForUser({ workspaceId: data.workspace.id, userId: data.user.id }, data.document.id)));
+    expect(results.filter(result => result.repaired)).toHaveLength(1);
+    expect(await prisma.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } } })).toMatchObject({ analysisRunId: data.run.id, extractionId: data.extraction.id });
+    expect(data.gateway.remoteCallCount()).toBe(calls);
+    expect(await prisma.ingestionRun.count({ where: { sourceDocumentId: data.document.id } })).toBe(ingestion);
+  });
+
+  it("V31-03 rejects a complete old extraction rather than promoting it current", async () => {
+    const data = await fixture(); await processBookAnalysisRun(data.run.id, deps(data));
+    await prisma.currentBookIntelligence.delete({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } } });
+    const laterJob = await prisma.job.create({ data: { workspaceId: data.workspace.id, type: "source.ingest", payload: {}, idempotencyKey: `later-${data.document.id}` } });
+    const laterIngestion = await prisma.ingestionRun.create({ data: { workspaceId: data.workspace.id, sourceDocumentId: data.document.id, jobId: laterJob.id, parserVersion: "later", normalizationVersion: "later", status: "SUCCEEDED" } });
+    const later = await prisma.documentExtraction.create({ data: { workspaceId: data.workspace.id, sourceDocumentId: data.document.id, ingestionRunId: laterIngestion.id, status: "SUCCEEDED", parserName: "later", parserVersion: "later", normalizationVersion: "later" } });
+    await prisma.currentDocumentExtraction.update({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } }, data: { extractionId: later.id } });
+    await expect(recoverBookAnalysisForUser({ workspaceId: data.workspace.id, userId: data.user.id }, data.document.id)).rejects.toThrow("BOOK_ANALYSIS_CURRENT_EXTRACTION_MISMATCH");
+    expect(await prisma.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } } })).toBeNull();
+  });
+
+  it("V31-05 keeps a newer current intelligence marker when an older finalization completes late", async () => {
+    const data = await fixture(); await processBookAnalysisRun(data.run.id, deps(data));
+    const newer = await requestBookAnalysisForUser(
+      { workspaceId: data.workspace.id, userId: data.user.id },
+      { sourceDocumentId: data.document.id, pipelineVersion: `matrix-newer-${randomUUID()}`, promptVersion: "p", provider: "test", model: "test" },
+    );
+    await processBookAnalysisRun(newer.run.id, deps(data, { embeddingVersion: "newer" }));
+    await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED", analysisStage: "FINALIZING", completedAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
+    await processBookAnalysisRun(data.run.id, deps(data));
+    expect(await prisma.currentBookIntelligence.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } } })).toMatchObject({ analysisRunId: newer.run.id, extractionId: data.extraction.id });
   });
 
   it("CASE02 exact target order and request identity", async () => {

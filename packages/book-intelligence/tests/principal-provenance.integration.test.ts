@@ -73,14 +73,13 @@ describe("BookAnalysis durable initiating principal", () => {
     expect(duplicate.job.userId).toBeNull();
   });
 
-  it("repairs a succeeded analysis marker concurrently without ingestion or provider replay", async () => {
+  it("rejects a status-only success without its durable finalization proof", async () => {
     const value = await fixture();
     const requested = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
     await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "SUCCEEDED", analysisStage: "COMPLETED", completedAt: new Date() } });
     const ingestionBefore = await prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } });
-    const repairs = await Promise.all(Array.from({ length: 5 }, () => recoverBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.document.id)));
-    expect(repairs.filter(repair => repair.repaired)).toHaveLength(1);
-    expect(await prisma.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: value.document.id, workspaceId: value.workspace.id } } })).toMatchObject({ analysisRunId: requested.run.id, chunkSetId: requested.run.chunkSetId });
+    await expect(recoverBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.document.id)).rejects.toThrow("BOOK_ANALYSIS_FINALIZATION_INCOMPLETE");
+    expect(await prisma.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: value.document.id, workspaceId: value.workspace.id } } })).toBeNull();
     expect(await prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } })).toBe(ingestionBefore);
     expect(await prisma.bookAnalysisRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } })).toBe(1);
   });
