@@ -57,6 +57,7 @@
     "test:phase17:e2e": "pnpm --filter @ai-cognitive/web exec playwright test --config playwright.phase17.config.ts",
     "test:phase17:release": "node scripts/run-phase17-release.mjs",
     "test:phase18:release": "node scripts/run-phase18-release.mjs",
+    "test:phase18-1:release": "node scripts/run-phase18-1-release.mjs",
     "test:beta-repair:provider-ux": "pnpm --filter @ai-cognitive/provider-gateway test:beta-repair:provider-ux",
     "test:beta-repair:provider-ux:e2e": "node scripts/run-beta-provider-ux-release.mjs",
     "test:beta-repair:provider-ux:release": "pnpm test:beta-repair:provider-ux && pnpm test:beta-repair:provider-ux:e2e",

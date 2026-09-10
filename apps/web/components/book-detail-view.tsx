@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { StatusBadge } from "./status-badge";
 import { SourceProcessing } from "./source-processing";
+import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
 
 const categoryNames: Record<string, string> = {
   SUMMARY: "核心观点",
@@ -53,9 +54,15 @@ type Props = {
     mediaType: string;
     version: number;
     hasIntelligence: boolean;
-    ingestionStatus: string;
+    ingestionStatus?: string | null;
     analysisStatus?: string | null;
     errorCode?: string | null;
+    processingState: string;
+    processingStage: ProcessingStage;
+    recoveryAction: RecoveryAction;
+    stageAvailability: WorkerAvailability;
+    workerAvailability: WorkerAvailability | ProcessingWorkerAvailability;
+    processingSince?: string | null;
   };
   memories: MemoryItemData[];
   structureNodes: StructureNodeData[];
@@ -118,13 +125,19 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
           <div className="card-panel" style={{ marginBottom: 32 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
               <span className="section-title">处理状态</span>
-              <StatusBadge value={item.analysisStatus === "FAILED" ? "失败" : item.ingestionStatus === "SUCCEEDED" ? "处理中" : "等待处理"} />
+              <StatusBadge value={item.processingState === "SUCCEEDED" ? "完成" : item.processingState.includes("FAILED") ? "失败" : item.processingState === "PROCESSING_DEGRADED" ? "需处理" : "处理中"} />
             </div>
             <SourceProcessing
               sourceDocumentId={item.id}
               ingestionStatus={item.ingestionStatus}
               analysisStatus={item.analysisStatus}
               errorCode={item.errorCode}
+              processingState={item.processingState}
+              processingStage={item.processingStage}
+              recoveryAction={item.recoveryAction}
+              stageAvailability={item.stageAvailability}
+              workerAvailability={item.workerAvailability}
+              processingSince={item.processingSince}
             />
           </div>
         )}

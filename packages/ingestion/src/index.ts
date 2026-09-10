@@ -160,6 +160,24 @@ export function createIngestionService(storage: StorageProvider, options = { max
         });
       } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "UNEXPECTED_ERROR"; const status = code === SourceError.OCR_REQUIRED ? "OCR_REQUIRED" : code === SourceError.PASSWORD_REQUIRED ? "PASSWORD_REQUIRED" : [SourceError.TYPE_MISMATCH, SourceError.UNSUPPORTED_TYPE, SourceError.TOO_LARGE, SourceError.ARCHIVE_UNSAFE, SourceError.CORRUPTED].includes(code as never) ? "REJECTED" : "FAILED"; await prisma.$transaction([prisma.ingestionRun.update({ where: { id: run.id }, data: { status, errorCode: code, completedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.FAILED, error: { code }, completedAt: new Date() } })]); logger.error("ingestion.failed", { ingestionRunId: run.id, code }); throw error; }
     },
+    async recoverIngestionForUser(context: TrustedRequestContext, sourceDocumentId: string, completion: { outboxTopic?: string } = {}) {
+      const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { userId: true } });
+      if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
+      return prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "SourceDocument" WHERE "id" = ${sourceDocumentId} AND "workspaceId" = ${context.workspaceId} FOR UPDATE`;
+        if (locked.length !== 1) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
+        const latest = await tx.ingestionRun.findFirst({ where: { sourceDocumentId, workspaceId: context.workspaceId }, orderBy: { createdAt: "desc" }, include: { job: true } });
+        if (latest && ["QUEUED", "RUNNING", "SUCCEEDED"].includes(latest.status)) return { run: latest, created: false };
+          // Recovery identity belongs to the durable source lineage, never to a
+          // particular Job's delivery attempts. The source row lock makes this
+          // count a serialized, monotonic generation number.
+          const generation = await tx.ingestionRun.count({ where: { sourceDocumentId, workspaceId: context.workspaceId } });
+          const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId }, idempotencyKey: `ingest:${sourceDocumentId}:retry:${generation}` } });
+        const run = await tx.ingestionRun.create({ data: { sourceDocumentId, workspaceId: context.workspaceId, jobId: job.id, parserVersion: latest?.parserVersion ?? "recovery", normalizationVersion: latest?.normalizationVersion ?? CANONICAL_NORMALIZATION_VERSION } });
+        await tx.outboxEvent.create({ data: { topic: completion.outboxTopic ?? INGESTION_TOPIC, aggregateId: run.id, payload: { ingestionRunId: run.id } } });
+        return { run, created: true };
+      });
+    },
   };
 }
 
