@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { sourceDetail } from "@/lib/product";
 import { BookDetailView } from "@/components/book-detail-view";
-import { deriveProcessingState } from "@/lib/processing-state";
+import { deriveProcessingStatus } from "@/lib/processing-state";
 import { processingWorkerAvailability } from "@/lib/worker-heartbeat";
 
 export default async function SourcePage({ params }: { params: Promise<{ sourceDocumentId: string }> }) {
@@ -21,7 +21,7 @@ export default async function SourcePage({ params }: { params: Promise<{ sourceD
   const analysisStatus = item.analysisRuns[0]?.status;
   const errorCode = item.ingestionRuns[0]?.errorCode ?? item.analysisRuns[0]?.errorCode;
   const workerAvailability = await processingWorkerAvailability();
-  const processingState = deriveProcessingState({ ingestion: item.ingestionRuns[0], analysis: item.analysisRuns[0], hasIntelligence: Boolean(item.currentIntelligence), workerAvailability, staleAfterMs: Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000) });
+  const processing = deriveProcessingStatus({ ingestion: item.ingestionRuns[0], analysis: item.analysisRuns[0], hasIntelligence: Boolean(item.currentIntelligence), workerAvailability, staleAfterMs: Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000) });
 
   return (
     <BookDetailView
@@ -34,7 +34,10 @@ export default async function SourcePage({ params }: { params: Promise<{ sourceD
         ingestionStatus,
         analysisStatus,
         errorCode,
-        processingState,
+        processingState: processing.state,
+        processingStage: processing.stage,
+        recoveryAction: processing.recoveryAction,
+        stageAvailability: processing.stageAvailability,
         workerAvailability,
         processingSince: (item.analysisRuns[0]?.startedAt ?? item.analysisRuns[0]?.createdAt ?? item.ingestionRuns[0]?.startedAt ?? item.ingestionRuns[0]?.createdAt)?.toISOString() ?? null,
       }}

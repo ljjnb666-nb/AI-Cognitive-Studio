@@ -8,11 +8,11 @@ import {
   needsProviderConfiguration,
 } from "@/lib/product-errors";
 import { submitProcessingRecovery } from "@/lib/processing-recovery";
-import { processingCopy, processingWaitLabel, type ProcessingState, type ProcessingWorkerAvailability, type WorkerAvailability } from "@/lib/processing-state";
+import { processingCopy, processingWaitLabel, type ProcessingStage, type ProcessingState, type ProcessingWorkerAvailability, type RecoveryAction, type WorkerAvailability } from "@/lib/processing-state";
 
-type Props = { sourceDocumentId: string; ingestionStatus?: string | null; analysisStatus?: string | null; errorCode?: string | null; processingState: string; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; processingSince?: string | null };
+type Props = { sourceDocumentId: string; ingestionStatus?: string | null; analysisStatus?: string | null; errorCode?: string | null; processingState: string; processingStage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; processingSince?: string | null };
 
-export function SourceProcessing({ sourceDocumentId, ingestionStatus, analysisStatus, errorCode, processingState, workerAvailability, processingSince }: Props) {
+export function SourceProcessing({ sourceDocumentId, ingestionStatus, analysisStatus, errorCode, processingState, processingStage: _processingStage, recoveryAction, stageAvailability, workerAvailability: _workerAvailability, processingSince }: Props) {
   const router = useRouter();
   const requested = useRef(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -48,12 +48,10 @@ export function SourceProcessing({ sourceDocumentId, ingestionStatus, analysisSt
   const recover = useCallback(async () => { if (recovering) return; setRecovering(true); try { const result = await submitProcessingRecovery(sourceDocumentId); if (result !== "RECOVERED") { setMessage(result); return; } router.refresh(); } finally { setRecovering(false); } }, [recovering, router, sourceDocumentId]);
   const failureCode = message ?? errorCode;
   const configurationError = needsProviderConfiguration(failureCode);
-  if (analysisStatus === "FAILED") return <section className="panel"><p className="error">深度理解失败：{bookIntelligenceErrorMessage(errorCode)}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 AI Provider</Link>}<button className="button secondary" aria-label="重试分析" onClick={() => void requestAnalysis(true)}>重试深度理解</button></div></section>;
-  if (configurationError) return <section className="panel"><p>书籍解析完成。配置 AI Provider 后开始深度理解。</p><div className="actions"><Link className="button" href="/studio/settings/providers">配置 AI Provider</Link><button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></div></section>;
-  if (message) return <section className="panel"><p className="error">{bookIntelligenceErrorMessage(message)}</p><button className="button secondary" onClick={() => void requestAnalysis(true)}>重试分析</button></section>;
+  if (message) return <section className="panel"><p className="error">{bookIntelligenceErrorMessage(message)}</p><button className="button secondary" onClick={() => void recover()}>恢复深度理解</button></section>;
   const state = processingState as ProcessingState;
-  const recovery = state === "NOT_STARTED" || state === "INGESTION_FAILED" || state === "PROCESSING_DEGRADED";
+  const recovery = recoveryAction !== "NONE" && recoveryAction !== "RECHECK";
   const waiting = processingSince ? processingWaitLabel(new Date(processingSince)) : null;
-  const stageAvailability = typeof workerAvailability === "string" ? workerAvailability : (analysisStatus ? workerAvailability.bookAnalysis : workerAvailability.ingestion);
-  return <section className="panel"><p>{processingCopy[state] ?? "正在处理"}</p>{waiting && <p className="muted">{waiting}</p>}<p className="muted">后台自动处理，无需保持页面打开。{stageAvailability === "DEGRADED" ? " 后台处理服务未运行或暂时不可用。" : ""}</p><div className="actions"><button className="button secondary" onClick={() => router.refresh()}>重新检查状态</button>{recovery && <button className="button" disabled={recovering} onClick={() => void recover()}>{recovering ? "正在提交恢复…" : state === "NOT_STARTED" ? "开始处理" : "重试解析"}</button>}</div></section>;
+  const recoveryCopy = recoveryAction === "RETRY_INGESTION" ? (state === "NOT_STARTED" ? "开始处理" : "重新解析") : "恢复深度理解";
+  return <section className="panel"><p>{configurationError ? "书籍解析完成。配置 AI Provider 后开始深度理解。" : processingCopy[state] ?? "正在处理"}</p>{waiting && <p className="muted">{waiting}</p>}<p className="muted">后台自动处理，无需保持页面打开。{stageAvailability === "DEGRADED" ? " 后台处理服务未运行或暂时不可用。" : ""}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 AI Provider</Link>}<button className="button secondary" onClick={() => router.refresh()}>重新检查状态</button>{recovery && <button className="button" disabled={recovering} onClick={() => void recover()}>{recovering ? "正在提交恢复…" : recoveryCopy}</button>}</div></section>;
 }

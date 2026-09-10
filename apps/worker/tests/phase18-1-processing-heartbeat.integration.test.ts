@@ -18,4 +18,24 @@ describe("Phase 18.1 processing heartbeat", () => {
       expect(await redis.get(PROCESSING_HEARTBEAT_KEY)).toBeNull();
     } finally { await redis.quit(); }
   });
+  it("handles a transient periodic Redis rejection and continues heartbeating", async () => {
+    let attempts = 0;
+    const errors = vi.fn();
+    const set = vi.fn(async () => { attempts++; if (attempts === 1) throw new Error("redis://secret@host"); return "OK"; });
+    const quit = vi.fn(async () => "OK");
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const heartbeat = startProcessingHeartbeat("redis://test", { ingestion: true, bookAnalysis: true, podcastGeneration: false, podcastAudio: false, shortVideoGeneration: false }, { connection: { set, quit } as never, intervalMs: 10, onError: errors });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 45));
+      expect(errors).toHaveBeenCalledOnce();
+      expect(set.mock.results.length).toBeGreaterThanOrEqual(2);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      await heartbeat.close();
+      await heartbeat.close();
+    }
+    expect(quit).toHaveBeenCalledOnce();
+  });
 });

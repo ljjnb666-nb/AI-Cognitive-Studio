@@ -42,7 +42,7 @@ test("worker-down upload becomes a recoverable degraded processing state without
     await page.waitForTimeout(1_200);
     await page.reload();
     await expect(page.getByText("后台处理服务暂时没有响应。你的文件已经保存，可以稍后重试。")).toBeVisible();
-    await expect(page.getByRole("button", { name: "重试解析" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "重新解析" })).toBeVisible();
     await expect(page.getByRole("button", { name: "重新检查状态" })).toBeVisible();
   } finally { await redis.quit(); }
 });

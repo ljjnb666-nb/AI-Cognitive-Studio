@@ -425,6 +425,40 @@ export async function requestBookAnalysisForUser(context: TrustedBookAnalysisReq
   return requestBookAnalysisCore({ ...input, workspaceId: context.workspaceId }, context.userId);
 }
 
+/**
+ * Stage-aware recovery.  It deliberately operates on the latest durable
+ * analysis lineage and never recreates ingestion.  A completed run whose
+ * current marker is absent is finalized from its already validated lineage,
+ * so no provider work is replayed.
+ */
+export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisRequestContext, sourceDocumentId: string, options: { outboxTopic?: string } = {}) {
+  const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { userId: true } });
+  if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "SourceDocument" WHERE "id" = ${sourceDocumentId} AND "workspaceId" = ${context.workspaceId} FOR UPDATE`;
+    if (locked.length !== 1) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
+    const run = await tx.bookAnalysisRun.findFirst({ where: { sourceDocumentId, workspaceId: context.workspaceId }, orderBy: { createdAt: "desc" }, include: { job: true } });
+    if (!run) throw new Error("BOOK_ANALYSIS_NOT_REQUESTED");
+    if (run.status === "SUCCEEDED") {
+      const current = await tx.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId, workspaceId: context.workspaceId } } });
+      // Never replace a newer valid marker during a late recovery.
+      if (current) return { run, action: "REPAIR_CURRENT_INTELLIGENCE" as const, repaired: false, created: false };
+      await tx.currentBookIntelligence.create({ data: { workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, extractionId: run.extractionId, chunkSetId: run.chunkSetId, analysisRunId: run.id } });
+      return { run, action: "REPAIR_CURRENT_INTELLIGENCE" as const, repaired: true, created: false };
+    }
+    if (!["FAILED", "QUEUED", "RUNNING"].includes(run.status)) throw new Error("BOOK_ANALYSIS_RECOVERY_UNAVAILABLE");
+    // Requests may have derived the same stale state before acquiring this
+    // lock.  Once one request requeues it, its fresh timestamp is the durable
+    // idempotency barrier for the followers.
+    const staleAfterMs = Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000);
+    if (run.status !== "FAILED" && Date.now() - (run.startedAt?.getTime() ?? run.createdAt.getTime()) <= staleAfterMs) return { run, action: "RETRY_ANALYSIS" as const, repaired: false, created: false };
+    const retryJob = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId, chunkSetId: run.chunkSetId }, idempotencyKey: `book:${run.analysisIdentityHash}:recovery:${run.job.attemptCount + 1}` } });
+    const recovered = await tx.bookAnalysisRun.update({ where: { id: run.id }, data: { jobId: retryJob.id, status: "QUEUED", analysisStage: "QUEUED", errorCode: null, startedAt: new Date(), completedAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
+    await tx.outboxEvent.create({ data: { topic: options.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id, queueJobId: retryJob.id } } });
+    return { run: recovered, action: "RETRY_ANALYSIS" as const, repaired: false, created: true };
+  });
+}
+
 async function runFinalizingStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
   await dependencies.faultInjector?.("beforeFinalization", { analysisRunId: run.id });
   if (!dependencies.embeddingGateway && !dependencies.embeddingProvider) throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_NOT_CONFIGURED");

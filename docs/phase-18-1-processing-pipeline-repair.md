@@ -25,3 +25,13 @@ The processing status endpoint is authenticated through the normal Web identity,
 Book-analysis worker enablement reuses Provider Gateway prerequisites: a built-in catalog is valid without an explicit manifest, and development/test can use the durable local keyring resolver. Production remains fail-closed without a valid keyring; malformed keyrings or explicit manifests fail fast. The legacy `BOOK_ANALYSIS_PROVIDER` remains supported, while provider selection remains run-pinned and workspace-scoped.
 
 The processing heartbeat contains only booleans for ingestion, book analysis, podcast generation, podcast audio, and short-video generation. Podcast, audio, and short-video workers still retain their legacy process-level enablement because their production runtime composition has not yet been converted to a workspace-BYOK-independent capability. The heartbeat makes those disabled capabilities diagnosable to operators; it never exposes provider settings, credentials, payloads, or errors.
+
+## V3 stage-aware recovery contract
+
+The single server-derived processing contract returns `processingState`, `processingStage`, `recoveryAction`, and `stageAvailability`. Stages are `INGESTION`, `BOOK_ANALYSIS`, and `COMPLETE`; recovery actions are `NONE`, `RECHECK`, `RETRY_INGESTION`, `RETRY_ANALYSIS`, and `REPAIR_CURRENT_INTELLIGENCE`. The browser consumes these fields and does not infer a stage from the presence of an analysis status.
+
+`CurrentBookIntelligence` is the durable product-success invariant. A succeeded analysis without that marker is degraded at the Book Analysis stage and recovery re-finalizes the marker from the existing successful run under the source-document lock. It preserves exact workspace, source document, extraction, chunk-set, analysis-run, and provider lineage, does not replay ingestion or provider work, and never overwrites an already-current marker.
+
+Periodic heartbeat failures are diagnostic: each timer write catches its own rejection and reports only a stable safe error code. A later heartbeat continues normally, and close is idempotent.
+
+Processing heartbeat currently represents one logical homogeneous processing-worker capability profile. Heterogeneous horizontally scaled workers require per-worker heartbeat identity and capability aggregation before that deployment model is supported.

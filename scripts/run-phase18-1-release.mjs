@@ -16,6 +16,7 @@ function write() { mkdirSync("output/phase18-1", { recursive: true }); writeFile
 try {
   run(["test:phase18:release"]);
   run(["--filter", "@ai-cognitive/ingestion", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/complete-upload.integration.test.ts"]);
+  run(["--filter", "@ai-cognitive/book-intelligence", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/principal-provenance.integration.test.ts"]);
   run(["--filter", "@ai-cognitive/worker", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/phase18-1-processing-heartbeat.integration.test.ts"]);
   run(["--filter", "@ai-cognitive/worker", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/worker-lifecycle.integration.test.ts"]);
   run(["--filter", "@ai-cognitive/worker", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/phase8c-production-runtime.test.ts", "-t", "W06"]);

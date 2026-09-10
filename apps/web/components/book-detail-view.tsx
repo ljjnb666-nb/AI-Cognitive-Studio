@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { StatusBadge } from "./status-badge";
 import { SourceProcessing } from "./source-processing";
-import type { ProcessingWorkerAvailability, WorkerAvailability } from "@/lib/processing-state";
+import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
 
 const categoryNames: Record<string, string> = {
   SUMMARY: "核心观点",
@@ -58,6 +58,9 @@ type Props = {
     analysisStatus?: string | null;
     errorCode?: string | null;
     processingState: string;
+    processingStage: ProcessingStage;
+    recoveryAction: RecoveryAction;
+    stageAvailability: WorkerAvailability;
     workerAvailability: WorkerAvailability | ProcessingWorkerAvailability;
     processingSince?: string | null;
   };
@@ -130,6 +133,9 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
               analysisStatus={item.analysisStatus}
               errorCode={item.errorCode}
               processingState={item.processingState}
+              processingStage={item.processingStage}
+              recoveryAction={item.recoveryAction}
+              stageAvailability={item.stageAvailability}
               workerAvailability={item.workerAvailability}
               processingSince={item.processingSince}
             />

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
-import { materializeChunkSet, requestBookAnalysis, requestBookAnalysisForUser } from "../src/index.js";
+import { materializeChunkSet, recoverBookAnalysisForUser, requestBookAnalysis, requestBookAnalysisForUser } from "../src/index.js";
 
 const workspaces: string[] = [], users: string[] = [];
 
@@ -24,7 +24,7 @@ async function fixture() {
   await prisma.currentDocumentExtraction.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id } });
   const chunkSet = await materializeChunkSet({ workspaceId: workspace.id, sourceDocumentId: document.id, configuration: { targetSize: 80, hardMax: 100 } });
   const input = { sourceDocumentId: document.id, chunkSetId: chunkSet.id, pipelineVersion: `provenance-${suffix}`, promptVersion: "p", provider: "test", model: "test" };
-  return { owner, member, outsider, workspace, input };
+  return { owner, member, outsider, workspace, document, input };
 }
 
 afterEach(async () => {
@@ -71,5 +71,29 @@ describe("BookAnalysis durable initiating principal", () => {
     const duplicate = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
     expect(duplicate.run.id).toBe(system.run.id);
     expect(duplicate.job.userId).toBeNull();
+  });
+
+  it("repairs a succeeded analysis marker concurrently without ingestion or provider replay", async () => {
+    const value = await fixture();
+    const requested = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "SUCCEEDED", analysisStage: "COMPLETED", completedAt: new Date() } });
+    const ingestionBefore = await prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } });
+    const repairs = await Promise.all(Array.from({ length: 5 }, () => recoverBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.document.id)));
+    expect(repairs.filter(repair => repair.repaired)).toHaveLength(1);
+    expect(await prisma.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: value.document.id, workspaceId: value.workspace.id } } })).toMatchObject({ analysisRunId: requested.run.id, chunkSetId: requested.run.chunkSetId });
+    expect(await prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } })).toBe(ingestionBefore);
+    expect(await prisma.bookAnalysisRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } })).toBe(1);
+  });
+
+  it("requeues failed analysis without replaying ingestion and keeps foreign recovery private", async () => {
+    const value = await fixture();
+    const requested = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "FAILED", errorCode: "SAFE_FAILURE" } });
+    const ingestionBefore = await prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } });
+    await expect(recoverBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.outsider.id }, value.document.id)).rejects.toThrow("WORKSPACE_ACCESS_DENIED");
+    const recoveries = await Promise.all(Array.from({ length: 5 }, () => recoverBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.document.id)));
+    expect(recoveries.filter(recovery => recovery.created)).toHaveLength(1);
+    expect(await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } })).toMatchObject({ status: "QUEUED" });
+    expect(await prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } })).toBe(ingestionBefore);
   });
 });

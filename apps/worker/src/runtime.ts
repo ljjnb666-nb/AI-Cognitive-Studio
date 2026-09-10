@@ -78,8 +78,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   let stopping = false;
   const active = new Set<Promise<void>>();
   const schedules: NodeJS.Timeout[] = [];
-  const heartbeat = startProcessingHeartbeat(environment.REDIS_URL, { ingestion: true, bookAnalysis: Boolean(bookWorker), podcastGeneration: Boolean(podcastWorker), podcastAudio: Boolean(audioWorker), shortVideoGeneration: Boolean(shortVideoWorker) });
-  await heartbeat.beat().catch(error => logger.warn("worker.heartbeat.failed", { error: error instanceof Error ? error.message : String(error) }));
+  const heartbeat = startProcessingHeartbeat(environment.REDIS_URL, { ingestion: true, bookAnalysis: Boolean(bookWorker), podcastGeneration: Boolean(podcastWorker), podcastAudio: Boolean(audioWorker), shortVideoGeneration: Boolean(shortVideoWorker) }, { onError: () => logger.warn("worker.heartbeat.failed", { code: "HEARTBEAT_WRITE_FAILED" }) });
+  await heartbeat.beat().catch(() => logger.warn("worker.heartbeat.failed", { code: "HEARTBEAT_WRITE_FAILED" }));
   const dispatch = (name: string, work: () => Promise<unknown>) => {
     let running = false;
     const run = async () => {
