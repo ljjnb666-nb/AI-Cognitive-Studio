@@ -15,12 +15,12 @@ function slot(stage: AnalysisRequest["stage"]): GatewayRequest["routeSlot"] { re
 
 class GatewayAnalysisProvider implements AnalysisProvider {
   private readonly receipts = new WeakMap<object, { invocationId: string; snapshotId: string }>();
-  constructor(private readonly runtime: BookGatewayRuntime, private readonly input: { workspaceId: string; userId: string; analysisRunId: string; executionKey: string; provider: string; model: string }) {}
+  constructor(private readonly runtime: BookGatewayRuntime, private readonly input: { workspaceId: string; userId: string; analysisRunId: string; executionKey: string; provider: string; model: string; structuredOutput: "STRICT_JSON_SCHEMA" | "JSON_MODE" }) {}
   async generateStructured(request: AnalysisRequest) {
     const routeSlot = slot(request.stage), operation = (request as AnalysisRequest & { operationKey?: string }).operationKey ?? sha256(JSON.stringify([request.stage, request.content, request.sourceBlockIds]));
-    const text = { system: request.systemInstructions, messages: [{ role: "user" as const, content: request.content }], structuredOutput: { mode: "STRICT_JSON_SCHEMA" as const, schemaName: "book_analysis_response", schema } };
+    const text = { system: request.systemInstructions, messages: [{ role: "user" as const, content: request.content }], structuredOutput: this.input.structuredOutput === "STRICT_JSON_SCHEMA" ? { mode: "STRICT_JSON_SCHEMA" as const, schemaName: "book_analysis_response", schema } : { mode: "JSON_MODE" as const } };
     const inputHash = sha256(JSON.stringify([this.input.workspaceId, routeSlot, this.input.analysisRunId, request.stage, operation, sha256(request.content), request.pipelineVersion, request.promptVersion, schema]));
-    const outcome = await this.runtime.gateway.execute({ workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput: "STRICT_JSON_SCHEMA" }, text, pipelineVersion: request.pipelineVersion, promptVersion: request.promptVersion, schemaVersion: "book-analysis-v1" }, { userId: this.input.userId });
+    const outcome = await this.runtime.gateway.execute({ workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput: this.input.structuredOutput }, text, pipelineVersion: request.pipelineVersion, promptVersion: request.promptVersion, schemaVersion: "book-analysis-v1" }, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);
     if (outcome.status === "ALREADY_PROCESSED" && outcome.textConsumed) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const response = outcome.response as { type?: string; structured?: unknown } | undefined;
@@ -53,11 +53,13 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
       workspaceId: input.workspaceId, routeSlot, correlationId: input.analysisRunId,
       idempotencyKey: `book-analysis-route-preflight:${input.analysisRunId}:${routeSlot}`,
       inputHash: sha256(`${input.analysisRunId}:${routeSlot}`),
-      capability: { family: "TEXT_GENERATION", structuredOutput: "STRICT_JSON_SCHEMA" },
+      capability: { family: "TEXT_GENERATION" },
     })));
     if (snapshots.some(snapshot => snapshot.providerKey !== input.provider || snapshot.modelId !== input.model)) throw new Error("BOOK_ANALYSIS_ROUTE_IDENTITY_MODEL_GAP");
+    const structuredOutput = snapshots[0]?.capability.structuredOutput === "STRICT_JSON_SCHEMA" ? "STRICT_JSON_SCHEMA" : snapshots.every(snapshot => snapshot.capability.structuredOutput === "JSON_MODE") ? "JSON_MODE" : undefined;
+    if (!structuredOutput) throw new Error("BOOK_ANALYSIS_STRUCTURED_OUTPUT_UNSUPPORTED");
     const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: input.analysisRunId }, select: { jobId: true } });
-    return new GatewayAnalysisProvider(runtime, { ...input, executionKey: run.jobId });
+    return new GatewayAnalysisProvider(runtime, { ...input, executionKey: run.jobId, structuredOutput });
   } };
   return runtime;
 }
