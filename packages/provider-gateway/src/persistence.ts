@@ -13,14 +13,23 @@ async function requireOwner(db: Db, context: OwnerContext): Promise<void> {
 }
 function hint(secret: string): string { return secret.length >= 4 ? `…${secret.slice(-4)}` : "configured"; }
 function boundedMetadata(value: Record<string, unknown>): Record<string, unknown> { const clean = redactSecrets(value) as Record<string, unknown>; if (JSON.stringify(clean).length > 8_192) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Provider metadata exceeds its safety bound"); return clean; }
+function isProviderConnectionNameConflict(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { code?: unknown; meta?: { target?: unknown } };
+  if (value.code !== "P2002") return false;
+  const target = value.meta?.target;
+  if (Array.isArray(target)) return target.length === 2 && target.includes("workspaceId") && target.includes("displayName");
+  return target === "ProviderConnection_workspaceId_displayName_key" || target === "workspaceId_displayName";
+}
+function normalizeConnectionNameConflict(error: unknown): never { if (isProviderConnectionNameConflict(error)) throw new ProviderGatewayError("PROVIDER_CONNECTION_NAME_CONFLICT"); throw error; }
 
 export class ProviderGatewayRepository {
   constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher) {}
-  async createConnection(context: OwnerContext, input: { providerKey: string; protocol: string; displayName: string; endpoint?: string; region?: string; configuration?: Record<string, unknown> }) { await requireOwner(this.db, context); const connection = await this.db.providerConnection.create({ data: { providerKey: input.providerKey, protocol: input.protocol, displayName: input.displayName, ...(input.endpoint !== undefined ? { endpoint: input.endpoint } : {}), ...(input.region !== undefined ? { region: input.region } : {}), configuration: boundedMetadata(input.configuration ?? {}) as never, workspaceId: context.workspaceId } }); await this.audit(context, "CONNECTION_CREATED", "ProviderConnection", connection.id, { providerKey: input.providerKey }); return connection; }
+  async createConnection(context: OwnerContext, input: { providerKey: string; protocol: string; displayName: string; endpoint?: string; region?: string; configuration?: Record<string, unknown> }) { await requireOwner(this.db, context); try { const connection = await this.db.providerConnection.create({ data: { providerKey: input.providerKey, protocol: input.protocol, displayName: input.displayName, ...(input.endpoint !== undefined ? { endpoint: input.endpoint } : {}), ...(input.region !== undefined ? { region: input.region } : {}), configuration: boundedMetadata(input.configuration ?? {}) as never, workspaceId: context.workspaceId } }); await this.audit(context, "CONNECTION_CREATED", "ProviderConnection", connection.id, { providerKey: input.providerKey }); return connection; } catch (error) { normalizeConnectionNameConflict(error); } }
   async createConnectionWithCredential(context: OwnerContext, input: { providerKey: string; protocol: string; displayName: string; endpoint: string; secret: string; region?: string; configuration?: Record<string, unknown> }) {
     if (!this.cipher) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Credential vault is not configured");
     await requireOwner(this.db, context);
-    return this.db.$transaction(async tx => {
+    try { return await this.db.$transaction(async tx => {
       const connection = await tx.providerConnection.create({ data: { providerKey: input.providerKey, protocol: input.protocol, displayName: input.displayName, endpoint: input.endpoint, ...(input.region !== undefined ? { region: input.region } : {}), configuration: boundedMetadata(input.configuration ?? {}) as never, workspaceId: context.workspaceId } });
       const credentialId = randomUUID();
       const encrypted = this.cipher!.encrypt(input.secret, { workspaceId: context.workspaceId, connectionId: connection.id, credentialVersionId: credentialId, providerKey: connection.providerKey });
@@ -30,7 +39,7 @@ export class ProviderGatewayRepository {
         { workspaceId: context.workspaceId, actorUserId: context.userId, action: "CREDENTIAL_CREATED", targetType: "ProviderCredentialVersion", targetId: credential.id, metadata: {} },
       ] });
       return { connection, credential };
-    });
+    }); } catch (error) { normalizeConnectionNameConflict(error); }
   }
   async updateConnection(context: OwnerContext, connectionId: string, input: { displayName?: string; endpoint?: string | null; region?: string | null; configuration?: Record<string, unknown> }) { await requireOwner(this.db, context); const connection = await this.db.providerConnection.update({ where: { id_workspaceId: { id: connectionId, workspaceId: context.workspaceId } }, data: { displayName: input.displayName, endpoint: input.endpoint, region: input.region, configuration: input.configuration ? boundedMetadata(input.configuration) as never : undefined } }); await this.audit(context, "CONNECTION_UPDATED", "ProviderConnection", connectionId, { displayName: input.displayName, endpointChanged: input.endpoint !== undefined, regionChanged: input.region !== undefined, configurationChanged: input.configuration !== undefined }); return connection; }
   async setConnectionEnabled(context: OwnerContext, connectionId: string, enabled: boolean) { await requireOwner(this.db, context); const current = await this.db.providerConnection.findUniqueOrThrow({ where: { id_workspaceId: { id: connectionId, workspaceId: context.workspaceId } } }); if (current.status === "REVOKED") throw new ProviderGatewayError("CONNECTION_DISABLED", "Revoked provider connections are terminal"); const connection = await this.db.providerConnection.update({ where: { id_workspaceId: { id: connectionId, workspaceId: context.workspaceId } }, data: { status: enabled ? "ACTIVE" : "DISABLED" } }); await this.audit(context, enabled ? "CONNECTION_ENABLED" : "CONNECTION_DISABLED", "ProviderConnection", connectionId, {}); return connection; }

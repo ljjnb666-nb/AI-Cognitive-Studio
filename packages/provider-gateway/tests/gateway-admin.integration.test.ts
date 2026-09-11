@@ -33,6 +33,20 @@ describe("gateway administration (OWNER only)", () => {
     expect(await prisma.providerCredentialVersion.findUnique({ where: { id_workspaceId: { id: created.credential.id, workspaceId: ownerA.workspaceId } }, select: { status: true } })).toMatchObject({ status: "ACTIVE" });
   });
 
+  it("normalizes only duplicate workspace Provider names and keeps credential creation atomic", async () => {
+    const owner = await user("OWNER"), repository = new ProviderGatewayRepository(prisma, testCipher());
+    await repository.createConnection(owner, { providerKey: "fixture", protocol: "TEST", displayName: "My Provider" });
+    const before = await Promise.all([prisma.providerConnection.count({ where: { workspaceId: owner.workspaceId } }), prisma.providerCredentialVersion.count({ where: { workspaceId: owner.workspaceId } }), prisma.providerAuditEvent.count({ where: { workspaceId: owner.workspaceId } })]);
+    await expect(repository.createConnection(owner, { providerKey: "fixture", protocol: "TEST", displayName: "My Provider" })).rejects.toMatchObject({ code: "PROVIDER_CONNECTION_NAME_CONFLICT" });
+    const secret = "duplicate-provider-secret-never-returned";
+    await expect(repository.createConnectionWithCredential(owner, { providerKey: "fixture", protocol: "TEST", displayName: "My Provider", endpoint: "https://fixture.example.test/v1", secret })).rejects.toMatchObject({ code: "PROVIDER_CONNECTION_NAME_CONFLICT" });
+    await expect(Promise.all([prisma.providerConnection.count({ where: { workspaceId: owner.workspaceId } }), prisma.providerCredentialVersion.count({ where: { workspaceId: owner.workspaceId } }), prisma.providerAuditEvent.count({ where: { workspaceId: owner.workspaceId } })])).resolves.toEqual(before);
+    try { await repository.createConnectionWithCredential(owner, { providerKey: "fixture", protocol: "TEST", displayName: "My Provider", endpoint: "https://fixture.example.test/v1", secret }); } catch (error) { expect(JSON.stringify(error)).not.toContain(secret); }
+    const otherWorkspace = randomUUID(), otherUser = randomUUID(); workspaceIds.push(otherWorkspace); userIds.push(otherUser); await prisma.workspace.create({ data: { id: otherWorkspace, name: "other-name-workspace" } }); await prisma.user.create({ data: { id: otherUser, email: `${otherUser}@test.invalid` } }); await prisma.workspaceMember.create({ data: { workspaceId: otherWorkspace, userId: otherUser, role: "OWNER" } });
+    await expect(repository.createConnection({ workspaceId: otherWorkspace, userId: otherUser }, { providerKey: "fixture", protocol: "TEST", displayName: "My Provider" })).resolves.toMatchObject({ displayName: "My Provider" });
+    await expect(repository.createConnection(owner, { providerKey: "fixture", protocol: "TEST", displayName: "My Provider 2" })).resolves.toMatchObject({ displayName: "My Provider 2" });
+  });
+
   it("allows each administrative mutation only to real workspace owners and emits no denied audit", async () => {
     const owner = await user("OWNER"); const editor = await user("EDITOR"); const viewer = await user("VIEWER"); const repository = new ProviderGatewayRepository(prisma, testCipher());
     const connection = await repository.createConnection(owner, { providerKey: "fixture", protocol: "TEST", displayName: "fixture" });

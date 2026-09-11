@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { ProviderGatewayError, ProviderGatewayRepository, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayRepository, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
+import { providerSettingsFailure } from "@/lib/provider-settings-errors";
 
 const jsonRecord = z.record(z.string(), z.unknown()).default({});
 const executableEndpoint = z.string().url().max(500).refine(value => { try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.hash && !url.search; } catch { return false; } }, "PROVIDER_CONNECTION_ENDPOINT_INVALID");
@@ -85,12 +86,7 @@ async function autoConfigure(context: { workspaceId: string; userId: string }, i
   for (const routeSlot of ["PODCAST_TTS", "SHORT_VIDEO_TTS"] as const) skipped.push(routeSlot);
   return { bound, skipped };
 }
-function failure(error: unknown) {
-  const message = error instanceof Error ? error.message.split(":")[0] : "";
-  const code = error instanceof ProviderGatewayError && error.code !== "INTERNAL_PROVIDER_ERROR" ? error.code : ["PROVIDER_GATEWAY_MODEL_MANIFEST_MISSING", "PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID", "PROVIDER_GATEWAY_KEYRING_MISSING", "PROVIDER_CONNECTION_ENDPOINT_INVALID", "PROVIDER_CONNECTION_PROTOCOL_INVALID", "CAPABILITY_MISMATCH", "AUTHORIZATION_FAILED", "TEST_CONNECTION_FAILED"].includes(message) ? message : error instanceof ProviderGatewayError ? "INTERNAL_PROVIDER_ERROR" : message || "PROVIDER_SETTINGS_REQUEST_FAILED";
-  const status = code === "WEB_IDENTITY_REQUIRED" ? 401 : code === "AUTHORIZATION_FAILED" || code.includes("ACCESS_DENIED") ? 403 : 400;
-  return NextResponse.json({ error: code === "INTERNAL_PROVIDER_ERROR" ? "PROVIDER_SETTINGS_REQUEST_FAILED" : code }, { status });
-}
+function failure(error: unknown) { const result = providerSettingsFailure(error); return NextResponse.json({ error: result.code }, { status: result.status }); }
 
 export async function GET() {
   try { return await response((await resolveWebIdentity()).workspaceId); } catch (error) { return failure(error); }
