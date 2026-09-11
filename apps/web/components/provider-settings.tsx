@@ -123,6 +123,7 @@ export function ProviderSettings() {
         <p style={{ color: "var(--on-surface-variant)", fontSize: 14, margin: "0 0 20px" }}>添加你自己的 AI Provider。API Key 会加密保存，之后不会再次显示明文。</p>
         <p style={{ color: "var(--on-surface-variant)", fontSize: 13, margin: "0 0 20px" }}>书籍理解可为分段、归并、综合和向量检索分别选择兼容的 Provider 与模型；混合组合仅作提示，不会阻止保存。</p>
         {bookProviderKeys.size > 1 && <p role="status" style={{ color: "var(--on-surface-variant)", fontSize: 13, margin: "0 0 20px" }}>当前书籍理解使用混合 Provider 组合。请确认各路由的模型、区域和向量维度符合你的工作区要求。</p>}
+        <StableBookRouteForm connections={state.connections} providers={state.manifest.providers} busy={busy} submit={submit} />
         <ConnectionForm providers={state.manifest.providers} busy={busy} submit={submit} />
       </section>
 
@@ -218,6 +219,14 @@ export function ProviderSettings() {
       )}
     </div>
   );
+}
+
+function StableBookRouteForm({ connections, providers, busy, submit }: { connections: Connection[]; providers: Provider[]; busy: boolean; submit(payload: Record<string, unknown>): Promise<void> }) {
+  const [textConnectionId, setTextConnectionId] = useState(connections[0]?.id ?? ""), [embeddingConnectionId, setEmbeddingConnectionId] = useState(connections[0]?.id ?? "");
+  const textConnection = connections.find(connection => connection.id === textConnectionId), embeddingConnection = connections.find(connection => connection.id === embeddingConnectionId);
+  const textModels = providers.find(provider => provider.providerKey === textConnection?.providerKey)?.models.filter(model => model.families.includes("TEXT_GENERATION")) ?? [];
+  const embeddingModels = providers.find(provider => provider.providerKey === embeddingConnection?.providerKey)?.models.filter(model => model.families.includes("EMBEDDING")) ?? [];
+  return <details className="card-panel" style={{ margin: "0 0 20px" }}><summary style={{ cursor: "pointer", fontWeight: 600 }}>稳定配置（推荐）</summary><p style={{ color: "var(--on-surface-variant)", fontSize: 13 }}>为三个书籍文本阶段写入相同的独立路由绑定，并单独写入 Embedding 路由。之后可在“自定义每个用途”中分别调整。</p><form action={form => void submit({ action: "APPLY_STABLE_BOOK_ROUTES", textConnectionId, textModelId: form.get("textModelId"), embeddingConnectionId, embeddingModelId: form.get("embeddingModelId"), embeddingConfiguration: {} })} style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}><label className="form-label">文本连接<select className="select-control" value={textConnectionId} onChange={event => setTextConnectionId(event.target.value)}>{connections.map(connection => <option key={connection.id} value={connection.id}>{connection.displayName}</option>)}</select></label><label className="form-label">文本模型<select className="select-control" name="textModelId">{textModels.map(model => <option key={model.modelId} value={model.modelId}>{model.modelId}</option>)}</select></label><label className="form-label">Embedding 连接<select className="select-control" value={embeddingConnectionId} onChange={event => setEmbeddingConnectionId(event.target.value)}>{connections.map(connection => <option key={connection.id} value={connection.id}>{connection.displayName}</option>)}</select></label><label className="form-label">Embedding 模型<select className="select-control" name="embeddingModelId">{embeddingModels.map(model => <option key={model.modelId} value={model.modelId}>{model.modelId}</option>)}</select></label><button type="submit" className="btn btn-primary" disabled={busy || !textModels.length || !embeddingModels.length}>应用稳定配置</button></form></details>;
 }
 
 function ConnectionForm({

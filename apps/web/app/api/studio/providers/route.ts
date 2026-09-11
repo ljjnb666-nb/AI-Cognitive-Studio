@@ -16,7 +16,8 @@ const setEnabled = z.object({ action: z.literal("SET_ENABLED"), connectionId: z.
 const setRoute = z.object({ action: z.literal("SET_ROUTE"), routeSlot: z.enum(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"]), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200), configuration: jsonRecord });
 const testConnection = z.object({ action: z.literal("TEST_CONNECTION"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000) });
 const autoConfigureRoutes = z.object({ action: z.literal("AUTO_CONFIGURE_ROUTES"), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200).optional() });
-const bodySchema = z.discriminatedUnion("action", [createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection, autoConfigureRoutes]);
+const stableBookRoutesInput = z.object({ action: z.literal("APPLY_STABLE_BOOK_ROUTES"), textConnectionId: z.string().cuid(), textModelId: z.string().trim().min(1).max(200), embeddingConnectionId: z.string().cuid(), embeddingModelId: z.string().trim().min(1).max(200), embeddingConfiguration: jsonRecord });
+const bodySchema = z.discriminatedUnion("action", [createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection, autoConfigureRoutes, stableBookRoutesInput]);
 
 function safeConnection(connection: { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credentialVersions: { id: string; displayHint: string | null; status: string }[] }) {
   const credential = connection.credentialVersions[0];
@@ -108,6 +109,14 @@ async function autoConfigure(context: { workspaceId: string; userId: string }, i
   for (const routeSlot of ["PODCAST_TTS", "SHORT_VIDEO_TTS"] as const) skipped.push(routeSlot);
   return { bound, skipped };
 }
+async function applyStableBookRoutes(context: { workspaceId: string; userId: string }, input: z.infer<typeof stableBookRoutesInput>, manifest: ReturnType<typeof productManifest>, repository: ProviderGatewayRepository) {
+  const [text, embedding] = await Promise.all([prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.textConnectionId, workspaceId: context.workspaceId } } }), prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.embeddingConnectionId, workspaceId: context.workspaceId } } })]);
+  if (!text || !embedding) throw new Error("AUTHORIZATION_FAILED");
+  assertSafeConfiguration(input.embeddingConfiguration); assertQwenRouteConfiguration(embedding.providerKey, "EMBEDDING", input.embeddingConfiguration);
+  for (const routeSlot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const) { validateRouteManifestSelection(manifest, { routeSlot, providerKey: text.providerKey, protocol: text.protocol, modelId: input.textModelId }); await repository.setRoute(context, { routeSlot, connectionId: text.id, modelId: input.textModelId, configuration: {} }); }
+  validateRouteManifestSelection(manifest, { routeSlot: "EMBEDDING", providerKey: embedding.providerKey, protocol: embedding.protocol, modelId: input.embeddingModelId, configuration: input.embeddingConfiguration });
+  await repository.setRoute(context, { routeSlot: "EMBEDDING", connectionId: embedding.id, modelId: input.embeddingModelId, configuration: input.embeddingConfiguration });
+}
 function failure(error: unknown) { const result = providerSettingsFailure(error); return NextResponse.json({ error: result.code }, { status: result.status }); }
 
 export async function GET() {
@@ -127,6 +136,7 @@ export async function POST(request: Request) {
     if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
     const repository = new ProviderGatewayRepository(prisma, cipher);
     if (input.action === "AUTO_CONFIGURE_ROUTES") { const configured = await autoConfigure(context, input, manifest, repository, cipher); return NextResponse.json({ ...(await (await response(context.workspaceId)).json()), autoConfigure: configured }); }
+    if (input.action === "APPLY_STABLE_BOOK_ROUTES") { await applyStableBookRoutes(context, input, manifest, repository); return response(context.workspaceId); }
     if (input.action === "CREATE_CONNECTION" || input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") {
       assertSafeConfiguration(input.configuration);
       assertFixedMiniMaxEndpoint(input.providerKey, input.endpoint);
