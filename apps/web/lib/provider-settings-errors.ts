@@ -17,7 +17,11 @@ const safeProviderSettingsCodes = new Set([
 
 export function providerSettingsFailure(error: unknown): { code: string; status: number } {
   const candidate = error instanceof ProviderGatewayError
-    ? error.code
+    ? safeProviderSettingsCodes.has(error.code)
+      ? error.code
+      : safeProviderSettingsCodes.has(error.message)
+        ? error.message
+        : undefined
     : error instanceof Error && safeProviderSettingsCodes.has(error.message)
       ? error.message
       : undefined;

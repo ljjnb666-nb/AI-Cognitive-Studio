@@ -3,12 +3,13 @@
 import { useEffect, useState } from "react";
 import { StatusBadge } from "./status-badge";
 import { readableProviderError } from "@/lib/provider-settings-ui-errors";
+import { readinessDisplay, type ProviderReadinessView } from "@/lib/provider-readiness-ui";
 
 type Model = { modelId: string; families: string[]; speechFormats?: string[] };
 type Provider = { providerKey: string; displayName: string; protocol: string; capabilityProtocols?: Record<string, string>; models: Model[] };
 type Connection = { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credential: { id?: string; exists: boolean; displayHint?: string | null; status?: string } };
 type Route = { id: string; routeSlot: string; connectionId: string; modelId: string; configuration: Record<string, unknown>; connection: { displayName: string } };
-type State = { manifest: { providers: Provider[] }; connections: Connection[]; routes: Route[]; readiness: Record<string, { state: string; missing: string[] }> };
+type State = { manifest: { providers: Provider[] }; connections: Connection[]; routes: Route[]; readiness: Record<string, ProviderReadinessView> };
 
 const routeSlots = [
   { slot: "BOOK_CHUNK_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_REDUCTION_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_SYNTHESIS", label: "书籍理解" },
@@ -21,6 +22,7 @@ const readinessLabels: Record<string, string> = {
   podcast: "播客生成",
   podcastAudio: "播客音频",
   shortVideo: "短视频生成",
+  thinking: "思考",
 };
 const readableError = readableProviderError;
 
@@ -79,8 +81,9 @@ export function ProviderSettings() {
           服务可用性
         </h2>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16 }}>
-          {Object.entries(state.readiness).map(([name, item]) => (
-            <div
+          {Object.entries(state.readiness).map(([name, item]) => {
+            const detail = readinessDisplay(item);
+            return <div
               key={name}
               style={{
                 backgroundColor: "var(--surface-container)",
@@ -93,13 +96,21 @@ export function ProviderSettings() {
                 <span style={{ fontWeight: 600, fontSize: 14 }}>{readinessLabels[name] ?? name}</span>
                 <StatusBadge value={item.state === "READY" ? "已就绪" : "未完成"} />
               </div>
-              {item.missing.length > 0 && (
+              {detail.summary && <p style={{ fontSize: 13, fontWeight: 600, margin: "0 0 10px" }}>{detail.summary}</p>}
+              {detail.rows.map(row => (
+                <div key={row.label} style={{ display: "grid", gridTemplateColumns: "16px 1fr", columnGap: 6, fontSize: 12, marginTop: 6 }}>
+                  <span aria-hidden="true">{row.configured ? "✓" : "○"}</span>
+                  <span><strong>{row.label}</strong><br />{row.detail}</span>
+                </div>
+              ))}
+              {detail.completion && <p style={{ fontSize: 12, color: item.state === "READY" ? "var(--success)" : "var(--muted-terracotta)", margin: "10px 0 0" }}>{detail.completion}</p>}
+              {!detail.rows.length && item.missing.length > 0 && (
                 <p style={{ fontSize: 12, color: "var(--muted-terracotta)", margin: "8px 0 0 0" }}>
                   需要配置 Provider 并完成所需执行路由。
                 </p>
               )}
-            </div>
-          ))}
+            </div>;
+          })}
         </div>
       </section>
 

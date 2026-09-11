@@ -50,7 +50,10 @@ mapping, final-content-only handling, JSON validation failures, and normalized
 upstream failures. Gemini adapter tests cover `gemini-embedding-2`, explicit
 768 output dimensionality, and finite vector validation. The Phase 18.2 release
 gate also retains Phase 18, Phase 18.1, Provider Gateway/BYOK, W06, and Phase 6
-browser coverage.
+browser coverage. Its M01-M28 evidence matrix additionally covers duplicate
+Provider-name conflict normalization, public-error allowlisting, and the Book
+readiness dependency display for the MiniMax-three-routes-plus-Gemini-embedding
+configuration.
 
 No real provider credential is used by the release gate. MiniMax speech, image,
 video, music, embedding support, automatic provider failover, and mass
