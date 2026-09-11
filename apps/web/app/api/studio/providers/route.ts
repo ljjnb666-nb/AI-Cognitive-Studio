@@ -117,9 +117,11 @@ async function applyStableBookRoutes(context: { workspaceId: string; userId: str
   if (!text || !embedding) throw new Error("AUTHORIZATION_FAILED");
   assertSafeConfiguration(input.textConfiguration); assertSafeConfiguration(input.embeddingConfiguration);
   assertQwenRouteConfiguration(text.providerKey, "BOOK_CHUNK_ANALYSIS", input.textConfiguration); assertQwenRouteConfiguration(embedding.providerKey, "EMBEDDING", input.embeddingConfiguration);
-  for (const routeSlot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const) { validateRouteManifestSelection(manifest, { routeSlot, providerKey: text.providerKey, protocol: text.protocol, modelId: input.textModelId, configuration: input.textConfiguration }); await repository.setRoute(context, { routeSlot, connectionId: text.id, modelId: input.textModelId, configuration: input.textConfiguration }); }
+  const textRoutes = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
+  // Validate the complete command before the repository receives any mutation.
+  for (const routeSlot of textRoutes) validateRouteManifestSelection(manifest, { routeSlot, providerKey: text.providerKey, protocol: text.protocol, modelId: input.textModelId, configuration: input.textConfiguration });
   validateRouteManifestSelection(manifest, { routeSlot: "EMBEDDING", providerKey: embedding.providerKey, protocol: embedding.protocol, modelId: input.embeddingModelId, configuration: input.embeddingConfiguration });
-  await repository.setRoute(context, { routeSlot: "EMBEDDING", connectionId: embedding.id, modelId: input.embeddingModelId, configuration: input.embeddingConfiguration });
+  await repository.setRoutesAtomically(context, [...textRoutes.map(routeSlot => ({ routeSlot, connectionId: text.id, modelId: input.textModelId, configuration: input.textConfiguration })), { routeSlot: "EMBEDDING", connectionId: embedding.id, modelId: input.embeddingModelId, configuration: input.embeddingConfiguration }]);
 }
 function failure(error: unknown) { const result = providerSettingsFailure(error); return NextResponse.json({ error: result.code }, { status: result.status }); }
 

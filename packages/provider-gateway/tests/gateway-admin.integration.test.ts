@@ -47,6 +47,20 @@ describe("gateway administration (OWNER only)", () => {
     await expect(repository.createConnection(owner, { providerKey: "fixture", protocol: "TEST", displayName: "My Provider 2" })).resolves.toMatchObject({ displayName: "My Provider 2" });
   });
 
+  it("commits a stable four-route command and its routing audits atomically", async () => {
+    const owner = await user("OWNER"), repository = new ProviderGatewayRepository(prisma, testCipher());
+    const text = await repository.createConnection(owner, { providerKey: "text", protocol: "TEST", displayName: "preset-text" });
+    const embedding = await repository.createConnection(owner, { providerKey: "embedding", protocol: "TEST", displayName: "preset-embedding" });
+    const inputs = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"].map(routeSlot => ({ routeSlot, connectionId: text.id, modelId: "text-v1" })).concat([{ routeSlot: "EMBEDDING", connectionId: embedding.id, modelId: "embedding-v1", configuration: { embeddingDimensions: 3 } }]);
+    await repository.setRoutesAtomically(owner, inputs);
+    expect(await prisma.providerRouteBinding.count({ where: { workspaceId: owner.workspaceId } })).toBe(4);
+    expect(await prisma.providerAuditEvent.count({ where: { workspaceId: owner.workspaceId, action: "ROUTING_UPDATED" } })).toBe(4);
+    const before = await Promise.all([prisma.providerRouteBinding.findMany({ where: { workspaceId: owner.workspaceId }, orderBy: { routeSlot: "asc" } }), prisma.providerAuditEvent.count({ where: { workspaceId: owner.workspaceId, action: "ROUTING_UPDATED" } })]);
+    await expect(repository.setRoutesAtomically(owner, [...inputs, { routeSlot: "EMBEDDING", connectionId: embedding.id, modelId: "other" }])).rejects.toThrow();
+    const after = [await prisma.providerRouteBinding.findMany({ where: { workspaceId: owner.workspaceId }, orderBy: { routeSlot: "asc" } }), await prisma.providerAuditEvent.count({ where: { workspaceId: owner.workspaceId, action: "ROUTING_UPDATED" } })];
+    expect(after).toEqual(before);
+  });
+
   it("allows each administrative mutation only to real workspace owners and emits no denied audit", async () => {
     const owner = await user("OWNER"); const editor = await user("EDITOR"); const viewer = await user("VIEWER"); const repository = new ProviderGatewayRepository(prisma, testCipher());
     const connection = await repository.createConnection(owner, { providerKey: "fixture", protocol: "TEST", displayName: "fixture" });
