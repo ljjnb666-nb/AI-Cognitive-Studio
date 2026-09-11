@@ -126,7 +126,35 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     expect(seen).toContainEqual(expect.objectContaining({ url: "https://mixed-workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/embeddings", model: "text-embedding-v4" }));
     const snapshots = await prisma.providerExecutionSnapshot.findMany({ where: { workspaceId: f.workspaceId }, select: { routeSlot: true, providerKey: true, modelId: true } });
     expect(snapshots).toEqual(expect.arrayContaining([expect.objectContaining({ routeSlot: "BOOK_CHUNK_ANALYSIS", providerKey: "minimax", modelId: "MiniMax-M3" }), expect.objectContaining({ routeSlot: "BOOK_REDUCTION_ANALYSIS", providerKey: "deepseek", modelId: "deepseek-v4-flash" }), expect.objectContaining({ routeSlot: "BOOK_SYNTHESIS", providerKey: "openai", modelId: "gpt-4o-mini" }), expect.objectContaining({ routeSlot: "EMBEDDING", providerKey: "qwen", modelId: "text-embedding-v4" })]));
-    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: f.workspaceId } })).toBeGreaterThanOrEqual(4);
+    const usage = await prisma.providerUsageEvent.findMany({ where: { workspaceId: f.workspaceId }, select: { routeSlot: true, providerKey: true, modelId: true } });
+    const expectedUsage = [
+      { routeSlot: "BOOK_CHUNK_ANALYSIS", providerKey: "minimax", modelId: "MiniMax-M3" },
+      { routeSlot: "BOOK_REDUCTION_ANALYSIS", providerKey: "deepseek", modelId: "deepseek-v4-flash" },
+      { routeSlot: "BOOK_SYNTHESIS", providerKey: "openai", modelId: "gpt-4o-mini" },
+      { routeSlot: "EMBEDDING", providerKey: "qwen", modelId: "text-embedding-v4" },
+    ];
+    expect(usage).toEqual(expect.arrayContaining(expectedUsage));
+    expect(usage.length).toBeGreaterThanOrEqual(4);
+    expect(usage.every(event => expectedUsage.some(expected => expected.routeSlot === event.routeSlot && expected.providerKey === event.providerKey && expected.modelId === event.modelId))).toBe(true);
     expect(await prisma.currentBookIntelligence.findFirst({ where: { workspaceId: f.workspaceId, analysisRunId: requested.run.id } })).toBeTruthy();
+  });
+  it("P24 creates a distinct BookAnalysisRun for a changed custom endpoint but reuses its normalized target", async () => {
+    const f = await fixture(), document = await bookLineage(f); await routes(f);
+    const customA = await durableRoutePlan(f.workspaceId);
+    customA.routes.BOOK_CHUNK_ANALYSIS = { ...customA.routes.BOOK_CHUNK_ANALYSIS, providerKey: "openai-compatible", modelId: "custom-book-model", endpoint: "https://custom-a.example.test/v1/" };
+    const first = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "p24", promptVersion: "p", provider: "openai-compatible", model: "custom-book-model", routePlan: customA });
+    const sameTarget = structuredClone(customA);
+    sameTarget.routes.BOOK_CHUNK_ANALYSIS.connectionId = "rotated-custom-connection";
+    sameTarget.routes.BOOK_CHUNK_ANALYSIS.credentialVersionId = "rotated-custom-credential";
+    sameTarget.routes.BOOK_CHUNK_ANALYSIS.endpoint = "https://CUSTOM-A.example.test:443/v1?credential=excluded";
+    const retry = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "p24", promptVersion: "p", provider: "openai-compatible", model: "custom-book-model", routePlan: sameTarget });
+    await prisma.job.update({ where: { id: first.job.id }, data: { status: "SUCCEEDED", completedAt: new Date() } });
+    const customB = structuredClone(customA);
+    customB.routes.BOOK_CHUNK_ANALYSIS.endpoint = "https://custom-b.example.test/v1";
+    const changed = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "p24", promptVersion: "p", provider: "openai-compatible", model: "custom-book-model", routePlan: customB });
+    expect(retry.run.id).toBe(first.run.id);
+    expect(retry.run.analysisIdentityHash).toBe(first.run.analysisIdentityHash);
+    expect(changed.run.id).not.toBe(first.run.id);
+    expect(changed.run.analysisIdentityHash).not.toBe(first.run.analysisIdentityHash);
   });
 });

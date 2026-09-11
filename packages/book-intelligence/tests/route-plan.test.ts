@@ -26,6 +26,32 @@ describe("Book route plan", () => {
     expect(fullBookRoutePlanHash(rotated)).not.toBe(baseline.integrityHash);
     expect(() => normalizeBookRoutePlan(rotated)).toThrow("BOOK_ROUTE_PLAN_INTEGRITY_FAILED");
   });
+  it("keeps fixed-provider endpoints out of semantic identity", () => {
+    const baseline = plan();
+    baseline.routes.BOOK_CHUNK_ANALYSIS.providerKey = "minimax";
+    const rotated = structuredClone(baseline);
+    rotated.routes.BOOK_CHUNK_ANALYSIS.connectionId = "minimax-connection-rotated";
+    rotated.routes.BOOK_CHUNK_ANALYSIS.credentialVersionId = "minimax-credential-rotated";
+    rotated.routes.BOOK_CHUNK_ANALYSIS.endpoint = "https://another-minimax-deployment.example.test/v1";
+    expect(bookRoutePlanHash(rotated)).toBe(bookRoutePlanHash(baseline));
+  });
+  it("uses only a normalized custom endpoint as the openai-compatible execution target", () => {
+    const baseline = plan();
+    baseline.routes.BOOK_CHUNK_ANALYSIS.providerKey = "openai-compatible";
+    baseline.routes.BOOK_CHUNK_ANALYSIS.endpoint = "https://Custom.Endpoint.example.test/v1/";
+    const sameTarget = structuredClone(baseline);
+    sameTarget.routes.BOOK_CHUNK_ANALYSIS.connectionId = "custom-connection-rotated";
+    sameTarget.routes.BOOK_CHUNK_ANALYSIS.credentialVersionId = "custom-credential-rotated";
+    sameTarget.routes.BOOK_CHUNK_ANALYSIS.endpoint = "https://user:secret@custom.endpoint.example.test:443/v1?api_key=never-hashed";
+    expect(bookRoutePlanHash(sameTarget)).toBe(bookRoutePlanHash(baseline));
+    const anotherTarget = structuredClone(baseline);
+    anotherTarget.routes.BOOK_CHUNK_ANALYSIS.endpoint = "https://other-service.example.test/v1";
+    expect(bookRoutePlanHash(anotherTarget)).not.toBe(bookRoutePlanHash(baseline));
+    const sealed = normalizeBookRoutePlan(baseline);
+    const tampered = structuredClone(sealed);
+    tampered.routes.BOOK_CHUNK_ANALYSIS.endpoint = "https://other-service.example.test/v1";
+    expect(() => normalizeBookRoutePlan(tampered)).toThrow("BOOK_ROUTE_PLAN_INTEGRITY_FAILED");
+  });
   it("changes semantic identity for model, version, configuration, output and embedding dimensions", () => {
     const baseline = bookRoutePlanHash(plan());
     for (const mutate of [

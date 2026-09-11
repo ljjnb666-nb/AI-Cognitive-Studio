@@ -19,8 +19,9 @@ export type BookRoutePlanEntry = {
 };
 /**
  * `integrityHash` protects every persisted execution locator.  It deliberately
- * is not part of `bookRoutePlanHash`: credentials and endpoints are execution
- * facts, not result semantics.
+ * is not part of `bookRoutePlanHash`: credentials and built-in endpoints are
+ * execution facts, not result semantics.  `openai-compatible` is the narrow
+ * exception because its user-supplied endpoint selects the actual service.
  */
 export type BookAnalysisRoutePlan = { version: 1; routes: Record<BookRouteSlot, BookRoutePlanEntry>; integrityHash?: string };
 
@@ -49,6 +50,22 @@ function normalizeEntry(entry: BookRoutePlanEntry): BookRoutePlanEntry {
     ...(entry.region ? { region: entry.region } : {}),
     adapterVersion: entry.adapterVersion,
   };
+}
+
+/**
+ * A custom OpenAI-compatible endpoint is a provider-selected service identity.
+ * Keep only the origin and path: credentials, query parameters, and fragments
+ * must never become part of a durable semantic identity.
+ */
+function semanticCustomEndpoint(endpoint: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw new Error("BOOK_ROUTE_PLAN_INVALID");
+  }
+  const pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+  return `${parsed.protocol.toLowerCase()}//${parsed.hostname.toLowerCase()}${parsed.port ? `:${parsed.port}` : ""}${pathname}`;
 }
 
 export function normalizeBookRoutePlan(plan: BookAnalysisRoutePlan): BookAnalysisRoutePlan {
@@ -81,6 +98,7 @@ function semanticPlan(plan: BookAnalysisRoutePlan) {
         configurationHash: entry.configurationHash,
         ...(entry.structuredOutput ? { structuredOutput: entry.structuredOutput } : {}),
         ...(entry.dimensions !== undefined ? { dimensions: entry.dimensions } : {}),
+        ...(entry.providerKey === "openai-compatible" ? { executionTarget: semanticCustomEndpoint(entry.endpoint) } : {}),
       }];
     })),
   };
