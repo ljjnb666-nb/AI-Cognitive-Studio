@@ -76,4 +76,20 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     const minimaxCalls = transport.calls.filter(call => call.url === "https://api.minimax.io/v1/text/chatcompletion_v2"); expect(minimaxCalls.length).toBeGreaterThan(0); const minimaxBody = JSON.parse(minimaxCalls[0]!.body!); expect(minimaxCalls[0]!.headers.authorization).toBe("Bearer minimax-sentinel"); expect(minimaxBody.model).toBe("MiniMax-M3"); expect(minimaxBody.response_format).toBeUndefined(); expect(minimaxBody.messages[0]).toMatchObject({ role: "system", content: expect.stringContaining("exactly one JSON object") }); expect(JSON.stringify(await prisma.providerTextResult.findMany({ where: { workspaceId: f.workspaceId } }))).not.toContain("reasoning"); expect(JSON.stringify(await prisma.providerExecutionSnapshot.findMany({ where: { workspaceId: f.workspaceId } }))).not.toContain("minimax-sentinel");
     expect(calls.text).toBeGreaterThan(0); expect(calls.embedding).toBe(1);
   });
+  it("P22 fails closed and never publishes Book Intelligence when real MiniMax final content is prose", async () => {
+    const f = await fixture(), document = await bookLineage(f);
+    const manifest = JSON.stringify({ providers: [
+      { providerKey: "minimax", displayName: "MiniMax", protocol: "OPENAI_COMPATIBLE", adapterVersion: "test", models: [{ modelId: "MiniMax-M3", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" }] },
+      { providerKey: "gemini", displayName: "Google Gemini", protocol: "GEMINI_NATIVE", capabilityProtocols: { EMBEDDING: "GEMINI_EMBEDDINGS" }, adapterVersion: "test", models: [{ modelId: "gemini-embedding-2", families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: 768, configurableEmbeddingDimensions: true }] },
+    ] });
+    const transport = new DeterministicProviderHttpTransport(request => request.url.includes(":batchEmbedContents") ? { status: 200, headers: {}, body: JSON.stringify({ embeddings: [] }) } : { status: 200, headers: {}, body: JSON.stringify({ model: "MiniMax-M3", choices: [{ finish_reason: "stop", message: { content: "ordinary prose must fail", reasoning_content: '{"summary":"never consume reasoning"}' } }] }) });
+    const r = createBookProductionGatewayRuntime({ ...source, PROVIDER_GATEWAY_MODEL_MANIFEST: manifest }, { ...controls, adapterResolver: createProviderAdapterResolver(transport) });
+    const store = new ProviderGatewayRepository(prisma, parseKeyring(keyring)!);
+    const minimax = await store.createConnection(f, { providerKey: "minimax", protocol: "OPENAI_COMPATIBLE", displayName: "MiniMax" }); await store.rotateCredential(f, minimax.id, "minimax-prose-sentinel");
+    for (const routeSlot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const) await store.setRoute(f, { routeSlot, connectionId: minimax.id, modelId: "MiniMax-M3" });
+    const gemini = await store.createConnection(f, { providerKey: "gemini", protocol: "GEMINI_EMBEDDINGS", displayName: "Gemini" }); await store.rotateCredential(f, gemini.id, "gemini-prose-sentinel"); await store.setRoute(f, { routeSlot: "EMBEDDING", connectionId: gemini.id, modelId: "gemini-embedding-2", configuration: { embeddingDimensions: 768 } });
+    const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "p22", promptVersion: "p", provider: "minimax", model: "MiniMax-M3" });
+    await expect(processBookAnalysisRun(requested.run.id, { analysisProviderForRun: input => r.createAnalysisProvider(input), embeddingGatewayForRun: input => ({ gateway: r.gateway, repository: r.repository, userId: input.userId }) })).rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE" });
+    expect(await prisma.currentBookIntelligence.findFirst({ where: { workspaceId: f.workspaceId, analysisRunId: requested.run.id } })).toBeNull(); expect(JSON.stringify(await prisma.providerTextResult.findMany({ where: { workspaceId: f.workspaceId } }))).not.toContain("reasoning");
+  });
 });
