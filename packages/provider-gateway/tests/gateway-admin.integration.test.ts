@@ -51,7 +51,7 @@ describe("gateway administration (OWNER only)", () => {
     const owner = await user("OWNER"), repository = new ProviderGatewayRepository(prisma, testCipher());
     const text = await repository.createConnection(owner, { providerKey: "text", protocol: "TEST", displayName: "preset-text" });
     const embedding = await repository.createConnection(owner, { providerKey: "embedding", protocol: "TEST", displayName: "preset-embedding" });
-    const inputs = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"].map(routeSlot => ({ routeSlot, connectionId: text.id, modelId: "text-v1" })).concat([{ routeSlot: "EMBEDDING", connectionId: embedding.id, modelId: "embedding-v1", configuration: { embeddingDimensions: 3 } }]);
+    const inputs: Parameters<ProviderGatewayRepository["setRoutesAtomically"]>[1] = [...(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const).map(routeSlot => ({ routeSlot, connectionId: text.id, modelId: "text-v1" })), { routeSlot: "EMBEDDING", connectionId: embedding.id, modelId: "embedding-v1", configuration: { embeddingDimensions: 3 } }];
     await repository.setRoutesAtomically(owner, inputs);
     expect(await prisma.providerRouteBinding.count({ where: { workspaceId: owner.workspaceId } })).toBe(4);
     expect(await prisma.providerAuditEvent.count({ where: { workspaceId: owner.workspaceId, action: "ROUTING_UPDATED" } })).toBe(4);

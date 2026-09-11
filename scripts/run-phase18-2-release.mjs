@@ -23,6 +23,6 @@ try {
   run(["test:phase18:release"]);
   run(["test:phase18-1:release"]);
   evidence.status = "PASSED";
-  evidence.matrix = "M01-M36 deterministic coverage: duplicate-name safety, provider error matrix, route-level Book composition, canonical immutable route plans, mixed structured output, Qwen embedding adapter, embedding identity isolation, non-destructive auto configuration, legacy compatibility, and no provider fallback";
+  evidence.matrix = "M01-M41 deterministic coverage: duplicate-name safety, provider error matrix, route-level Book composition, schema/migration alignment, semantic route identity plus sealed full execution plans, JSON-only Book routes, Qwen configuration safety, genuine MiniMax/DeepSeek/strict-schema/Qwen pinned worker composition, mixed structured output, Qwen embedding adapter, embedding identity isolation, non-destructive auto configuration, legacy compatibility, and no provider fallback";
 } catch (error) { evidence.error = error instanceof Error ? error.message : String(error); throw error; }
 finally { evidence.finishedAt = new Date().toISOString(); write(); }

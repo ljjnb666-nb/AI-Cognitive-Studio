@@ -17,6 +17,7 @@ describe("Provider settings public errors", () => {
     ["CAPABILITY_MISMATCH", 400],
     ["TEST_CONNECTION_FAILED", 400],
     ["NETWORK_POLICY_REJECTED", 400],
+    ["QWEN_CONFIGURATION_INVALID", 400],
   ])("maps public code %s to its stable HTTP status", (code, status) => {
     expect(providerSettingsFailure(new ProviderGatewayError(code as never))).toEqual({ code, status });
   });
@@ -27,6 +28,11 @@ describe("Provider settings public errors", () => {
 
   it("maps duplicate Provider names to the Chinese UI message", () => {
     expect(readableProviderError("PROVIDER_CONNECTION_NAME_CONFLICT")).toBe("已存在同名 Provider，请换一个名称。");
+  });
+
+  it("maps invalid Qwen configuration to its safe Chinese UI message", () => {
+    expect(readableProviderError("QWEN_CONFIGURATION_INVALID")).toBe("百炼配置无效，请检查区域、工作区 ID 和向量维度。");
+    expect(providerSettingsFailure(new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "qwen upstream debug detail"))).toEqual({ code: "PROVIDER_SETTINGS_REQUEST_FAILED", status: 500 });
   });
 
   it.each([

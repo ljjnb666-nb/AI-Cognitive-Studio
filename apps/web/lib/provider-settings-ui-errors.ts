@@ -9,6 +9,7 @@ export const providerErrorMessages: Record<string, string> = {
   AUTHORIZATION_FAILED: "当前账户无权修改此工作区的 Provider。",
   PROVIDER_CONNECTION_PROTOCOL_INVALID: "请选择当前 Provider 支持的协议。",
   PROVIDER_CONFIGURATION_SECRET_FORBIDDEN: "高级配置不能包含密钥或凭据。",
+  QWEN_CONFIGURATION_INVALID: "百炼配置无效，请检查区域、工作区 ID 和向量维度。",
   CAPABILITY_MISMATCH: "所选模型不支持该用途；Teach Back 需要支持严格 JSON 输出的模型。",
   TEST_CONNECTION_FAILED: "连接测试未通过。请检查 API Key、地址和网络后重试。",
 };

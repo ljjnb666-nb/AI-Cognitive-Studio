@@ -18,11 +18,13 @@ describe("Phase 12 Teach Back deterministic assessment", () => {
 });
 
 describe("Better Auth production-build contract", () => {
+  // Password hashing and the first database write are deliberately real here;
+  // this is a release-contract test, not a five-second latency contract.
   it("creates a password account with the release environment", async () => {
     const { auth } = await import("../lib/auth");
     const response = await auth.handler(new Request("http://localhost:3001/api/auth/sign-up/email", { method: "POST", headers: { "content-type": "application/json", origin: "http://localhost:3001" }, body: JSON.stringify({ name: "Phase Twelve Auth", email: `phase12-auth-${Date.now()}@ai-cognitive-studio.test`, password: "Phase12Password!" }) }));
     expect(response.status, await response.text()).toBe(200);
-  });
+  }, 15_000);
 });
 
 async function fixture() {

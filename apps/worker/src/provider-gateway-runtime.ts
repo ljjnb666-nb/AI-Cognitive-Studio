@@ -1,7 +1,7 @@
 import { prisma } from "@ai-cognitive/db";
 import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, GatewayPodcastSpeechSynthesisProvider, type DurablePodcastGenerationProvider, type DurableSpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
 import { GatewayShortVideoProvider, GatewayShortVideoRetrievalEmbeddingProvider, GatewayShortVideoTtsProvider, type ShortVideoProvider, type ShortVideoTtsProvider } from "@ai-cognitive/short-video-generation";
-import { bookRoutePlanHash, loadConsumedBookAnalysisEmbeddingIdentity, normalizeBookRoutePlan, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type BookAnalysisRoutePlan, type EmbeddingProvider, validateAnalysisResponse } from "@ai-cognitive/book-intelligence";
+import { bookRoutePlanHash, fullBookRoutePlanHash, loadConsumedBookAnalysisEmbeddingIdentity, normalizeBookRoutePlan, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type BookAnalysisRoutePlan, type EmbeddingProvider, validateAnalysisResponse } from "@ai-cognitive/book-intelligence";
 import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, resolveCredentialKeyring, resolveProviderCatalog, stableHash, validateProviderEndpoint, type ExecutionSnapshot, type GatewayExecutionDependencies, type ProviderAdapterResolver, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
@@ -22,7 +22,7 @@ function verifiedPlan(raw: unknown, storedHash: string | null): BookAnalysisRout
   if (!raw || !storedHash) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
   try {
     const plan = normalizeBookRoutePlan(raw as BookAnalysisRoutePlan);
-    if (bookRoutePlanHash(plan) !== storedHash || Object.values(plan.routes).some(entry => stableHash(entry.configuration) !== entry.configurationHash)) throw new Error("mismatch");
+    if (bookRoutePlanHash(plan) !== storedHash || !plan.integrityHash || fullBookRoutePlanHash(plan) !== plan.integrityHash || Object.values(plan.routes).some(entry => stableHash(entry.configuration) !== entry.configurationHash)) throw new Error("mismatch");
     return plan;
   } catch { throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED"); }
 }

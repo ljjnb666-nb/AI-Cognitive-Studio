@@ -17,7 +17,12 @@ export type BookRoutePlanEntry = {
   region?: string;
   adapterVersion: string;
 };
-export type BookAnalysisRoutePlan = { version: 1; routes: Record<BookRouteSlot, BookRoutePlanEntry> };
+/**
+ * `integrityHash` protects every persisted execution locator.  It deliberately
+ * is not part of `bookRoutePlanHash`: credentials and endpoints are execution
+ * facts, not result semantics.
+ */
+export type BookAnalysisRoutePlan = { version: 1; routes: Record<BookRouteSlot, BookRoutePlanEntry>; integrityHash?: string };
 
 function canonical(value: unknown): string {
   if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return JSON.stringify(value);
@@ -55,8 +60,45 @@ export function normalizeBookRoutePlan(plan: BookAnalysisRoutePlan): BookAnalysi
     routes[slot] = normalizeEntry(entry);
   }
   if (!routes.EMBEDDING.dimensions || !Number.isSafeInteger(routes.EMBEDDING.dimensions) || routes.EMBEDDING.dimensions <= 0) throw new Error("BOOK_ROUTE_PLAN_INVALID");
-  return { version: 1, routes };
+  const normalized = { version: 1 as const, routes };
+  const integrityHash = fullBookRoutePlanHash(normalized);
+  if (plan.integrityHash !== undefined && plan.integrityHash !== integrityHash) throw new Error("BOOK_ROUTE_PLAN_INTEGRITY_FAILED");
+  return { ...normalized, integrityHash };
 }
 
-export function bookRoutePlanHash(plan: BookAnalysisRoutePlan): string { return sha256(canonical(normalizeBookRoutePlan(plan))); }
+function semanticPlan(plan: BookAnalysisRoutePlan) {
+  const normalized = normalizeBookRoutePlan({ version: plan.version, routes: plan.routes });
+  return {
+    version: normalized.version,
+    routes: Object.fromEntries(bookRouteSlots.map(routeSlot => {
+      const entry = normalized.routes[routeSlot];
+      return [routeSlot, {
+        providerKey: entry.providerKey,
+        protocol: entry.protocol,
+        modelId: entry.modelId,
+        ...(entry.modelVersion ? { modelVersion: entry.modelVersion } : {}),
+        configuration: entry.configuration,
+        configurationHash: entry.configurationHash,
+        ...(entry.structuredOutput ? { structuredOutput: entry.structuredOutput } : {}),
+        ...(entry.dimensions !== undefined ? { dimensions: entry.dimensions } : {}),
+      }];
+    })),
+  };
+}
+
+/** Stable result identity; adapter code is owned by pipelineVersion, not routes. */
+export function bookRoutePlanHash(plan: BookAnalysisRoutePlan): string { return sha256(canonical(semanticPlan(plan))); }
+/** Hash the full immutable execution plan, excluding only its self-referential seal. */
+export function fullBookRoutePlanHash(plan: Pick<BookAnalysisRoutePlan, "version" | "routes">): string { return sha256(canonical({ version: plan.version, routes: normalizeRoutes(plan) })); }
+function normalizeRoutes(plan: Pick<BookAnalysisRoutePlan, "version" | "routes">) {
+  if (plan.version !== 1) throw new Error("BOOK_ROUTE_PLAN_VERSION_UNSUPPORTED");
+  const routes = {} as Record<BookRouteSlot, BookRoutePlanEntry>;
+  for (const slot of bookRouteSlots) {
+    const entry = plan.routes?.[slot];
+    if (!entry) throw new Error("BOOK_ROUTE_PLAN_INVALID");
+    routes[slot] = normalizeEntry(entry);
+  }
+  if (!routes.EMBEDDING.dimensions || !Number.isSafeInteger(routes.EMBEDDING.dimensions) || routes.EMBEDDING.dimensions <= 0) throw new Error("BOOK_ROUTE_PLAN_INVALID");
+  return routes;
+}
 export function canonicalBookRoutePlan(plan: BookAnalysisRoutePlan): string { return canonical(normalizeBookRoutePlan(plan)); }

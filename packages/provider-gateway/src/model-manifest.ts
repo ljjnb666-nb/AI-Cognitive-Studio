@@ -50,7 +50,7 @@ export function validateRouteManifestSelection(manifest: ProviderModelManifest, 
   const model: ModelCapability | undefined = catalogModel ?? (provider.providerKey === "openai-compatible" && input.modelId.trim() && provider.models[0] ? { ...provider.models[0], modelId: input.modelId } as ModelCapability : undefined);
   if (!model || !model.families.includes(family)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Model is not compatible with route capability");
   if (input.routeSlot === "TEACH_BACK_ASSESSMENT" && model.structuredOutput !== "STRICT_JSON_SCHEMA") throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Teach Back requires strict JSON schema support");
-  if (family === "TEXT_GENERATION" && input.routeSlot.startsWith("BOOK_") && (model.structuredOutput === "UNSUPPORTED" || !model.structuredOutput)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "This route requires structured output support");
+  if (family === "TEXT_GENERATION" && input.routeSlot.startsWith("BOOK_") && model.structuredOutput !== "STRICT_JSON_SCHEMA" && model.structuredOutput !== "JSON_MODE") throw new ProviderGatewayError("CAPABILITY_MISMATCH", "This route requires JSON structured output support");
   if (family === "SPEECH") {
     const outputFormat = input.configuration?.outputFormat;
     if (typeof outputFormat === "string" && model.speechFormats && !model.speechFormats.includes(outputFormat)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Speech format is unsupported by model");

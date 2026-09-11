@@ -41,7 +41,13 @@ route, a compatible catalog model, an active decryptable workspace credential,
 and executable endpoint policy. A missing embedding route reports
 `BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED`; no provider fallback or historical
 vector reuse occurs. Existing route snapshots and credential versions remain
-pinned for active durable work and are immutable execution evidence.
+pinned for active durable work and are immutable execution evidence. A Book
+run stores both a semantic route identity (provider, protocol, model/version,
+canonical configuration, JSON mode and embedding dimensions) and a full-plan
+seal. Connection IDs, credential-version IDs, endpoints, regions and adapter
+versions are execution locators rather than result semantics; adapter behavior
+is owned by `pipelineVersion`. Changing a locator therefore does not regenerate
+an equal analysis, but invalidates a sealed in-flight plan and fails closed.
 
 ## Validation matrix and limitations
 
@@ -50,10 +56,20 @@ mapping, final-content-only handling, JSON validation failures, and normalized
 upstream failures. Gemini adapter tests cover `gemini-embedding-2`, explicit
 768 output dimensionality, and finite vector validation. The Phase 18.2 release
 gate also retains Phase 18, Phase 18.1, Provider Gateway/BYOK, W06, and Phase 6
-browser coverage. Its M01-M36 evidence matrix additionally covers duplicate
+browser coverage. Its M01-M40 evidence matrix additionally covers duplicate
 Provider-name conflict normalization, public-error allowlisting, and the Book
 readiness dependency display for the MiniMax-three-routes-plus-Gemini-embedding
 configuration.
+
+M37 verifies Prisma schema/migration alignment for `routePlanHash`; M38 proves
+credential and connection rotation retain semantic identity while the complete
+plan seal rejects tampering; M39 rejects `PROMPT_ONLY`, `UNSUPPORTED`, and
+undefined structured-output modes for every Book text route; M40 verifies safe
+Qwen configuration errors (region, workspace ID, and dimensions) without
+exposing unknown internal failures. M41 executes a genuine pinned mixed worker
+run: MiniMax chunk analysis, DeepSeek section/chapter reductions, strict-schema
+synthesis, and Qwen `text-embedding-v4` at 768 dimensions after live route
+bindings have changed.
 
 No real provider credential is used by the release gate. MiniMax speech, image,
 video, music, embedding support, automatic provider failover, and mass
