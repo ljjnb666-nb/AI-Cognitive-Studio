@@ -2,13 +2,19 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { ProviderGatewayRepository, testCipher } from "@ai-cognitive/provider-gateway";
-import { providerReadiness } from "../lib/provider-product.js";
+import { providerReadiness, resolveBookProductExecution } from "../lib/provider-product.js";
 import { readinessDisplay } from "../lib/provider-readiness-ui.js";
 
 const owned: Array<{ workspaceId: string; userId: string }> = [];
 const manifest = JSON.stringify({ providers: [
   { providerKey: "minimax", displayName: "MiniMax", protocol: "OPENAI_COMPATIBLE", adapterVersion: "test", models: [{ modelId: "MiniMax-M3", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" }] },
   { providerKey: "gemini", displayName: "Google Gemini", protocol: "GEMINI_NATIVE", capabilityProtocols: { EMBEDDING: "GEMINI_EMBEDDINGS" }, adapterVersion: "test", models: [{ modelId: "gemini-embedding-2", families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: 768, configurableEmbeddingDimensions: true, embeddingDimensionOptions: [768] }] },
+] });
+const mixedManifest = JSON.stringify({ providers: [
+  { providerKey: "minimax", displayName: "MiniMax", protocol: "OPENAI_COMPATIBLE", adapterVersion: "test", models: [{ modelId: "MiniMax-M3", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" }] },
+  { providerKey: "deepseek", displayName: "DeepSeek", protocol: "OPENAI_COMPATIBLE", adapterVersion: "test", models: [{ modelId: "deepseek-test", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" }] },
+  { providerKey: "zhipu", displayName: "智谱 GLM", protocol: "OPENAI_COMPATIBLE", adapterVersion: "test", models: [{ modelId: "glm-test", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "STRICT_JSON_SCHEMA" }] },
+  { providerKey: "qwen", displayName: "阿里云百炼 Qwen", protocol: "OPENAI_COMPATIBLE", adapterVersion: "test", models: [{ modelId: "text-embedding-v4", families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: 1024, configurableEmbeddingDimensions: true, embeddingDimensionOptions: [1024, 768] }] },
 ] });
 
 async function fixture() {
@@ -63,5 +69,42 @@ describe("Provider settings Book readiness", () => {
     expect(readiness.book).toMatchObject({ state: "READY", configured: 4, required: 4, missing: [] });
     expect(readiness.book.dependencies).toContainEqual(expect.objectContaining({ slot: "EMBEDDING", state: "READY", providerName: "Google Gemini", modelId: "gemini-embedding-2" }));
     expect(display).toMatchObject({ summary: "4 / 4 已配置", completion: "已就绪", rows: expect.arrayContaining([expect.objectContaining({ label: "向量检索", configured: true, detail: "Google Gemini · gemini-embedding-2" })]) });
+  });
+
+  it("keeps all four Book slots independently executable and visible for a mixed provider composition", async () => {
+    process.env.PROVIDER_GATEWAY_MODEL_MANIFEST = mixedManifest;
+    const workspaceId = randomUUID(), userId = randomUUID(), identity = { workspaceId, userId };
+    owned.push(identity);
+    await prisma.workspace.create({ data: { id: workspaceId, name: `mixed-readiness-${workspaceId}` } });
+    await prisma.user.create({ data: { id: userId, email: `${userId}@test.invalid` } });
+    await prisma.workspaceMember.create({ data: { workspaceId, userId, role: "OWNER" } });
+    const repository = new ProviderGatewayRepository(prisma, testCipher());
+    const connection = async (providerKey: string, displayName: string, endpoint: string) => {
+      const value = await repository.createConnection(identity, { providerKey, protocol: "OPENAI_COMPATIBLE", displayName, endpoint });
+      await repository.rotateCredential(identity, value.id, `${providerKey}-mixed-route-test-secret`);
+      return value;
+    };
+    const minimax = await connection("minimax", "MiniMax mixed", "https://api.minimax.io/v1/text/chatcompletion_v2");
+    const deepseek = await connection("deepseek", "DeepSeek mixed", "https://api.deepseek.com/chat/completions");
+    const zhipu = await connection("zhipu", "Zhipu mixed", "https://open.bigmodel.cn/api/paas/v4/chat/completions");
+    const qwen = await connection("qwen", "Qwen mixed", "https://workspace-test.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions");
+    await repository.setRoute(identity, { routeSlot: "BOOK_CHUNK_ANALYSIS", connectionId: minimax.id, modelId: "MiniMax-M3" });
+    await repository.setRoute(identity, { routeSlot: "BOOK_REDUCTION_ANALYSIS", connectionId: deepseek.id, modelId: "deepseek-test" });
+    await repository.setRoute(identity, { routeSlot: "BOOK_SYNTHESIS", connectionId: zhipu.id, modelId: "glm-test" });
+    await repository.setRoute(identity, { routeSlot: "EMBEDDING", connectionId: qwen.id, modelId: "text-embedding-v4", configuration: { qwenRegion: "BEIJING", qwenWorkspaceId: "workspace-test", embeddingDimensions: 768 } });
+    const readiness = await providerReadiness(workspaceId), display = readinessDisplay(readiness.book), plan = await resolveBookProductExecution(workspaceId);
+    expect(readiness.book).toMatchObject({ state: "READY", configured: 4, required: 4, missing: [] });
+    expect(display.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: "分块理解", detail: "MiniMax · MiniMax-M3" }),
+      expect.objectContaining({ label: "归并分析", detail: "DeepSeek · deepseek-test" }),
+      expect.objectContaining({ label: "全书综合", detail: "智谱 GLM · glm-test" }),
+      expect.objectContaining({ label: "向量检索", detail: "阿里云百炼 Qwen · text-embedding-v4" }),
+    ]));
+    expect(plan.routePlan.routes).toMatchObject({
+      BOOK_CHUNK_ANALYSIS: { providerKey: "minimax", modelId: "MiniMax-M3", structuredOutput: "JSON_MODE" },
+      BOOK_REDUCTION_ANALYSIS: { providerKey: "deepseek", modelId: "deepseek-test", structuredOutput: "JSON_MODE" },
+      BOOK_SYNTHESIS: { providerKey: "zhipu", modelId: "glm-test", structuredOutput: "STRICT_JSON_SCHEMA" },
+      EMBEDDING: { providerKey: "qwen", modelId: "text-embedding-v4", dimensions: 768 },
+    });
   });
 });

@@ -16,7 +16,7 @@ const setEnabled = z.object({ action: z.literal("SET_ENABLED"), connectionId: z.
 const setRoute = z.object({ action: z.literal("SET_ROUTE"), routeSlot: z.enum(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"]), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200), configuration: jsonRecord });
 const testConnection = z.object({ action: z.literal("TEST_CONNECTION"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000) });
 const autoConfigureRoutes = z.object({ action: z.literal("AUTO_CONFIGURE_ROUTES"), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200).optional() });
-const stableBookRoutesInput = z.object({ action: z.literal("APPLY_STABLE_BOOK_ROUTES"), textConnectionId: z.string().cuid(), textModelId: z.string().trim().min(1).max(200), embeddingConnectionId: z.string().cuid(), embeddingModelId: z.string().trim().min(1).max(200), embeddingConfiguration: jsonRecord });
+const stableBookRoutesInput = z.object({ action: z.literal("APPLY_STABLE_BOOK_ROUTES"), textConnectionId: z.string().cuid(), textModelId: z.string().trim().min(1).max(200), textConfiguration: jsonRecord, embeddingConnectionId: z.string().cuid(), embeddingModelId: z.string().trim().min(1).max(200), embeddingConfiguration: jsonRecord });
 const bodySchema = z.discriminatedUnion("action", [createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection, autoConfigureRoutes, stableBookRoutesInput]);
 
 function safeConnection(connection: { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credentialVersions: { id: string; displayHint: string | null; status: string }[] }) {
@@ -81,7 +81,9 @@ async function autoConfigure(context: { workspaceId: string; userId: string }, i
   if (!connection) throw new Error("AUTHORIZATION_FAILED");
   const provider = manifest.providers.find(item => item.providerKey === connection.providerKey); if (!provider) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
   const chosen = input.modelId ? provider.models.find(model => model.modelId === input.modelId) : provider.models.find(model => model.families.includes("TEXT_GENERATION"));
-  if (!chosen) throw new Error("CAPABILITY_MISMATCH");
+  // An embedding-only catalog entry is still useful: it can fill EMBEDDING
+  // without pretending that it offers a text-generation route.
+  if (input.modelId && !chosen) throw new Error("CAPABILITY_MISMATCH");
   const bound: string[] = [], skipped: string[] = [];
   const existingBindings = new Set((await prisma.providerRouteBinding.findMany({ where: { workspaceId: context.workspaceId }, select: { routeSlot: true } })).map(route => route.routeSlot));
   const credential = await prisma.providerCredentialVersion.findFirst({ where: { workspaceId: context.workspaceId, connectionId: connection.id, status: "ACTIVE" }, orderBy: { credentialVersion: "desc" } });
@@ -101,10 +103,11 @@ async function autoConfigure(context: { workspaceId: string; userId: string }, i
     try { validateRouteManifestSelection(manifest, { routeSlot, providerKey: connection.providerKey, protocol, modelId, configuration }); await repository.setRoute(context, { routeSlot, connectionId, modelId, configuration }); bound.push(routeSlot); }
     catch { skipped.push(routeSlot); }
   };
-  if (chosen.families.includes("TEXT_GENERATION")) { const textConnection = await connectionFor("TEXT_GENERATION"); for (const routeSlot of textSlots) await bindIfUnbound(routeSlot, textConnection.id, textConnection.protocol, chosen.modelId);
-    if (chosen.structuredOutput === "STRICT_JSON_SCHEMA") await bindIfUnbound("TEACH_BACK_ASSESSMENT", textConnection.id, textConnection.protocol, chosen.modelId); }
+  const qwenConfiguration = safeConfiguration(connection.configuration);
+  if (chosen?.families.includes("TEXT_GENERATION")) { const textConnection = await connectionFor("TEXT_GENERATION"); for (const routeSlot of textSlots) await bindIfUnbound(routeSlot, textConnection.id, textConnection.protocol, chosen.modelId, textConnection.providerKey === "qwen" ? qwenConfiguration : {});
+    if (chosen.structuredOutput === "STRICT_JSON_SCHEMA") await bindIfUnbound("TEACH_BACK_ASSESSMENT", textConnection.id, textConnection.protocol, chosen.modelId, textConnection.providerKey === "qwen" ? qwenConfiguration : {}); }
   const embedding = provider.models.find(model => model.families.includes("EMBEDDING"));
-  if (embedding) { try { const embeddingConnection = await connectionFor("EMBEDDING"); await bindIfUnbound("EMBEDDING", embeddingConnection.id, embeddingConnection.protocol, embedding.modelId); } catch { skipped.push("EMBEDDING"); } }
+  if (embedding) { try { const embeddingConnection = await connectionFor("EMBEDDING"); const configuration = embeddingConnection.providerKey === "qwen" ? { ...qwenConfiguration, embeddingDimensions: embedding.embeddingDimensions } : {}; await bindIfUnbound("EMBEDDING", embeddingConnection.id, embeddingConnection.protocol, embedding.modelId, configuration); } catch { skipped.push("EMBEDDING"); } }
   // Speech needs user-approved voice metadata and is therefore never auto-bound merely because a key is valid.
   for (const routeSlot of ["PODCAST_TTS", "SHORT_VIDEO_TTS"] as const) skipped.push(routeSlot);
   return { bound, skipped };
@@ -112,8 +115,9 @@ async function autoConfigure(context: { workspaceId: string; userId: string }, i
 async function applyStableBookRoutes(context: { workspaceId: string; userId: string }, input: z.infer<typeof stableBookRoutesInput>, manifest: ReturnType<typeof productManifest>, repository: ProviderGatewayRepository) {
   const [text, embedding] = await Promise.all([prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.textConnectionId, workspaceId: context.workspaceId } } }), prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.embeddingConnectionId, workspaceId: context.workspaceId } } })]);
   if (!text || !embedding) throw new Error("AUTHORIZATION_FAILED");
-  assertSafeConfiguration(input.embeddingConfiguration); assertQwenRouteConfiguration(embedding.providerKey, "EMBEDDING", input.embeddingConfiguration);
-  for (const routeSlot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const) { validateRouteManifestSelection(manifest, { routeSlot, providerKey: text.providerKey, protocol: text.protocol, modelId: input.textModelId }); await repository.setRoute(context, { routeSlot, connectionId: text.id, modelId: input.textModelId, configuration: {} }); }
+  assertSafeConfiguration(input.textConfiguration); assertSafeConfiguration(input.embeddingConfiguration);
+  assertQwenRouteConfiguration(text.providerKey, "BOOK_CHUNK_ANALYSIS", input.textConfiguration); assertQwenRouteConfiguration(embedding.providerKey, "EMBEDDING", input.embeddingConfiguration);
+  for (const routeSlot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const) { validateRouteManifestSelection(manifest, { routeSlot, providerKey: text.providerKey, protocol: text.protocol, modelId: input.textModelId, configuration: input.textConfiguration }); await repository.setRoute(context, { routeSlot, connectionId: text.id, modelId: input.textModelId, configuration: input.textConfiguration }); }
   validateRouteManifestSelection(manifest, { routeSlot: "EMBEDDING", providerKey: embedding.providerKey, protocol: embedding.protocol, modelId: input.embeddingModelId, configuration: input.embeddingConfiguration });
   await repository.setRoute(context, { routeSlot: "EMBEDDING", connectionId: embedding.id, modelId: input.embeddingModelId, configuration: input.embeddingConfiguration });
 }

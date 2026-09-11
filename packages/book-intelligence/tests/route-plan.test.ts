@@ -17,6 +17,14 @@ describe("Book route plan", () => {
     const changed = plan(); changed.routes.BOOK_SYNTHESIS.modelId = "synthesis-v2";
     expect(bookRoutePlanHash(changed)).not.toBe(bookRoutePlanHash(first));
   });
+  it("changes whenever any independently pinned route changes", () => {
+    const baseline = bookRoutePlanHash(plan());
+    for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"] as const) {
+      const changed = plan();
+      changed.routes[slot].modelId = `${changed.routes[slot].modelId}-v2`;
+      expect(bookRoutePlanHash(changed)).not.toBe(baseline);
+    }
+  });
   it("rejects incomplete or non-pinned durable route data", () => {
     const invalid = plan(); invalid.routes.EMBEDDING.credentialVersionId = "";
     expect(() => normalizeBookRoutePlan(invalid)).toThrow("BOOK_ROUTE_PLAN_INVALID");
