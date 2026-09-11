@@ -1245,6 +1245,8 @@ model BookAnalysisRun {
   modelVersionKey          String
   idempotencyKey           String                    @unique
   analysisIdentityHash     String                    @unique
+  routePlan                Json?
+  routePlanHash            String?
   status                   AnalysisRunStatus         @default(QUEUED)
   errorCode                String?
   executionClaimToken      String?
@@ -1269,7 +1271,7 @@ model BookAnalysisRun {
   @@unique([id, workspaceId, chunkSetId])
   @@unique([id, workspaceId, sourceDocumentId, extractionId], map: "BookAnalysisRun_lineage_key")
   @@unique([id, workspaceId, sourceDocumentId, extractionId, chunkSetId], map: "BookAnalysisRun_current_lineage_key")
-  @@unique([chunkSetId, pipelineVersion, promptVersion, provider, model, modelVersionKey])
+  @@index([routePlanHash])
 }
 
 model AnalysisArtifact {

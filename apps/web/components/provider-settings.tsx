@@ -2,12 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { StatusBadge } from "./status-badge";
+import { readableProviderError } from "@/lib/provider-settings-ui-errors";
+import { readinessDisplay, type ProviderReadinessView } from "@/lib/provider-readiness-ui";
 
-type Model = { modelId: string; families: string[]; speechFormats?: string[] };
+type Model = { modelId: string; families: string[]; speechFormats?: string[]; embeddingDimensionOptions?: number[] };
 type Provider = { providerKey: string; displayName: string; protocol: string; capabilityProtocols?: Record<string, string>; models: Model[] };
 type Connection = { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credential: { id?: string; exists: boolean; displayHint?: string | null; status?: string } };
-type Route = { id: string; routeSlot: string; connectionId: string; modelId: string; configuration: Record<string, unknown>; connection: { displayName: string } };
-type State = { manifest: { providers: Provider[] }; connections: Connection[]; routes: Route[]; readiness: Record<string, { state: string; missing: string[] }> };
+type Route = { id: string; routeSlot: string; connectionId: string; modelId: string; configuration: Record<string, unknown>; connection: { displayName: string; providerKey: string } };
+type State = { manifest: { providers: Provider[] }; connections: Connection[]; routes: Route[]; readiness: Record<string, ProviderReadinessView> };
 
 const routeSlots = [
   { slot: "BOOK_CHUNK_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_REDUCTION_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_SYNTHESIS", label: "书籍理解" },
@@ -20,21 +22,9 @@ const readinessLabels: Record<string, string> = {
   podcast: "播客生成",
   podcastAudio: "播客音频",
   shortVideo: "短视频生成",
+  thinking: "思考",
 };
-const providerErrorMessages: Record<string, string> = {
-  PROVIDER_SETTINGS_LOAD_FAILED: "加载 Provider 设置失败，请刷新后重试。",
-  PROVIDER_SETTINGS_SAVE_FAILED: "保存 Provider 设置失败，请检查输入后重试。",
-  PROVIDER_GATEWAY_MODEL_MANIFEST_MISSING: "服务目录暂不可用，请联系部署管理员。",
-  PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID: "服务目录配置无效，请联系部署管理员。",
-  PROVIDER_GATEWAY_KEYRING_MISSING: "凭据保护服务未配置，暂时无法保存 API Key。",
-  PROVIDER_CONNECTION_ENDPOINT_INVALID: "请输入有效的 HTTPS API Endpoint。",
-  AUTHORIZATION_FAILED: "当前账户无权修改此工作区的 Provider。",
-  PROVIDER_CONNECTION_PROTOCOL_INVALID: "请选择当前 Provider 支持的协议。",
-  PROVIDER_CONFIGURATION_SECRET_FORBIDDEN: "高级配置不能包含密钥或凭据。",
-  CAPABILITY_MISMATCH: "所选模型不支持该用途；Teach Back 需要支持严格 JSON 输出的模型。",
-  TEST_CONNECTION_FAILED: "连接测试未通过。请检查 API Key、地址和网络后重试。",
-};
-function readableError(code: string): string { return providerErrorMessages[code] ?? "操作未完成，请检查输入后重试。"; }
+const readableError = readableProviderError;
 
 export function ProviderSettings() {
   const [state, setState] = useState<State | null>(null);
@@ -82,6 +72,7 @@ export function ProviderSettings() {
       </div>
     );
   }
+  const bookTextRouteIdentities = new Set(state.routes.filter(route => ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"].includes(route.routeSlot)).map(route => `${route.connection.providerKey}:${route.modelId}`));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 32 }}>
@@ -91,8 +82,9 @@ export function ProviderSettings() {
           服务可用性
         </h2>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16 }}>
-          {Object.entries(state.readiness).map(([name, item]) => (
-            <div
+          {Object.entries(state.readiness).map(([name, item]) => {
+            const detail = readinessDisplay(item);
+            return <div
               key={name}
               style={{
                 backgroundColor: "var(--surface-container)",
@@ -105,13 +97,21 @@ export function ProviderSettings() {
                 <span style={{ fontWeight: 600, fontSize: 14 }}>{readinessLabels[name] ?? name}</span>
                 <StatusBadge value={item.state === "READY" ? "已就绪" : "未完成"} />
               </div>
-              {item.missing.length > 0 && (
+              {detail.summary && <p style={{ fontSize: 13, fontWeight: 600, margin: "0 0 10px" }}>{detail.summary}</p>}
+              {detail.rows.map(row => (
+                <div key={row.label} style={{ display: "grid", gridTemplateColumns: "16px 1fr", columnGap: 6, fontSize: 12, marginTop: 6 }}>
+                  <span aria-hidden="true">{row.configured ? "✓" : "○"}</span>
+                  <span><strong>{row.label}</strong><br />{row.detail}</span>
+                </div>
+              ))}
+              {detail.completion && <p style={{ fontSize: 12, color: item.state === "READY" ? "var(--success)" : "var(--muted-terracotta)", margin: "10px 0 0" }}>{detail.completion}</p>}
+              {!detail.rows.length && item.missing.length > 0 && (
                 <p style={{ fontSize: 12, color: "var(--muted-terracotta)", margin: "8px 0 0 0" }}>
                   需要配置 Provider 并完成所需执行路由。
                 </p>
               )}
-            </div>
-          ))}
+            </div>;
+          })}
         </div>
       </section>
 
@@ -121,6 +121,9 @@ export function ProviderSettings() {
           添加 AI Provider
         </h2>
         <p style={{ color: "var(--on-surface-variant)", fontSize: 14, margin: "0 0 20px" }}>添加你自己的 AI Provider。API Key 会加密保存，之后不会再次显示明文。</p>
+        <p style={{ color: "var(--on-surface-variant)", fontSize: 13, margin: "0 0 20px" }}>书籍理解可为分段、归并、综合和向量检索分别选择兼容的 Provider 与模型；混合组合仅作提示，不会阻止保存。</p>
+        {bookTextRouteIdentities.size > 1 && <p role="status" style={{ color: "var(--on-surface-variant)", fontSize: 13, margin: "0 0 20px" }}>当前书籍理解混用了多个文本模型。不同模型可能导致术语、摘要粒度和表达风格存在差异。</p>}
+        <StableBookRouteForm connections={state.connections} providers={state.manifest.providers} busy={busy} submit={submit} />
         <ConnectionForm providers={state.manifest.providers} busy={busy} submit={submit} />
       </section>
 
@@ -156,7 +159,7 @@ export function ProviderSettings() {
 
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
                 <CredentialRotation connectionId={connection.id} busy={busy} submit={submit} />
-                <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit({ action: "AUTO_CONFIGURE_ROUTES", connectionId: connection.id })} style={{ height: 36, fontSize: 13 }}>自动配置推荐用途</button>
+                <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void submit({ action: "AUTO_CONFIGURE_ROUTES", connectionId: connection.id })} style={{ height: 36, fontSize: 13 }}>填补未绑定的默认路由</button>
 
                 {connection.credential.id && connection.credential.status === "ACTIVE" && (
                   <button
@@ -218,6 +221,23 @@ export function ProviderSettings() {
   );
 }
 
+function StableBookRouteForm({ connections, providers, busy, submit }: { connections: Connection[]; providers: Provider[]; busy: boolean; submit(payload: Record<string, unknown>): Promise<void> }) {
+  const firstConnectionFor = (family: "TEXT_GENERATION" | "EMBEDDING") => connections.find(connection => providers.find(provider => provider.providerKey === connection.providerKey)?.models.some(model => model.families.includes(family)))?.id ?? "";
+  const [textConnectionId, setTextConnectionId] = useState(() => firstConnectionFor("TEXT_GENERATION")), [embeddingConnectionId, setEmbeddingConnectionId] = useState(() => firstConnectionFor("EMBEDDING"));
+  const [textQwenRegion, setTextQwenRegion] = useState("BEIJING"), [textQwenWorkspaceId, setTextQwenWorkspaceId] = useState("");
+  const [embeddingQwenRegion, setEmbeddingQwenRegion] = useState("BEIJING"), [embeddingQwenWorkspaceId, setEmbeddingQwenWorkspaceId] = useState(""), [embeddingQwenDimension, setEmbeddingQwenDimension] = useState("1024");
+  const textConnection = connections.find(connection => connection.id === textConnectionId), embeddingConnection = connections.find(connection => connection.id === embeddingConnectionId);
+  const textModels = providers.find(provider => provider.providerKey === textConnection?.providerKey)?.models.filter(model => model.families.includes("TEXT_GENERATION")) ?? [];
+  const embeddingModels = providers.find(provider => provider.providerKey === embeddingConnection?.providerKey)?.models.filter(model => model.families.includes("EMBEDDING")) ?? [];
+  const textConfiguration = textConnection?.providerKey === "qwen" ? { qwenRegion: textQwenRegion, qwenWorkspaceId: textQwenWorkspaceId } : {};
+  const embeddingConfiguration = embeddingConnection?.providerKey === "qwen" ? { qwenRegion: embeddingQwenRegion, qwenWorkspaceId: embeddingQwenWorkspaceId, embeddingDimensions: Number(embeddingQwenDimension) } : {};
+  return <details className="card-panel" style={{ margin: "0 0 20px" }}><summary style={{ cursor: "pointer", fontWeight: 600 }}>稳定配置（推荐）</summary><p style={{ color: "var(--on-surface-variant)", fontSize: 13 }}>为三个书籍文本阶段写入相同的独立路由绑定，并单独写入 Embedding 路由。之后可在“自定义每个用途”中分别调整。</p>{!embeddingModels.length && <p role="status" style={{ color: "var(--on-surface-variant)", fontSize: 13 }}>尚未配置支持 Embedding 的 Provider。请先添加 Qwen / Gemini / OpenAI 等向量连接。</p>}<form action={form => void submit({ action: "APPLY_STABLE_BOOK_ROUTES", textConnectionId, textModelId: form.get("textModelId"), textConfiguration, embeddingConnectionId, embeddingModelId: form.get("embeddingModelId"), embeddingConfiguration })} style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}><label className="form-label">文本连接<select className="select-control" value={textConnectionId} onChange={event => setTextConnectionId(event.target.value)}>{connections.map(connection => <option key={connection.id} value={connection.id}>{connection.displayName}</option>)}</select></label><label className="form-label">文本模型<select className="select-control" name="textModelId">{textModels.map(model => <option key={model.modelId} value={model.modelId}>{model.modelId}</option>)}</select></label>{textConnection?.providerKey === "qwen" && <QwenStableFields region={textQwenRegion} workspaceId={textQwenWorkspaceId} setRegion={setTextQwenRegion} setWorkspaceId={setTextQwenWorkspaceId} /> }<label className="form-label">Embedding 连接<select className="select-control" value={embeddingConnectionId} onChange={event => setEmbeddingConnectionId(event.target.value)}>{connections.map(connection => <option key={connection.id} value={connection.id}>{connection.displayName}</option>)}</select></label><label className="form-label">Embedding 模型<select className="select-control" name="embeddingModelId">{embeddingModels.map(model => <option key={model.modelId} value={model.modelId}>{model.modelId}</option>)}</select></label>{embeddingConnection?.providerKey === "qwen" && <><QwenStableFields region={embeddingQwenRegion} workspaceId={embeddingQwenWorkspaceId} setRegion={setEmbeddingQwenRegion} setWorkspaceId={setEmbeddingQwenWorkspaceId} /><label className="form-label">Embedding 维度<select className="select-control" value={embeddingQwenDimension} onChange={event => setEmbeddingQwenDimension(event.target.value)}>{[2048, 1536, 1024, 768, 512, 256, 128, 64].map(dimension => <option key={dimension} value={dimension}>{dimension}</option>)}</select></label></>}<button type="submit" className="btn btn-primary" disabled={busy || !textModels.length || !embeddingModels.length}>应用稳定配置</button></form></details>;
+}
+
+function QwenStableFields({ region, workspaceId, setRegion, setWorkspaceId }: { region: string; workspaceId: string; setRegion(value: string): void; setWorkspaceId(value: string): void }) {
+  return <><label className="form-label">百炼区域<select className="select-control" value={region} onChange={event => setRegion(event.target.value)}><option value="BEIJING">北京</option><option value="SINGAPORE">新加坡</option></select></label><label className="form-label">百炼工作区 ID<input className="input-control" value={workspaceId} onChange={event => setWorkspaceId(event.target.value)} required pattern="[A-Za-z0-9][A-Za-z0-9-]{0,61}[A-Za-z0-9]|[A-Za-z0-9]" placeholder="workspace-id" /></label></>;
+}
+
 function ConnectionForm({
   providers,
   busy,
@@ -228,9 +248,12 @@ function ConnectionForm({
   submit(payload: Record<string, unknown>): Promise<void>;
 }) {
   const [providerKey, setProviderKey] = useState(providers[0]?.providerKey ?? "");
-  const defaultEndpoints: Record<string, string> = { openai: "https://api.openai.com/v1/responses", anthropic: "https://api.anthropic.com/v1/messages", gemini: "https://generativelanguage.googleapis.com/v1beta", deepseek: "https://api.deepseek.com/chat/completions", zhipu: "https://open.bigmodel.cn/api/paas/v4/chat/completions" };
+  const defaultEndpoints: Record<string, string> = { openai: "https://api.openai.com/v1/responses", anthropic: "https://api.anthropic.com/v1/messages", gemini: "https://generativelanguage.googleapis.com/v1beta", deepseek: "https://api.deepseek.com/chat/completions", zhipu: "https://open.bigmodel.cn/api/paas/v4/chat/completions", minimax: "https://api.minimax.io/v1/text/chatcompletion_v2" };
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [qwenRegion, setQwenRegion] = useState("BEIJING");
+  const [qwenWorkspaceId, setQwenWorkspaceId] = useState("");
   const provider = providers.find((item) => item.providerKey === providerKey);
+  const qwenEndpoint = `https://${qwenWorkspaceId}.${qwenRegion === "BEIJING" ? "cn-beijing" : "ap-southeast-1"}.maas.aliyuncs.com/compatible-mode/v1/chat/completions`;
 
   return (
     <form
@@ -240,10 +263,10 @@ function ConnectionForm({
           providerKey,
           protocol: form.get("protocol"),
           displayName: form.get("displayName"),
-          endpoint: form.get("endpoint"),
+          endpoint: providerKey === "qwen" ? qwenEndpoint : form.get("endpoint"),
           secret: form.get("secret"),
           region: form.get("region") || undefined,
-          configuration: parseConfiguration(form.get("configuration")),
+          configuration: providerKey === "qwen" ? { ...parseConfiguration(form.get("configuration")), qwenRegion, qwenWorkspaceId } : parseConfiguration(form.get("configuration")),
         })
       }
       style={{ display: "grid", gap: 16, maxWidth: 640 }}
@@ -266,8 +289,13 @@ function ConnectionForm({
 
       <div className="form-group">
         <label className="form-label">Base URL</label>
-        <input className="input-control font-mono" name="endpoint" type="url" required readOnly={Boolean(defaultEndpoints[providerKey])} defaultValue={defaultEndpoints[providerKey] ?? ""} placeholder="https://api.example.com/v1" />
+        <input className="input-control font-mono" name="endpoint" type="url" required readOnly={Boolean(defaultEndpoints[providerKey]) || providerKey === "qwen"} value={providerKey === "qwen" ? qwenEndpoint : undefined} defaultValue={providerKey === "qwen" ? undefined : defaultEndpoints[providerKey] ?? ""} placeholder="https://api.example.com/v1" />
       </div>
+
+      {providerKey === "qwen" && <>
+        <div className="form-group"><label className="form-label">百炼区域</label><select className="select-control" value={qwenRegion} onChange={event => setQwenRegion(event.target.value)}><option value="BEIJING">北京</option><option value="SINGAPORE">新加坡</option></select></div>
+        <div className="form-group"><label className="form-label">百炼工作区 ID</label><input className="input-control" value={qwenWorkspaceId} onChange={event => setQwenWorkspaceId(event.target.value)} required pattern="[A-Za-z0-9][A-Za-z0-9-]{0,61}[A-Za-z0-9]|[A-Za-z0-9]" placeholder="workspace-id" /></div>
+      </>}
 
       <div className="form-group">
         <label className="form-label">API Key</label>
@@ -340,6 +368,9 @@ function RouteForm({
 }) {
   const [selectedConnectionId, setSelectedConnectionId] = useState(existing?.connectionId ?? "");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [qwenRegion, setQwenRegion] = useState(String(existing?.configuration.qwenRegion ?? "BEIJING"));
+  const [qwenWorkspaceId, setQwenWorkspaceId] = useState(String(existing?.configuration.qwenWorkspaceId ?? ""));
+  const [qwenDimension, setQwenDimension] = useState(String(existing?.configuration.embeddingDimensions ?? 1024));
   const connectionId = connections.some((c) => c.id === selectedConnectionId) ? selectedConnectionId : existing?.connectionId ?? connections[0]?.id ?? "";
   const connection = connections.find((c) => c.id === connectionId);
   const provider = providers.find((p) => p.providerKey === connection?.providerKey);
@@ -355,7 +386,7 @@ function RouteForm({
           routeSlot: slot,
           connectionId,
           modelId: form.get("modelId"),
-          configuration: parseConfiguration(form.get("configuration")),
+          configuration: connection?.providerKey === "qwen" ? { ...parseConfiguration(form.get("configuration")), qwenRegion, qwenWorkspaceId, ...(capability === "EMBEDDING" ? { embeddingDimensions: Number(qwenDimension) } : {}) } : parseConfiguration(form.get("configuration")),
         })
       }
       style={{
@@ -400,6 +431,12 @@ function RouteForm({
           {showAdvanced ? "隐藏高级路由配置" : "展开高级路由配置 JSON"}
         </button>
       </div>
+
+      {connection?.providerKey === "qwen" && <div style={{ display: "grid", gridTemplateColumns: capability === "EMBEDDING" ? "1fr 1fr 1fr" : "1fr 1fr", gap: 12, marginBottom: 16 }}>
+        <div className="form-group"><label className="form-label">百炼区域</label><select className="select-control" value={qwenRegion} onChange={event => setQwenRegion(event.target.value)}><option value="BEIJING">北京</option><option value="SINGAPORE">新加坡</option></select></div>
+        <div className="form-group"><label className="form-label">百炼工作区 ID</label><input className="input-control" value={qwenWorkspaceId} onChange={event => setQwenWorkspaceId(event.target.value)} required placeholder="workspace-id" /></div>
+        {capability === "EMBEDDING" && <div className="form-group"><label className="form-label">向量维度</label><select className="select-control" value={qwenDimension} onChange={event => setQwenDimension(event.target.value)}>{(models[0]?.embeddingDimensionOptions ?? [1024]).map(dimension => <option key={dimension} value={dimension}>{dimension}</option>)}</select></div>}
+      </div>}
 
       {showAdvanced && (
         <div className="form-group" style={{ marginBottom: 16 }}>
