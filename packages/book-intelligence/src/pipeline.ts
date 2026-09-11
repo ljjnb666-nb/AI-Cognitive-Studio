@@ -17,7 +17,8 @@ import {
 import { buildContext } from "./context.js";
 import { cosineSimilarity, embeddingIdentityWithHash, type EmbeddingProvider } from "./embeddings.js";
 import { sha256, type SourceBlockInput } from "./chunking.js";
-import { canonicalEmbeddingInputHash, type ProviderExecutionRepository, type ProviderGateway } from "@ai-cognitive/provider-gateway";
+import { bookRoutePlanHash, normalizeBookRoutePlan, type BookAnalysisRoutePlan } from "./route-plan.js";
+import { canonicalEmbeddingInputHash, type ProviderExecutionRepository, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
 import { loadConsumedBookAnalysisEmbeddingIdentity, materializeBookAnalysisEmbeddings, type BookAnalysisEmbeddingTarget, verifyConsumedBookAnalysisEmbeddings } from "./gateway-materialization.js";
 import { dispatchPendingOutbox } from "../../ingestion/src/outbox-dispatcher.js";
 import {
@@ -45,14 +46,14 @@ export type ProcessBookAnalysisDependencies = {
   analysisProviderForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => Promise<AnalysisProvider> | AnalysisProvider;
   embeddingProvider?: EmbeddingProvider;
   /** Query/retrieval identity only; never used by the durable EMBEDDINGS stage. */
-  embeddingGateway?: { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string };
-  embeddingGatewayForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string }) => Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string }> | { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string };
+  embeddingGateway?: { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute };
+  embeddingGatewayForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string }) => Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute }> | { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute };
   embeddingVersion?: string;
   correlationId?: string;
   faultInjector?: AnalysisFaultInjector;
 };
 type ActiveBookAnalysisDependencies = ProcessBookAnalysisDependencies & { analysisProvider: AnalysisProvider };
-export type BookAnalysisRequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; correlationId?: string; outboxTopic?: string };
+export type BookAnalysisRequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; routePlan?: BookAnalysisRoutePlan; correlationId?: string; outboxTopic?: string };
 export type TrustedBookAnalysisRequestContext = { workspaceId: string; userId: string };
 type StageContext = { blocks: SourceBlockInput[]; blockMap: Map<string, SourceBlockInput>; chunks: any[]; nodes: any[] };
 
@@ -77,10 +78,18 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
     ? await prisma.chunkSet.findFirstOrThrow({ where: { id: input.chunkSetId, workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId } })
     : await prisma.chunkSet.findFirstOrThrow({ where: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, status: "SUCCEEDED" }, orderBy: { completedAt: "desc" } });
   if (chunkSet.status !== "SUCCEEDED") throw new Error("CHUNK_SET_NOT_SUCCEEDED");
-  const modelVersionKey = input.modelVersion ?? "";
-  const identityBase = [chunkSet.id, input.pipelineVersion, input.promptVersion, input.provider, input.model, modelVersionKey] as const;
+  const routePlan = input.routePlan ? normalizeBookRoutePlan(input.routePlan) : undefined;
+  const routePlanHash = routePlan ? bookRoutePlanHash(routePlan) : undefined;
+  const display = routePlan?.routes.BOOK_CHUNK_ANALYSIS;
+  const provider = display?.providerKey ?? input.provider, model = display?.modelId ?? input.model, modelVersion = display?.modelVersion ?? input.modelVersion;
+  const modelVersionKey = modelVersion ?? "";
+  // Keep the original identity for historical rows.  A new, pinned plan gets a
+  // distinct identity, while a retry of a legacy single-model row still finds it.
+  const identityBase = routePlan
+    ? [chunkSet.id, input.pipelineVersion, input.promptVersion, routePlanHash] as const
+    : [chunkSet.id, input.pipelineVersion, input.promptVersion, input.provider, input.model, input.modelVersion ?? ""] as const;
   const analysisIdentityHash = sha256(JSON.stringify(identityBase));
-  const existing = await prisma.bookAnalysisRun.findFirst({ where: { chunkSetId: chunkSet.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersionKey }, include: { job: true } });
+  const existing = await prisma.bookAnalysisRun.findUnique({ where: { analysisIdentityHash }, include: { job: true } });
   if (existing && existing.status !== "FAILED") return { run: existing, job: existing.job };
   if (existing) {
     const requeued = await prisma.$transaction(async (tx) => {
@@ -93,7 +102,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
       return tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: existing.id }, include: { job: true } });
     });
     if (requeued) return { run: requeued, job: requeued.job };
-    const concurrent = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { chunkSetId: chunkSet.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersionKey }, include: { job: true } });
+    const concurrent = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { analysisIdentityHash }, include: { job: true } });
     return { run: concurrent, job: concurrent.job };
   }
   const idempotencyKey = `book:${analysisIdentityHash}`;
@@ -101,13 +110,13 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
     return await prisma.$transaction(async (tx) => {
       await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
       const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey, correlationId: input.correlationId } });
-      const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersion: input.modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash } });
+      const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider, model, modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash, ...(routePlan ? { routePlan: routePlan as never, routePlanHash } : {}) } });
       await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id, queueJobId: job.id } } });
-      logger.info("book.analysis.requested", { ...logFields(run, input.correlationId), extractionId: current.extractionId, jobId: job.id, provider: input.provider, model: input.model });
+      logger.info("book.analysis.requested", { ...logFields(run, input.correlationId), extractionId: current.extractionId, jobId: job.id, provider, model, ...(routePlanHash ? { routePlanHash } : {}) });
       return { run, job };
     });
   } catch {
-    const run = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { chunkSetId: chunkSet.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersionKey }, include: { job: true } });
+    const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { analysisIdentityHash }, include: { job: true } });
     return { run, job: run.job };
   }
 }
@@ -387,7 +396,7 @@ async function runEmbeddingStage(run: any, token: string, dependencies: ActiveBo
   // run-scoped so a lineage mutation cannot pay for a second invocation before
   // the original encrypted receipt is reconciled.
   const targetLineageHash = sha256(JSON.stringify(targets.map(target => ({ kind: target.kind, id: target.id, extractionId: target.extractionId, contentHash: target.contentHash, ...(target.kind === "BOOK_MEMORY" ? { analysisRunId: target.analysisRunId } : {}) }))));
-  const request = { workspaceId: run.workspaceId, routeSlot: "EMBEDDING" as const, correlationId: dependencies.correlationId ?? run.id, idempotencyKey: `book-analysis-embeddings:${run.id}`, inputHash: canonicalEmbeddingInputHash(embedding), capability: { family: "EMBEDDING" as const }, embedding, pipelineVersion: `${run.pipelineVersion}:book-embedding:${targetLineageHash}` };
+  const request = { workspaceId: run.workspaceId, routeSlot: "EMBEDDING" as const, correlationId: dependencies.correlationId ?? run.id, idempotencyKey: `book-analysis-embeddings:${run.id}`, inputHash: canonicalEmbeddingInputHash(embedding), capability: { family: "EMBEDDING" as const }, embedding, ...(dependencies.embeddingGateway.pinnedRoute ? { pinnedRoute: dependencies.embeddingGateway.pinnedRoute } : {}), pipelineVersion: `${run.pipelineVersion}:book-embedding:${targetLineageHash}` };
   const outcome = await dependencies.embeddingGateway.gateway.execute(request, { userId: dependencies.embeddingGateway.userId });
   if (outcome.status === "RECONCILIATION_REQUIRED") throw new Error("BOOK_ANALYSIS_EMBEDDING_RECONCILIATION_REQUIRED");
   if (outcome.status === "IN_PROGRESS" || outcome.status === "BLOCKED_EXISTING") throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED");

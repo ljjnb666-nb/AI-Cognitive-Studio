@@ -9,7 +9,7 @@ export function readinessDisplay(item: ProviderReadinessView) {
     detail: dependency.state === "READY"
       ? `${dependency.providerName ?? "Provider"} · ${dependency.modelId ?? ""}`.trim()
       : dependency.error === "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"
-        ? "尚未配置｜推荐：Gemini Embedding 2 · 768维"
+        ? "尚未配置｜请选择兼容的向量模型与维度"
         : "尚未配置",
   }));
   return {

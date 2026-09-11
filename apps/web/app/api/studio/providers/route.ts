@@ -44,6 +44,22 @@ function assertFixedMiniMaxEndpoint(providerKey: string, endpoint: string) {
   const expected = builtInProviderProfiles.find(profile => profile.providerKey === "minimax" && profile.family === "TEXT_GENERATION")?.endpoint;
   if (!expected || endpoint !== expected) throw new Error("PROVIDER_CONNECTION_ENDPOINT_INVALID");
 }
+function qwenEndpoint(configuration: Record<string, unknown>): string {
+  const region = configuration.qwenRegion, workspaceId = configuration.qwenWorkspaceId;
+  if ((region !== "BEIJING" && region !== "SINGAPORE") || typeof workspaceId !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(workspaceId)) throw new Error("QWEN_CONFIGURATION_INVALID");
+  return `https://${workspaceId}.${region === "BEIJING" ? "cn-beijing" : "ap-southeast-1"}.maas.aliyuncs.com/compatible-mode/v1/chat/completions`;
+}
+function assertQwenConnectionConfiguration(providerKey: string, endpoint: string, configuration: Record<string, unknown>) {
+  if (providerKey === "qwen" && endpoint !== qwenEndpoint(configuration)) throw new Error("PROVIDER_CONNECTION_ENDPOINT_INVALID");
+}
+function assertQwenRouteConfiguration(providerKey: string, routeSlot: RouteSlot, configuration: Record<string, unknown>) {
+  if (providerKey !== "qwen") return;
+  qwenEndpoint(configuration);
+  if (routeSlot === "EMBEDDING") {
+    const dimension = configuration.embeddingDimensions;
+    if (typeof dimension !== "number" || ![2048, 1536, 1024, 768, 512, 256, 128, 64].includes(dimension)) throw new Error("QWEN_CONFIGURATION_INVALID");
+  }
+}
 async function testSubmittedConnection(input: z.infer<typeof testConnection>, manifest: ReturnType<typeof productManifest>) {
   const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
   if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
@@ -66,6 +82,7 @@ async function autoConfigure(context: { workspaceId: string; userId: string }, i
   const chosen = input.modelId ? provider.models.find(model => model.modelId === input.modelId) : provider.models.find(model => model.families.includes("TEXT_GENERATION"));
   if (!chosen) throw new Error("CAPABILITY_MISMATCH");
   const bound: string[] = [], skipped: string[] = [];
+  const existingBindings = new Set((await prisma.providerRouteBinding.findMany({ where: { workspaceId: context.workspaceId }, select: { routeSlot: true } })).map(route => route.routeSlot));
   const credential = await prisma.providerCredentialVersion.findFirst({ where: { workspaceId: context.workspaceId, connectionId: connection.id, status: "ACTIVE" }, orderBy: { credentialVersion: "desc" } });
   if (!credential) throw new Error("AUTHORIZATION_FAILED");
   const secret = cipher.decrypt(credential, { workspaceId: context.workspaceId, connectionId: connection.id, credentialVersionId: credential.id, providerKey: connection.providerKey });
@@ -78,10 +95,15 @@ async function autoConfigure(context: { workspaceId: string; userId: string }, i
     if (!endpoint) throw new Error("CAPABILITY_MISMATCH");
     return (await repository.createConnectionWithCredential(context, { providerKey: connection.providerKey, protocol, displayName: `${provider.displayName}（${family === "TEXT_GENERATION" ? "文本" : family === "EMBEDDING" ? "向量" : "语音"}）`, endpoint, secret, configuration: {} })).connection;
   };
-  if (chosen.families.includes("TEXT_GENERATION")) { const textConnection = await connectionFor("TEXT_GENERATION"); for (const routeSlot of textSlots) { try { validateRouteManifestSelection(manifest, { routeSlot, providerKey: connection.providerKey, protocol: textConnection.protocol, modelId: chosen.modelId }); await repository.setRoute(context, { routeSlot, connectionId: textConnection.id, modelId: chosen.modelId, configuration: {} }); bound.push(routeSlot); } catch { skipped.push(routeSlot); } }
-    if (chosen.structuredOutput === "STRICT_JSON_SCHEMA") { try { validateRouteManifestSelection(manifest, { routeSlot: "TEACH_BACK_ASSESSMENT", providerKey: connection.providerKey, protocol: textConnection.protocol, modelId: chosen.modelId }); await repository.setRoute(context, { routeSlot: "TEACH_BACK_ASSESSMENT", connectionId: textConnection.id, modelId: chosen.modelId, configuration: {} }); bound.push("TEACH_BACK_ASSESSMENT"); } catch { skipped.push("TEACH_BACK_ASSESSMENT"); } } }
+  const bindIfUnbound = async (routeSlot: RouteSlot, connectionId: string, protocol: string, modelId: string, configuration: Record<string, unknown> = {}) => {
+    if (existingBindings.has(routeSlot)) { skipped.push(routeSlot); return; }
+    try { validateRouteManifestSelection(manifest, { routeSlot, providerKey: connection.providerKey, protocol, modelId, configuration }); await repository.setRoute(context, { routeSlot, connectionId, modelId, configuration }); bound.push(routeSlot); }
+    catch { skipped.push(routeSlot); }
+  };
+  if (chosen.families.includes("TEXT_GENERATION")) { const textConnection = await connectionFor("TEXT_GENERATION"); for (const routeSlot of textSlots) await bindIfUnbound(routeSlot, textConnection.id, textConnection.protocol, chosen.modelId);
+    if (chosen.structuredOutput === "STRICT_JSON_SCHEMA") await bindIfUnbound("TEACH_BACK_ASSESSMENT", textConnection.id, textConnection.protocol, chosen.modelId); }
   const embedding = provider.models.find(model => model.families.includes("EMBEDDING"));
-  if (embedding) try { const embeddingConnection = await connectionFor("EMBEDDING"); validateRouteManifestSelection(manifest, { routeSlot: "EMBEDDING", providerKey: connection.providerKey, protocol: embeddingConnection.protocol, modelId: embedding.modelId }); await repository.setRoute(context, { routeSlot: "EMBEDDING", connectionId: embeddingConnection.id, modelId: embedding.modelId, configuration: {} }); bound.push("EMBEDDING"); } catch { skipped.push("EMBEDDING"); }
+  if (embedding) { try { const embeddingConnection = await connectionFor("EMBEDDING"); await bindIfUnbound("EMBEDDING", embeddingConnection.id, embeddingConnection.protocol, embedding.modelId); } catch { skipped.push("EMBEDDING"); } }
   // Speech needs user-approved voice metadata and is therefore never auto-bound merely because a key is valid.
   for (const routeSlot of ["PODCAST_TTS", "SHORT_VIDEO_TTS"] as const) skipped.push(routeSlot);
   return { bound, skipped };
@@ -108,6 +130,7 @@ export async function POST(request: Request) {
     if (input.action === "CREATE_CONNECTION" || input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") {
       assertSafeConfiguration(input.configuration);
       assertFixedMiniMaxEndpoint(input.providerKey, input.endpoint);
+      assertQwenConnectionConfiguration(input.providerKey, input.endpoint, input.configuration);
       await validateProviderEndpoint(input.endpoint, { environment: process.env.NODE_ENV ?? "production", allowPrivateEndpoints: process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS === "true", dns: { lookup: resolveProviderHostname } });
       const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
       if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
@@ -123,6 +146,7 @@ export async function POST(request: Request) {
       assertSafeConfiguration(input.configuration);
       const connection = await prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.connectionId, workspaceId: context.workspaceId } }, select: { providerKey: true, protocol: true } });
       if (!connection) throw new Error("AUTHORIZATION_FAILED");
+      assertQwenRouteConfiguration(connection.providerKey, input.routeSlot as RouteSlot, input.configuration);
       validateRouteManifestSelection(manifest, { routeSlot: input.routeSlot as RouteSlot, providerKey: connection.providerKey, protocol: connection.protocol, modelId: input.modelId, configuration: input.configuration });
       await repository.setRoute(context, input);
     }

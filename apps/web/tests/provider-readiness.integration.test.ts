@@ -48,7 +48,7 @@ describe("Provider settings Book readiness", () => {
       expect.objectContaining({ slot: "BOOK_SYNTHESIS", state: "READY", providerName: "MiniMax", modelId: "MiniMax-M3" }),
       expect.objectContaining({ slot: "EMBEDDING", state: "MISSING", error: "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED" }),
     ]));
-    expect(display).toMatchObject({ summary: "3 / 4 已配置", completion: "待完成 1 项", rows: expect.arrayContaining([expect.objectContaining({ label: "分块理解", configured: true, detail: "MiniMax · MiniMax-M3" }), expect.objectContaining({ label: "向量检索", configured: false, detail: "尚未配置｜推荐：Gemini Embedding 2 · 768维" })]) });
+    expect(display).toMatchObject({ summary: "3 / 4 已配置", completion: "待完成 1 项", rows: expect.arrayContaining([expect.objectContaining({ label: "分块理解", configured: true, detail: "MiniMax · MiniMax-M3" }), expect.objectContaining({ label: "向量检索", configured: false, detail: "尚未配置｜请选择兼容的向量模型与维度" })]) });
     expect(readiness.thinking).toMatchObject({ state: "READY", dependencies: [expect.objectContaining({ providerName: "MiniMax", modelId: "MiniMax-M3" })] });
     expect(readiness.mastery.state).toBe("INCOMPLETE");
   });

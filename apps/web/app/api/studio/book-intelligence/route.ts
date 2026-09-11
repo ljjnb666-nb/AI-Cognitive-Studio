@@ -32,6 +32,7 @@ export async function POST(request: Request) {
       provider: provider.provider,
       model: provider.model,
       modelVersion: provider.modelVersion,
+      routePlan: provider.routePlan,
       outboxTopic: process.env.PHASE9_BOOK_TOPIC?.trim() || undefined,
     });
     return NextResponse.json({ analysisRunId: requested.run.id, status: requested.run.status, stage: requested.run.analysisStage });

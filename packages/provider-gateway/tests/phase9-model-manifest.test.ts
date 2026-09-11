@@ -25,6 +25,8 @@ describe("Phase 9 model manifest", () => {
     const gemini = builtInProviderCatalog.providers.find(provider => provider.providerKey === "gemini");
     expect(gemini?.models.some(model => model.modelId === "text-embedding-004")).toBe(false);
     expect(gemini?.models).toContainEqual(expect.objectContaining({ modelId: "gemini-embedding-2", families: ["EMBEDDING"], embeddingDimensions: 768, configurableEmbeddingDimensions: true }));
+    const qwen = builtInProviderCatalog.providers.find(provider => provider.providerKey === "qwen");
+    expect(qwen?.models).toContainEqual(expect.objectContaining({ modelId: "text-embedding-v4", embeddingDimensions: 1024, configurableEmbeddingDimensions: true, embeddingDimensionOptions: [2048, 1536, 1024, 768, 512, 256, 128, 64] }));
   });
 });
 

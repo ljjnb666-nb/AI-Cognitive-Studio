@@ -12,7 +12,7 @@ import { processingWorkerAvailability } from "@/lib/worker-heartbeat";
 async function requestAnalysis(identity: Awaited<ReturnType<typeof resolveWebIdentity>>, sourceDocumentId: string) {
   const provider = await resolveBookProductExecution(identity.workspaceId);
   const chunkSet = await materializeChunkSet({ workspaceId: identity.workspaceId, sourceDocumentId });
-  return requestBookAnalysisForUser(identity, { sourceDocumentId, chunkSetId: chunkSet.id, pipelineVersion: process.env.BOOK_ANALYSIS_PIPELINE_VERSION?.trim() || "product-v1", promptVersion: process.env.BOOK_ANALYSIS_PROMPT_VERSION?.trim() || "product-v1", provider: provider.provider, model: provider.model, modelVersion: provider.modelVersion, outboxTopic: process.env.PHASE9_BOOK_TOPIC?.trim() || undefined });
+  return requestBookAnalysisForUser(identity, { sourceDocumentId, chunkSetId: chunkSet.id, pipelineVersion: process.env.BOOK_ANALYSIS_PIPELINE_VERSION?.trim() || "product-v1", promptVersion: process.env.BOOK_ANALYSIS_PROMPT_VERSION?.trim() || "product-v1", provider: provider.provider, model: provider.model, modelVersion: provider.modelVersion, routePlan: provider.routePlan, outboxTopic: process.env.PHASE9_BOOK_TOPIC?.trim() || undefined });
 }
 
 export async function POST(_: Request, { params }: { params: Promise<{ sourceDocumentId: string }> }) {

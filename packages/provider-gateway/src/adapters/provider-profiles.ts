@@ -44,6 +44,9 @@ function qwenProfile(family: CapabilityFamily, configuration: Readonly<Record<st
 export function approvedProfile(providerKey: string, family: CapabilityFamily, endpoint: string | undefined, configuration: Readonly<Record<string, unknown>> = {}): ProviderProfile | undefined {
   if (providerKey === "openai-compatible" && family === "TEXT_GENERATION" && endpoint) return { providerKey, family, protocol: "OPENAI_COMPATIBLE", endpoint, authScheme: "BEARER" };
   const profile = providerKey === "qwen" ? qwenProfile(family, configuration) : builtInProviderProfiles.find(item => item.providerKey === providerKey && item.family === family);
-  return profile && (!endpoint || endpoint === profile.endpoint) ? profile : undefined;
+  // Qwen's connection stores the provider-owned text endpoint, while the
+  // adapter derives the family-specific endpoint from the typed route region
+  // and workspace ID.  Never execute a user supplied endpoint for Qwen.
+  return profile && (providerKey === "qwen" || !endpoint || endpoint === profile.endpoint) ? profile : undefined;
 }
 export function authHeaders(scheme: AuthScheme, credential: string | undefined): Record<string, string> { if (!credential) throw new ProviderGatewayError("AUTHENTICATION_FAILED"); return scheme === "BEARER" ? { authorization: `Bearer ${credential}` } : scheme === "X_API_KEY" ? { "x-api-key": credential } : { "x-goog-api-key": credential }; }

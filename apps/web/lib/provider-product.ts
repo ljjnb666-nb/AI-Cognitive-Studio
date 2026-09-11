@@ -1,7 +1,8 @@
 import "server-only";
 
 import { prisma } from "@ai-cognitive/db";
-import { resolveProviderCatalog, routeSlotCapabilities, sanitizedProviderManifest, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { resolveProviderCatalog, routeSlotCapabilities, sanitizedProviderManifest, stableHash, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import type { BookAnalysisRoutePlan } from "@ai-cognitive/book-intelligence";
 
 const bookSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
 const requiredSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"] as const;
@@ -10,6 +11,7 @@ type RouteWithConnection = { routeSlot: string; modelId: string; configuration: 
 export type ProviderReadinessDependency = { slot: RouteSlot; label: string; state: "READY" | "MISSING"; providerKey?: string; providerName?: string; modelId?: string; error?: string };
 
 export type ProductRouteIdentity = { provider: string; model: string; modelVersion?: string; configuration: JsonRecord };
+export type ProductBookExecution = ProductRouteIdentity & { routePlan: BookAnalysisRoutePlan };
 export type PodcastVoice = { ordinal: number; providerVoiceId: string; voiceVersion: string; speakingRate: number; pitch: number; style?: string; language?: string; outputFormat: string };
 
 export function productManifest() { return resolveProviderCatalog(process.env.PROVIDER_GATEWAY_MODEL_MANIFEST); }
@@ -64,12 +66,37 @@ function readinessDependency(manifest: ReturnType<typeof productManifest>, route
   }
 }
 
+function bookRoutePlan(manifest: ReturnType<typeof productManifest>, routes: RouteWithConnection[]): BookAnalysisRoutePlan {
+  const entries = {} as BookAnalysisRoutePlan["routes"];
+  for (const slot of [...bookSlots, "EMBEDDING"] as const) {
+    const route = routes.find(item => item.routeSlot === slot);
+    const identity = routeIdentity(manifest, routes, slot);
+    if (!route || !route.connection.endpoint) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
+    const credential = route.connection.credentialVersions.find(item => item.status === "ACTIVE");
+    const provider = manifest.providers.find(item => item.providerKey === identity.provider);
+    const capability = provider?.models.find(item => item.modelId === identity.model);
+    if (!credential || !provider || !capability) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
+    const dimensions = slot === "EMBEDDING" ? Number(identity.configuration.embeddingDimensions ?? capability.embeddingDimensions) : undefined;
+    if (slot === "EMBEDDING" && (!Number.isSafeInteger(dimensions) || dimensions! <= 0)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
+    entries[slot] = {
+      providerKey: identity.provider,
+      protocol: route.connection.protocol,
+      modelId: identity.model,
+      ...(identity.modelVersion ? { modelVersion: identity.modelVersion } : {}),
+      configuration: identity.configuration,
+      configurationHash: stableHash(identity.configuration),
+      ...(slot === "EMBEDDING" ? { dimensions } : { structuredOutput: capability.structuredOutput === "STRICT_JSON_SCHEMA" ? "STRICT_JSON_SCHEMA" : "JSON_MODE" }),
+      connectionId: route.connection.id,
+      credentialVersionId: credential.id,
+      endpoint: route.connection.endpoint,
+      adapterVersion: provider.adapterVersion,
+    };
+  }
+  return { version: 1, routes: entries };
+}
 export async function resolveBookRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> {
-  const manifest = productManifest(), routes = await routesForWorkspace(workspaceId);
-  const identities = bookSlots.map(slot => routeIdentity(manifest, routes, slot));
-  const [first] = identities;
-  if (!first || identities.some(item => item.provider !== first.provider || item.model !== first.model || (item.modelVersion ?? "") !== (first.modelVersion ?? ""))) throw new Error("BOOK_ROUTE_IDENTITY_INCONSISTENT");
-  return first;
+  const plan = await resolveBookProductExecution(workspaceId);
+  return { provider: plan.provider, model: plan.model, modelVersion: plan.modelVersion, configuration: plan.configuration };
 }
 export async function resolvePodcastRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "PODCAST_SCRIPT"); }
 export async function resolveShortVideoRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "SHORT_VIDEO_SCRIPT"); }
@@ -79,8 +106,8 @@ function configurationRequired(error: unknown): never {
   if (error instanceof Error && (error.message === "PODCAST_TTS_CONFIGURATION_REQUIRED" || error.message === "SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED")) throw error;
   throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
 }
-export async function resolveBookProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
-  try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(); const identity = bookSlots.map(slot => routeIdentity(manifest, routes, slot)); const [first] = identity; if (!first || identity.some(item => item.provider !== first.provider || item.model !== first.model || (item.modelVersion ?? "") !== (first.modelVersion ?? ""))) throw new Error("BOOK_ROUTE_IDENTITY_INCONSISTENT"); routeIdentity(manifest, routes, "EMBEDDING"); return first; } catch (error) { return configurationRequired(error); }
+export async function resolveBookProductExecution(workspaceId: string): Promise<ProductBookExecution> {
+  try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(), routePlan = bookRoutePlan(manifest, routes), chunk = routePlan.routes.BOOK_CHUNK_ANALYSIS; return { provider: chunk.providerKey, model: chunk.modelId, modelVersion: chunk.modelVersion, configuration: chunk.configuration, routePlan }; } catch (error) { return configurationRequired(error); }
 }
 export async function resolvePodcastProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
   try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(); const script = routeIdentity(manifest, routes, "PODCAST_SCRIPT"); routeIdentity(manifest, routes, "EMBEDDING"); return script; } catch (error) { return configurationRequired(error); }
@@ -118,7 +145,6 @@ export async function providerReadiness(workspaceId: string) {
   // route is absent or unusable.
   const bookDependencies = (["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"] as const).map(slot => readinessDependency(manifest, routes, slot, slot === "EMBEDDING" ? "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED" : undefined));
   const bookMissing = bookDependencies.flatMap(item => item.state === "MISSING" ? [item.error ?? "AI_PROVIDER_CONFIGURATION_REQUIRED"] : []);
-  try { await resolveBookRouteIdentity(workspaceId); } catch (error) { bookMissing.push(error instanceof Error ? error.message : "BOOK_ROUTE_IDENTITY_INCONSISTENT"); }
   const podcastMissing = missing(["PODCAST_SCRIPT", "EMBEDDING"]);
   const audioMissing = missing(["PODCAST_TTS"]);
   try { await resolvePodcastAudioRoute(workspaceId); } catch (error) { audioMissing.push(error instanceof Error ? error.message : "PODCAST_TTS_CONFIGURATION_REQUIRED"); }

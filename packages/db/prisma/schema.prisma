@@ -1245,6 +1245,8 @@ model BookAnalysisRun {
   modelVersionKey          String
   idempotencyKey           String                    @unique
   analysisIdentityHash     String                    @unique
+  routePlan                Json?
+  routePlanHash            String?
   status                   AnalysisRunStatus         @default(QUEUED)
   errorCode                String?
   executionClaimToken      String?
