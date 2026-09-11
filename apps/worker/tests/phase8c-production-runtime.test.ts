@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
-import { ProviderGatewayRepository, parseKeyring, type GatewayRequest } from "@ai-cognitive/provider-gateway";
+import { DeterministicProviderHttpTransport, ProviderGatewayRepository, createProviderAdapterResolver, parseKeyring, type GatewayRequest } from "@ai-cognitive/provider-gateway";
 import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser } from "@ai-cognitive/book-intelligence";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { startWorkerRuntime } from "../src/runtime.js";
@@ -60,7 +60,11 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       { providerKey: "minimax", displayName: "MiniMax", protocol: "OPENAI_COMPATIBLE", adapterVersion: "test", models: [{ modelId: "MiniMax-M3", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" }] },
       { providerKey: "gemini", displayName: "Google Gemini", protocol: "GEMINI_NATIVE", capabilityProtocols: { EMBEDDING: "GEMINI_EMBEDDINGS" }, adapterVersion: "test", models: [{ modelId: "gemini-embedding-2", families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: 768, configurableEmbeddingDimensions: true }] },
     ] });
-    const r = createBookProductionGatewayRuntime({ ...source, PROVIDER_GATEWAY_MODEL_MANIFEST: manifest }, { ...controls, adapterResolver: input => ({ execute: async ({ request }) => input.family === "EMBEDDING" ? (calls.embedding++, { response: { vectors: request.embedding!.texts.map(() => [1, ...Array(767).fill(0)]), dimensions: 768 } }) : (calls.text++, { response: { type: "STRUCTURED", structured: { summary: "MiniMax final response", memory: [{ type: "SUMMARY", content: "grounded durable evidence" }] } } }) }) });
+    const transport = new DeterministicProviderHttpTransport(request => {
+      if (request.url.includes(":batchEmbedContents")) { calls.embedding++; const body = JSON.parse(request.body!); expect(body.requests[0].embedContentConfig.outputDimensionality).toBe(768); return { status: 200, headers: {}, body: JSON.stringify({ embeddings: body.requests.map(() => ({ values: [1, ...Array(767).fill(0)] })) }) }; }
+      calls.text++; return { status: 200, headers: {}, body: JSON.stringify({ model: "MiniMax-M3", choices: [{ finish_reason: "stop", message: { content: '{"summary":"MiniMax final response","memory":[{"type":"SUMMARY","content":"grounded durable evidence"}]}', reasoning_content: "never persist this reasoning" } }] }) };
+    });
+    const r = createBookProductionGatewayRuntime({ ...source, PROVIDER_GATEWAY_MODEL_MANIFEST: manifest }, { ...controls, adapterResolver: createProviderAdapterResolver(transport) });
     const store = new ProviderGatewayRepository(prisma, parseKeyring(keyring)!);
     const minimax = await store.createConnection(f, { providerKey: "minimax", protocol: "OPENAI_COMPATIBLE", displayName: "MiniMax" }); await store.rotateCredential(f, minimax.id, "minimax-sentinel");
     for (const routeSlot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const) await store.setRoute(f, { routeSlot, connectionId: minimax.id, modelId: "MiniMax-M3" });
@@ -69,6 +73,7 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     await expect(processBookAnalysisRun(requested.run.id, { analysisProviderForRun: input => r.createAnalysisProvider(input), embeddingGatewayForRun: input => ({ gateway: r.gateway, repository: r.repository, userId: input.userId }) })).resolves.toMatchObject({ status: "SUCCEEDED", analysisStage: "COMPLETED" });
     expect(await prisma.currentBookIntelligence.findFirst({ where: { workspaceId: f.workspaceId, analysisRunId: requested.run.id } })).toBeTruthy();
     expect(await prisma.providerExecutionSnapshot.findMany({ where: { workspaceId: f.workspaceId }, select: { providerKey: true, modelId: true, routeSlot: true, capability: true } })).toEqual(expect.arrayContaining([expect.objectContaining({ providerKey: "minimax", modelId: "MiniMax-M3", routeSlot: "BOOK_CHUNK_ANALYSIS" }), expect.objectContaining({ providerKey: "gemini", modelId: "gemini-embedding-2", routeSlot: "EMBEDDING" })]));
+    const minimaxCalls = transport.calls.filter(call => call.url === "https://api.minimax.io/v1/text/chatcompletion_v2"); expect(minimaxCalls.length).toBeGreaterThan(0); const minimaxBody = JSON.parse(minimaxCalls[0]!.body!); expect(minimaxCalls[0]!.headers.authorization).toBe("Bearer minimax-sentinel"); expect(minimaxBody.model).toBe("MiniMax-M3"); expect(minimaxBody.response_format).toBeUndefined(); expect(minimaxBody.messages[0]).toMatchObject({ role: "system", content: expect.stringContaining("exactly one JSON object") }); expect(JSON.stringify(await prisma.providerTextResult.findMany({ where: { workspaceId: f.workspaceId } }))).not.toContain("reasoning"); expect(JSON.stringify(await prisma.providerExecutionSnapshot.findMany({ where: { workspaceId: f.workspaceId } }))).not.toContain("minimax-sentinel");
     expect(calls.text).toBeGreaterThan(0); expect(calls.embedding).toBe(1);
   });
 });

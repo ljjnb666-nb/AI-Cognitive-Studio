@@ -28,12 +28,13 @@ spaces. Similarity and retrieval only use matching identity hashes, so historica
 Gemini `text-embedding-004` vectors cannot be silently mixed with
 `gemini-embedding-2` vectors.
 
-MiniMax uses a JSON prompt contract plus the existing gateway JSON parsing and
-Book Intelligence domain/grounding/quote/offset/publication validation. This
-phase does not claim native strict JSON Schema support and does not send an
-unsupported `response_format` parameter. Only the structurally parsed final
-assistant message is consumed; provider reasoning fields are ignored, and no
-`<think>` regex stripping is used.
+MiniMax-M3 has no claimed native strict JSON-schema guarantee and does not
+depend on an unsupported `response_format` parameter. Book Intelligence places
+an explicit trusted JSON-only output contract in the system instruction, while
+source evidence remains an untrusted user message. The gateway performs exact
+`JSON.parse` on final assistant content and then applies the existing domain,
+grounding, quote, offset, and publication validation. Reasoning fields are
+ignored; there is no `<think>` stripping, Markdown stripping, or JSON extraction.
 
 Book Intelligence readiness requires all three text routes and the embedding
 route, a compatible catalog model, an active decryptable workspace credential,
