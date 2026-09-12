@@ -132,21 +132,30 @@ export async function reconcileHistoricalBookAnalysisBootstraps(limit = 25) {
   }
   return adopted;
 }
-/** A bounded, no-provider-call rearm pass. Readiness is checked by the normal processor. */
+export type BookAnalysisBootstrapRearm = "REARMED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "NOT_READY";
+
+/** Rearms exactly one durable bootstrap; readiness always precedes mutation. */
+export async function rearmBookAnalysisBootstrapById(bootstrapId: string, source: NodeJS.ProcessEnv = process.env): Promise<BookAnalysisBootstrapRearm> {
+  const bootstrap = await prisma.bookAnalysisBootstrap.findUnique({ where: { id: bootstrapId }, select: { id: true, status: true, workspaceId: true, nextAttemptAt: true, executionLeaseUntil: true } });
+  if (!bootstrap) return "NOT_FOUND";
+  const now = new Date();
+  const eligible = bootstrap.status === "WAITING_FOR_PROVIDER" || (bootstrap.status === "PENDING" && !!bootstrap.nextAttemptAt && bootstrap.nextAttemptAt <= now) || (bootstrap.status === "RUNNING" && !!bootstrap.executionLeaseUntil && bootstrap.executionLeaseUntil < now);
+  if (!eligible) return "NOT_ELIGIBLE";
+  try { assertGatewayRuntimeReady(source); await resolveBookProductExecution(bootstrap.workspaceId); }
+  catch (error) { if (readyErrors.has(errorCode(error))) return "NOT_READY"; throw error; }
+  let rearmed = false;
+  await prisma.$transaction(async tx => {
+    const changed = bootstrap.status === "RUNNING"
+      ? await tx.$queryRaw<Array<{ dispatchGeneration: number }>>`UPDATE "BookAnalysisBootstrap" SET "status" = 'PENDING'::"BookAnalysisBootstrapStatus", "errorCode" = NULL, "nextAttemptAt" = NULL, "dispatchGeneration" = "dispatchGeneration" + 1, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${bootstrap.id} AND "status" = 'RUNNING'::"BookAnalysisBootstrapStatus" AND "executionLeaseUntil" < NOW() RETURNING "dispatchGeneration"`
+      : await tx.bookAnalysisBootstrap.updateMany({ where: { id: bootstrap.id, status: bootstrap.status, ...(bootstrap.status === "PENDING" ? { nextAttemptAt: { lte: now } } : {}) }, data: { status: "PENDING", errorCode: null, nextAttemptAt: null, dispatchGeneration: { increment: 1 }, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }).then(async result => result.count ? [await tx.bookAnalysisBootstrap.findUniqueOrThrow({ where: { id: bootstrap.id }, select: { dispatchGeneration: true } })] : []);
+    if (changed.length === 1) { rearmed = true; await tx.outboxEvent.create({ data: { topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC, aggregateId: bootstrap.id, payload: { bootstrapId: bootstrap.id, dispatchGeneration: changed[0]!.dispatchGeneration } } }); }
+  });
+  return rearmed ? "REARMED" : "NOT_ELIGIBLE";
+}
+
+/** Bounded discovery delegates every candidate to the exact-target rearm core. */
 export async function reconcileWaitingBookAnalysisBootstraps(limit = 25, source: NodeJS.ProcessEnv = process.env) {
-  const waiting = await prisma.bookAnalysisBootstrap.findMany({ where: { OR: [{ status: "WAITING_FOR_PROVIDER" }, { status: "PENDING", nextAttemptAt: { lte: new Date() } }, { status: "RUNNING", executionLeaseUntil: { lt: new Date() } }] }, orderBy: { updatedAt: "asc" }, take: limit, select: { id: true, status: true } });
-  for (const row of waiting) {
-    try {
-      const bootstrap = await prisma.bookAnalysisBootstrap.findUniqueOrThrow({ where: { id: row.id }, select: { workspaceId: true } });
-      assertGatewayRuntimeReady(source);
-      await resolveBookProductExecution(bootstrap.workspaceId);
-      await prisma.$transaction(async tx => {
-        const changed = row.status === "RUNNING"
-          ? await tx.$queryRaw<Array<{ dispatchGeneration: number }>>`UPDATE "BookAnalysisBootstrap" SET "status" = 'PENDING'::"BookAnalysisBootstrapStatus", "errorCode" = NULL, "nextAttemptAt" = NULL, "dispatchGeneration" = "dispatchGeneration" + 1, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${row.id} AND "status" = 'RUNNING'::"BookAnalysisBootstrapStatus" AND "executionLeaseUntil" < NOW() RETURNING "dispatchGeneration"`
-          : await tx.bookAnalysisBootstrap.updateMany({ where: { id: row.id, status: row.status }, data: { status: "PENDING", errorCode: null, nextAttemptAt: null, dispatchGeneration: { increment: 1 }, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }).then(async result => result.count ? [await tx.bookAnalysisBootstrap.findUniqueOrThrow({ where: { id: row.id }, select: { dispatchGeneration: true } })] : []);
-        if (changed.length === 1) await tx.outboxEvent.create({ data: { topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC, aggregateId: row.id, payload: { bootstrapId: row.id, dispatchGeneration: changed[0]!.dispatchGeneration } } });
-      });
-    } catch (error) { if (!readyErrors.has(errorCode(error))) throw error; }
-  }
+  const waiting = await prisma.bookAnalysisBootstrap.findMany({ where: { OR: [{ status: "WAITING_FOR_PROVIDER" }, { status: "PENDING", nextAttemptAt: { lte: new Date() } }, { status: "RUNNING", executionLeaseUntil: { lt: new Date() } }] }, orderBy: { updatedAt: "asc" }, take: limit, select: { id: true } });
+  for (const row of waiting) await rearmBookAnalysisBootstrapById(row.id, source);
   return waiting.length;
 }

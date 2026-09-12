@@ -26,7 +26,7 @@ vi.mock("@ai-cognitive/provider-gateway", () => ({ resolveCredentialKeyring: () 
 
 import { materializeChunkSet, requestBookAnalysisForUser, resolveBookProductExecution } from "@ai-cognitive/book-intelligence";
 import { prisma } from "@ai-cognitive/db";
-import { adoptHistoricalBookAnalysisBootstrapForIngestionRun, bookAnalysisBootstrapJobId, classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
+import { adoptHistoricalBookAnalysisBootstrapForIngestionRun, bookAnalysisBootstrapJobId, classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, rearmBookAnalysisBootstrapById, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
 
 describe("BookAnalysisBootstrap fault boundaries", () => {
   beforeEach(() => {
@@ -100,6 +100,7 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
   it("does not rearm an expired RUNNING selection after a fresh claim wins the conditional update", async () => {
     const freshClaim = { executionClaimToken: "fresh-worker", executionLeaseUntil: new Date("2030-01-01T00:00:00.000Z"), dispatchGeneration: 7 };
     state.findMany.mockResolvedValue([{ id: "bootstrap-1", status: "RUNNING" }]);
+    state.findUnique.mockResolvedValue({ id: "bootstrap-1", status: "RUNNING", workspaceId: "workspace-1", nextAttemptAt: null, executionLeaseUntil: new Date("2000-01-01T00:00:00.000Z") });
     state.findUniqueOrThrow.mockResolvedValue({ workspaceId: "workspace-1", ...freshClaim });
     // The SQL mutation is the race fence: an empty RETURNING set means the fresh claim won.
     state.queryRaw.mockResolvedValue([]);
@@ -109,8 +110,29 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     expect(freshClaim).toEqual(expect.objectContaining({ executionClaimToken: "fresh-worker", dispatchGeneration: 7 }));
   });
 
+  it("rearms only the exact waiting target once and publishes its next generation", async () => {
+    state.findUnique.mockResolvedValueOnce({ id: "bootstrap-b", status: "WAITING_FOR_PROVIDER", workspaceId: "workspace-b", nextAttemptAt: null, executionLeaseUntil: null }).mockResolvedValueOnce({ id: "bootstrap-b", status: "PENDING", workspaceId: "workspace-b", nextAttemptAt: null, executionLeaseUntil: null });
+    state.findUniqueOrThrow.mockResolvedValue({ dispatchGeneration: 2 });
+    await expect(rearmBookAnalysisBootstrapById("bootstrap-b")).resolves.toBe("REARMED");
+    expect(state.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "bootstrap-b", status: "WAITING_FOR_PROVIDER" } }));
+    expect(state.outboxCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ aggregateId: "bootstrap-b", payload: { bootstrapId: "bootstrap-b", dispatchGeneration: 2 } }) }));
+    await expect(rearmBookAnalysisBootstrapById("bootstrap-b")).resolves.toBe("NOT_ELIGIBLE");
+    expect(state.outboxCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed for an unknown or provider-unready exact rearm without mutation", async () => {
+    state.findUnique.mockResolvedValueOnce(null);
+    await expect(rearmBookAnalysisBootstrapById("unknown")).resolves.toBe("NOT_FOUND");
+    state.findUnique.mockResolvedValueOnce({ id: "bootstrap-1", status: "WAITING_FOR_PROVIDER", workspaceId: "workspace-1", nextAttemptAt: null, executionLeaseUntil: null });
+    state.keyring = false;
+    await expect(rearmBookAnalysisBootstrapById("bootstrap-1")).resolves.toBe("NOT_READY");
+    expect(state.updateMany).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
+  });
+
   it("rearms a genuinely expired RUNNING row once and publishes its new generation", async () => {
     state.findMany.mockResolvedValue([{ id: "bootstrap-1", status: "RUNNING" }]);
+    state.findUnique.mockResolvedValue({ id: "bootstrap-1", status: "RUNNING", workspaceId: "workspace-1", nextAttemptAt: null, executionLeaseUntil: new Date("2000-01-01T00:00:00.000Z") });
     state.findUniqueOrThrow.mockResolvedValue({ workspaceId: "workspace-1" });
     state.queryRaw.mockResolvedValue([{ dispatchGeneration: 2 }]);
     await reconcileWaitingBookAnalysisBootstraps();
@@ -121,7 +143,8 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
 
   it("rearms provider waiting work and makes its new generation claimable", async () => {
     state.findMany.mockResolvedValue([{ id: "bootstrap-1", status: "WAITING_FOR_PROVIDER" }]);
-    state.findUniqueOrThrow.mockResolvedValueOnce({ workspaceId: "workspace-1" }).mockResolvedValueOnce({ dispatchGeneration: 2 });
+    state.findUnique.mockResolvedValue({ id: "bootstrap-1", status: "WAITING_FOR_PROVIDER", workspaceId: "workspace-1", nextAttemptAt: null, executionLeaseUntil: null });
+    state.findUniqueOrThrow.mockResolvedValueOnce({ dispatchGeneration: 2 }).mockResolvedValue(state.detail);
     await reconcileWaitingBookAnalysisBootstraps();
     expect(state.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "bootstrap-1", status: "WAITING_FOR_PROVIDER" }, data: expect.objectContaining({ status: "PENDING", dispatchGeneration: { increment: 1 } }) }));
     expect(state.outboxCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ payload: { bootstrapId: "bootstrap-1", dispatchGeneration: 2 } }) }));
