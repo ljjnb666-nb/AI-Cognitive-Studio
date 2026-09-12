@@ -43,13 +43,13 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
 
   it("releases ownership into WAITING_FOR_PROVIDER without invoking chunking", async () => {
     state.keyring = false;
-    await processBookAnalysisBootstrap("bootstrap-1");
+    await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 });
     expect(materializeChunkSet).not.toHaveBeenCalled();
     expect(state.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "WAITING_FOR_PROVIDER", executionClaimToken: null }) }));
   });
 
   it("keeps the lease-owned row recoverable when a fault simulates a process crash", async () => {
-    await expect(processBookAnalysisBootstrap("bootstrap-1", { faultInjector: point => { if (point === "afterBookAnalysisRequest") throw new Error("BOOK_ANALYSIS_BOOTSTRAP_SIMULATED_CRASH"); } })).rejects.toThrow("BOOK_ANALYSIS_BOOTSTRAP_SIMULATED_CRASH");
+    await expect(processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1, faultInjector: point => { if (point === "afterBookAnalysisRequest") throw new Error("BOOK_ANALYSIS_BOOTSTRAP_SIMULATED_CRASH"); } })).rejects.toThrow("BOOK_ANALYSIS_BOOTSTRAP_SIMULATED_CRASH");
     expect(requestBookAnalysisForUser).toHaveBeenCalledTimes(1);
     expect(state.updateMany).not.toHaveBeenCalled();
   });
@@ -60,15 +60,22 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     expect(options.jobId({ bootstrapId: "bootstrap-1", dispatchGeneration: 2 })).toBe("bootstrap-1:2");
   });
 
+  it("does no work when the authoritative generation claim rejects a stale delivery", async () => {
+    state.executeRaw.mockResolvedValueOnce(0);
+    await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 });
+    expect(materializeChunkSet).not.toHaveBeenCalled();
+    expect(requestBookAnalysisForUser).not.toHaveBeenCalled();
+  });
+
   it("returns chunk-set contention to durable PENDING rather than terminal failure", async () => {
     vi.mocked(materializeChunkSet).mockRejectedValueOnce(new Error("CHUNK_SET_MATERIALIZATION_IN_PROGRESS"));
-    await processBookAnalysisBootstrap("bootstrap-1");
-    expect(state.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "PENDING", retryCount: { increment: 1 } }) }));
+    await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 });
+    expect(state.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "PENDING", retryCount: 1, nextAttemptAt: expect.any(Date) }) }));
   });
 
   it("reserves FAILED_TERMINAL for permanent lineage violations", async () => {
     state.detail.ingestionRun.status = "FAILED";
-    await expect(processBookAnalysisBootstrap("bootstrap-1")).rejects.toThrow("BOOK_ANALYSIS_BOOTSTRAP_LINEAGE_INVALID");
+    await expect(processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 })).rejects.toThrow("BOOK_ANALYSIS_BOOTSTRAP_LINEAGE_INVALID");
     expect(state.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "FAILED_TERMINAL" }) }));
   });
 });
