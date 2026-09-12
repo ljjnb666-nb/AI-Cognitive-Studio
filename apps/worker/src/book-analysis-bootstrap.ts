@@ -12,6 +12,13 @@ export type BookAnalysisBootstrapPayload = { bootstrapId: string; dispatchGenera
 export type BookAnalysisBootstrapQueueOptions = { prefix?: string; concurrency?: number; source?: NodeJS.ProcessEnv };
 export type BookAnalysisBootstrapFaultPoint = "afterClaim" | "afterChunkSetMaterialization" | "afterBookAnalysisRequest";
 export type ProcessBookAnalysisBootstrapOptions = { source?: NodeJS.ProcessEnv; expectedDispatchGeneration?: number; faultInjector?: (point: BookAnalysisBootstrapFaultPoint, input: { bootstrapId: string; analysisRunId?: string }) => Promise<void> | void };
+/**
+ * BullMQ forbids ':' in custom job IDs. Keep the durable bootstrap generation
+ * in the identity so retries deduplicate while a rearmed generation is new.
+ */
+export function bookAnalysisBootstrapJobId(payload: BookAnalysisBootstrapPayload): string {
+  return `book-analysis-bootstrap-${payload.bootstrapId}-g${payload.dispatchGeneration}`;
+}
 const readyErrors = new Set(["AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"]);
 const errorCode = (error: unknown): string => error instanceof Error ? error.message.split(":")[0] ?? "BOOK_ANALYSIS_BOOTSTRAP_FAILED" : "BOOK_ANALYSIS_BOOTSTRAP_FAILED";
 const assertGatewayRuntimeReady = (source: NodeJS.ProcessEnv = process.env) => { if (!resolveCredentialKeyring(source)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED"); };
@@ -82,9 +89,9 @@ export function createBookAnalysisBootstrapWorker(environment: Environment, opti
   return new Worker<BookAnalysisBootstrapPayload>(BOOK_ANALYSIS_BOOTSTRAP_QUEUE, job => processBookAnalysisBootstrap(job.data.bootstrapId, { source: options.source, expectedDispatchGeneration: job.data.dispatchGeneration }), { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_BOOK_ANALYSIS_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) });
 }
 export function createBookAnalysisBootstrapQueue(environment: Environment, options: BookAnalysisBootstrapQueueOptions = {}) { return new Queue<BookAnalysisBootstrapPayload>(BOOK_ANALYSIS_BOOTSTRAP_QUEUE, { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) }); }
-export function dispatchBookAnalysisBootstrapWithQueue(queue: Queue<BookAnalysisBootstrapPayload>, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; topic?: string } = {}) {
+export function dispatchBookAnalysisBootstrapWithQueue(queue: Queue<BookAnalysisBootstrapPayload>, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; aggregateIds?: string[]; topic?: string } = {}) {
   const { topic = BOOK_ANALYSIS_BOOTSTRAP_TOPIC, ...rest } = options;
-  return dispatchPendingOutbox<BookAnalysisBootstrapPayload>({ topic, queue, jobName: BOOK_ANALYSIS_BOOTSTRAP_JOB, parse: payload => payload as BookAnalysisBootstrapPayload, jobId: payload => `${payload.bootstrapId}:${payload.dispatchGeneration}`, ...rest });
+  return dispatchPendingOutbox<BookAnalysisBootstrapPayload>({ topic, queue, jobName: BOOK_ANALYSIS_BOOTSTRAP_JOB, parse: payload => payload as BookAnalysisBootstrapPayload, jobId: bookAnalysisBootstrapJobId, ...rest });
 }
 
 export type HistoricalBookAnalysisBootstrapAdoption = "ADOPTED" | "ALREADY_ADOPTED" | "NOT_FOUND" | "NOT_ELIGIBLE";

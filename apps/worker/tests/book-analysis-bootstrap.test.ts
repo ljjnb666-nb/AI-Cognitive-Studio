@@ -26,7 +26,7 @@ vi.mock("@ai-cognitive/provider-gateway", () => ({ resolveCredentialKeyring: () 
 
 import { materializeChunkSet, requestBookAnalysisForUser, resolveBookProductExecution } from "@ai-cognitive/book-intelligence";
 import { prisma } from "@ai-cognitive/db";
-import { adoptHistoricalBookAnalysisBootstrapForIngestionRun, classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
+import { adoptHistoricalBookAnalysisBootstrapForIngestionRun, bookAnalysisBootstrapJobId, classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
 
 describe("BookAnalysisBootstrap fault boundaries", () => {
   beforeEach(() => {
@@ -62,10 +62,19 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     expect(state.updateMany).not.toHaveBeenCalled();
   });
 
-  it("uses a new durable generation in the BullMQ job identity", async () => {
-    await dispatchBookAnalysisBootstrapWithQueue({ add: vi.fn() } as never);
+  it("uses a BullMQ-safe, deterministic, generation-sensitive durable job identity", async () => {
+    await dispatchBookAnalysisBootstrapWithQueue({ add: vi.fn() } as never, { aggregateIds: ["bootstrap-1"] });
     const options = state.dispatch.mock.calls[0]?.[0];
-    expect(options.jobId({ bootstrapId: "bootstrap-1", dispatchGeneration: 2 })).toBe("bootstrap-1:2");
+    const generationOne = options.jobId({ bootstrapId: "bootstrap-1", dispatchGeneration: 1 });
+    const generationTwo = options.jobId({ bootstrapId: "bootstrap-1", dispatchGeneration: 2 });
+    expect(generationOne).toBe("book-analysis-bootstrap-bootstrap-1-g1");
+    expect(generationOne).toBe(bookAnalysisBootstrapJobId({ bootstrapId: "bootstrap-1", dispatchGeneration: 1 }));
+    expect(options.jobId({ bootstrapId: "bootstrap-1", dispatchGeneration: 1 })).toBe(generationOne);
+    expect(generationOne).not.toContain(":");
+    expect(generationOne).not.toMatch(/^\d+$/);
+    expect(generationTwo).toBe("book-analysis-bootstrap-bootstrap-1-g2");
+    expect(generationTwo).not.toBe(generationOne);
+    expect(options.aggregateIds).toEqual(["bootstrap-1"]);
   });
 
   it("does no work when the authoritative generation claim rejects a stale delivery", async () => {
