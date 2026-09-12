@@ -27,6 +27,13 @@ async function owned(id: string, token: string, data: Record<string, unknown>) {
   const changed = await prisma.bookAnalysisBootstrap.updateMany({ where: { id, executionClaimToken: token, status: "RUNNING", executionLeaseUntil: { gt: new Date() } }, data });
   if (changed.count !== 1) throw new Error("BOOK_ANALYSIS_BOOTSTRAP_OWNERSHIP_LOST");
 }
+export async function renewBookAnalysisBootstrapLease(id: string, token: string, leaseMs = 120_000): Promise<void> {
+  const changed = await prisma.$executeRaw`
+    UPDATE "BookAnalysisBootstrap" SET "executionLeaseUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond')
+    WHERE "id" = ${id} AND "status" = 'RUNNING'::"BookAnalysisBootstrapStatus"
+      AND "executionClaimToken" = ${token} AND "executionLeaseUntil" > NOW()`;
+  if (changed !== 1) throw new Error("BOOK_ANALYSIS_BOOTSTRAP_OWNERSHIP_LOST");
+}
 async function waitForProvider(id: string, token: string, code: string) {
   await owned(id, token, { status: "WAITING_FOR_PROVIDER", errorCode: code, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null });
 }
@@ -44,7 +51,9 @@ export async function processBookAnalysisBootstrap(bootstrapId: string) {
     if (!current || current.extractionId !== bootstrap.extractionId) throw new Error("BOOK_ANALYSIS_BOOTSTRAP_CURRENT_EXTRACTION_MISMATCH");
     assertGatewayRuntimeReady();
     const chunkSet = await materializeChunkSet({ workspaceId: bootstrap.workspaceId, sourceDocumentId: bootstrap.sourceDocumentId, correlationId: bootstrap.id });
+    await renewBookAnalysisBootstrapLease(bootstrap.id, token);
     const execution = await resolveBookProductExecution(bootstrap.workspaceId);
+    await renewBookAnalysisBootstrapLease(bootstrap.id, token);
     const requested = await requestBookAnalysisForUser({ workspaceId: bootstrap.workspaceId, userId: bootstrap.requestedByUserId }, { sourceDocumentId: bootstrap.sourceDocumentId, chunkSetId: chunkSet.id, pipelineVersion: "phase18.2", promptVersion: "phase18.2", provider: execution.provider, model: execution.model, modelVersion: execution.modelVersion, routePlan: execution.routePlan, correlationId: bootstrap.id });
     await owned(bootstrap.id, token, { status: "SUCCEEDED", analysisRunId: requested.run.id, errorCode: null, completedAt: new Date(), executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null });
   } catch (error) {
