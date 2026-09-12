@@ -174,7 +174,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
             data: {
               topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC,
               aggregateId: bootstrap.id,
-              payload: { bootstrapId: bootstrap.id },
+              payload: { bootstrapId: bootstrap.id, dispatchGeneration: bootstrap.dispatchGeneration },
             },
           });
           await tx.ingestionRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", completedAt: new Date() } });

@@ -386,24 +386,24 @@ enum BetaFeedbackStatus {
 }
 
 model User {
-  id                 String               @id @default(cuid())
-  email              String               @unique
-  name               String?
-  avatarUrl          String?
-  emailVerified      Boolean              @default(false)
-  image              String?
-  defaultWorkspaceId String?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  jobs               Job[]
-  memberships        WorkspaceMember[]
-  accounts           Account[]
-  sessions           Session[]
-  cognitionStates    UserCognitionState[]
-  defaultWorkspace   Workspace?           @relation("DefaultWorkspace", fields: [defaultWorkspaceId], references: [id], onDelete: SetNull)
-  betaParticipant    BetaParticipant?
-  redeemedBetaInvites BetaInvite[]        @relation("BetaInviteRedeemer")
-  productEvents      ProductEvent[]
+  id                  String               @id @default(cuid())
+  email               String               @unique
+  name                String?
+  avatarUrl           String?
+  emailVerified       Boolean              @default(false)
+  image               String?
+  defaultWorkspaceId  String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  jobs                Job[]
+  memberships         WorkspaceMember[]
+  accounts            Account[]
+  sessions            Session[]
+  cognitionStates     UserCognitionState[]
+  defaultWorkspace    Workspace?           @relation("DefaultWorkspace", fields: [defaultWorkspaceId], references: [id], onDelete: SetNull)
+  betaParticipant     BetaParticipant?
+  redeemedBetaInvites BetaInvite[]         @relation("BetaInviteRedeemer")
+  productEvents       ProductEvent[]
 
   @@index([defaultWorkspaceId])
 }
@@ -458,10 +458,10 @@ model BetaParticipant {
   status         BetaParticipantStatus @default(ACTIVE)
   consentVersion String
   consentedAt    DateTime
-  enrolledAt     DateTime               @default(now())
+  enrolledAt     DateTime              @default(now())
   withdrawnAt    DateTime?
-  createdAt      DateTime               @default(now())
-  updatedAt      DateTime               @updatedAt
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
   user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   events         ProductEvent[]
   feedback       BetaFeedback[]
@@ -507,7 +507,7 @@ model ProductEvent {
 }
 
 model BetaFeedback {
-  id            String               @id @default(cuid())
+  id            String                 @id @default(cuid())
   participantId String
   workspaceId   String?
   category      BetaFeedbackCategory
@@ -517,11 +517,11 @@ model BetaFeedback {
   entityType    String?
   entityId      String?
   route         String?
-  status        BetaFeedbackStatus   @default(NEW)
-  createdAt     DateTime             @default(now())
+  status        BetaFeedbackStatus     @default(NEW)
+  createdAt     DateTime               @default(now())
   reviewedAt    DateTime?
-  participant   BetaParticipant      @relation(fields: [participantId], references: [id], onDelete: Cascade)
-  workspace     Workspace?           @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  participant   BetaParticipant        @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  workspace     Workspace?             @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
 
   @@index([participantId, createdAt])
 }
@@ -867,16 +867,16 @@ model Verification {
 }
 
 model WorkspaceMember {
-  workspaceId      String
-  userId           String
-  role             WorkspaceRole
-  createdAt        DateTime          @default(now())
-  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  thinkingSessions ThinkingSession[]
-  teachBackAttempts TeachBackAttempt[]
-  cognitionReviewStates UserCognitionReviewState[]
-  cognitionReviewEvents UserCognitionReviewEvent[]
+  workspaceId            String
+  userId                 String
+  role                   WorkspaceRole
+  createdAt              DateTime                   @default(now())
+  workspace              Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user                   User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  thinkingSessions       ThinkingSession[]
+  teachBackAttempts      TeachBackAttempt[]
+  cognitionReviewStates  UserCognitionReviewState[]
+  cognitionReviewEvents  UserCognitionReviewEvent[]
   bookAnalysisBootstraps BookAnalysisBootstrap[]
 
   @@id([workspaceId, userId])
@@ -1035,46 +1035,46 @@ model UploadCompletion {
 }
 
 model IngestionRun {
-  id                   String              @id @default(cuid())
-  sourceDocumentId     String
-  workspaceId          String
-  jobId                String              @unique
-  status               IngestionStatus     @default(QUEUED)
-  parserVersion        String
-  normalizationVersion String
-  errorCode            String?
-  createdAt            DateTime            @default(now())
-  startedAt            DateTime?
-  completedAt          DateTime?
-  sourceDocument       SourceDocument      @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  job                  Job                 @relation(fields: [jobId], references: [id], onDelete: Restrict)
-  extraction           DocumentExtraction?
+  id                    String                 @id @default(cuid())
+  sourceDocumentId      String
+  workspaceId           String
+  jobId                 String                 @unique
+  status                IngestionStatus        @default(QUEUED)
+  parserVersion         String
+  normalizationVersion  String
+  errorCode             String?
+  createdAt             DateTime               @default(now())
+  startedAt             DateTime?
+  completedAt           DateTime?
+  sourceDocument        SourceDocument         @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  job                   Job                    @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  extraction            DocumentExtraction?
   bookAnalysisBootstrap BookAnalysisBootstrap?
 
   @@unique([id, sourceDocumentId, workspaceId])
 }
 
 model DocumentExtraction {
-  id                   String                     @id @default(cuid())
-  ingestionRunId       String                     @unique
-  sourceDocumentId     String
-  workspaceId          String
-  status               ExtractionStatus
-  parserName           String
-  parserVersion        String
-  normalizationVersion String
-  textStorageKey       String?
-  textSha256           String?
-  characterCount       Int?
-  createdAt            DateTime                   @default(now())
-  ingestionRun         IngestionRun               @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
-  sourceDocument       SourceDocument             @relation("DocumentExtractionSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  currentMarker        CurrentDocumentExtraction? @relation("CurrentExtractionDocument")
-  pages                SourcePage[]
-  blocks               SourceBlock[]
-  structureNodes       DocumentStructureNode[]
-  chunkSets            ChunkSet[]
-  analysisRuns         BookAnalysisRun[]
+  id                     String                     @id @default(cuid())
+  ingestionRunId         String                     @unique
+  sourceDocumentId       String
+  workspaceId            String
+  status                 ExtractionStatus
+  parserName             String
+  parserVersion          String
+  normalizationVersion   String
+  textStorageKey         String?
+  textSha256             String?
+  characterCount         Int?
+  createdAt              DateTime                   @default(now())
+  ingestionRun           IngestionRun               @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+  sourceDocument         SourceDocument             @relation("DocumentExtractionSourceDocument", fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  currentMarker          CurrentDocumentExtraction? @relation("CurrentExtractionDocument")
+  pages                  SourcePage[]
+  blocks                 SourceBlock[]
+  structureNodes         DocumentStructureNode[]
+  chunkSets              ChunkSet[]
+  analysisRuns           BookAnalysisRun[]
   bookAnalysisBootstraps BookAnalysisBootstrap[]
 
   @@unique([id, sourceDocumentId, workspaceId])
@@ -1296,6 +1296,9 @@ model BookAnalysisBootstrap {
   extractionId        String
   requestedByUserId   String
   status              BookAnalysisBootstrapStatus @default(PENDING)
+  dispatchGeneration  Int                         @default(1)
+  retryCount          Int                         @default(0)
+  nextAttemptAt       DateTime?
   analysisRunId       String?
   errorCode           String?
   executionClaimToken String?
@@ -1417,20 +1420,20 @@ model UserCognitionState {
 }
 
 model UserCognitionReviewState {
-  id                    String                  @id @default(cuid())
+  id                    String                 @id @default(cuid())
   workspaceId           String
   userId                String
   memoryItemId          String
-  reviewCount           Int                     @default(0)
+  reviewCount           Int                    @default(0)
   lastReviewedAt        DateTime?
   nextReviewAt          DateTime?
   lastMasteryState      TeachBackMasteryState?
   lastMasteryAssessedAt DateTime?
-  scheduleVersion       String                  @default("phase13-v1")
-  createdAt             DateTime                @default(now())
-  updatedAt             DateTime                @updatedAt
-  owner                 WorkspaceMember         @relation(fields: [workspaceId, userId], references: [workspaceId, userId], onDelete: Cascade)
-  memoryItem            BookMemoryItem          @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  scheduleVersion       String                 @default("phase13-v1")
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  owner                 WorkspaceMember        @relation(fields: [workspaceId, userId], references: [workspaceId, userId], onDelete: Cascade)
+  memoryItem            BookMemoryItem         @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
 
   @@unique([workspaceId, userId, memoryItemId])
   @@index([workspaceId, userId, nextReviewAt])
@@ -1438,14 +1441,14 @@ model UserCognitionReviewState {
 }
 
 model UserCognitionReviewEvent {
-  id           String                        @id
+  id           String                       @id
   workspaceId  String
   userId       String
   memoryItemId String
   kind         UserCognitionReviewEventKind @default(MANUAL_REVIEW)
-  createdAt    DateTime                      @default(now())
-  owner        WorkspaceMember               @relation(fields: [workspaceId, userId], references: [workspaceId, userId], onDelete: Cascade)
-  memoryItem   BookMemoryItem                @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  createdAt    DateTime                     @default(now())
+  owner        WorkspaceMember              @relation(fields: [workspaceId, userId], references: [workspaceId, userId], onDelete: Cascade)
+  memoryItem   BookMemoryItem               @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
 
   @@unique([id, workspaceId])
   @@index([workspaceId, userId, memoryItemId, createdAt])
@@ -1507,15 +1510,15 @@ model TeachBackAttempt {
 }
 
 model TeachBackAssessment {
-  id           String                 @id @default(cuid())
+  id           String                @id @default(cuid())
   workspaceId  String
   attemptId    String
   masteryState TeachBackMasteryState
   rubric       Json
   feedback     String
   nextPrompt   String?
-  createdAt    DateTime               @default(now())
-  attempt      TeachBackAttempt       @relation(fields: [attemptId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  createdAt    DateTime              @default(now())
+  attempt      TeachBackAttempt      @relation(fields: [attemptId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 
   @@unique([attemptId])
   @@unique([attemptId, workspaceId])
