@@ -12,6 +12,9 @@ export type BookAnalysisEmbeddingTarget =
   | { kind: "BOOK_MEMORY"; id: string; extractionId: string; analysisRunId: string; contentHash: string; text: string };
 export type BookAnalysisEmbeddingInput = { workspaceId: string; analysisRunId: string; claimToken: string; invocationId: string; snapshotId: string; embeddingVersion: string; targets: readonly BookAnalysisEmbeddingTarget[] };
 const canonical = (value: unknown) => JSON.stringify(value);
+export function bookAnalysisEmbeddingIdempotencyKey(analysisRunId: string, batchOrdinal = 0): string { return batchOrdinal === 0 ? `book-analysis-embeddings:${analysisRunId}` : `book-analysis-embeddings:${analysisRunId}:batch:${batchOrdinal}`; }
+export function bookAnalysisEmbeddingRetryIdempotencyKey(analysisRunId: string, batchOrdinal: number, retryOrdinal: number): string { return `${bookAnalysisEmbeddingIdempotencyKey(analysisRunId, batchOrdinal)}:retry:${retryOrdinal}`; }
+function isBookAnalysisEmbeddingIdempotencyKey(value: string, analysisRunId: string): boolean { const base = bookAnalysisEmbeddingIdempotencyKey(analysisRunId); if (!value.startsWith(base)) return false; const suffix = value.slice(base.length); return suffix === "" || /^:retry:[1-9][0-9]*$/.test(suffix) || /^:batch:[1-9][0-9]*(?::retry:[1-9][0-9]*)?$/.test(suffix); }
 export function embeddingConsumerFingerprint(kind: string, input: { workspaceId: string; invocationId: string; snapshotId: string; embeddingVersion: string; targets: readonly (Target | MemoryTarget)[]; identity: { provider: string; model: string; modelVersion?: string; dimensions: number } }) {
   if (!input.embeddingVersion || !input.targets.length || new Set(input.targets.map(target => target.id)).size !== input.targets.length) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid embedding materialization intent");
   return sha256(canonical({ workspaceId: input.workspaceId, invocationId: input.invocationId, snapshotId: input.snapshotId, kind, embeddingVersion: input.embeddingVersion, provider: input.identity.provider, model: input.identity.model, modelVersion: input.identity.modelVersion ?? "", dimensions: input.identity.dimensions, targetCount: input.targets.length, targets: input.targets.map(target => ({ id: target.id, extractionId: target.extractionId, contentHash: target.contentHash, ...("analysisRunId" in target ? { analysisRunId: target.analysisRunId } : {}) })) }));
@@ -30,8 +33,8 @@ export async function verifyConsumedBookAnalysisEmbeddings(input: BookAnalysisEm
   return prisma.$transaction(async (tx) => {
     const owners = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${input.analysisRunId} AND "workspaceId" = ${input.workspaceId} AND "executionClaimToken" = ${input.claimToken} AND "executionLeaseUntil" > NOW() AND "status" = 'RUNNING'::"AnalysisRunStatus" AND "analysisStage" = 'EMBEDDINGS'::"AnalysisRunStage" FOR UPDATE`;
     if (owners.length !== 1) throw new Error("BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST");
-    const invocation = await tx.providerInvocation.findFirst({ where: { id: input.invocationId, workspaceId: input.workspaceId, idempotencyKey: `book-analysis-embeddings:${input.analysisRunId}`, status: "SUCCEEDED" }, select: { id: true, snapshotId: true } });
-    if (!invocation || invocation.snapshotId !== input.snapshotId) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis invocation provenance changed");
+    const invocation = await tx.providerInvocation.findFirst({ where: { id: input.invocationId, workspaceId: input.workspaceId, status: "SUCCEEDED" }, select: { id: true, snapshotId: true, idempotencyKey: true } });
+    if (!invocation || !isBookAnalysisEmbeddingIdempotencyKey(invocation.idempotencyKey, input.analysisRunId) || invocation.snapshotId !== input.snapshotId) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis invocation provenance changed");
     const [receipt, snapshot] = await Promise.all([
       tx.providerEmbeddingResult.findUnique({ where: { invocationId: input.invocationId } }),
       tx.providerExecutionSnapshot.findUnique({ where: { id_workspaceId: { id: input.snapshotId, workspaceId: input.workspaceId } } }),
@@ -64,13 +67,21 @@ export async function verifyConsumedBookAnalysisEmbeddings(input: BookAnalysisEm
 
 /** Uses the consumed run-scoped receipt, never row recency or the current route. */
 export async function loadConsumedBookAnalysisEmbeddingIdentity(input: Pick<BookAnalysisEmbeddingInput, "workspaceId" | "analysisRunId" | "embeddingVersion">) {
-  const invocation = await prisma.providerInvocation.findFirst({ where: { workspaceId: input.workspaceId, idempotencyKey: `book-analysis-embeddings:${input.analysisRunId}`, status: "SUCCEEDED" }, select: { id: true, snapshotId: true } });
-  if (!invocation) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis invocation is missing");
-  const [receipt, snapshot] = await Promise.all([prisma.providerEmbeddingResult.findUnique({ where: { invocationId: invocation.id } }), prisma.providerExecutionSnapshot.findUnique({ where: { id_workspaceId: { id: invocation.snapshotId, workspaceId: input.workspaceId } } })]);
-  if (!receipt || !snapshot || receipt.snapshotId !== invocation.snapshotId || !receipt.consumedAt || !receipt.purgedAt || receipt.consumerKind !== "BOOK_ANALYSIS_EMBEDDINGS" || receipt.consumerKey !== input.analysisRunId || !receipt.consumerFingerprint || receipt.ciphertext !== null || receipt.iv !== null || receipt.authTag !== null || receipt.keyVersion !== null) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis consumed receipt is invalid");
-  const dimensions = embeddingDimensions(snapshot.capability as never, snapshot.configuration as never);
-  if (receipt.dimensions !== dimensions) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis receipt dimensions changed");
-  return { ...identity(snapshot, input.embeddingVersion, dimensions), dimensions };
+  const base = bookAnalysisEmbeddingIdempotencyKey(input.analysisRunId);
+  const invocations = (await prisma.providerInvocation.findMany({ where: { workspaceId: input.workspaceId, status: "SUCCEEDED", idempotencyKey: { startsWith: base } }, select: { id: true, snapshotId: true, idempotencyKey: true }, orderBy: { idempotencyKey: "asc" } })).filter(invocation => isBookAnalysisEmbeddingIdempotencyKey(invocation.idempotencyKey, input.analysisRunId));
+  if (!invocations.length || invocations.some(invocation => !isBookAnalysisEmbeddingIdempotencyKey(invocation.idempotencyKey, input.analysisRunId))) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis invocation is missing");
+  let resolved: { provider: string; model: string; modelVersion?: string; embeddingVersion: string; hash: string; dimensions: number } | undefined;
+  for (const invocation of invocations) {
+    const [receipt, snapshot] = await Promise.all([prisma.providerEmbeddingResult.findUnique({ where: { invocationId: invocation.id } }), prisma.providerExecutionSnapshot.findUnique({ where: { id_workspaceId: { id: invocation.snapshotId, workspaceId: input.workspaceId } } })]);
+    if (!receipt || !snapshot || receipt.snapshotId !== invocation.snapshotId || !receipt.consumedAt || !receipt.purgedAt || receipt.consumerKind !== "BOOK_ANALYSIS_EMBEDDINGS" || receipt.consumerKey !== input.analysisRunId || !receipt.consumerFingerprint || receipt.ciphertext !== null || receipt.iv !== null || receipt.authTag !== null || receipt.keyVersion !== null) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis consumed receipt is invalid");
+    const dimensions = embeddingDimensions(snapshot.capability as never, snapshot.configuration as never);
+    if (receipt.dimensions !== dimensions) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis receipt dimensions changed");
+    const current = { ...identity(snapshot, input.embeddingVersion, dimensions), dimensions };
+    if (resolved && (resolved.hash !== current.hash || resolved.provider !== current.provider || resolved.model !== current.model || resolved.dimensions !== current.dimensions)) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis embedding batch identity changed");
+    resolved = current;
+  }
+  if (!resolved) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis invocation is missing");
+  return resolved;
 }
 
 export async function materializeDocumentChunkEmbeddings(repository: ProviderExecutionRepository, input: DocumentInput) {

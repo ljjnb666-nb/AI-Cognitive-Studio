@@ -6,7 +6,7 @@ import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewa
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
 
-export type BookGatewayRuntime = { gateway: ProviderGateway; repository: ProviderExecutionRepository; createAnalysisProvider(input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }): Promise<AnalysisProvider>; createEmbeddingGatewayForRun(input: { workspaceId: string; userId: string; analysisRunId: string }): Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute }>; close(): Promise<void>; };
+export type BookGatewayRuntime = { gateway: ProviderGateway; repository: ProviderExecutionRepository; createAnalysisProvider(input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }): Promise<AnalysisProvider>; createEmbeddingGatewayForRun(input: { workspaceId: string; userId: string; analysisRunId: string }): Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute; maxEmbeddingInputs?: number }>; close(): Promise<void>; };
 /** Test-only seams keep production composition real while preventing external provider traffic. */
 export type BookProductionGatewayRuntimeOverrides = Pick<GatewayExecutionDependencies, "circuit" | "rate" | "concurrency" | "validateEndpoint"> & { adapterResolver?: ProviderAdapterResolver; redisFactory?: (url: string) => ReturnType<typeof createRedisConnection> };
 
@@ -93,9 +93,15 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
     if (!run.routePlan) throw new Error("BOOK_ANALYSIS_LEGACY_ROUTE_PLAN_UNAVAILABLE");
     const plan = verifiedPlan(run.routePlan, run.routePlanHash), entry = plan.routes.EMBEDDING;
     if (manifest.providers.find(provider => provider.providerKey === entry.providerKey)?.adapterVersion !== entry.adapterVersion) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
-    const pinnedRoute: ResolvedRoute = { source: "WORKSPACE", providerKey: entry.providerKey, protocol: entry.protocol as ResolvedRoute["protocol"], modelId: entry.modelId, adapterVersion: entry.adapterVersion, connectionId: entry.connectionId, credentialVersionId: entry.credentialVersionId, endpoint: entry.endpoint, region: entry.region, capability: { modelId: entry.modelId, families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: entry.dimensions }, configuration: entry.configuration };
+    const declaredCapability = manifest.providers.find(provider => provider.providerKey === entry.providerKey)?.models.find(model => model.modelId === entry.modelId);
+    if (!declaredCapability?.families.includes("EMBEDDING")) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
+    // The plan pins the semantic dimension, while the signed catalog capability
+    // supplies protocol behavior such as Qwen's configurable dimensions and
+    // maximum batch size.  Dropping those fields makes the adapter omit the
+    // dimensions request parameter and silently receive the provider default.
+    const pinnedRoute: ResolvedRoute = { source: "WORKSPACE", providerKey: entry.providerKey, protocol: entry.protocol as ResolvedRoute["protocol"], modelId: entry.modelId, adapterVersion: entry.adapterVersion, connectionId: entry.connectionId, credentialVersionId: entry.credentialVersionId, endpoint: entry.endpoint, region: entry.region, capability: { ...declaredCapability, embeddingDimensions: entry.dimensions }, configuration: entry.configuration };
     const snapshot = await gateway.resolveSnapshot({ workspaceId: input.workspaceId, routeSlot: "EMBEDDING", correlationId: input.analysisRunId, idempotencyKey: `book-analysis-route-preflight:${input.analysisRunId}:EMBEDDING`, inputHash: sha256(`${input.analysisRunId}:EMBEDDING`), capability: { family: "EMBEDDING" }, pinnedRoute });
-    return { gateway, repository, userId: input.userId, pinnedRoute: snapshot };
+    return { gateway, repository, userId: input.userId, pinnedRoute: snapshot, maxEmbeddingInputs: snapshot.capability.maxEmbeddingInputs };
   } };
   return runtime;
 }
