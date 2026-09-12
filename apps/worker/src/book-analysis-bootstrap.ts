@@ -10,6 +10,8 @@ export const BOOK_ANALYSIS_BOOTSTRAP_QUEUE = "book.analysis.bootstrap";
 export const BOOK_ANALYSIS_BOOTSTRAP_JOB = "book.analysis.bootstrap";
 export type BookAnalysisBootstrapPayload = { bootstrapId: string };
 export type BookAnalysisBootstrapQueueOptions = { prefix?: string; concurrency?: number };
+export type BookAnalysisBootstrapFaultPoint = "afterClaim" | "afterChunkSetMaterialization" | "afterBookAnalysisRequest";
+export type ProcessBookAnalysisBootstrapOptions = { faultInjector?: (point: BookAnalysisBootstrapFaultPoint, input: { bootstrapId: string; analysisRunId?: string }) => Promise<void> | void };
 const readyErrors = new Set(["AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"]);
 const errorCode = (error: unknown): string => error instanceof Error ? error.message.split(":")[0] ?? "BOOK_ANALYSIS_BOOTSTRAP_FAILED" : "BOOK_ANALYSIS_BOOTSTRAP_FAILED";
 const assertGatewayRuntimeReady = () => { if (!resolveCredentialKeyring(process.env)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED"); };
@@ -39,12 +41,13 @@ async function waitForProvider(id: string, token: string, code: string) {
 }
 
 /** PostgreSQL is the authority: BullMQ carries only this durable intent ID. */
-export async function processBookAnalysisBootstrap(bootstrapId: string) {
+export async function processBookAnalysisBootstrap(bootstrapId: string, options: ProcessBookAnalysisBootstrapOptions = {}) {
   const initial = await prisma.bookAnalysisBootstrap.findUnique({ where: { id: bootstrapId } });
   if (!initial || initial.status === "SUCCEEDED" || initial.status === "FAILED_TERMINAL") return;
   const token = randomUUID();
   if (!await claimBootstrap(bootstrapId, token)) return;
   try {
+    await options.faultInjector?.("afterClaim", { bootstrapId });
     const bootstrap = await prisma.bookAnalysisBootstrap.findUniqueOrThrow({ where: { id: bootstrapId }, include: { ingestionRun: { include: { job: true } }, sourceDocument: true, extraction: true, requestedBy: true } });
     if (bootstrap.ingestionRun.status !== "SUCCEEDED" || bootstrap.ingestionRun.workspaceId !== bootstrap.workspaceId || bootstrap.ingestionRun.sourceDocumentId !== bootstrap.sourceDocumentId || bootstrap.extraction.ingestionRunId !== bootstrap.ingestionRunId || bootstrap.extraction.sourceDocumentId !== bootstrap.sourceDocumentId || bootstrap.requestedBy.workspaceId !== bootstrap.workspaceId || bootstrap.requestedBy.userId !== bootstrap.requestedByUserId) throw new Error("BOOK_ANALYSIS_BOOTSTRAP_LINEAGE_INVALID");
     const current = await prisma.currentDocumentExtraction.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: bootstrap.sourceDocumentId, workspaceId: bootstrap.workspaceId } } });
@@ -52,12 +55,18 @@ export async function processBookAnalysisBootstrap(bootstrapId: string) {
     assertGatewayRuntimeReady();
     const chunkSet = await materializeChunkSet({ workspaceId: bootstrap.workspaceId, sourceDocumentId: bootstrap.sourceDocumentId, correlationId: bootstrap.id });
     await renewBookAnalysisBootstrapLease(bootstrap.id, token);
+    await options.faultInjector?.("afterChunkSetMaterialization", { bootstrapId: bootstrap.id });
     const execution = await resolveBookProductExecution(bootstrap.workspaceId);
     await renewBookAnalysisBootstrapLease(bootstrap.id, token);
     const requested = await requestBookAnalysisForUser({ workspaceId: bootstrap.workspaceId, userId: bootstrap.requestedByUserId }, { sourceDocumentId: bootstrap.sourceDocumentId, chunkSetId: chunkSet.id, pipelineVersion: "phase18.2", promptVersion: "phase18.2", provider: execution.provider, model: execution.model, modelVersion: execution.modelVersion, routePlan: execution.routePlan, correlationId: bootstrap.id });
+    await options.faultInjector?.("afterBookAnalysisRequest", { bootstrapId: bootstrap.id, analysisRunId: requested.run.id });
     await owned(bootstrap.id, token, { status: "SUCCEEDED", analysisRunId: requested.run.id, errorCode: null, completedAt: new Date(), executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null });
   } catch (error) {
     const code = errorCode(error);
+    // Test-only crash seams deliberately preserve the durable RUNNING claim.
+    // A real process crash has the same shape: the lease expires and BullMQ's
+    // stalled-job recovery can safely redeliver the deterministic bootstrap ID.
+    if (code === "BOOK_ANALYSIS_BOOTSTRAP_SIMULATED_CRASH") throw error;
     if (readyErrors.has(code)) { await waitForProvider(bootstrapId, token, code); return; }
     if (code === "BOOK_ANALYSIS_BOOTSTRAP_OWNERSHIP_LOST") throw error;
     await owned(bootstrapId, token, { status: "FAILED_TERMINAL", errorCode: code, completedAt: new Date(), executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null });
