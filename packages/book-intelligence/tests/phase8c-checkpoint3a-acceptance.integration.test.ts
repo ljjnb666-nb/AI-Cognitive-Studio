@@ -20,7 +20,7 @@ class Analysis implements AnalysisProvider {
   }
 }
 
-async function fixture() {
+async function fixture(maxEmbeddingInputs?: number) {
   const suffix = randomUUID();
   const user = await prisma.user.create({ data: { email: `${suffix}@checkpoint3a.test` } });
   const workspace = await prisma.workspace.create({ data: { name: `checkpoint3a-${suffix}` } });
@@ -36,7 +36,7 @@ async function fixture() {
   await prisma.currentDocumentExtraction.create({ data: { workspaceId: workspace.id, sourceDocumentId: document.id, extractionId: extraction.id } });
   const chunkSet = await materializeChunkSet({ workspaceId: workspace.id, sourceDocumentId: document.id, configuration: { targetSize: 35, hardMax: 45 } });
   const requested = await requestBookAnalysisForUser({ workspaceId: workspace.id, userId: user.id }, { sourceDocumentId: document.id, pipelineVersion: `matrix-${suffix}`, promptVersion: "p", provider: "test", model: "test" });
-  const gateway = await createBookAnalysisEmbeddingGatewayFixture({ workspaceId: workspace.id, userId: user.id });
+  const gateway = await createBookAnalysisEmbeddingGatewayFixture({ workspaceId: workspace.id, userId: user.id, maxEmbeddingInputs });
   return { user, workspace, document, extraction, chunkSet, run: requested.run, job: requested.job, gateway };
 }
 
@@ -130,6 +130,25 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     expect(data.gateway.remoteInputs()).toEqual([[...chunks.map((item) => item.content), ...memories.map((item) => item.content)]]);
     const invocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: data.workspace.id } });
     expect(invocation.idempotencyKey).toBe(`book-analysis-embeddings:${data.run.id}`); expect(invocation.requestFingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("CASE02B batches bounded provider inputs in order and resumes only incomplete batches", async () => {
+    const data = await fixture(2);
+    let crashed = false;
+    await expect(processBookAnalysisRun(data.run.id, deps(data, { faultInjector: point => { if (point === "afterEmbeddingMaterialization" && !crashed) { crashed = true; throw new Error("CASE02B_AFTER_FIRST_BATCH"); } } }))).rejects.toThrow("CASE02B_AFTER_FIRST_BATCH");
+    expect(data.gateway.remoteInputs()).toHaveLength(1);
+    expect(data.gateway.remoteInputs()[0]).toHaveLength(2);
+    await processBookAnalysisRun(data.run.id, deps(data));
+    const chunks = await prisma.documentChunk.findMany({ where: { chunkSetId: data.chunkSet.id }, orderBy: [{ ordinal: "asc" }, { id: "asc" }] });
+    const memories = await prisma.bookMemoryItem.findMany({ where: { analysisRunId: data.run.id }, orderBy: [{ ordinal: "asc" }, { id: "asc" }] });
+    const targets = [...chunks.map(item => item.content), ...memories.map(item => item.content)];
+    expect(data.gateway.remoteInputs().every(batch => batch.length <= 2)).toBe(true);
+    expect(data.gateway.remoteInputs().flat()).toEqual(targets);
+    expect(data.gateway.remoteCallCount()).toBe(Math.ceil(targets.length / 2));
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id, idempotencyKey: { startsWith: `book-analysis-embeddings:${data.run.id}` }, status: "SUCCEEDED" } })).toBe(Math.ceil(targets.length / 2));
+    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(chunks.length);
+    expect(await prisma.bookMemoryEmbedding.count({ where: { analysisRunId: data.run.id } })).toBe(memories.length);
+    expect(await prisma.currentBookIntelligence.findFirst({ where: { workspaceId: data.workspace.id, analysisRunId: data.run.id } })).toBeTruthy();
   });
 
   it("CASE03 crash after durable gateway success reuses encrypted receipt", async () => {

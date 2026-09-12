@@ -19,7 +19,7 @@ import { cosineSimilarity, embeddingIdentityWithHash, type EmbeddingProvider } f
 import { sha256, type SourceBlockInput } from "./chunking.js";
 import { bookRoutePlanHash, normalizeBookRoutePlan, type BookAnalysisRoutePlan } from "./route-plan.js";
 import { canonicalEmbeddingInputHash, type ProviderExecutionRepository, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
-import { loadConsumedBookAnalysisEmbeddingIdentity, materializeBookAnalysisEmbeddings, type BookAnalysisEmbeddingTarget, verifyConsumedBookAnalysisEmbeddings } from "./gateway-materialization.js";
+import { bookAnalysisEmbeddingIdempotencyKey, bookAnalysisEmbeddingRetryIdempotencyKey, loadConsumedBookAnalysisEmbeddingIdentity, materializeBookAnalysisEmbeddings, type BookAnalysisEmbeddingTarget, verifyConsumedBookAnalysisEmbeddings } from "./gateway-materialization.js";
 import { dispatchPendingOutbox } from "../../ingestion/src/outbox-dispatcher.js";
 import {
   BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST,
@@ -46,8 +46,8 @@ export type ProcessBookAnalysisDependencies = {
   analysisProviderForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => Promise<AnalysisProvider> | AnalysisProvider;
   embeddingProvider?: EmbeddingProvider;
   /** Query/retrieval identity only; never used by the durable EMBEDDINGS stage. */
-  embeddingGateway?: { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute };
-  embeddingGatewayForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string }) => Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute }> | { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute };
+  embeddingGateway?: { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute; maxEmbeddingInputs?: number };
+  embeddingGatewayForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string }) => Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute; maxEmbeddingInputs?: number }> | { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute; maxEmbeddingInputs?: number };
   embeddingVersion?: string;
   correlationId?: string;
   faultInjector?: AnalysisFaultInjector;
@@ -200,6 +200,7 @@ async function runChunkStage(run: any, token: string, dependencies: ActiveBookAn
       provider: run.provider,
       model: run.model,
       operationKey: `chunk:${chunk.id}:${chunk.contentHash}`,
+      boundedChunk: { chunkId: chunk.id, contentHash: chunk.contentHash, sourceBlockIds: chunk.sourceSpans.map((span: any) => span.sourceBlockId) },
     };
     await renewBookAnalysisLease(run.id, token);
     const response = await guardedGenerateStructured(dependencies.analysisProvider, request, context.blocks, contextLimit);
@@ -390,35 +391,49 @@ async function runEmbeddingStage(run: any, token: string, dependencies: ActiveBo
     ...context.chunks.map(chunk => ({ kind: "DOCUMENT_CHUNK" as const, id: chunk.id, extractionId: run.extractionId, contentHash: chunk.contentHash, text: chunk.content })),
     ...memoryItems.map(item => ({ kind: "BOOK_MEMORY" as const, id: item.id, extractionId: item.extractionId, analysisRunId: run.id, contentHash: item.contentHash, text: item.content })),
   ];
-  const embedding = { texts: targets.map(target => target.text), purpose: "DOCUMENT" as const };
-  await renewBookAnalysisLease(run.id, token);
-  // The gateway fingerprint binds the whole ordered target set.  Keep this key
-  // run-scoped so a lineage mutation cannot pay for a second invocation before
-  // the original encrypted receipt is reconciled.
-  const targetLineageHash = sha256(JSON.stringify(targets.map(target => ({ kind: target.kind, id: target.id, extractionId: target.extractionId, contentHash: target.contentHash, ...(target.kind === "BOOK_MEMORY" ? { analysisRunId: target.analysisRunId } : {}) }))));
-  const request = { workspaceId: run.workspaceId, routeSlot: "EMBEDDING" as const, correlationId: dependencies.correlationId ?? run.id, idempotencyKey: `book-analysis-embeddings:${run.id}`, inputHash: canonicalEmbeddingInputHash(embedding), capability: { family: "EMBEDDING" as const }, embedding, ...(dependencies.embeddingGateway.pinnedRoute ? { pinnedRoute: dependencies.embeddingGateway.pinnedRoute } : {}), pipelineVersion: `${run.pipelineVersion}:book-embedding:${targetLineageHash}` };
-  const outcome = await dependencies.embeddingGateway.gateway.execute(request, { userId: dependencies.embeddingGateway.userId });
-  if (outcome.status === "RECONCILIATION_REQUIRED") throw new Error("BOOK_ANALYSIS_EMBEDDING_RECONCILIATION_REQUIRED");
-  if (outcome.status === "IN_PROGRESS" || outcome.status === "BLOCKED_EXISTING") throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED");
-  if (outcome.status === "TERMINAL_FAILED") throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_FAILED");
-  const invocationId = outcome.invocationId;
-  const recoveredInvocation = outcome.status === "ALREADY_PROCESSED" && !outcome.snapshot ? await prisma.providerInvocation.findFirst({ where: { id: invocationId, workspaceId: run.workspaceId }, select: { snapshotId: true } }) : undefined;
-  const snapshotId = outcome.status === "SUCCEEDED" ? outcome.snapshot.id : outcome.status === "ALREADY_PROCESSED" ? outcome.snapshot?.id ?? recoveredInvocation?.snapshotId : undefined;
-  if (!invocationId || !snapshotId) throw new Error("BOOK_ANALYSIS_EMBEDDING_RECONCILIATION_REQUIRED");
-  await dependencies.faultInjector?.("afterEmbeddingGatewayPersist", { analysisRunId: run.id, invocationId, snapshotId });
-  await renewBookAnalysisLease(run.id, token);
-  await dependencies.faultInjector?.("beforeEmbeddingMaterialization", { analysisRunId: run.id, invocationId, snapshotId });
-  const materialization = await materializeBookAnalysisEmbeddings(dependencies.embeddingGateway.repository, { workspaceId: run.workspaceId, analysisRunId: run.id, claimToken: token, invocationId, snapshotId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", targets });
-  if (materialization.status === "ALREADY_CONSUMED") await verifyConsumedBookAnalysisEmbeddings({ workspaceId: run.workspaceId, analysisRunId: run.id, claimToken: token, invocationId, snapshotId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", targets });
-  await dependencies.faultInjector?.("afterEmbeddingMaterialization", { analysisRunId: run.id, invocationId, snapshotId });
-  const pinned = await dependencies.embeddingGateway.repository.loadExecutionSnapshot(run.workspaceId, snapshotId);
-  const identity = embeddingIdentityWithHash({ provider: pinned.providerKey, model: pinned.modelId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", dimensions: Number(pinned.configuration.embeddingDimensions ?? pinned.capability.embeddingDimensions) });
+  const configuredBatchLimit = dependencies.embeddingGateway.maxEmbeddingInputs ?? dependencies.embeddingGateway.pinnedRoute?.capability.maxEmbeddingInputs;
+  const batchLimit = typeof configuredBatchLimit === "number" && Number.isSafeInteger(configuredBatchLimit) && configuredBatchLimit > 0 ? configuredBatchLimit : targets.length;
+  const batches = Array.from({ length: Math.ceil(targets.length / batchLimit) }, (_, ordinal) => targets.slice(ordinal * batchLimit, (ordinal + 1) * batchLimit));
+  let identity: ReturnType<typeof embeddingIdentityWithHash> | undefined;
+  for (const [batchOrdinal, batchTargets] of batches.entries()) {
+    const embedding = { texts: batchTargets.map(target => target.text), purpose: "DOCUMENT" as const };
+    await renewBookAnalysisLease(run.id, token);
+    // A completed batch has a distinct durable invocation and receipt.  On a
+    // retry Gateway returns that receipt instead of rebilling it, while later
+    // batches remain available for normal durable recovery.
+    const targetLineageHash = sha256(JSON.stringify(batchTargets.map(target => ({ kind: target.kind, id: target.id, extractionId: target.extractionId, contentHash: target.contentHash, ...(target.kind === "BOOK_MEMORY" ? { analysisRunId: target.analysisRunId } : {}) }))));
+    const baseIdempotencyKey = bookAnalysisEmbeddingIdempotencyKey(run.id, batchOrdinal);
+    const previous = (await prisma.providerInvocation.findMany({ where: { workspaceId: run.workspaceId, idempotencyKey: { startsWith: baseIdempotencyKey } }, select: { idempotencyKey: true, status: true } })).filter(invocation => invocation.idempotencyKey === baseIdempotencyKey || invocation.idempotencyKey.startsWith(`${baseIdempotencyKey}:retry:`));
+    const successful = previous.find(invocation => invocation.status === "SUCCEEDED");
+    const retryOrdinal = Math.max(0, ...previous.map(invocation => { const match = invocation.idempotencyKey.match(/:retry:([1-9][0-9]*)$/); return match ? Number(match[1]) : 0; }).filter(Number.isSafeInteger));
+    const idempotencyKey = successful?.idempotencyKey ?? (previous.length ? bookAnalysisEmbeddingRetryIdempotencyKey(run.id, batchOrdinal, retryOrdinal + 1) : baseIdempotencyKey);
+    const request = { workspaceId: run.workspaceId, routeSlot: "EMBEDDING" as const, correlationId: dependencies.correlationId ?? run.id, idempotencyKey, inputHash: canonicalEmbeddingInputHash(embedding), capability: { family: "EMBEDDING" as const }, embedding, ...(dependencies.embeddingGateway.pinnedRoute ? { pinnedRoute: dependencies.embeddingGateway.pinnedRoute } : {}), pipelineVersion: `${run.pipelineVersion}:book-embedding:${batchOrdinal}:${targetLineageHash}` };
+    const outcome = await dependencies.embeddingGateway.gateway.execute(request, { userId: dependencies.embeddingGateway.userId });
+    if (outcome.status === "RECONCILIATION_REQUIRED") throw new Error("BOOK_ANALYSIS_EMBEDDING_RECONCILIATION_REQUIRED");
+    if (outcome.status === "IN_PROGRESS" || outcome.status === "BLOCKED_EXISTING") throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED");
+    if (outcome.status === "TERMINAL_FAILED") throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_FAILED");
+    const invocationId = outcome.invocationId;
+    const recoveredInvocation = outcome.status === "ALREADY_PROCESSED" && !outcome.snapshot ? await prisma.providerInvocation.findFirst({ where: { id: invocationId, workspaceId: run.workspaceId }, select: { snapshotId: true } }) : undefined;
+    const snapshotId = outcome.status === "SUCCEEDED" ? outcome.snapshot.id : outcome.status === "ALREADY_PROCESSED" ? outcome.snapshot?.id ?? recoveredInvocation?.snapshotId : undefined;
+    if (!invocationId || !snapshotId) throw new Error("BOOK_ANALYSIS_EMBEDDING_RECONCILIATION_REQUIRED");
+    await dependencies.faultInjector?.("afterEmbeddingGatewayPersist", { analysisRunId: run.id, batchOrdinal, invocationId, snapshotId });
+    await renewBookAnalysisLease(run.id, token);
+    await dependencies.faultInjector?.("beforeEmbeddingMaterialization", { analysisRunId: run.id, batchOrdinal, invocationId, snapshotId });
+    const materialization = await materializeBookAnalysisEmbeddings(dependencies.embeddingGateway.repository, { workspaceId: run.workspaceId, analysisRunId: run.id, claimToken: token, invocationId, snapshotId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", targets: batchTargets });
+    if (materialization.status === "ALREADY_CONSUMED") await verifyConsumedBookAnalysisEmbeddings({ workspaceId: run.workspaceId, analysisRunId: run.id, claimToken: token, invocationId, snapshotId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", targets: batchTargets });
+    await dependencies.faultInjector?.("afterEmbeddingMaterialization", { analysisRunId: run.id, batchOrdinal, invocationId, snapshotId });
+    const pinned = await dependencies.embeddingGateway.repository.loadExecutionSnapshot(run.workspaceId, snapshotId);
+    const currentIdentity = embeddingIdentityWithHash({ provider: pinned.providerKey, model: pinned.modelId, embeddingVersion: dependencies.embeddingVersion ?? "gateway", dimensions: Number(pinned.configuration.embeddingDimensions ?? pinned.capability.embeddingDimensions) });
+    if (identity && identity.hash !== currentIdentity.hash) throw new Error("BOOK_ANALYSIS_EMBEDDING_IDENTITY_CHANGED");
+    identity = currentIdentity;
+  }
+  if (!identity) throw new Error("EMBEDDINGS_INCOMPLETE");
   const [chunkCount, memoryCount] = await Promise.all([
     prisma.documentChunkEmbedding.count({ where: { chunkId: { in: context.chunks.map((chunk) => chunk.id) }, embeddingIdentityHash: identity.hash } }),
     prisma.bookMemoryEmbedding.count({ where: { memoryItemId: { in: memoryItems.map((item) => item.id) }, embeddingIdentityHash: identity.hash } }),
   ]);
   if (chunkCount !== context.chunks.length || memoryCount !== memoryItems.length) throw new Error("EMBEDDINGS_INCOMPLETE");
-  await dependencies.faultInjector?.("beforeEmbeddingStageAdvance", { analysisRunId: run.id, invocationId, snapshotId });
+  await dependencies.faultInjector?.("beforeEmbeddingStageAdvance", { analysisRunId: run.id, batchCount: batches.length });
   await advanceStage(run, token, "EMBEDDINGS", "FINALIZING", dependencies.correlationId);
 }
 
@@ -497,7 +512,13 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
     // idempotency barrier for the followers.
     const staleAfterMs = Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000);
     if (run.status !== "FAILED" && Date.now() - (run.startedAt?.getTime() ?? run.createdAt.getTime()) <= staleAfterMs) return { run, action: "RETRY_ANALYSIS" as const, repaired: false, created: false };
-    const retryJob = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId, chunkSetId: run.chunkSetId }, idempotencyKey: `book:${run.analysisIdentityHash}:recovery:${run.job.attemptCount + 1}` } });
+    // BullMQ attemptCount belongs to the individual durable Job and may remain
+    // zero after a provider-stage failure.  The source-document lock makes this
+    // run-scoped count an idempotent, collision-free recovery sequence.
+    const recoveryKeyPrefix = `book:${run.analysisIdentityHash}:recovery:`;
+    const recoveryJobs = await tx.job.findMany({ where: { workspaceId: context.workspaceId, idempotencyKey: { startsWith: recoveryKeyPrefix } }, select: { idempotencyKey: true } });
+    const recoveryOrdinal = Math.max(0, ...recoveryJobs.map(job => Number((job.idempotencyKey ?? "").slice(recoveryKeyPrefix.length))).filter(Number.isSafeInteger));
+    const retryJob = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId, chunkSetId: run.chunkSetId }, idempotencyKey: `${recoveryKeyPrefix}${recoveryOrdinal + 1}` } });
     const recovered = await tx.bookAnalysisRun.update({ where: { id: run.id }, data: { jobId: retryJob.id, status: "QUEUED", analysisStage: "QUEUED", errorCode: null, startedAt: new Date(), completedAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
     await tx.outboxEvent.create({ data: { topic: options.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id, queueJobId: retryJob.id } } });
     return { run: recovered, action: "RETRY_ANALYSIS" as const, repaired: false, created: true };

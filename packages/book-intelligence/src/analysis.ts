@@ -4,7 +4,8 @@ export type AnalysisStage = "CHUNK" | "SECTION" | "CHAPTER" | "BOOK";
 export type EvidenceCandidate = { sourceBlockId: string; startOffset: number; endOffset: number; quoteText?: string };
 export type MemoryCandidate = { type: "SUMMARY" | "CONCEPT" | "ARGUMENT" | "CLAIM" | "EXAMPLE" | "STORY" | "QUOTE" | "PERSON" | "QUESTION" | "COUNTERPOINT"; content: string; evidence?: EvidenceCandidate[] };
 export type AnalysisResponse = { summary: string; memory?: MemoryCandidate[]; relations?: Array<{ fromOrdinal: number; toOrdinal: number; type: "EXPLAINS" | "SUPPORTS" | "OPPOSES" | "ASSOCIATED_WITH" | "DEVELOPS" }> };
-export interface AnalysisRequest { stage: AnalysisStage; content: string; sourceBlockIds: string[]; tokenBudget: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; provider?: string; model?: string; operationKey?: string }
+export type BoundedChunkProvenance = { chunkId: string; contentHash: string; sourceBlockIds: string[] };
+export interface AnalysisRequest { stage: AnalysisStage; content: string; sourceBlockIds: string[]; tokenBudget: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; provider?: string; model?: string; operationKey?: string; boundedChunk?: BoundedChunkProvenance }
 export interface AnalysisProvider { generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> }
 export type AnalysisTransaction = { $queryRaw<T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T> };
 export type AnalysisReceiptConsumer = { consumerKind: string; consumerKey: string; consumerFingerprint: string; materialize: (tx: AnalysisTransaction, response: AnalysisResponse) => Promise<void> };
@@ -39,8 +40,11 @@ export async function reduceBoundedAnalysisChildren(input: { provider: AnalysisP
 
 export function assertNoFullBookPrompt(requests: AnalysisRequest[], blocks: SourceBlockInput[], limit: number): void { for (const request of requests) assertBoundedProviderRequest(request, blocks, limit); }
 export function assertBoundedProviderRequest(request: AnalysisRequest, blocks: SourceBlockInput[], limit: number): void {
-  const whole = blocks.map((b) => b.text).join("\n\n"), ids = new Set(blocks.map((b) => b.id)), requested = new Set(request.sourceBlockIds);
-  if (!request.systemInstructions || request.content === whole || request.content.length > limit || [...ids].every((id) => requested.has(id))) throw new Error("FULL_BOOK_PROMPT_PROHIBITED"); if (estimateAnalysisTokens(request.content) > request.tokenBudget) throw new Error("ANALYSIS_TOKEN_BUDGET_EXCEEDED");
+  const whole = blocks.map((b) => b.text).join("\n\n"), ids = new Set(blocks.map((b) => b.id)), requested = new Set(request.sourceBlockIds), provenance = request.boundedChunk, provenanceIds = new Set(provenance?.sourceBlockIds ?? []);
+  const sameIds = requested.size === provenanceIds.size && [...requested].every((id) => provenanceIds.has(id));
+  const isBoundedChunk = request.stage === "CHUNK" && Boolean(provenance?.chunkId) && provenance?.contentHash === sha256(request.content) && sameIds && [...requested].every((id) => ids.has(id));
+  const containsWholeSource = request.content === whole || [...ids].every((id) => requested.has(id));
+  if (!request.systemInstructions || request.content.length > limit || (containsWholeSource && !isBoundedChunk)) throw new Error("FULL_BOOK_PROMPT_PROHIBITED"); if (estimateAnalysisTokens(request.content) > request.tokenBudget) throw new Error("ANALYSIS_TOKEN_BUDGET_EXCEEDED");
 }
 export function validateQuote(block: Pick<SourceBlockInput, "text">, evidence: EvidenceCandidate): string {
   if (!evidence.quoteText || !validateEvidence(block, evidence, evidence.quoteText)) throw new Error("INVALID_DIRECT_QUOTE");

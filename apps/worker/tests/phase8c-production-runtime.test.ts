@@ -94,7 +94,7 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     expect(await prisma.currentBookIntelligence.findFirst({ where: { workspaceId: f.workspaceId, analysisRunId: requested.run.id } })).toBeNull(); expect(JSON.stringify(await prisma.providerTextResult.findMany({ where: { workspaceId: f.workspaceId } }))).not.toContain("reasoning");
   });
   it("P23 executes each Book stage through its sealed mixed provider route after live bindings change", async () => {
-    const f = await fixture(), document = await bookLineage(f, true), seen: Array<{ url: string; model: string; structured?: unknown; input?: string[] }> = []; let textResponse = 0;
+    const f = await fixture(), document = await bookLineage(f, true), seen: Array<{ url: string; model: string; structured?: unknown; input?: string[]; dimensions?: number }> = []; let textResponse = 0;
     const mixedManifest = JSON.stringify({ providers: [
       { providerKey: "minimax", displayName: "MiniMax", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v1", models: [{ modelId: "MiniMax-M3", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" }] },
       { providerKey: "deepseek", displayName: "DeepSeek", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v2", models: [{ modelId: "deepseek-v4-flash", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" }] },
@@ -103,7 +103,7 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     ] });
     const transport = new DeterministicProviderHttpTransport(request => {
       const body = JSON.parse(request.body!);
-      if (request.url.endsWith("/embeddings")) { seen.push({ url: request.url, model: body.model, input: body.input }); return { status: 200, headers: {}, body: JSON.stringify({ model: "text-embedding-v4", data: body.input.map((_: string, index: number) => ({ index, embedding: [1, ...Array(767).fill(0)] })), usage: { prompt_tokens: 7 } }) }; }
+      if (request.url.endsWith("/embeddings")) { seen.push({ url: request.url, model: body.model, input: body.input, dimensions: body.dimensions }); return { status: 200, headers: {}, body: JSON.stringify({ model: "text-embedding-v4", data: body.input.map((_: string, index: number) => ({ index, embedding: [1, ...Array(767).fill(0)] })), usage: { prompt_tokens: 7 } }) }; }
       if (request.url.endsWith("/responses")) { seen.push({ url: request.url, model: body.model, structured: body.text?.format }); return { status: 200, headers: {}, body: JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ summary: `strict synthesis ${++textResponse}`, memory: [{ type: "SUMMARY", content: "grounded durable evidence" }] }) }] }], usage: { input_tokens: 3, output_tokens: 2 } }) }; }
       seen.push({ url: request.url, model: body.model, structured: body.response_format }); return { status: 200, headers: {}, body: JSON.stringify({ model: body.model, choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ summary: `mixed stage ${++textResponse}`, memory: [{ type: "SUMMARY", content: "grounded durable evidence" }] }) } }], usage: { prompt_tokens: 3, completion_tokens: 2 } }) };
     });
@@ -119,9 +119,10 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     await store.setRoute(f, { routeSlot: "EMBEDDING", connectionId: qwen.id, modelId: "text-embedding-v4", configuration: { qwenRegion: "BEIJING", qwenWorkspaceId: "mixed-workspace", embeddingDimensions: 768 } });
     const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "p23", promptVersion: "p", provider: "minimax", model: "MiniMax-M3", routePlan: await durableRoutePlan(f.workspaceId) });
     await store.setRoute(f, { routeSlot: "BOOK_CHUNK_ANALYSIS", connectionId: deepseek.id, modelId: "deepseek-v4-flash" });
-    await expect(processBookAnalysisRun(requested.run.id, { analysisProviderForRun: input => runtimeMixed.createAnalysisProvider(input), embeddingGatewayForRun: input => ({ gateway: runtimeMixed.gateway, repository: runtimeMixed.repository, userId: input.userId }) })).resolves.toMatchObject({ status: "SUCCEEDED", analysisStage: "COMPLETED" });
+    await expect(processBookAnalysisRun(requested.run.id, { analysisProviderForRun: input => runtimeMixed.createAnalysisProvider(input), embeddingGatewayForRun: input => runtimeMixed.createEmbeddingGatewayForRun(input) })).resolves.toMatchObject({ status: "SUCCEEDED", analysisStage: "COMPLETED" });
     expect(seen.filter(call => call.url === "https://api.minimax.io/v1/text/chatcompletion_v2").every(call => call.model === "MiniMax-M3" && call.structured === undefined)).toBe(true);
     const reductions = seen.filter(call => call.url === "https://api.deepseek.com/chat/completions"); expect(reductions.length).toBeGreaterThanOrEqual(2); expect(reductions.every(call => call.model === "deepseek-v4-flash" && (call.structured as { type?: string } | undefined)?.type === "json_object")).toBe(true);
+    expect(seen.filter(call => call.url.endsWith("/embeddings"))).toEqual([expect.objectContaining({ model: "text-embedding-v4", dimensions: 768 })]);
     expect(seen).toContainEqual(expect.objectContaining({ url: "https://api.openai.com/v1/responses", model: "gpt-4o-mini", structured: expect.objectContaining({ type: "json_schema" }) }));
     expect(seen).toContainEqual(expect.objectContaining({ url: "https://mixed-workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/embeddings", model: "text-embedding-v4" }));
     const snapshots = await prisma.providerExecutionSnapshot.findMany({ where: { workspaceId: f.workspaceId }, select: { routeSlot: true, providerKey: true, modelId: true } });

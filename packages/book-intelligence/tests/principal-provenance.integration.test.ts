@@ -95,4 +95,15 @@ describe("BookAnalysis durable initiating principal", () => {
     expect(await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } })).toMatchObject({ status: "QUEUED" });
     expect(await prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } })).toBe(ingestionBefore);
   });
+
+  it("allocates a new durable recovery key when a later failed retry has no BullMQ attempt increment", async () => {
+    const value = await fixture();
+    const requested = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "FAILED", errorCode: "FIRST_FAILURE" } });
+    const first = await recoverBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.document.id);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "FAILED", errorCode: "SECOND_FAILURE" } });
+    const second = await recoverBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.document.id);
+    expect([first, second].map(recovery => recovery.created)).toEqual([true, true]);
+    expect(await prisma.job.findMany({ where: { workspaceId: value.workspace.id, idempotencyKey: { startsWith: `book:${requested.run.analysisIdentityHash}:recovery:` } }, select: { idempotencyKey: true }, orderBy: { idempotencyKey: "asc" } })).toEqual([{ idempotencyKey: `book:${requested.run.analysisIdentityHash}:recovery:1` }, { idempotencyKey: `book:${requested.run.analysisIdentityHash}:recovery:2` }]);
+  });
 });

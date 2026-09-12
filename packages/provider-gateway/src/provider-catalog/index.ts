@@ -13,7 +13,7 @@ export const builtInProviderCatalog: ProviderModelManifest = {
     { providerKey: "zhipu", displayName: "智谱 GLM", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v1", models: [text("glm-4-flash", "JSON_MODE")] },
     // Qwen embeddings use Model Studio's typed region/workspace configuration.
     // text-embedding-v4 dimensions are the published, selectable values.
-    { providerKey: "qwen", displayName: "阿里云百炼 Qwen", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v1", models: [text("qwen-plus", "JSON_MODE"), { modelId: "text-embedding-v4", families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: 1024, configurableEmbeddingDimensions: true, embeddingDimensionOptions: [2048, 1536, 1024, 768, 512, 256, 128, 64] }] },
+    { providerKey: "qwen", displayName: "阿里云百炼 Qwen", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v1", models: [text("qwen-plus", "JSON_MODE"), { modelId: "text-embedding-v4", families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: 1024, configurableEmbeddingDimensions: true, embeddingDimensionOptions: [2048, 1536, 1024, 768, 512, 256, 128, 64], maxEmbeddingInputs: 10 }] },
     // MiniMax M3 has no native strict JSON Schema declaration here.  The
     // gateway prompts for JSON and keeps its existing parse/domain validation gate.
     { providerKey: "minimax", displayName: "MiniMax", protocol: "OPENAI_COMPATIBLE", adapterVersion: "builtin-v1", models: [text("MiniMax-M3", "JSON_MODE")] },
