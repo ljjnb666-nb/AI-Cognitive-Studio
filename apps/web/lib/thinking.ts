@@ -29,6 +29,10 @@ const types = new Set([
   "STORY",
 ]);
 const safeThinkingProviderErrors = new Set(["AI_PROVIDER_CONFIGURATION_REQUIRED", "INVALID_PROVIDER_RESPONSE", "RATE_LIMITED", "TIMEOUT", "TRANSIENT_UPSTREAM", "AUTHENTICATION_FAILED", "AUTHORIZATION_FAILED", "MODEL_NOT_FOUND"]);
+function safeProviderErrorCode(error: unknown) {
+  const code = error instanceof ProviderGatewayError ? error.code : error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return code && safeThinkingProviderErrors.has(code) ? code : undefined;
+}
 type Identity = Pick<WebIdentityContext, "workspaceId" | "userId">;
 type Runtime = {
   gateway: ProviderGateway;
@@ -145,7 +149,8 @@ async function generate(
       { userId: identity.userId },
     );
   } catch (error) {
-    if (error instanceof ProviderGatewayError && safeThinkingProviderErrors.has(error.code)) throw new Error(error.code);
+    const code = safeProviderErrorCode(error);
+    if (code) throw new Error(code);
     throw new Error("THINKING_SESSION_PROVIDER_FAILED");
   }
   if (result.status === "IN_PROGRESS") return { inProgress: true as const };
@@ -165,7 +170,7 @@ async function generate(
     typeof response.text !== "string" ||
     !response.text.trim()
   )
-    throw new Error("THINKING_SESSION_PROVIDER_FAILED");
+    throw new Error("INVALID_PROVIDER_RESPONSE");
   return {
     inProgress: false as const,
     active,

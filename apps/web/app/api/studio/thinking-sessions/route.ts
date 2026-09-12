@@ -2,6 +2,23 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { resolveWebIdentity } from "@/lib/identity";
 import { createThinkingSession } from "@/lib/thinking";
+import { thinkingSessionFailureForCode } from "@/lib/thinking-session-errors";
+
 const body = z.object({ memoryItemId: z.string().cuid(), sessionId: z.string().uuid() });
-const failures: Record<string, { message: string; status: number }> = { AI_PROVIDER_CONFIGURATION_REQUIRED: { message: "思考功能尚未配置可用的 AI Provider。", status: 400 }, INVALID_PROVIDER_RESPONSE: { message: "模型返回了空内容或无效响应，请重试。", status: 502 }, RATE_LIMITED: { message: "模型服务当前请求过多，请稍后重试。", status: 429 }, TIMEOUT: { message: "模型响应超时，请稍后重试。", status: 504 }, TRANSIENT_UPSTREAM: { message: "模型服务暂时不可用，请稍后重试。", status: 503 }, AUTHENTICATION_FAILED: { message: "Provider 凭证无效或已失效，请检查 Provider 设置。", status: 401 }, AUTHORIZATION_FAILED: { message: "Provider 没有执行该模型的权限，请检查 Provider 设置。", status: 403 }, MODEL_NOT_FOUND: { message: "配置的模型当前不可用，请检查 Provider 设置。", status: 400 }, THINKING_SESSION_PROVIDER_FAILED: { message: "暂时无法开始思考，请稍后重试。", status: 502 } };
-export async function POST(request: Request) { try { const [identity, input] = await Promise.all([resolveWebIdentity(), request.json().then(body.parse)]); const result = await createThinkingSession(identity, input.memoryItemId, input.sessionId); return NextResponse.json(result.pending ? result : { ...result, href: `/studio/thinking/${result.id}` }, { status: result.pending ? 202 : 200 }); } catch (error) { const raw = error instanceof Error ? error.message.split(":")[0] : "THINKING_SESSION_CREATE_FAILED", failure = failures[raw], code = failure ? raw : "THINKING_SESSION_PROVIDER_FAILED"; return NextResponse.json({ error: code, message: failures[code]!.message }, { status: raw === "COGNITION_NOT_CURRENT" ? 404 : raw === "WEB_IDENTITY_REQUIRED" ? 401 : failures[code]!.status }); } }
+
+function thinkingSessionFailure(error: unknown) {
+  const raw = error instanceof Error ? error.message.split(":")[0] : undefined;
+  if (error instanceof z.ZodError) return { error: "THINKING_SESSION_REQUEST_INVALID", message: "请求参数无效。", status: 400 };
+  return thinkingSessionFailureForCode(raw);
+}
+
+export async function POST(request: Request) {
+  try {
+    const [identity, input] = await Promise.all([resolveWebIdentity(), request.json().then(body.parse)]);
+    const result = await createThinkingSession(identity, input.memoryItemId, input.sessionId);
+    return NextResponse.json(result.pending ? result : { ...result, href: `/studio/thinking/${result.id}` }, { status: result.pending ? 202 : 200 });
+  } catch (error) {
+    const failure = thinkingSessionFailure(error);
+    return NextResponse.json({ error: failure.error, message: failure.message }, { status: failure.status });
+  }
+}

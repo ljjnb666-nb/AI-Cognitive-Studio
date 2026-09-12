@@ -22,7 +22,7 @@ export function StartThinkingButton({ memoryItemId }: { memoryItemId: string }) 
         return;
       }
       if (!response.ok || !body?.href) {
-        setError(body?.message ?? "无法开始思考，请检查 Provider 设置。");
+        setError(body?.message ?? "暂时无法开始思考，请稍后重试。");
         pendingSessionId.current = null;
         return;
       }
