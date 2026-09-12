@@ -86,6 +86,36 @@ export function dispatchBookAnalysisBootstrapWithQueue(queue: Queue<BookAnalysis
   const { topic = BOOK_ANALYSIS_BOOTSTRAP_TOPIC, ...rest } = options;
   return dispatchPendingOutbox<BookAnalysisBootstrapPayload>({ topic, queue, jobName: BOOK_ANALYSIS_BOOTSTRAP_JOB, parse: payload => payload as BookAnalysisBootstrapPayload, jobId: payload => `${payload.bootstrapId}:${payload.dispatchGeneration}`, ...rest });
 }
+
+/** Adopts only pre-bootstrap, successful ingestion lineage. It is deliberately
+ * bounded and performs no Provider work; the ordinary bootstrap worker owns AI execution. */
+export async function reconcileHistoricalBookAnalysisBootstraps(limit = 25) {
+  const candidates = await prisma.ingestionRun.findMany({
+    where: { status: "SUCCEEDED", bookAnalysisBootstrap: null, extraction: { isNot: null }, sourceDocument: { currentExtraction: { isNot: null } } },
+    orderBy: { completedAt: "asc" }, take: limit,
+    select: { id: true },
+  });
+  let adopted = 0;
+  for (const candidate of candidates) {
+    const created = await prisma.$transaction(async tx => {
+      // Serializing on the immutable ingestion row makes concurrent reconcilers
+      // duplicate-safe without ever selecting an arbitrary workspace member.
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "IngestionRun" WHERE "id" = ${candidate.id} FOR UPDATE`;
+      if (locked.length !== 1) return false;
+      const run = await tx.ingestionRun.findUniqueOrThrow({ where: { id: candidate.id }, include: { job: { select: { userId: true } }, extraction: { select: { id: true } } } });
+      if (run.status !== "SUCCEEDED" || !run.extraction || !run.job.userId) return false;
+      const current = await tx.currentDocumentExtraction.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId } } });
+      if (!current || current.extractionId !== run.extraction.id) return false;
+      const existing = await tx.bookAnalysisBootstrap.findUnique({ where: { ingestionRunId: run.id }, select: { id: true } });
+      if (existing) return false;
+      const bootstrap = await tx.bookAnalysisBootstrap.create({ data: { workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, ingestionRunId: run.id, extractionId: run.extraction.id, requestedByUserId: run.job.userId } });
+      await tx.outboxEvent.create({ data: { topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC, aggregateId: bootstrap.id, payload: { bootstrapId: bootstrap.id, dispatchGeneration: bootstrap.dispatchGeneration } } });
+      return true;
+    });
+    if (created) adopted += 1;
+  }
+  return adopted;
+}
 /** A bounded, no-provider-call rearm pass. Readiness is checked by the normal processor. */
 export async function reconcileWaitingBookAnalysisBootstraps(limit = 25, source: NodeJS.ProcessEnv = process.env) {
   const waiting = await prisma.bookAnalysisBootstrap.findMany({ where: { OR: [{ status: "WAITING_FOR_PROVIDER" }, { status: "PENDING", nextAttemptAt: { lte: new Date() } }, { status: "RUNNING", executionLeaseUntil: { lt: new Date() } }] }, orderBy: { updatedAt: "asc" }, take: limit, select: { id: true, status: true } });

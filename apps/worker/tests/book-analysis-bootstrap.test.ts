@@ -9,12 +9,13 @@ const state = vi.hoisted(() => ({
   },
   keyring: true,
   updates: [] as unknown[],
-  findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), executeRaw: vi.fn(), queryRaw: vi.fn(), transaction: vi.fn(), outboxCreate: vi.fn(),
+  findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), bootstrapCreate: vi.fn(), ingestionFindMany: vi.fn(), executeRaw: vi.fn(), queryRaw: vi.fn(), transaction: vi.fn(), outboxCreate: vi.fn(),
   dispatch: vi.fn(),
 }));
 
 vi.mock("@ai-cognitive/db", () => ({ prisma: {
-  bookAnalysisBootstrap: { findUnique: state.findUnique, findUniqueOrThrow: state.findUniqueOrThrow, updateMany: state.updateMany, findMany: state.findMany },
+  bookAnalysisBootstrap: { findUnique: state.findUnique, findUniqueOrThrow: state.findUniqueOrThrow, updateMany: state.updateMany, findMany: state.findMany, create: state.bootstrapCreate },
+  ingestionRun: { findMany: state.ingestionFindMany },
   currentDocumentExtraction: { findUnique: vi.fn() },
   outboxEvent: { create: state.outboxCreate },
   $executeRaw: state.executeRaw, $transaction: state.transaction,
@@ -25,7 +26,7 @@ vi.mock("@ai-cognitive/provider-gateway", () => ({ resolveCredentialKeyring: () 
 
 import { materializeChunkSet, requestBookAnalysisForUser, resolveBookProductExecution } from "@ai-cognitive/book-intelligence";
 import { prisma } from "@ai-cognitive/db";
-import { classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
+import { classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
 
 describe("BookAnalysisBootstrap fault boundaries", () => {
   beforeEach(() => {
@@ -35,11 +36,13 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     state.findUnique.mockReset().mockResolvedValue(state.initial);
     state.findUniqueOrThrow.mockReset().mockResolvedValue(state.detail);
     state.findMany.mockReset().mockResolvedValue([]);
+    state.ingestionFindMany.mockReset().mockResolvedValue([]);
     state.updateMany.mockReset().mockImplementation(async (input: unknown) => { state.updates.push(input); return { count: 1 }; });
     state.executeRaw.mockReset().mockResolvedValue(1);
     state.queryRaw.mockReset().mockResolvedValue([]);
     state.outboxCreate.mockReset().mockResolvedValue({ id: "outbox-1" });
-    state.transaction.mockReset().mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => callback({ $queryRaw: state.queryRaw, bookAnalysisBootstrap: { updateMany: state.updateMany, findUniqueOrThrow: state.findUniqueOrThrow }, outboxEvent: { create: state.outboxCreate } }));
+    state.bootstrapCreate.mockReset().mockResolvedValue({ id: "bootstrap-1", dispatchGeneration: 1 });
+    state.transaction.mockReset().mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => callback({ $queryRaw: state.queryRaw, ingestionRun: { findUniqueOrThrow: state.findUniqueOrThrow }, currentDocumentExtraction: prisma.currentDocumentExtraction, bookAnalysisBootstrap: { updateMany: state.updateMany, findUniqueOrThrow: state.findUniqueOrThrow, findUnique: state.findUnique, create: state.bootstrapCreate }, outboxEvent: { create: state.outboxCreate } }));
     vi.mocked(prisma.currentDocumentExtraction.findUnique).mockReset().mockResolvedValue({ extractionId: "extraction-1" } as never);
     vi.mocked(materializeChunkSet).mockReset().mockResolvedValue({ id: "chunk-set-1" } as never);
     vi.mocked(resolveBookProductExecution).mockReset().mockResolvedValue({ provider: "fixture", model: "book", configuration: {}, routePlan: { version: 1, routes: {} } } as never);
@@ -148,5 +151,25 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     expect(first.data.nextAttemptAt.getTime() - Date.now()).toBe(10_000);
     expect(capped.data.nextAttemptAt.getTime() - Date.now()).toBe(300_000);
     vi.useRealTimers();
+  });
+
+  it("adopts a historical successful current extraction exactly once with its original Job user", async () => {
+    state.ingestionFindMany.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.queryRaw.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.findUniqueOrThrow.mockResolvedValue({ id: "ingestion-1", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: "user-1" }, extraction: { id: "extraction-1" } });
+    vi.mocked(prisma.currentDocumentExtraction.findUnique).mockResolvedValue({ extractionId: "extraction-1" } as never);
+    state.findUnique.mockResolvedValue(null);
+    expect(await reconcileHistoricalBookAnalysisBootstraps()).toBe(1);
+    expect(state.bootstrapCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ requestedByUserId: "user-1", ingestionRunId: "ingestion-1", extractionId: "extraction-1" }) }));
+    expect(state.outboxCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ payload: { bootstrapId: "bootstrap-1", dispatchGeneration: 1 } }) }));
+  });
+
+  it("fails closed for historical lineage without a provable initiating user", async () => {
+    state.ingestionFindMany.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.queryRaw.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.findUniqueOrThrow.mockResolvedValue({ id: "ingestion-1", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: null }, extraction: { id: "extraction-1" } });
+    expect(await reconcileHistoricalBookAnalysisBootstraps()).toBe(0);
+    expect(state.bootstrapCreate).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
   });
 });
