@@ -26,7 +26,7 @@ vi.mock("@ai-cognitive/provider-gateway", () => ({ resolveCredentialKeyring: () 
 
 import { materializeChunkSet, requestBookAnalysisForUser, resolveBookProductExecution } from "@ai-cognitive/book-intelligence";
 import { prisma } from "@ai-cognitive/db";
-import { classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
+import { adoptHistoricalBookAnalysisBootstrapForIngestionRun, classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
 
 describe("BookAnalysisBootstrap fault boundaries", () => {
   beforeEach(() => {
@@ -153,17 +153,84 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     vi.useRealTimers();
   });
 
-  it("adopts a historical successful current extraction exactly once with its original Job user", async () => {
+  it("adopts only the explicit target when multiple eligible ingestions exist", async () => {
+    const target = { id: "ingestion-b", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-b", job: { userId: "user-1" }, extraction: { id: "extraction-b" } };
+    state.queryRaw.mockResolvedValue([{ id: "ingestion-b" }]);
+    state.findUniqueOrThrow.mockResolvedValue(target);
+    state.findUnique.mockResolvedValue(null);
+    state.bootstrapCreate.mockResolvedValue({ id: "bootstrap-b", dispatchGeneration: 1 });
+    vi.mocked(prisma.currentDocumentExtraction.findUnique).mockResolvedValue({ extractionId: "extraction-b" } as never);
+
+    await expect(adoptHistoricalBookAnalysisBootstrapForIngestionRun("ingestion-b")).resolves.toBe("ADOPTED");
+    expect(state.ingestionFindMany).not.toHaveBeenCalled();
+    expect(state.bootstrapCreate).toHaveBeenCalledTimes(1);
+    expect(state.bootstrapCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ ingestionRunId: "ingestion-b", sourceDocumentId: "source-b", extractionId: "extraction-b" }) }));
+    expect(state.outboxCreate).toHaveBeenCalledTimes(1);
+    expect(state.bootstrapCreate).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ ingestionRunId: "ingestion-a" }) }));
+  });
+
+  it("makes exact-target adoption idempotent", async () => {
+    state.queryRaw.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.findUniqueOrThrow.mockResolvedValue({ id: "ingestion-1", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: "user-1" }, extraction: { id: "extraction-1" } });
+    state.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: "bootstrap-1" });
+
+    await expect(adoptHistoricalBookAnalysisBootstrapForIngestionRun("ingestion-1")).resolves.toBe("ADOPTED");
+    await expect(adoptHistoricalBookAnalysisBootstrapForIngestionRun("ingestion-1")).resolves.toBe("ALREADY_ADOPTED");
+    expect(state.bootstrapCreate).toHaveBeenCalledTimes(1);
+    expect(state.outboxCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed for an unknown exact ingestion target", async () => {
+    state.queryRaw.mockResolvedValue([]);
+    await expect(adoptHistoricalBookAnalysisBootstrapForIngestionRun("unknown-ingestion")).resolves.toBe("NOT_FOUND");
+    expect(state.bootstrapCreate).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for a stale or cross-workspace current extraction", async () => {
+    state.queryRaw.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.findUniqueOrThrow.mockResolvedValue({ id: "ingestion-1", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: "user-1" }, extraction: { id: "extraction-1" } });
+    vi.mocked(prisma.currentDocumentExtraction.findUnique).mockResolvedValue({ extractionId: "other-workspace-extraction" } as never);
+
+    await expect(adoptHistoricalBookAnalysisBootstrapForIngestionRun("ingestion-1")).resolves.toBe("NOT_ELIGIBLE");
+    expect(prisma.currentDocumentExtraction.findUnique).toHaveBeenCalledWith({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: "source-1", workspaceId: "workspace-1" } } });
+    expect(state.bootstrapCreate).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for invalid initiating-user provenance", async () => {
+    state.queryRaw.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.findUniqueOrThrow.mockResolvedValue({ id: "ingestion-1", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: null }, extraction: { id: "extraction-1" } });
+
+    await expect(adoptHistoricalBookAnalysisBootstrapForIngestionRun("ingestion-1")).resolves.toBe("NOT_ELIGIBLE");
+    expect(state.bootstrapCreate).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "an unsupported ingestion state", run: { id: "ingestion-1", status: "FAILED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: "user-1" }, extraction: { id: "extraction-1" } } },
+    { label: "a missing extraction", run: { id: "ingestion-1", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: "user-1" }, extraction: null } },
+  ])("fails closed for %s", async ({ run }) => {
+    state.queryRaw.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.findUniqueOrThrow.mockResolvedValue(run);
+
+    await expect(adoptHistoricalBookAnalysisBootstrapForIngestionRun("ingestion-1")).resolves.toBe("NOT_ELIGIBLE");
+    expect(state.bootstrapCreate).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
+  });
+
+  it("keeps batch discovery limit semantics while delegating each selected candidate to the exact-target core", async () => {
     state.ingestionFindMany.mockResolvedValue([{ id: "ingestion-1" }]);
     state.queryRaw.mockResolvedValue([{ id: "ingestion-1" }]);
     state.findUniqueOrThrow.mockResolvedValue({ id: "ingestion-1", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: "user-1" }, extraction: { id: "extraction-1" } });
     vi.mocked(prisma.currentDocumentExtraction.findUnique).mockResolvedValue({ extractionId: "extraction-1" } as never);
     state.findUnique.mockResolvedValue(null);
-    expect(await reconcileHistoricalBookAnalysisBootstraps()).toBe(1);
+    expect(await reconcileHistoricalBookAnalysisBootstraps(1)).toBe(1);
+    expect(state.ingestionFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 1, orderBy: { completedAt: "asc" } }));
     expect(state.bootstrapCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ requestedByUserId: "user-1", ingestionRunId: "ingestion-1", extractionId: "extraction-1" }) }));
     expect(state.outboxCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ payload: { bootstrapId: "bootstrap-1", dispatchGeneration: 1 } }) }));
     state.findUnique.mockResolvedValue({ id: "bootstrap-1" });
-    expect(await reconcileHistoricalBookAnalysisBootstraps()).toBe(0);
+    expect(await reconcileHistoricalBookAnalysisBootstraps(1)).toBe(0);
     expect(state.bootstrapCreate).toHaveBeenCalledTimes(1);
     expect(state.outboxCreate).toHaveBeenCalledTimes(1);
   });
