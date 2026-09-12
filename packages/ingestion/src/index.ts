@@ -18,6 +18,7 @@ export type TrustedRequestContext = { userId: string; workspaceId: string };
 export const INGESTION_QUEUE = "source.ingestion";
 export const INGESTION_TOPIC = "source.ingestion.requested";
 export const INGESTION_JOB = "source.ingest";
+export const BOOK_ANALYSIS_BOOTSTRAP_TOPIC = "book.analysis.bootstrap.requested";
 const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").map((character) => character.charCodeAt(0) < 32 ? "_" : character).join("").slice(0, 180) || "source";
 
 export function assertSafeUrl(value: string): URL {
@@ -154,6 +155,27 @@ export function createIngestionService(storage: StorageProvider, options = { max
             where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId } },
             create: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId, extractionId: extraction.id },
             update: { extractionId: extraction.id },
+          });
+          if (!run.job.userId) throw new Error("INGESTION_INITIATOR_REQUIRED");
+          const bootstrap = await tx.bookAnalysisBootstrap.upsert({
+            where: { ingestionRunId: run.id },
+            create: {
+              workspaceId: run.workspaceId,
+              sourceDocumentId: run.sourceDocumentId,
+              ingestionRunId: run.id,
+              extractionId: extraction.id,
+              requestedByUserId: run.job.userId,
+            },
+            // The ingestion lineage is immutable. A replay may only observe its
+            // original durable bootstrap; it must never retarget a new extraction or user.
+            update: {},
+          });
+          await tx.outboxEvent.create({
+            data: {
+              topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC,
+              aggregateId: bootstrap.id,
+              payload: { bootstrapId: bootstrap.id },
+            },
           });
           await tx.ingestionRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", completedAt: new Date() } });
           await tx.job.update({ where: { id: run.jobId }, data: { status: JobStatus.SUCCEEDED, progress: 100, completedAt: new Date() } });

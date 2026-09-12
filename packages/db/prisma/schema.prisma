@@ -142,6 +142,14 @@ enum AnalysisRunStatus {
   FAILED
 }
 
+enum BookAnalysisBootstrapStatus {
+  PENDING
+  RUNNING
+  WAITING_FOR_PROVIDER
+  SUCCEEDED
+  FAILED_TERMINAL
+}
+
 enum StructureNodeKind {
   ROOT
   CHAPTER
@@ -414,6 +422,7 @@ model Workspace {
   jobs                       Job[]
   chunkSets                  ChunkSet[]
   analysisRuns               BookAnalysisRun[]
+  bookAnalysisBootstraps     BookAnalysisBootstrap[]
   memoryItems                BookMemoryItem[]
   podcastProjects            PodcastProject[]
   podcastEpisodes            PodcastEpisode[]
@@ -868,6 +877,7 @@ model WorkspaceMember {
   teachBackAttempts TeachBackAttempt[]
   cognitionReviewStates UserCognitionReviewState[]
   cognitionReviewEvents UserCognitionReviewEvent[]
+  bookAnalysisBootstraps BookAnalysisBootstrap[]
 
   @@id([workspaceId, userId])
 }
@@ -977,6 +987,7 @@ model SourceDocument {
   currentExtraction           CurrentDocumentExtraction?   @relation("CurrentExtractionSourceDocument")
   chunkSets                   ChunkSet[]
   analysisRuns                BookAnalysisRun[]
+  bookAnalysisBootstraps      BookAnalysisBootstrap[]
   currentIntelligence         CurrentBookIntelligence?     @relation("CurrentIntelligenceSourceDocument")
   podcastProjects             PodcastProjectSource[]
   podcastGenerationSources    PodcastGenerationSource[]
@@ -1038,6 +1049,7 @@ model IngestionRun {
   sourceDocument       SourceDocument      @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   job                  Job                 @relation(fields: [jobId], references: [id], onDelete: Restrict)
   extraction           DocumentExtraction?
+  bookAnalysisBootstrap BookAnalysisBootstrap?
 
   @@unique([id, sourceDocumentId, workspaceId])
 }
@@ -1063,6 +1075,7 @@ model DocumentExtraction {
   structureNodes       DocumentStructureNode[]
   chunkSets            ChunkSet[]
   analysisRuns         BookAnalysisRun[]
+  bookAnalysisBootstraps BookAnalysisBootstrap[]
 
   @@unique([id, sourceDocumentId, workspaceId])
   @@unique([ingestionRunId, sourceDocumentId, workspaceId])
@@ -1266,12 +1279,43 @@ model BookAnalysisRun {
   memoryItems              BookMemoryItem[]
   currentMarkers           CurrentBookIntelligence[] @relation("CurrentIntelligenceRun")
   podcastGenerationSources PodcastGenerationSource[]
+  bootstraps               BookAnalysisBootstrap[]
 
   @@unique([id, workspaceId])
   @@unique([id, workspaceId, chunkSetId])
   @@unique([id, workspaceId, sourceDocumentId, extractionId], map: "BookAnalysisRun_lineage_key")
   @@unique([id, workspaceId, sourceDocumentId, extractionId, chunkSetId], map: "BookAnalysisRun_current_lineage_key")
   @@index([routePlanHash])
+}
+
+model BookAnalysisBootstrap {
+  id                  String                      @id @default(cuid())
+  workspaceId         String
+  sourceDocumentId    String
+  ingestionRunId      String                      @unique
+  extractionId        String
+  requestedByUserId   String
+  status              BookAnalysisBootstrapStatus @default(PENDING)
+  analysisRunId       String?
+  errorCode           String?
+  executionClaimToken String?
+  executionClaimedAt  DateTime?
+  executionLeaseUntil DateTime?
+  createdAt           DateTime                    @default(now())
+  updatedAt           DateTime                    @updatedAt
+  startedAt           DateTime?
+  completedAt         DateTime?
+  workspace           Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  sourceDocument      SourceDocument              @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  ingestionRun        IngestionRun                @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+  extraction          DocumentExtraction          @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Restrict)
+  requestedBy         WorkspaceMember             @relation(fields: [workspaceId, requestedByUserId], references: [workspaceId, userId], onDelete: Restrict)
+  analysisRun         BookAnalysisRun?            @relation(fields: [analysisRunId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@unique([workspaceId, sourceDocumentId, ingestionRunId, extractionId])
+  @@unique([ingestionRunId, sourceDocumentId, workspaceId])
+  @@index([workspaceId, status, executionLeaseUntil])
+  @@index([analysisRunId, workspaceId])
 }
 
 model AnalysisArtifact {
