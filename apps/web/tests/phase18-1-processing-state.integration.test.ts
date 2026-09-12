@@ -62,5 +62,6 @@ describe("Phase 18.1 product processing state", () => {
     expect(deriveProcessingStatus({ ...input, bootstrap: run("RUNNING") }).state).toBe("ANALYSIS_QUEUED");
     expect(deriveProcessingStatus({ ...input, bootstrap: run("WAITING_FOR_PROVIDER") }).state).toBe("WAITING_FOR_PROVIDER");
     expect(deriveProcessingStatus({ ...input, bootstrap: run("FAILED_TERMINAL") }).state).toBe("BOOTSTRAP_FAILED");
+    expect(deriveProcessingStatus({ ...input, bootstrap: run("SUCCEEDED") }).state).toBe("BOOTSTRAP_SUCCEEDED");
   });
 });

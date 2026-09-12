@@ -162,12 +162,26 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     expect(await reconcileHistoricalBookAnalysisBootstraps()).toBe(1);
     expect(state.bootstrapCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ requestedByUserId: "user-1", ingestionRunId: "ingestion-1", extractionId: "extraction-1" }) }));
     expect(state.outboxCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ payload: { bootstrapId: "bootstrap-1", dispatchGeneration: 1 } }) }));
+    state.findUnique.mockResolvedValue({ id: "bootstrap-1" });
+    expect(await reconcileHistoricalBookAnalysisBootstraps()).toBe(0);
+    expect(state.bootstrapCreate).toHaveBeenCalledTimes(1);
+    expect(state.outboxCreate).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed for historical lineage without a provable initiating user", async () => {
     state.ingestionFindMany.mockResolvedValue([{ id: "ingestion-1" }]);
     state.queryRaw.mockResolvedValue([{ id: "ingestion-1" }]);
     state.findUniqueOrThrow.mockResolvedValue({ id: "ingestion-1", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: null }, extraction: { id: "extraction-1" } });
+    expect(await reconcileHistoricalBookAnalysisBootstraps()).toBe(0);
+    expect(state.bootstrapCreate).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects historical adoption when the current extraction is from another lineage", async () => {
+    state.ingestionFindMany.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.queryRaw.mockResolvedValue([{ id: "ingestion-1" }]);
+    state.findUniqueOrThrow.mockResolvedValue({ id: "ingestion-1", status: "SUCCEEDED", workspaceId: "workspace-1", sourceDocumentId: "source-1", job: { userId: "user-1" }, extraction: { id: "extraction-1" } });
+    vi.mocked(prisma.currentDocumentExtraction.findUnique).mockResolvedValue({ extractionId: "other-workspace-extraction" } as never);
     expect(await reconcileHistoricalBookAnalysisBootstraps()).toBe(0);
     expect(state.bootstrapCreate).not.toHaveBeenCalled();
     expect(state.outboxCreate).not.toHaveBeenCalled();
