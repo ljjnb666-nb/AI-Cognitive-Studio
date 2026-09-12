@@ -17,7 +17,7 @@ export function validateTextGenerationResponse(value: unknown): TextGenerationRe
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw invalid();
   const response = value as TextGenerationResponse;
   if ((response.type !== "TEXT" && response.type !== "STRUCTURED") || (response.finishReason !== undefined && !finishReasons.has(response.finishReason)) || (response.providerModel !== undefined && (typeof response.providerModel !== "string" || response.providerModel.length > 512))) throw invalid();
-  if (response.type === "TEXT") { if (typeof response.text !== "string" || response.structured !== undefined) throw invalid(); }
+  if (response.type === "TEXT") { if (typeof response.text !== "string" || !response.text.trim() || response.structured !== undefined) throw invalid(); }
   else if (response.text !== undefined || response.structured === undefined || !jsonSafe(response.structured)) throw invalid();
   let serialized: string;
   try { serialized = JSON.stringify(response); } catch { throw invalid(); }

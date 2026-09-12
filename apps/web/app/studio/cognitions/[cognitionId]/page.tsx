@@ -37,6 +37,7 @@ export default async function CognitionDetailPage({
               <div className="meta-badge">
                 {cognitionTypeLabels[cognition.type]}
               </div>
+              <span className="support-copy">{cognition.evidence.length ? "有来源依据" : "未附来源证据"}</span>
               <CognitionSaveButton
                 cognitionId={cognition.id}
                 initialSaved={cognition.saved}
@@ -77,8 +78,8 @@ export default async function CognitionDetailPage({
               {latest?.assessment
                 ? `最近一次：${latest.assessment.masteryState === "DEMONSTRATED" ? "已表现出理解" : latest.assessment.masteryState === "DEVELOPING" ? "正在形成" : "需要再梳理"}`
                 : cognition.saved
-                  ? "已保存，等待你的思考或复述。"
-                  : "尚未保存到你的认知。"}
+                  ? "已收藏到你的认知库，等待你的思考或复述。"
+                  : "尚未收藏到你的认知库。"}
             </p>
           </section>
           <section className="card-panel">

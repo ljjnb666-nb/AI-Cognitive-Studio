@@ -57,7 +57,7 @@ test("real Better Auth session creates, persists, completes, and protects a grou
   await page.goto(`/studio/cognitions/${fixture.cognition.id}`);
   await expect(page.getByRole("button", { name: "开始思考" })).toBeVisible();
   await page.getByRole("button", { name: "开始思考" }).click();
-  await expect(page.getByText("思考会话尚未就绪，请先配置 Provider。", { exact: false })).toBeVisible();
+  await expect(page.getByText("思考功能尚未配置可用的 AI Provider。", { exact: false })).toBeVisible();
   await configureThinkingRoute(page);
   const creationIds: string[] = [];
   let creationAttempt = 0;
@@ -65,18 +65,45 @@ test("real Better Auth session creates, persists, completes, and protects a grou
     if (route.request().method() !== "POST") return route.continue();
     creationIds.push((route.request().postDataJSON() as { sessionId: string }).sessionId);
     if (creationAttempt++ === 0) {
-      await route.fetch();
       await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "RETRYABLE" }) });
+      return;
+    }
+    if (creationAttempt === 2) {
+      await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ pending: true }) });
+      return;
+    }
+    if (creationAttempt === 3) {
+      await route.abort("failed");
+      return;
+    }
+    if (creationAttempt === 4) {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "not-json" });
+      return;
+    }
+    if (creationAttempt === 5) {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ message: "missing href" }) });
       return;
     }
     await route.continue();
   });
   await page.getByRole("button", { name: "开始思考" }).click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.locator('p[role="alert"]').filter({ hasText: "暂时无法开始思考，请稍后重试。" })).toBeVisible();
+  await page.getByRole("button", { name: "开始思考" }).click();
+  await expect(page.locator('p[role="alert"]').filter({ hasText: "思考引导仍在生成中，请重试以继续。" })).toBeVisible();
+  await page.getByRole("button", { name: "开始思考" }).click();
+  await expect(page.locator('p[role="alert"]').filter({ hasText: "网络请求未完成，请重试以继续。" })).toBeVisible();
+  await page.getByRole("button", { name: "开始思考" }).click();
+  await expect(page.locator('p[role="alert"]').filter({ hasText: "服务器响应不完整，请重试以继续。" })).toBeVisible();
+  await page.getByRole("button", { name: "开始思考" }).click();
+  await expect(page.locator('p[role="alert"]').filter({ hasText: "服务器响应不完整，请重试以继续。" })).toBeVisible();
   await page.getByRole("button", { name: "开始思考" }).click();
   await expect(page).toHaveURL(/\/studio\/thinking\//);
-  expect(creationIds).toHaveLength(2);
-  expect(creationIds[1]).toBe(creationIds[0]);
+  expect(creationIds).toHaveLength(6);
+  expect(creationIds[1]).not.toBe(creationIds[0]);
+  expect(creationIds[2]).toBe(creationIds[1]);
+  expect(creationIds[3]).toBe(creationIds[1]);
+  expect(creationIds[4]).toBe(creationIds[1]);
+  expect(creationIds[5]).toBe(creationIds[1]);
   await expect(page.getByText("你愿意用哪一条证据来检验这个判断？", { exact: true })).toBeVisible();
   await expect(page.getByText(`“${fixture.sourceText}”`, { exact: true })).toBeVisible();
   const sessionId = page.url().split("/").at(-1)!;

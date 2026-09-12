@@ -4,7 +4,10 @@ import { compileStrictJsonSchema } from "./strict-json-schema.js";
 
 export function normalizeTextResponse(text: string, providerModel: string | undefined, finishReason: TextGenerationResponse["finishReason"], input: TextGenerationInput): TextGenerationResponse {
   const structured = input.structuredOutput;
-  if (!structured || structured.mode === "PROMPT_ONLY") return { type: "TEXT", text, providerModel, finishReason };
+  if (!structured || structured.mode === "PROMPT_ONLY") {
+    if (!text.trim()) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Provider returned empty text");
+    return { type: "TEXT", text, providerModel, finishReason };
+  }
   let value: unknown;
   try { value = JSON.parse(text); } catch { throw invalid(); }
   if (structured.mode === "STRICT_JSON_SCHEMA") {

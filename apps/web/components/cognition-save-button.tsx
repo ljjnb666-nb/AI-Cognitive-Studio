@@ -24,7 +24,7 @@ export function CognitionSaveButton({ cognitionId, initialSaved }: { cognitionId
 
   return (
     <button type="button" className="btn btn-secondary" onClick={toggle} disabled={pending} aria-pressed={saved}>
-      {pending ? "正在保存…" : saved ? "已保存" : "保存认知"}
+      {pending ? "正在收藏…" : saved ? "已收藏" : "收藏认知"}
     </button>
   );
 }

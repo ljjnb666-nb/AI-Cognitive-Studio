@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Prisma, prisma } from "@ai-cognitive/db";
 import {
   canonicalTextInputHash,
+  ProviderGatewayError,
   type ProviderExecutionRepository,
   type ProviderGateway,
   type TextGenerationInput,
@@ -27,6 +28,11 @@ const types = new Set([
   "EXAMPLE",
   "STORY",
 ]);
+const safeThinkingProviderErrors = new Set(["AI_PROVIDER_CONFIGURATION_REQUIRED", "INVALID_PROVIDER_RESPONSE", "RATE_LIMITED", "TIMEOUT", "TRANSIENT_UPSTREAM", "AUTHENTICATION_FAILED", "AUTHORIZATION_FAILED", "MODEL_NOT_FOUND"]);
+function safeProviderErrorCode(error: unknown) {
+  const code = error instanceof ProviderGatewayError ? error.code : error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return code && safeThinkingProviderErrors.has(code) ? code : undefined;
+}
 type Identity = Pick<WebIdentityContext, "workspaceId" | "userId">;
 type Runtime = {
   gateway: ProviderGateway;
@@ -142,12 +148,14 @@ async function generate(
       },
       { userId: identity.userId },
     );
-  } catch {
+  } catch (error) {
+    const code = safeProviderErrorCode(error);
+    if (code) throw new Error(code);
     throw new Error("THINKING_SESSION_PROVIDER_FAILED");
   }
   if (result.status === "IN_PROGRESS") return { inProgress: true as const };
   if (result.status !== "SUCCEEDED" && result.status !== "ALREADY_PROCESSED")
-    throw new Error("THINKING_SESSION_PROVIDER_FAILED");
+    throw new Error("INVALID_PROVIDER_RESPONSE");
   if (result.status === "ALREADY_PROCESSED" && result.textConsumed)
     return { inProgress: false as const, consumed: true as const };
   const response = result.response;
@@ -162,7 +170,7 @@ async function generate(
     typeof response.text !== "string" ||
     !response.text.trim()
   )
-    throw new Error("THINKING_SESSION_PROVIDER_FAILED");
+    throw new Error("INVALID_PROVIDER_RESPONSE");
   return {
     inProgress: false as const,
     active,
