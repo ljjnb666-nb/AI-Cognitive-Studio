@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
-import { materializeChunkSet, recoverBookAnalysisForUser, requestBookAnalysis, requestBookAnalysisForUser } from "../src/index.js";
+import { materializeChunkSet, reconcileStaleBookAnalysisJob, recoverBookAnalysisForUser, requestBookAnalysis, requestBookAnalysisForUser, sha256 } from "../src/index.js";
 
 const workspaces: string[] = [], users: string[] = [];
 
@@ -94,6 +94,39 @@ describe("BookAnalysis durable initiating principal", () => {
     expect(recoveries.filter(recovery => recovery.created)).toHaveLength(1);
     expect(await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } })).toMatchObject({ status: "QUEUED" });
     expect(await prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } })).toBe(ingestionBefore);
+  });
+
+  it("preserves a non-unique admission failure instead of replacing it with a missing-run lookup", async () => {
+    const value = await fixture();
+    await prisma.job.createMany({ data: [0, 1].map(ordinal => ({ workspaceId: value.workspace.id, userId: value.owner.id, type: "book.analysis", status: "QUEUED", payload: {}, idempotencyKey: `occupied:${ordinal}:${crypto.randomUUID()}` })) });
+    await expect(requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input)).rejects.toThrow("WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED");
+    expect(await prisma.bookAnalysisRun.count({ where: { workspaceId: value.workspace.id } })).toBe(0);
+  });
+
+  it("does not treat a Job idempotency collision as a BookAnalysisRun identity race", async () => {
+    const value = await fixture();
+    const analysisIdentityHash = sha256(JSON.stringify([value.input.chunkSetId, value.input.pipelineVersion, value.input.promptVersion, value.input.provider, value.input.model, ""]));
+    await prisma.job.create({ data: { workspaceId: value.workspace.id, userId: value.owner.id, type: "book.analysis", status: "SUCCEEDED", payload: {}, idempotencyKey: `book:${analysisIdentityHash}` } });
+    await expect(requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input)).rejects.toMatchObject({ code: "P2002" });
+    expect(await prisma.bookAnalysisRun.count({ where: { workspaceId: value.workspace.id } })).toBe(0);
+  });
+
+  it("reconciles only an expired Book analysis lease and releases its admission job", async () => {
+    const value = await fixture();
+    const requested = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
+    const expiredAt = new Date(Date.now() - 1_000);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "RUNNING", executionClaimToken: crypto.randomUUID(), executionClaimedAt: expiredAt, executionLeaseUntil: expiredAt } });
+    await prisma.job.update({ where: { id: requested.job.id }, data: { status: "RUNNING" } });
+    await expect(reconcileStaleBookAnalysisJob(requested.job.id)).resolves.toBe("STALE_RUN_FAILED");
+    await expect(prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } })).resolves.toMatchObject({ status: "FAILED", errorCode: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED", executionClaimToken: null });
+    await expect(prisma.job.findUniqueOrThrow({ where: { id: requested.job.id } })).resolves.toMatchObject({ status: "FAILED", error: { code: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED" } });
+  });
+
+  it("reconciles an active Book Job that has no durable analysis run", async () => {
+    const value = await fixture();
+    const orphan = await prisma.job.create({ data: { workspaceId: value.workspace.id, userId: value.owner.id, type: "book.analysis", status: "QUEUED", payload: { sourceDocumentId: value.document.id }, idempotencyKey: `orphan:${crypto.randomUUID()}` } });
+    await expect(reconcileStaleBookAnalysisJob(orphan.id)).resolves.toBe("ORPHAN_JOB_FAILED");
+    await expect(prisma.job.findUniqueOrThrow({ where: { id: orphan.id } })).resolves.toMatchObject({ status: "FAILED", error: { code: "BOOK_ANALYSIS_ORPHANED_JOB" } });
   });
 
   it("allocates a new durable recovery key when a later failed retry has no BullMQ attempt increment", async () => {

@@ -57,6 +57,14 @@ export type BookAnalysisRequestInput = { workspaceId: string; sourceDocumentId: 
 export type TrustedBookAnalysisRequestContext = { workspaceId: string; userId: string };
 type StageContext = { blocks: SourceBlockInput[]; blockMap: Map<string, SourceBlockInput>; chunks: any[]; nodes: any[] };
 
+/** A duplicate durable analysis identity means a concurrent request won the create race. */
+export function isBookAnalysisIdentityUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error) || (error as { code?: unknown }).code !== "P2002") return false;
+  const target = (error as { meta?: { target?: unknown } }).meta?.target;
+  if (Array.isArray(target)) return target.length === 1 && target[0] === "analysisIdentityHash";
+  return target === "BookAnalysisRun_analysisIdentityHash_key" || target === "analysisIdentityHash";
+}
+
 const asBlocks = (blocks: Array<{ id: string; ordinal: number; text: string; kind: string; metadata: unknown }>): SourceBlockInput[] => blocks.map((block) => ({ ...block, kind: block.kind as SourceBlockInput["kind"], metadata: block.metadata as SourceBlockInput["metadata"] }));
 const embeddingIdentity = (provider: EmbeddingProvider, override?: string) => embeddingIdentityWithHash(provider.identity, override);
 const logFields = (run: any, correlationId?: string) => ({ workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, analysisRunId: run.id, chunkSetId: run.chunkSetId, analysisStage: run.analysisStage, correlationId: correlationId ?? run.id });
@@ -115,7 +123,8 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
       logger.info("book.analysis.requested", { ...logFields(run, input.correlationId), extractionId: current.extractionId, jobId: job.id, provider, model, ...(routePlanHash ? { routePlanHash } : {}) });
       return { run, job };
     });
-  } catch {
+  } catch (error) {
+    if (!isBookAnalysisIdentityUniqueViolation(error)) throw error;
     const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { analysisIdentityHash }, include: { job: true } });
     return { run, job: run.job };
   }
@@ -540,6 +549,30 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
       await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
     }
   }
+}
+
+export type StaleBookAnalysisJobReconciliation = "STALE_RUN_FAILED" | "ORPHAN_JOB_FAILED" | "NOT_ELIGIBLE";
+
+/**
+ * Exact-job operator reconciliation for durable Book analysis records that can
+ * no longer be consumed. It never touches a live lease and never creates a
+ * retry; normal recovery may be requested only after this releases the stale
+ * admission slot.
+ */
+export async function reconcileStaleBookAnalysisJob(jobId: string, now = new Date()): Promise<StaleBookAnalysisJobReconciliation> {
+  return prisma.$transaction(async (tx) => {
+    const job = await tx.job.findUnique({ where: { id: jobId }, select: { id: true, type: true, status: true } });
+    if (!job || job.type !== BOOK_ANALYSIS_JOB || !["QUEUED", "RUNNING"].includes(job.status)) return "NOT_ELIGIBLE";
+    const run = await tx.bookAnalysisRun.findUnique({ where: { jobId: job.id }, select: { id: true, status: true, executionLeaseUntil: true } });
+    if (!run) {
+      await tx.job.update({ where: { id: job.id }, data: { status: "FAILED", error: { code: "BOOK_ANALYSIS_ORPHANED_JOB" }, completedAt: now } });
+      return "ORPHAN_JOB_FAILED";
+    }
+    if (run.status !== "RUNNING" || !run.executionLeaseUntil || run.executionLeaseUntil >= now) return "NOT_ELIGIBLE";
+    await tx.bookAnalysisRun.update({ where: { id: run.id }, data: { status: "FAILED", errorCode: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED", completedAt: now, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
+    await tx.job.update({ where: { id: job.id }, data: { status: "FAILED", error: { code: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED" }, completedAt: now } });
+    return "STALE_RUN_FAILED";
+  });
 }
 
 async function runFinalizingStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
