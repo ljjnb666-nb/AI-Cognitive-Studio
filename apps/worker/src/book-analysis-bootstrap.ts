@@ -12,6 +12,13 @@ export type BookAnalysisBootstrapPayload = { bootstrapId: string; dispatchGenera
 export type BookAnalysisBootstrapQueueOptions = { prefix?: string; concurrency?: number; source?: NodeJS.ProcessEnv };
 export type BookAnalysisBootstrapFaultPoint = "afterClaim" | "afterChunkSetMaterialization" | "afterBookAnalysisRequest";
 export type ProcessBookAnalysisBootstrapOptions = { source?: NodeJS.ProcessEnv; expectedDispatchGeneration?: number; faultInjector?: (point: BookAnalysisBootstrapFaultPoint, input: { bootstrapId: string; analysisRunId?: string }) => Promise<void> | void };
+/**
+ * BullMQ forbids ':' in custom job IDs. Keep the durable bootstrap generation
+ * in the identity so retries deduplicate while a rearmed generation is new.
+ */
+export function bookAnalysisBootstrapJobId(payload: BookAnalysisBootstrapPayload): string {
+  return `book-analysis-bootstrap-${payload.bootstrapId}-g${payload.dispatchGeneration}`;
+}
 const readyErrors = new Set(["AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"]);
 const errorCode = (error: unknown): string => error instanceof Error ? error.message.split(":")[0] ?? "BOOK_ANALYSIS_BOOTSTRAP_FAILED" : "BOOK_ANALYSIS_BOOTSTRAP_FAILED";
 const assertGatewayRuntimeReady = (source: NodeJS.ProcessEnv = process.env) => { if (!resolveCredentialKeyring(source)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED"); };
@@ -82,25 +89,73 @@ export function createBookAnalysisBootstrapWorker(environment: Environment, opti
   return new Worker<BookAnalysisBootstrapPayload>(BOOK_ANALYSIS_BOOTSTRAP_QUEUE, job => processBookAnalysisBootstrap(job.data.bootstrapId, { source: options.source, expectedDispatchGeneration: job.data.dispatchGeneration }), { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_BOOK_ANALYSIS_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) });
 }
 export function createBookAnalysisBootstrapQueue(environment: Environment, options: BookAnalysisBootstrapQueueOptions = {}) { return new Queue<BookAnalysisBootstrapPayload>(BOOK_ANALYSIS_BOOTSTRAP_QUEUE, { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) }); }
-export function dispatchBookAnalysisBootstrapWithQueue(queue: Queue<BookAnalysisBootstrapPayload>, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; topic?: string } = {}) {
+export function dispatchBookAnalysisBootstrapWithQueue(queue: Queue<BookAnalysisBootstrapPayload>, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; aggregateIds?: string[]; topic?: string } = {}) {
   const { topic = BOOK_ANALYSIS_BOOTSTRAP_TOPIC, ...rest } = options;
-  return dispatchPendingOutbox<BookAnalysisBootstrapPayload>({ topic, queue, jobName: BOOK_ANALYSIS_BOOTSTRAP_JOB, parse: payload => payload as BookAnalysisBootstrapPayload, jobId: payload => `${payload.bootstrapId}:${payload.dispatchGeneration}`, ...rest });
+  return dispatchPendingOutbox<BookAnalysisBootstrapPayload>({ topic, queue, jobName: BOOK_ANALYSIS_BOOTSTRAP_JOB, parse: payload => payload as BookAnalysisBootstrapPayload, jobId: bookAnalysisBootstrapJobId, ...rest });
 }
-/** A bounded, no-provider-call rearm pass. Readiness is checked by the normal processor. */
-export async function reconcileWaitingBookAnalysisBootstraps(limit = 25, source: NodeJS.ProcessEnv = process.env) {
-  const waiting = await prisma.bookAnalysisBootstrap.findMany({ where: { OR: [{ status: "WAITING_FOR_PROVIDER" }, { status: "PENDING", nextAttemptAt: { lte: new Date() } }, { status: "RUNNING", executionLeaseUntil: { lt: new Date() } }] }, orderBy: { updatedAt: "asc" }, take: limit, select: { id: true, status: true } });
-  for (const row of waiting) {
-    try {
-      const bootstrap = await prisma.bookAnalysisBootstrap.findUniqueOrThrow({ where: { id: row.id }, select: { workspaceId: true } });
-      assertGatewayRuntimeReady(source);
-      await resolveBookProductExecution(bootstrap.workspaceId);
-      await prisma.$transaction(async tx => {
-        const changed = row.status === "RUNNING"
-          ? await tx.$queryRaw<Array<{ dispatchGeneration: number }>>`UPDATE "BookAnalysisBootstrap" SET "status" = 'PENDING'::"BookAnalysisBootstrapStatus", "errorCode" = NULL, "nextAttemptAt" = NULL, "dispatchGeneration" = "dispatchGeneration" + 1, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${row.id} AND "status" = 'RUNNING'::"BookAnalysisBootstrapStatus" AND "executionLeaseUntil" < NOW() RETURNING "dispatchGeneration"`
-          : await tx.bookAnalysisBootstrap.updateMany({ where: { id: row.id, status: row.status }, data: { status: "PENDING", errorCode: null, nextAttemptAt: null, dispatchGeneration: { increment: 1 }, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }).then(async result => result.count ? [await tx.bookAnalysisBootstrap.findUniqueOrThrow({ where: { id: row.id }, select: { dispatchGeneration: true } })] : []);
-        if (changed.length === 1) await tx.outboxEvent.create({ data: { topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC, aggregateId: row.id, payload: { bootstrapId: row.id, dispatchGeneration: changed[0]!.dispatchGeneration } } });
-      });
-    } catch (error) { if (!readyErrors.has(errorCode(error))) throw error; }
+
+export type HistoricalBookAnalysisBootstrapAdoption = "ADOPTED" | "ALREADY_ADOPTED" | "NOT_FOUND" | "NOT_ELIGIBLE";
+
+/**
+ * Adopts one immutable, successful ingestion lineage into a durable bootstrap.
+ * This intentionally performs no Provider work or queue dispatch; those belong
+ * to the ordinary outbox dispatcher and bootstrap worker respectively.
+ */
+export async function adoptHistoricalBookAnalysisBootstrapForIngestionRun(ingestionRunId: string): Promise<HistoricalBookAnalysisBootstrapAdoption> {
+  return prisma.$transaction(async tx => {
+    // Serializing on the immutable ingestion row makes direct callers and the
+    // batch reconciler duplicate-safe without selecting another ingestion run.
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "IngestionRun" WHERE "id" = ${ingestionRunId} FOR UPDATE`;
+    if (locked.length !== 1) return "NOT_FOUND";
+    const run = await tx.ingestionRun.findUniqueOrThrow({ where: { id: ingestionRunId }, include: { job: { select: { userId: true } }, extraction: { select: { id: true } } } });
+    if (run.status !== "SUCCEEDED" || !run.extraction || !run.job.userId) return "NOT_ELIGIBLE";
+    const current = await tx.currentDocumentExtraction.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId } } });
+    if (!current || current.extractionId !== run.extraction.id) return "NOT_ELIGIBLE";
+    const existing = await tx.bookAnalysisBootstrap.findUnique({ where: { ingestionRunId: run.id }, select: { id: true } });
+    if (existing) return "ALREADY_ADOPTED";
+    const bootstrap = await tx.bookAnalysisBootstrap.create({ data: { workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, ingestionRunId: run.id, extractionId: run.extraction.id, requestedByUserId: run.job.userId } });
+    await tx.outboxEvent.create({ data: { topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC, aggregateId: bootstrap.id, payload: { bootstrapId: bootstrap.id, dispatchGeneration: bootstrap.dispatchGeneration } } });
+    return "ADOPTED";
+  });
+}
+
+/** Discovers historical candidates; exact adoption and its transaction live above. */
+export async function reconcileHistoricalBookAnalysisBootstraps(limit = 25) {
+  const candidates = await prisma.ingestionRun.findMany({
+    where: { status: "SUCCEEDED", bookAnalysisBootstrap: null, extraction: { isNot: null }, sourceDocument: { currentExtraction: { isNot: null } } },
+    orderBy: { completedAt: "asc" }, take: limit,
+    select: { id: true },
+  });
+  let adopted = 0;
+  for (const candidate of candidates) {
+    if (await adoptHistoricalBookAnalysisBootstrapForIngestionRun(candidate.id) === "ADOPTED") adopted += 1;
   }
+  return adopted;
+}
+export type BookAnalysisBootstrapRearm = "REARMED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "NOT_READY";
+
+/** Rearms exactly one durable bootstrap; readiness always precedes mutation. */
+export async function rearmBookAnalysisBootstrapById(bootstrapId: string, source: NodeJS.ProcessEnv = process.env): Promise<BookAnalysisBootstrapRearm> {
+  const bootstrap = await prisma.bookAnalysisBootstrap.findUnique({ where: { id: bootstrapId }, select: { id: true, status: true, workspaceId: true, nextAttemptAt: true, executionLeaseUntil: true } });
+  if (!bootstrap) return "NOT_FOUND";
+  const now = new Date();
+  const eligible = bootstrap.status === "WAITING_FOR_PROVIDER" || (bootstrap.status === "PENDING" && !!bootstrap.nextAttemptAt && bootstrap.nextAttemptAt <= now) || (bootstrap.status === "RUNNING" && !!bootstrap.executionLeaseUntil && bootstrap.executionLeaseUntil < now);
+  if (!eligible) return "NOT_ELIGIBLE";
+  try { assertGatewayRuntimeReady(source); await resolveBookProductExecution(bootstrap.workspaceId); }
+  catch (error) { if (readyErrors.has(errorCode(error))) return "NOT_READY"; throw error; }
+  let rearmed = false;
+  await prisma.$transaction(async tx => {
+    const changed = bootstrap.status === "RUNNING"
+      ? await tx.$queryRaw<Array<{ dispatchGeneration: number }>>`UPDATE "BookAnalysisBootstrap" SET "status" = 'PENDING'::"BookAnalysisBootstrapStatus", "errorCode" = NULL, "nextAttemptAt" = NULL, "dispatchGeneration" = "dispatchGeneration" + 1, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${bootstrap.id} AND "status" = 'RUNNING'::"BookAnalysisBootstrapStatus" AND "executionLeaseUntil" < NOW() RETURNING "dispatchGeneration"`
+      : await tx.bookAnalysisBootstrap.updateMany({ where: { id: bootstrap.id, status: bootstrap.status, ...(bootstrap.status === "PENDING" ? { nextAttemptAt: { lte: now } } : {}) }, data: { status: "PENDING", errorCode: null, nextAttemptAt: null, dispatchGeneration: { increment: 1 }, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }).then(async result => result.count ? [await tx.bookAnalysisBootstrap.findUniqueOrThrow({ where: { id: bootstrap.id }, select: { dispatchGeneration: true } })] : []);
+    if (changed.length === 1) { rearmed = true; await tx.outboxEvent.create({ data: { topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC, aggregateId: bootstrap.id, payload: { bootstrapId: bootstrap.id, dispatchGeneration: changed[0]!.dispatchGeneration } } }); }
+  });
+  return rearmed ? "REARMED" : "NOT_ELIGIBLE";
+}
+
+/** Bounded discovery delegates every candidate to the exact-target rearm core. */
+export async function reconcileWaitingBookAnalysisBootstraps(limit = 25, source: NodeJS.ProcessEnv = process.env) {
+  const waiting = await prisma.bookAnalysisBootstrap.findMany({ where: { OR: [{ status: "WAITING_FOR_PROVIDER" }, { status: "PENDING", nextAttemptAt: { lte: new Date() } }, { status: "RUNNING", executionLeaseUntil: { lt: new Date() } }] }, orderBy: { updatedAt: "asc" }, take: limit, select: { id: true } });
+  for (const row of waiting) await rearmBookAnalysisBootstrapById(row.id, source);
   return waiting.length;
 }

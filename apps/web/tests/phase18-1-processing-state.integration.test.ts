@@ -56,4 +56,12 @@ describe("Phase 18.1 product processing state", () => {
     const succeeded = await submitProcessingRecovery("source", async () => new Response(null, { status: 202 }));
     expect([failed, unavailable, succeeded]).toEqual(["PROCESSING_RECOVERY_FAILED", "PROCESSING_RECOVERY_FAILED", "RECOVERED"]);
   });
+  it("distinguishes bootstrap waiting and terminal states from generic degraded processing", () => {
+    const input = { ingestion: run("SUCCEEDED"), hasIntelligence: false, workerAvailability: "AVAILABLE" as const, now };
+    expect(deriveProcessingStatus({ ...input, bootstrap: run("PENDING") }).state).toBe("ANALYSIS_QUEUED");
+    expect(deriveProcessingStatus({ ...input, bootstrap: run("RUNNING") }).state).toBe("ANALYSIS_QUEUED");
+    expect(deriveProcessingStatus({ ...input, bootstrap: run("WAITING_FOR_PROVIDER") }).state).toBe("WAITING_FOR_PROVIDER");
+    expect(deriveProcessingStatus({ ...input, bootstrap: run("FAILED_TERMINAL") }).state).toBe("BOOTSTRAP_FAILED");
+    expect(deriveProcessingStatus({ ...input, bootstrap: run("SUCCEEDED") }).state).toBe("BOOTSTRAP_SUCCEEDED");
+  });
 });
