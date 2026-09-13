@@ -2,9 +2,8 @@ import "server-only";
 
 import { prisma } from "@ai-cognitive/db";
 import { resolveProviderCatalog, routeSlotCapabilities, sanitizedProviderManifest, stableHash, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
-import type { BookAnalysisRoutePlan } from "@ai-cognitive/book-intelligence";
+import { resolveBookProductExecution as resolveSharedBookProductExecution, type BookAnalysisRoutePlan } from "@ai-cognitive/book-intelligence";
 
-const bookSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
 const requiredSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"] as const;
 type JsonRecord = Record<string, unknown>;
 type RouteWithConnection = { routeSlot: string; modelId: string; configuration: unknown; connection: { id: string; providerKey: string; protocol: string; endpoint: string | null; status: string; credentialVersions: { id: string; status: string }[] } };
@@ -66,34 +65,6 @@ function readinessDependency(manifest: ReturnType<typeof productManifest>, route
   }
 }
 
-function bookRoutePlan(manifest: ReturnType<typeof productManifest>, routes: RouteWithConnection[]): BookAnalysisRoutePlan {
-  const entries = {} as BookAnalysisRoutePlan["routes"];
-  for (const slot of [...bookSlots, "EMBEDDING"] as const) {
-    const route = routes.find(item => item.routeSlot === slot);
-    const identity = routeIdentity(manifest, routes, slot);
-    if (!route || !route.connection.endpoint) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
-    const credential = route.connection.credentialVersions.find(item => item.status === "ACTIVE");
-    const provider = manifest.providers.find(item => item.providerKey === identity.provider);
-    const capability = provider?.models.find(item => item.modelId === identity.model);
-    if (!credential || !provider || !capability) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
-    const dimensions = slot === "EMBEDDING" ? Number(identity.configuration.embeddingDimensions ?? capability.embeddingDimensions) : undefined;
-    if (slot === "EMBEDDING" && (!Number.isSafeInteger(dimensions) || dimensions! <= 0)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
-    entries[slot] = {
-      providerKey: identity.provider,
-      protocol: route.connection.protocol,
-      modelId: identity.model,
-      ...(identity.modelVersion ? { modelVersion: identity.modelVersion } : {}),
-      configuration: identity.configuration,
-      configurationHash: stableHash(identity.configuration),
-      ...(slot === "EMBEDDING" ? { dimensions } : { structuredOutput: capability.structuredOutput === "STRICT_JSON_SCHEMA" ? "STRICT_JSON_SCHEMA" : "JSON_MODE" }),
-      connectionId: route.connection.id,
-      credentialVersionId: credential.id,
-      endpoint: route.connection.endpoint,
-      adapterVersion: provider.adapterVersion,
-    };
-  }
-  return { version: 1, routes: entries };
-}
 export async function resolveBookRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> {
   const plan = await resolveBookProductExecution(workspaceId);
   return { provider: plan.provider, model: plan.model, modelVersion: plan.modelVersion, configuration: plan.configuration };
@@ -107,7 +78,7 @@ function configurationRequired(error: unknown): never {
   throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
 }
 export async function resolveBookProductExecution(workspaceId: string): Promise<ProductBookExecution> {
-  try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(), routePlan = bookRoutePlan(manifest, routes), chunk = routePlan.routes.BOOK_CHUNK_ANALYSIS; return { provider: chunk.providerKey, model: chunk.modelId, modelVersion: chunk.modelVersion, configuration: chunk.configuration, routePlan }; } catch (error) { return configurationRequired(error); }
+  try { return await resolveSharedBookProductExecution(workspaceId); } catch (error) { return configurationRequired(error); }
 }
 export async function resolvePodcastProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
   try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(); const script = routeIdentity(manifest, routes, "PODCAST_SCRIPT"); routeIdentity(manifest, routes, "EMBEDDING"); return script; } catch (error) { return configurationRequired(error); }

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   bookIntelligenceErrorMessage,
@@ -10,40 +10,20 @@ import {
 import { submitProcessingRecovery } from "@/lib/processing-recovery";
 import { processingCopy, processingWaitLabel, type ProcessingStage, type ProcessingState, type ProcessingWorkerAvailability, type RecoveryAction, type WorkerAvailability } from "@/lib/processing-state";
 
-type Props = { sourceDocumentId: string; ingestionStatus?: string | null; analysisStatus?: string | null; errorCode?: string | null; processingState: string; processingStage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; processingSince?: string | null };
+type Props = { sourceDocumentId: string; ingestionStatus?: string | null; analysisStatus?: string | null; bootstrapStatus?: string | null; errorCode?: string | null; processingState: string; processingStage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; processingSince?: string | null };
 
-export function SourceProcessing({ sourceDocumentId, ingestionStatus, analysisStatus, errorCode, processingState, processingStage: _processingStage, recoveryAction, stageAvailability, workerAvailability: _workerAvailability, processingSince }: Props) {
+export function SourceProcessing({ sourceDocumentId, ingestionStatus: _ingestionStatus, analysisStatus: _analysisStatus, bootstrapStatus: _bootstrapStatus, errorCode, processingState, processingStage: _processingStage, recoveryAction, stageAvailability, workerAvailability: _workerAvailability, processingSince }: Props) {
   const router = useRouter();
-  const requested = useRef(false);
   const [message, setMessage] = useState<string | null>(null);
-  const terminal = processingState === "SUCCEEDED" || processingState.includes("FAILED") || processingState === "PROCESSING_DEGRADED";
-  const requestAnalysis = useCallback(async (manual = false) => {
-    if (!manual && requested.current) return;
-    requested.current = true;
-    try {
-      const response = await fetch("/api/studio/book-intelligence", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceDocumentId }) });
-      setMessage(null);
-      if (!response.ok) {
-        const body = await response.json() as { error?: string };
-        const code = body.error ?? "BOOK_INTELLIGENCE_REQUEST_FAILED";
-        setMessage(code);
-        requested.current = false;
-        return;
-      }
-      router.refresh();
-    } catch {
-      setMessage("BOOK_INTELLIGENCE_REQUEST_FAILED");
-      requested.current = false;
-    }
-  }, [sourceDocumentId, router]);
-  useEffect(() => { if (!terminal && ingestionStatus === "SUCCEEDED" && !analysisStatus) queueMicrotask(() => void requestAnalysis()); }, [analysisStatus, ingestionStatus, requestAnalysis, terminal]);
+  const terminal = processingState === "SUCCEEDED" || processingState.includes("FAILED");
   useEffect(() => {
     if (terminal || message) return;
-    let timer: number | undefined, delay = 2_000, stopped = false;
-    const poll = () => { if (stopped || document.hidden) { timer = window.setTimeout(poll, 10_000); return; } router.refresh(); delay = Math.min(delay + 1_000, 10_000); timer = window.setTimeout(poll, delay); };
+    let timer: number | undefined, stopped = false;
+    const delay = processingState === "PROCESSING_DEGRADED" ? 45_000 : 7_500;
+    const poll = () => { if (stopped) return; if (!document.hidden) router.refresh(); timer = window.setTimeout(poll, delay); };
     timer = window.setTimeout(poll, delay);
     return () => { stopped = true; if (timer) window.clearTimeout(timer); };
-  }, [message, router, terminal]);
+  }, [message, processingState, router, terminal]);
   const [recovering, setRecovering] = useState(false);
   const recover = useCallback(async () => { if (recovering) return; setRecovering(true); try { const result = await submitProcessingRecovery(sourceDocumentId); if (result !== "RECOVERED") { setMessage(result); return; } router.refresh(); } finally { setRecovering(false); } }, [recovering, router, sourceDocumentId]);
   const failureCode = message ?? errorCode;

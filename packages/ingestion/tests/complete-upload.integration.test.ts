@@ -96,6 +96,7 @@ afterEach(async () => {
   if (outboxAggregateIds.length) await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: outboxAggregateIds } } });
   if (workspaceIds.length) {
     await prisma.currentDocumentExtraction.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
+    await prisma.bookAnalysisBootstrap.deleteMany({ where: { workspaceId: { in: workspaceIds } } });
     await prisma.sourceSpan.deleteMany({ where: { sourceBlock: { extraction: { workspaceId: { in: workspaceIds } } } } });
     await prisma.sourceBlock.deleteMany({ where: { extraction: { workspaceId: { in: workspaceIds } } } });
     await prisma.sourcePage.deleteMany({ where: { extraction: { workspaceId: { in: workspaceIds } } } });

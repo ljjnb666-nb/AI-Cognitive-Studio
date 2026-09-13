@@ -1,4 +1,4 @@
-import { materializeChunkSet, requestBookAnalysisForUser } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, requestBookAnalysisForUser, resolveBookAnalysisVersions } from "@ai-cognitive/book-intelligence";
 import { prisma } from "@ai-cognitive/db";
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -27,8 +27,7 @@ export async function POST(request: Request) {
     const requested = await requestBookAnalysisForUser({ workspaceId: identity.workspaceId, userId: identity.userId }, {
       sourceDocumentId: document.id,
       chunkSetId: chunkSet.id,
-      pipelineVersion: process.env.BOOK_ANALYSIS_PIPELINE_VERSION?.trim() || "product-v1",
-      promptVersion: process.env.BOOK_ANALYSIS_PROMPT_VERSION?.trim() || "product-v1",
+      ...resolveBookAnalysisVersions(),
       provider: provider.provider,
       model: provider.model,
       modelVersion: provider.modelVersion,

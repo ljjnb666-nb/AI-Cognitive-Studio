@@ -5,18 +5,9 @@ import { useState } from "react";
 import { StatusBadge } from "./status-badge";
 import { SourceProcessing } from "./source-processing";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
+import { cognitionTypeLabels } from "@/lib/cognitions";
 
-const categoryNames: Record<string, string> = {
-  SUMMARY: "核心观点",
-  CONCEPT: "关键概念",
-  ARGUMENT: "主要论证",
-  CLAIM: "重要证据",
-  QUESTION: "质疑焦点",
-  COUNTERPOINT: "反面视角",
-  EXAMPLE: "案例阐释",
-  STORY: "叙事隐喻",
-  QUOTE: "重要引用",
-};
+const categoryNames: Record<string, string> = cognitionTypeLabels;
 
 const cognitionTypes = new Set(["SUMMARY", "CONCEPT", "ARGUMENT", "CLAIM", "QUOTE", "QUESTION", "COUNTERPOINT", "EXAMPLE", "STORY"]);
 
@@ -56,6 +47,7 @@ type Props = {
     hasIntelligence: boolean;
     ingestionStatus?: string | null;
     analysisStatus?: string | null;
+    bootstrapStatus?: string | null;
     errorCode?: string | null;
     processingState: string;
     processingStage: ProcessingStage;
@@ -131,6 +123,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
               sourceDocumentId={item.id}
               ingestionStatus={item.ingestionStatus}
               analysisStatus={item.analysisStatus}
+              bootstrapStatus={item.bootstrapStatus}
               errorCode={item.errorCode}
               processingState={item.processingState}
               processingStage={item.processingStage}
