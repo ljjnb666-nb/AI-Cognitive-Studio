@@ -1,0 +1,60 @@
+{
+  "fixtures": [
+    {
+      "id": "F1-native-cn",
+      "filename": "F1-native-cn.pdf",
+      "fixtureClass": "native-cn",
+      "generator": "scripts/make-fixtures.mjs (synthetic, no copyrighted content)",
+      "declaredPages": 5,
+      "notes": "synthetic"
+    },
+    {
+      "id": "F2-multicolumn",
+      "filename": "F2-multicolumn.pdf",
+      "fixtureClass": "multicolumn",
+      "generator": "scripts/make-fixtures.mjs (synthetic, no copyrighted content)",
+      "declaredPages": 4,
+      "notes": "synthetic"
+    },
+    {
+      "id": "F3-scanned-cn",
+      "filename": "F3-scanned-cn.pdf",
+      "fixtureClass": "scanned",
+      "generator": "scripts/make-fixtures.mjs (synthetic, no copyrighted content)",
+      "declaredPages": 3,
+      "notes": "synthetic"
+    },
+    {
+      "id": "F4-textbook-complex",
+      "filename": "F4-textbook-complex.pdf",
+      "fixtureClass": "textbook",
+      "generator": "scripts/make-fixtures.mjs (synthetic, no copyrighted content)",
+      "declaredPages": 1,
+      "notes": "synthetic"
+    },
+    {
+      "id": "F5-long-book",
+      "filename": "F5-long-book.pdf",
+      "fixtureClass": "long-book",
+      "generator": "scripts/make-fixtures.mjs (synthetic, no copyrighted content)",
+      "declaredPages": 520,
+      "notes": "synthetic"
+    },
+    {
+      "id": "warmup",
+      "filename": "warmup.pdf",
+      "fixtureClass": "warmup",
+      "generator": "scripts/make-fixtures.mjs (synthetic, no copyrighted content)",
+      "declaredPages": 2,
+      "notes": "synthetic"
+    },
+    {
+      "id": "not-a-pdf",
+      "filename": "not-a-pdf.pdf",
+      "fixtureClass": "malformed",
+      "generator": "scripts/make-fixtures.mjs (synthetic, no copyrighted content)",
+      "declaredPages": 0,
+      "notes": "invalid input fixture for failure-isolation testing"
+    }
+  ]
+}
