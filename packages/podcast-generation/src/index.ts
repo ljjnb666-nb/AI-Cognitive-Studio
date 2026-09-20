@@ -10,5 +10,7 @@ export * from "./gateway-speech-provider.js";
 export * from "./consumer-fingerprint.js";
 export * from "./destination-projection.js";
 export * from "./audio.js";
+export * from "./audio-semantic-identity.js";
+export * from "./paid-outcome-quarantine.js";
 export * from "./audio-processor.js";
 export * from "./prompts.js";

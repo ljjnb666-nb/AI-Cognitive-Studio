@@ -87,7 +87,10 @@ describe("Phase 8C 2A to 2B upgrade acceptance", () => {
       expect((await migrationCount(db))[0]?.count).toBe(30n);
       stage("UPGRADE_STAGE_05_CREATE_2A_FIXTURE");
       await db.workspace.create({ data: { id: workspaceId, name: "upgrade" } });
-      await db.providerExecutionSnapshot.create({ data: { id: snapshotId, workspaceId, routeSlot: "EMBEDDING", providerKey: "openai", protocol: "OPENAI_EMBEDDINGS", modelId: "upgrade", capability: { modelId: "upgrade", families: ["EMBEDDING"], confidence: "VERIFIED", embeddingDimensions: 3 }, configuration: {}, configurationHash: "upgrade", adapterVersion: "2a", correlationId: invocationId } });
+      // Raw insert intentionally targets the historical fixture: the current
+      // Prisma client knows PR-A0's additive snapshot column, while this
+      // pre-upgrade database correctly does not have it yet.
+      await db.$executeRawUnsafe('INSERT INTO "ProviderExecutionSnapshot" ("id","workspaceId","routeSlot","providerKey","protocol","modelId","capability","configuration","configurationHash","adapterVersion","correlationId") VALUES ($1,$2,$3,$4,$5,$6,CAST($7 AS jsonb),CAST($8 AS jsonb),$9,$10,$11)', snapshotId, workspaceId, "EMBEDDING", "openai", "OPENAI_EMBEDDINGS", "upgrade", JSON.stringify({ modelId: "upgrade", families: ["EMBEDDING"], confidence: "VERIFIED", embeddingDimensions: 3 }), JSON.stringify({}), "upgrade", "2a", invocationId);
       await db.providerInvocation.create({ data: { id: invocationId, workspaceId, snapshotId, providerKey: "openai", protocol: "OPENAI_EMBEDDINGS", modelId: "upgrade", routeSlot: "EMBEDDING", idempotencyKey: invocationId, requestFingerprint: "a".repeat(64), correlationId: invocationId, status: "SUCCEEDED", completedAt: new Date() } });
       await db.providerInvocationAttempt.create({ data: { id: attemptId, workspaceId, invocationId, attemptNumber: 1, status: "SUCCEEDED", completedAt: new Date() } });
       const encrypted = cipher.encryptEmbeddingResult(JSON.stringify({ vectors, dimensions: 3 }), { workspaceId, invocationId, attemptId, snapshotId, providerKey: "openai", modelId: "upgrade" });
@@ -103,6 +106,7 @@ describe("Phase 8C 2A to 2B upgrade acceptance", () => {
       await prisma("migrate deploy", databaseUrl);
       db = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
       expect((await migrationCount(db))[0]?.count).toBe(currentMigrationCount);
+      expect(await db.providerExecutionSnapshot.findUniqueOrThrow({ where: { id_workspaceId: { id: snapshotId, workspaceId } } })).toMatchObject({ outcomeRecoveryCapability: "NONE" });
       const postUpgradeRepository = new ProviderExecutionRepository(db as never, cipher);
       expect(await postUpgradeRepository.recoverEmbeddingHandoff(workspaceId, invocationId)).toMatchObject({ kind: "RECOVERABLE", response: { vectors } });
       stage("UPGRADE_STAGE_08_CREATE_DOCUMENT_LINEAGE");
@@ -117,6 +121,10 @@ describe("Phase 8C 2A to 2B upgrade acceptance", () => {
       await db.$disconnect(); db = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
       await expect(materializeDocumentChunkEmbeddings(new ProviderExecutionRepository(db as never, cipher), { workspaceId, invocationId, snapshotId, embeddingVersion: "upgrade-v1", targets: targets.targets })).resolves.toMatchObject({ status: "ALREADY_CONSUMED" });
       expect(await db.documentChunkEmbedding.count({ where: { workspaceId } })).toBe(2); expect(await db.providerInvocation.count({ where: { workspaceId } })).toBe(1); expect(await db.providerInvocationAttempt.count({ where: { workspaceId } })).toBe(1); expect(await db.providerUsageEvent.count({ where: { workspaceId } })).toBe(1);
-    } finally { stage("UPGRADE_STAGE_11_CLEANUP"); await db?.$disconnect(); await admin.$disconnect(); const cleanup = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_TEST } } }); await cleanup.$executeRawUnsafe('DROP DATABASE IF EXISTS "ai_cognitive_studio_phase8c2b_upgrade_test"'); await cleanup.$disconnect(); if (fixture) rmSync(fixture, { recursive: true, force: true }); expect(existsSync(real2BMigration)).toBe(true); }
+      await db.$disconnect(); db = undefined;
+      await prisma("migrate deploy", databaseUrl);
+      db = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+      expect((await migrationCount(db))[0]?.count).toBe(currentMigrationCount);
+    } finally { stage("UPGRADE_STAGE_11_CLEANUP"); await db?.$disconnect(); await admin.$disconnect(); const cleanup = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_TEST } } }); await cleanup.$executeRawUnsafe('DROP DATABASE IF EXISTS "ai_cognitive_studio_phase8c2b_upgrade_test"'); await cleanup.$disconnect(); if (fixture) rmSync(fixture, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); expect(existsSync(real2BMigration)).toBe(true); }
   }, 120_000);
 });
