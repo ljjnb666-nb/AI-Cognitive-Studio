@@ -59,6 +59,24 @@ enum ProviderInvocationAttemptStatus {
   REMOTE_OUTCOME_UNKNOWN
 }
 
+enum ProviderOutcomeRecoveryCapability {
+  NONE
+  AUTHORITATIVE_LOOKUP
+  PROVIDER_IDEMPOTENT_REPLAY
+  ASYNC_OPERATION_HANDLE
+}
+
+enum PodcastAudioPaidOutcomeQuarantineStatus {
+  OPEN
+  RESOLVED
+}
+
+enum PodcastAudioPaidOutcomeResolution {
+  DEFINITIVE_REMOTE_FAILURE
+  ABANDON_AND_ALLOW_RETRY
+  RECOVERED_DURABLE_RESULT
+}
+
 enum ProviderUsageStatus {
   SUCCEEDED
   FAILED
@@ -409,44 +427,45 @@ model User {
 }
 
 model Workspace {
-  id                         String                      @id @default(cuid())
-  name                       String
-  createdAt                  DateTime                    @default(now())
-  updatedAt                  DateTime                    @updatedAt
-  members                    WorkspaceMember[]
-  projects                   Project[]
-  works                      Work[]
-  sources                    Source[]
-  sourceBlobs                SourceBlob[]
-  uploadSessions             UploadSession[]
-  jobs                       Job[]
-  chunkSets                  ChunkSet[]
-  analysisRuns               BookAnalysisRun[]
-  bookAnalysisBootstraps     BookAnalysisBootstrap[]
-  memoryItems                BookMemoryItem[]
-  podcastProjects            PodcastProject[]
-  podcastEpisodes            PodcastEpisode[]
-  podcastGenerationRuns      PodcastGenerationRun[]
-  podcastVoiceProfiles       PodcastVoiceProfile[]
-  audioGenerationRuns        AudioGenerationRun[]
-  podcastAudioRevisions      PodcastAudioRevision[]
-  shortVideoProjects         ShortVideoProject[]
-  shortVideoGenerationRuns   ShortVideoGenerationRun[]
-  shortVideoRevisions        ShortVideoRevision[]
-  providerConnections        ProviderConnection[]
-  providerRoutes             ProviderRouteBinding[]
-  providerSnapshots          ProviderExecutionSnapshot[]
-  providerInvocations        ProviderInvocation[]
-  providerInvocationAttempts ProviderInvocationAttempt[]
-  providerEmbeddingResults   ProviderEmbeddingResult[]
-  providerTextResults        ProviderTextResult[]
-  providerSpeechResults      ProviderSpeechResult[]
-  providerUsageEvents        ProviderUsageEvent[]
-  providerAuditEvents        ProviderAuditEvent[]
-  cognitionStates            UserCognitionState[]
-  defaultForUsers            User[]                      @relation("DefaultWorkspace")
-  productEvents              ProductEvent[]
-  betaFeedback               BetaFeedback[]
+  id                                 String                              @id @default(cuid())
+  name                               String
+  createdAt                          DateTime                            @default(now())
+  updatedAt                          DateTime                            @updatedAt
+  members                            WorkspaceMember[]
+  projects                           Project[]
+  works                              Work[]
+  sources                            Source[]
+  sourceBlobs                        SourceBlob[]
+  uploadSessions                     UploadSession[]
+  jobs                               Job[]
+  chunkSets                          ChunkSet[]
+  analysisRuns                       BookAnalysisRun[]
+  bookAnalysisBootstraps             BookAnalysisBootstrap[]
+  memoryItems                        BookMemoryItem[]
+  podcastProjects                    PodcastProject[]
+  podcastEpisodes                    PodcastEpisode[]
+  podcastGenerationRuns              PodcastGenerationRun[]
+  podcastVoiceProfiles               PodcastVoiceProfile[]
+  audioGenerationRuns                AudioGenerationRun[]
+  podcastAudioPaidOutcomeQuarantines PodcastAudioPaidOutcomeQuarantine[]
+  podcastAudioRevisions              PodcastAudioRevision[]
+  shortVideoProjects                 ShortVideoProject[]
+  shortVideoGenerationRuns           ShortVideoGenerationRun[]
+  shortVideoRevisions                ShortVideoRevision[]
+  providerConnections                ProviderConnection[]
+  providerRoutes                     ProviderRouteBinding[]
+  providerSnapshots                  ProviderExecutionSnapshot[]
+  providerInvocations                ProviderInvocation[]
+  providerInvocationAttempts         ProviderInvocationAttempt[]
+  providerEmbeddingResults           ProviderEmbeddingResult[]
+  providerTextResults                ProviderTextResult[]
+  providerSpeechResults              ProviderSpeechResult[]
+  providerUsageEvents                ProviderUsageEvent[]
+  providerAuditEvents                ProviderAuditEvent[]
+  cognitionStates                    UserCognitionState[]
+  defaultForUsers                    User[]                              @relation("DefaultWorkspace")
+  productEvents                      ProductEvent[]
+  betaFeedback                       BetaFeedback[]
 }
 
 /// Closed Beta access is product access, never a second authentication identity.
@@ -590,65 +609,67 @@ model ProviderRouteBinding {
 }
 
 model ProviderExecutionSnapshot {
-  id                  String                     @id @default(cuid())
-  workspaceId         String
-  routeSlot           String
-  providerKey         String
-  protocol            String
-  modelId             String
-  connectionId        String?
-  credentialVersionId String?
-  endpoint            String?
-  region              String?
-  capability          Json
-  configuration       Json                       @default("{}")
-  configurationHash   String
-  adapterVersion      String
-  promptVersion       String?
-  schemaVersion       String?
-  pipelineVersion     String?
-  correlationId       String
-  createdAt           DateTime                   @default(now())
-  workspace           Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  connection          ProviderConnection?        @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  credentialVersion   ProviderCredentialVersion? @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
-  invocations         ProviderInvocation[]
-  embeddingResults    ProviderEmbeddingResult[]
-  textResults         ProviderTextResult[]
-  speechResults       ProviderSpeechResult[]
+  id                        String                            @id @default(cuid())
+  workspaceId               String
+  routeSlot                 String
+  providerKey               String
+  protocol                  String
+  modelId                   String
+  connectionId              String?
+  credentialVersionId       String?
+  endpoint                  String?
+  region                    String?
+  capability                Json
+  configuration             Json                              @default("{}")
+  configurationHash         String
+  adapterVersion            String
+  promptVersion             String?
+  schemaVersion             String?
+  pipelineVersion           String?
+  correlationId             String
+  outcomeRecoveryCapability ProviderOutcomeRecoveryCapability @default(NONE)
+  createdAt                 DateTime                          @default(now())
+  workspace                 Workspace                         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  connection                ProviderConnection?               @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  credentialVersion         ProviderCredentialVersion?        @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
+  invocations               ProviderInvocation[]
+  embeddingResults          ProviderEmbeddingResult[]
+  textResults               ProviderTextResult[]
+  speechResults             ProviderSpeechResult[]
 
   @@unique([id, workspaceId])
   @@index([workspaceId, routeSlot, createdAt])
 }
 
 model ProviderInvocation {
-  id                  String                      @id @default(cuid())
-  workspaceId         String
-  snapshotId          String
-  connectionId        String?
-  credentialVersionId String?
-  providerKey         String
-  protocol            String
-  modelId             String
-  routeSlot           String
-  idempotencyKey      String
-  requestFingerprint  String
-  correlationId       String
-  status              ProviderInvocationStatus    @default(PENDING)
-  claimToken          String?
-  claimOwner          String?
-  claimExpiresAt      DateTime?
-  createdAt           DateTime                    @default(now())
-  completedAt         DateTime?
-  workspace           Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  snapshot            ProviderExecutionSnapshot   @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  connection          ProviderConnection?         @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  credentialVersion   ProviderCredentialVersion?  @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
-  usageEvents         ProviderUsageEvent[]
-  attempts            ProviderInvocationAttempt[]
-  embeddingResult     ProviderEmbeddingResult?
-  textResult          ProviderTextResult?
-  speechResult        ProviderSpeechResult?
+  id                     String                              @id @default(cuid())
+  workspaceId            String
+  snapshotId             String
+  connectionId           String?
+  credentialVersionId    String?
+  providerKey            String
+  protocol               String
+  modelId                String
+  routeSlot              String
+  idempotencyKey         String
+  requestFingerprint     String
+  correlationId          String
+  status                 ProviderInvocationStatus            @default(PENDING)
+  claimToken             String?
+  claimOwner             String?
+  claimExpiresAt         DateTime?
+  createdAt              DateTime                            @default(now())
+  completedAt            DateTime?
+  workspace              Workspace                           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  snapshot               ProviderExecutionSnapshot           @relation(fields: [snapshotId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  connection             ProviderConnection?                 @relation(fields: [connectionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  credentialVersion      ProviderCredentialVersion?          @relation(fields: [credentialVersionId, connectionId, workspaceId], references: [id, connectionId, workspaceId], onDelete: Restrict)
+  usageEvents            ProviderUsageEvent[]
+  attempts               ProviderInvocationAttempt[]
+  embeddingResult        ProviderEmbeddingResult?
+  textResult             ProviderTextResult?
+  speechResult           ProviderSpeechResult?
+  paidOutcomeQuarantines PodcastAudioPaidOutcomeQuarantine[]
 
   @@unique([workspaceId, idempotencyKey])
   @@unique([id, workspaceId])
@@ -658,23 +679,24 @@ model ProviderInvocation {
 }
 
 model ProviderInvocationAttempt {
-  id              String                          @id @default(cuid())
-  workspaceId     String
-  invocationId    String
-  attemptNumber   Int
-  status          ProviderInvocationAttemptStatus @default(RUNNING)
-  failureCode     String?
-  remoteRequestId String?
-  latencyMs       Int?
-  createdAt       DateTime                        @default(now())
-  startedAt       DateTime                        @default(now())
-  completedAt     DateTime?
-  workspace       Workspace                       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  invocation      ProviderInvocation              @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
-  usageEvents     ProviderUsageEvent[]
-  embeddingResult ProviderEmbeddingResult?
-  textResult      ProviderTextResult?
-  speechResult    ProviderSpeechResult?
+  id                     String                              @id @default(cuid())
+  workspaceId            String
+  invocationId           String
+  attemptNumber          Int
+  status                 ProviderInvocationAttemptStatus     @default(RUNNING)
+  failureCode            String?
+  remoteRequestId        String?
+  latencyMs              Int?
+  createdAt              DateTime                            @default(now())
+  startedAt              DateTime                            @default(now())
+  completedAt            DateTime?
+  workspace              Workspace                           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invocation             ProviderInvocation                  @relation(fields: [invocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  usageEvents            ProviderUsageEvent[]
+  embeddingResult        ProviderEmbeddingResult?
+  textResult             ProviderTextResult?
+  speechResult           ProviderSpeechResult?
+  paidOutcomeQuarantines PodcastAudioPaidOutcomeQuarantine[]
 
   @@unique([id, invocationId, workspaceId])
   @@unique([invocationId, attemptNumber])
@@ -2100,13 +2122,13 @@ model PodcastEpisodeAudioConfig {
 }
 
 model AudioGenerationRun {
-  id                       String                     @id @default(cuid())
+  id                       String                              @id @default(cuid())
   workspaceId              String
   podcastProjectId         String
   episodeId                String
   scriptRevisionId         String
   audioConfigId            String
-  jobId                    String                     @unique
+  jobId                    String                              @unique
   provider                 String
   model                    String
   modelVersion             String?
@@ -2116,22 +2138,22 @@ model AudioGenerationRun {
   normalizationVersion     String
   outputFormat             String
   generationIdentityHash   String
-  idempotencyKey           String                     @unique
-  status                   AudioGenerationStatus      @default(QUEUED)
-  stage                    AudioGenerationStage       @default(QUEUED)
+  idempotencyKey           String                              @unique
+  status                   AudioGenerationStatus               @default(QUEUED)
+  stage                    AudioGenerationStage                @default(QUEUED)
   errorCode                String?
   executionClaimToken      String?
   executionClaimedAt       DateTime?
   executionLeaseUntil      DateTime?
   correlationId            String?
-  createdAt                DateTime                   @default(now())
+  createdAt                DateTime                            @default(now())
   startedAt                DateTime?
   completedAt              DateTime?
-  workspace                Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  episode                  PodcastEpisode             @relation(fields: [episodeId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
-  scriptRevision           PodcastScriptRevision      @relation(fields: [scriptRevisionId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Restrict)
-  audioConfig              PodcastEpisodeAudioConfig  @relation(fields: [audioConfigId, workspaceId, podcastProjectId, episodeId], references: [id, workspaceId, podcastProjectId, episodeId], onDelete: Restrict)
-  job                      Job                        @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  workspace                Workspace                           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  episode                  PodcastEpisode                      @relation(fields: [episodeId, workspaceId, podcastProjectId], references: [id, workspaceId, podcastProjectId], onDelete: Restrict)
+  scriptRevision           PodcastScriptRevision               @relation(fields: [scriptRevisionId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Restrict)
+  audioConfig              PodcastEpisodeAudioConfig           @relation(fields: [audioConfigId, workspaceId, podcastProjectId, episodeId], references: [id, workspaceId, podcastProjectId, episodeId], onDelete: Restrict)
+  job                      Job                                 @relation(fields: [jobId], references: [id], onDelete: Restrict)
   hostVoices               AudioGenerationHostVoice[]
   speechPlans              UtteranceSpeechPlan[]
   utteranceArtifacts       UtteranceAudioArtifact[]
@@ -2139,10 +2161,36 @@ model AudioGenerationRun {
   episodeArtifacts         EpisodeAudioArtifact[]
   revisions                PodcastAudioRevision[]
   evaluations              AudioEvaluationRun[]
+  paidOutcomeQuarantines   PodcastAudioPaidOutcomeQuarantine[]
 
   @@unique([episodeId, generationIdentityHash])
   @@unique([id, workspaceId, episodeId])
   @@unique([id, workspaceId, episodeId, podcastProjectId])
+  @@unique([id, workspaceId])
+}
+
+model PodcastAudioPaidOutcomeQuarantine {
+  id                          String                                  @id @default(cuid())
+  workspaceId                 String
+  audioGenerationRunId        String
+  semanticIdentityHash        String
+  providerInvocationId        String
+  providerInvocationAttemptId String
+  status                      PodcastAudioPaidOutcomeQuarantineStatus @default(OPEN)
+  reasonCode                  String
+  resolution                  PodcastAudioPaidOutcomeResolution?
+  resolutionActorId           String?
+  resolutionReason            String?
+  riskAcknowledged            Boolean?
+  createdAt                   DateTime                                @default(now())
+  resolvedAt                  DateTime?
+  workspace                   Workspace                               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  audioGenerationRun          AudioGenerationRun                      @relation(fields: [audioGenerationRunId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  providerInvocation          ProviderInvocation                      @relation(fields: [providerInvocationId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  providerInvocationAttempt   ProviderInvocationAttempt               @relation(fields: [providerInvocationAttemptId, providerInvocationId, workspaceId], references: [id, invocationId, workspaceId], onDelete: Restrict)
+
+  @@index([workspaceId, semanticIdentityHash, status])
+  @@index([audioGenerationRunId])
 }
 
 model AudioGenerationHostVoice {

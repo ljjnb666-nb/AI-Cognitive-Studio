@@ -3,6 +3,8 @@ export type RouteSlot = (typeof routeSlots)[number];
 export type CapabilityFamily = "TEXT_GENERATION" | "EMBEDDING" | "SPEECH";
 export type ProtocolFamily = "OPENAI_RESPONSES" | "OPENAI_COMPATIBLE" | "ANTHROPIC_COMPATIBLE" | "GEMINI_NATIVE" | "OPENAI_EMBEDDINGS" | "GEMINI_EMBEDDINGS" | "COHERE_EMBEDDINGS_V2" | "VOYAGE_EMBEDDINGS" | "CUSTOM_SPEECH" | "TEST";
 export type CapabilityConfidence = "VERIFIED" | "DECLARED" | "EXPERIMENTAL";
+/** Capability implemented by this application for a persisted execution snapshot. */
+export type ProviderOutcomeRecoveryCapability = "NONE" | "AUTHORITATIVE_LOOKUP" | "PROVIDER_IDEMPOTENT_REPLAY" | "ASYNC_OPERATION_HANDLE";
 export type StructuredOutputMode = "STRICT_JSON_SCHEMA" | "JSON_MODE" | "PROMPT_ONLY" | "UNSUPPORTED";
 
 export type ModelCapability = {
@@ -41,7 +43,7 @@ export type GatewayRequest = { workspaceId: string; routeSlot: RouteSlot; correl
 export type ResourceBudget = { maxInputTokens?: number; maxOutputTokens?: number; maxEmbeddingInputTokens?: number; maxSpeechCharacters?: number; maxAttempts?: number };
 export type ResourceEstimates = { inputTokens?: number; outputTokens?: number; embeddingInputTokens?: number; speechCharacters?: number };
 export type ResolvedRoute = { source: "WORKSPACE" | "PLATFORM"; providerKey: string; protocol: ProtocolFamily; modelId: string; adapterVersion: string; connectionId?: string; credentialVersionId?: string; endpoint?: string; region?: string; capability: ModelCapability; configuration: Readonly<Record<string, unknown>> };
-export type ExecutionSnapshot = ResolvedRoute & { id: string; workspaceId: string; routeSlot: RouteSlot; configurationHash: string; correlationId: string; promptVersion?: string; schemaVersion?: string; pipelineVersion?: string; createdAt: Date };
+export type ExecutionSnapshot = ResolvedRoute & { id: string; workspaceId: string; routeSlot: RouteSlot; configurationHash: string; correlationId: string; promptVersion?: string; schemaVersion?: string; pipelineVersion?: string; /** Legacy test/manual snapshots default fail-safe at persistence. */ outcomeRecoveryCapability?: ProviderOutcomeRecoveryCapability; createdAt: Date };
 export type PlatformDefaultResolver = { resolve(input: Pick<GatewayRequest, "workspaceId" | "routeSlot" | "capability">): Promise<ResolvedRoute | undefined> };
 export type AdapterRequest = GatewayRequest & { requestFingerprint: string };
 export type ProviderAdapterResolverInput = Pick<ExecutionSnapshot, "providerKey" | "protocol" | "modelId"> & { family: CapabilityFamily };
