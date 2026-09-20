@@ -1,6 +1,6 @@
 CREATE TYPE "ProviderOutcomeRecoveryCapability" AS ENUM ('NONE', 'AUTHORITATIVE_LOOKUP', 'PROVIDER_IDEMPOTENT_REPLAY', 'ASYNC_OPERATION_HANDLE');
 CREATE TYPE "PodcastAudioPaidOutcomeQuarantineStatus" AS ENUM ('OPEN', 'RESOLVED');
-CREATE TYPE "PodcastAudioPaidOutcomeResolution" AS ENUM ('DEFINITIVE_REMOTE_FAILURE', 'ABANDON_AND_ALLOW_RETRY', 'RECOVERED_DURABLE_RESULT');
+CREATE TYPE "PodcastAudioPaidOutcomeResolution" AS ENUM ('DEFINITIVE_REMOTE_FAILURE', 'ABANDON_AND_ALLOW_RETRY');
 ALTER TABLE "ProviderExecutionSnapshot" ADD COLUMN "outcomeRecoveryCapability" "ProviderOutcomeRecoveryCapability" NOT NULL DEFAULT 'NONE';
 CREATE UNIQUE INDEX "AudioGenerationRun_id_workspaceId_key" ON "AudioGenerationRun"("id", "workspaceId");
 CREATE TABLE "PodcastAudioPaidOutcomeQuarantine" (

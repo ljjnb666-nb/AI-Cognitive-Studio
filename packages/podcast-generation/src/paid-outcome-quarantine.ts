@@ -4,7 +4,7 @@ import { podcastAudioSemanticIdentity } from "./audio-semantic-identity.js";
 export type QuarantineResolution = "DEFINITIVE_REMOTE_FAILURE" | "ABANDON_AND_ALLOW_RETRY";
 
 /** Opens the only active paid-outcome gate for an Audio semantic operation. */
-type QuarantineFaultInjector = (point: "open.after-create" | "resolve.after-update") => void | Promise<void>;
+type QuarantineFaultInjector = (point: "open.after-create" | "resolve.after-authorization-lock" | "resolve.after-update") => void | Promise<void>;
 export async function openPodcastAudioPaidOutcomeQuarantine(input: { workspaceId: string; audioGenerationRunId: string; providerInvocationId: string; providerInvocationAttemptId: string; faultInjector?: QuarantineFaultInjector }) {
   return prisma.$transaction(async tx => {
     const run = await tx.audioGenerationRun.findFirst({ where: { id: input.audioGenerationRunId, workspaceId: input.workspaceId }, include: { audioConfig: true, hostVoices: true } });
@@ -29,10 +29,11 @@ export async function resolvePodcastAudioPaidOutcomeQuarantine(input: { workspac
   if (!input.reason.trim()) throw new Error("AUDIO_PAID_OUTCOME_RESOLUTION_REASON_REQUIRED");
   if (input.resolution === "ABANDON_AND_ALLOW_RETRY" && input.riskAcknowledged !== true) throw new Error("AUDIO_PAID_OUTCOME_RISK_ACKNOWLEDGEMENT_REQUIRED");
   return prisma.$transaction(async tx => {
-    // Revalidate under the same transaction as the mutation so a concurrent
-    // membership downgrade/delete cannot authorize a later resolution write.
-    const members = await tx.$queryRaw<Array<{ role: string }>>`SELECT "role"::text AS "role" FROM "WorkspaceMember" WHERE "workspaceId"=${input.workspaceId} AND "userId"=${input.actorId} FOR KEY SHARE`;
+    // Lock the membership row before the quarantine row. FOR UPDATE blocks
+    // non-key role downgrades and deletion until this privileged mutation ends.
+    const members = await tx.$queryRaw<Array<{ role: string }>>`SELECT "role"::text AS "role" FROM "WorkspaceMember" WHERE "workspaceId"=${input.workspaceId} AND "userId"=${input.actorId} FOR UPDATE`;
     if (members[0]?.role !== "OWNER") throw new Error("AUDIO_PAID_OUTCOME_OPERATOR_ACCESS_DENIED");
+    await input.faultInjector?.("resolve.after-authorization-lock");
     const rows = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "PodcastAudioPaidOutcomeQuarantine" WHERE "id"=${input.quarantineId} AND "workspaceId"=${input.workspaceId} FOR UPDATE`;
     if (rows.length !== 1) throw new Error("AUDIO_PAID_OUTCOME_QUARANTINE_NOT_FOUND");
     const current = await tx.podcastAudioPaidOutcomeQuarantine.findUniqueOrThrow({ where: { id: input.quarantineId } });
