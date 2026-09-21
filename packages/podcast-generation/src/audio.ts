@@ -131,6 +131,15 @@ export async function requestPodcastAudioGeneration(context: TrustedRequestConte
     const requestedHostVoices = mapping.map(value => ({ hostId: value.hostId, voiceIdentityHash: value.identity }));
     const reusable = prior.find(run => run.status !== "FAILED" && sameDurableHostVoiceMapping(run.hostVoices, requestedHostVoices));
     if (reusable) return { run: reusable, job: reusable.job };
+    // A failed run with durable paid speech evidence owns its provider operation
+    // identities. Do not fork a fresh run before PR-A performs same-run rearm.
+    for (const failed of prior.filter(run => run.status === "FAILED" && sameDurableHostVoiceMapping(run.hostVoices, requestedHostVoices))) {
+      const [speechResult, successfulChunk] = await Promise.all([
+        tx.providerSpeechResult.findFirst({ where: { workspaceId: context.workspaceId, invocation: { idempotencyKey: { startsWith: `podcast-tts:${failed.id}:` } } } }),
+        tx.utteranceSpeechChunk.findFirst({ where: { audioGenerationRunId: failed.id, status: "SUCCEEDED" } }),
+      ]);
+      if (speechResult || successfulChunk) return { run: failed, job: failed.job };
+    }
     identity = sha(stable([...identityBase, prior.length]));
     await admitWorkspaceExpensiveOperation(tx, context.workspaceId, workspaceOperationLimit());
     const job = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: AUDIO_GENERATION_JOB, payload: { episodeId: episode.id, scriptRevisionId: current.id }, idempotencyKey: `audio:${identity}`, correlationId: input.correlationId } });
