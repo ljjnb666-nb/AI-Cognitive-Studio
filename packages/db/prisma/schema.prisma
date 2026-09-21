@@ -2144,6 +2144,8 @@ model AudioGenerationRun {
   executionClaimToken      String?
   executionClaimedAt       DateTime?
   executionLeaseUntil      DateTime?
+  /// Durable transport fence. Legacy rows and deliveries are generation zero.
+  dispatchGeneration       Int                                 @default(0)
   correlationId            String?
   createdAt                DateTime                            @default(now())
   startedAt                DateTime?
