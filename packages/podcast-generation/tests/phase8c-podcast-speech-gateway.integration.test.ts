@@ -4,7 +4,7 @@ import { prisma } from "@ai-cognitive/db";
 import { ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, testCipher } from "@ai-cognitive/provider-gateway";
 import { readEnvironment } from "@ai-cognitive/shared/server";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
-import { createEpisode, createEpisodeAudioConfig, createPodcastProject, createVoiceProfile, processPodcastAudioGenerationRun, requestPodcastAudioGeneration } from "../src/index.js";
+import { createEpisode, createEpisodeAudioConfig, createPodcastProject, createVoiceProfile, processPodcastAudioGenerationRun as processAudioGenerationRun, rearmPodcastAudioGenerationById, requestPodcastAudioGeneration } from "../src/index.js";
 import { GatewayPodcastSpeechSynthesisProvider } from "../src/gateway-speech-provider.js";
 
 process.env.NODE_ENV = "test";
@@ -12,6 +12,13 @@ const environment = readEnvironment();
 const storage = new S3CompatibleStorageProvider({ endpoint: environment.S3_ENDPOINT, publicEndpoint: environment.S3_PUBLIC_ENDPOINT, region: environment.S3_REGION, bucket: environment.S3_BUCKET, accessKey: environment.S3_ACCESS_KEY, secretKey: environment.S3_SECRET_KEY, forcePathStyle: environment.S3_FORCE_PATH_STYLE });
 const owned: Array<{ workspaceId: string; userId: string }> = [];
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+async function processPodcastAudioGenerationRun(runId: string, dependencies: Parameters<typeof processAudioGenerationRun>[1], expectedDispatchGeneration = 0) {
+  const result = await processAudioGenerationRun(runId, dependencies, expectedDispatchGeneration);
+  if (result.status === "SUCCEEDED" && expectedDispatchGeneration === 0 && result.dispatchGeneration > 0) return processAudioGenerationRun(runId, dependencies, result.dispatchGeneration);
+  if (result.status !== "FAILED" || expectedDispatchGeneration !== 0) return result;
+  await expect(rearmPodcastAudioGenerationById(runId, 0)).resolves.toBe("REARMED");
+  return processAudioGenerationRun(runId, dependencies, 1);
+}
 function wav() { const samples = 8_000, bytes = new Uint8Array(44 + samples * 2), view = new DataView(bytes.buffer); bytes.set(new TextEncoder().encode("RIFF")); view.setUint32(4, bytes.length - 8, true); bytes.set(new TextEncoder().encode("WAVEfmt "), 8); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, 8_000, true); view.setUint32(28, 16_000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); bytes.set(new TextEncoder().encode("data"), 36); view.setUint32(40, samples * 2, true); for (let i = 0; i < samples; i++) view.setInt16(44 + i * 2, Math.sin(i / 20) * 2_000, true); return bytes; }
 
 async function fixture() {

@@ -127,8 +127,9 @@ export async function requestPodcastAudioGeneration(context: TrustedRequestConte
     const quarantine = await tx.podcastAudioPaidOutcomeQuarantine.findFirst({ where: { workspaceId: context.workspaceId, semanticIdentityHash, status: "OPEN" }, include: { audioGenerationRun: { include: { job: true } } } });
     if (quarantine) return { run: quarantine.audioGenerationRun, job: quarantine.audioGenerationRun.job, quarantine };
     // Re-read after the semantic lock: a concurrent same-run rearm wins over a fresh retry.
-    const prior = await tx.audioGenerationRun.findMany({ where: equivalent, include: { job: true }, orderBy: { createdAt: "desc" } });
-    const reusable = prior.find(run => run.status !== "FAILED");
+    const prior = await tx.audioGenerationRun.findMany({ where: equivalent, include: { job: true, hostVoices: true }, orderBy: { createdAt: "desc" } });
+    const requestedHostVoices = mapping.map(value => ({ hostId: value.hostId, voiceIdentityHash: value.identity }));
+    const reusable = prior.find(run => run.status !== "FAILED" && sameDurableHostVoiceMapping(run.hostVoices, requestedHostVoices));
     if (reusable) return { run: reusable, job: reusable.job };
     identity = sha(stable([...identityBase, prior.length]));
     await admitWorkspaceExpensiveOperation(tx, context.workspaceId, workspaceOperationLimit());
@@ -172,6 +173,8 @@ async function finalize(run: any, token: string) { const artifact = await prisma
 export async function processPodcastAudioGenerationRun(runId: string, dependencies: AudioDependencies, expectedDispatchGeneration = 0) {
   if (!Number.isSafeInteger(expectedDispatchGeneration) || expectedDispatchGeneration < 0) return prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: runId } });
   let run: any = await prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: runId }, include: { job: true, audioConfig: true, scriptRevision: true, hostVoices: { include: { voiceProfile: true } } } });
+  // A stale delivery has zero authority, including over terminal verification.
+  if (run.dispatchGeneration !== expectedDispatchGeneration) return run;
   if (run.status === "SUCCEEDED") {
     const provider = dependencies.providerForRun ? await dependencies.providerForRun({ workspaceId: run.workspaceId, audioGenerationRunId: run.id }) : dependencies.provider;
     if (!provider) throw new Error("AUDIO_GENERATION_PROVIDER_NOT_CONFIGURED");
@@ -179,7 +182,7 @@ export async function processPodcastAudioGenerationRun(runId: string, dependenci
     return run;
   }
   const token = randomUUID();
-  const claimed = await prisma.$transaction(async tx => { const rows = await tx.$queryRaw<Array<{ jobId: string }>>`UPDATE "AudioGenerationRun" SET "status"='RUNNING'::"AudioGenerationStatus", "stage"=CASE WHEN "stage"='QUEUED'::"AudioGenerationStage" THEN 'SPEECH_PREPARATION'::"AudioGenerationStage" ELSE "stage" END, "executionClaimToken"=${token}, "executionClaimedAt"=NOW(), "executionLeaseUntil"=NOW()+(${AUDIO_LEASE_MS} * INTERVAL '1 millisecond'), "startedAt"=COALESCE("startedAt",NOW()), "completedAt"=NULL, "errorCode"=NULL WHERE "id"=${runId} AND "dispatchGeneration"=${expectedDispatchGeneration} AND "status"<>'SUCCEEDED'::"AudioGenerationStatus" AND ("executionClaimToken" IS NULL OR "executionLeaseUntil"<NOW()) RETURNING "jobId"`; if (rows.length) await tx.job.update({ where: { id: rows[0]!.jobId }, data: { status: "RUNNING", startedAt: new Date(), attemptCount: { increment: 1 }, error: undefined } }); return rows.length === 1; }); if (!claimed) return prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: runId } });
+  const claimed = await prisma.$transaction(async tx => { const rows = await tx.$queryRaw<Array<{ jobId: string }>>`UPDATE "AudioGenerationRun" SET "status"='RUNNING'::"AudioGenerationStatus", "stage"=CASE WHEN "stage"='QUEUED'::"AudioGenerationStage" THEN 'SPEECH_PREPARATION'::"AudioGenerationStage" ELSE "stage" END, "executionClaimToken"=${token}, "executionClaimedAt"=NOW(), "executionLeaseUntil"=NOW()+(${AUDIO_LEASE_MS} * INTERVAL '1 millisecond'), "startedAt"=COALESCE("startedAt",NOW()), "completedAt"=NULL, "errorCode"=NULL WHERE "id"=${runId} AND "dispatchGeneration"=${expectedDispatchGeneration} AND ("status"='QUEUED'::"AudioGenerationStatus" OR ("status"='RUNNING'::"AudioGenerationStatus" AND ("executionClaimToken" IS NULL OR "executionLeaseUntil" IS NULL OR "executionLeaseUntil"<NOW()))) RETURNING "jobId"`; if (rows.length) await tx.job.update({ where: { id: rows[0]!.jobId }, data: { status: "RUNNING", startedAt: new Date(), attemptCount: { increment: 1 }, error: undefined } }); return rows.length === 1; }); if (!claimed) return prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: runId } });
   try { const provider = dependencies.providerForRun ? await dependencies.providerForRun({ workspaceId: run.workspaceId, audioGenerationRunId: run.id }) : dependencies.provider; if (!provider) throw new Error("AUDIO_GENERATION_PROVIDER_NOT_CONFIGURED"); if (provider.identity.provider !== run.provider || provider.identity.model !== run.model || (provider.identity.modelVersion ?? null) !== run.modelVersion) throw new Error("AUDIO_PROVIDER_IDENTITY_MISMATCH"); while (true) { run = await prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: runId }, include: { job: true, audioConfig: true, scriptRevision: true, hostVoices: { include: { voiceProfile: true } } } }); if (run.stage === "SPEECH_PREPARATION") { await createPlans(run, token); await dependencies.faultInjector?.("after-speech-preparation", { runId }); await stage(run.id, token, "SPEECH_PREPARATION", "UTTERANCE_SYNTHESIS"); } else if (run.stage === "UTTERANCE_SYNTHESIS") { await synthesize(run, token, dependencies, provider); await stage(run.id, token, "UTTERANCE_SYNTHESIS", "SEGMENT_ASSEMBLY"); } else if (run.stage === "SEGMENT_ASSEMBLY") { await assembleSegments(run, token, dependencies.storage); await stage(run.id, token, "SEGMENT_ASSEMBLY", "EPISODE_ASSEMBLY"); } else if (run.stage === "EPISODE_ASSEMBLY") { await assembleEpisode(run, token, dependencies.storage); await dependencies.faultInjector?.("after-episode-assembly", { runId }); await stage(run.id, token, "EPISODE_ASSEMBLY", "AUDIO_NORMALIZATION"); } else if (run.stage === "AUDIO_NORMALIZATION") { await normalizeEpisode(run, token, dependencies.storage); await stage(run.id, token, "AUDIO_NORMALIZATION", "QUALITY_VALIDATION"); } else if (run.stage === "QUALITY_VALIDATION") { await evaluate(run, token, dependencies.storage); await stage(run.id, token, "QUALITY_VALIDATION", "FINALIZING"); } else if (run.stage === "FINALIZING") { await finalize(run, token); } else if (run.stage === "COMPLETED") break; else throw new Error("AUDIO_STAGE_INVALID"); }
     return prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: run.id } });
   } catch (error) { const code = typeof error === "object" && error !== null && "code" in error && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : error instanceof Error ? error.message.split(":")[0]! : "AUDIO_GENERATION_FAILED"; if (code !== "AUDIO_GENERATION_OWNERSHIP_LOST") await prisma.$transaction(async tx => { const changed = await tx.$executeRaw`UPDATE "AudioGenerationRun" SET "status"='FAILED'::"AudioGenerationStatus", "errorCode"=${code}, "completedAt"=NOW(), "executionClaimToken"=NULL, "executionLeaseUntil"=NULL WHERE "id"=${run.id} AND "executionClaimToken"=${token} AND "executionLeaseUntil">NOW()`; if (changed) await tx.job.update({ where: { id: run.jobId }, data: { status: "FAILED", completedAt: new Date(), error: { code } } });
@@ -192,6 +195,16 @@ export async function processPodcastAudioGenerationRun(runId: string, dependenci
 }
 function audioSemanticIdentityForRun(run: any) {
   return podcastAudioSemanticIdentity({ episodeId: run.episodeId, scriptRevisionId: run.scriptRevisionId, audioConfig: run.audioConfig, hostVoices: run.hostVoices, provider: run.provider, model: run.model, modelVersion: run.modelVersion, pipelineVersion: run.pipelineVersion, speechPreparationVersion: run.speechPreparationVersion, assemblyVersion: run.assemblyVersion, normalizationVersion: run.normalizationVersion, outputFormat: run.outputFormat });
+}
+
+/**
+ * PR-A0 persists a voice-hash multiset. Adoption decisions need the stricter,
+ * order-independent but host-sensitive durable assignment instead.
+ */
+function sameDurableHostVoiceMapping(left: Array<{ hostId: string; voiceIdentityHash: string }>, right: Array<{ hostId: string; voiceIdentityHash: string }>) {
+  if (left.length !== right.length) return false;
+  const map = new Map(left.map(value => [value.hostId, value.voiceIdentityHash]));
+  return map.size === right.length && right.every(value => map.get(value.hostId) === value.voiceIdentityHash);
 }
 
 /**
@@ -215,7 +228,7 @@ export async function rearmPodcastAudioGenerationById(audioGenerationRunId: stri
       const quarantine = await tx.podcastAudioPaidOutcomeQuarantine.findFirst({ where: { workspaceId: current.workspaceId, semanticIdentityHash, status: "OPEN" } });
       if (quarantine) return "PAID_OUTCOME_QUARANTINED";
       const equivalent = await tx.audioGenerationRun.findMany({ where: { episodeId: current.episodeId, scriptRevisionId: current.scriptRevisionId, audioConfigId: current.audioConfigId, provider: current.provider, model: current.model, modelVersion: current.modelVersion, pipelineVersion: current.pipelineVersion, speechPreparationVersion: current.speechPreparationVersion, assemblyVersion: current.assemblyVersion, normalizationVersion: current.normalizationVersion, outputFormat: current.outputFormat }, include: { audioConfig: true, hostVoices: true } });
-      if (equivalent.some(other => other.id !== current.id && other.status !== "FAILED" && audioSemanticIdentityForRun(other) === semanticIdentityHash)) return "SUPERSEDED";
+      if (equivalent.some(other => other.id !== current.id && other.status !== "FAILED" && audioSemanticIdentityForRun(other) === semanticIdentityHash && sameDurableHostVoiceMapping(other.hostVoices, current.hostVoices))) return "SUPERSEDED";
       const leaseLive = current.executionLeaseUntil !== null && current.executionLeaseUntil.getTime() > (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now.getTime();
       if (current.status === "SUCCEEDED" || (current.status === "RUNNING" && leaseLive)) return "NOT_ELIGIBLE";
       const jobIsActive = current.job.status === "QUEUED" || current.job.status === "RUNNING";
