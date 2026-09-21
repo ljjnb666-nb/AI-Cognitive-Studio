@@ -1,7 +1,7 @@
 import { prisma } from "@ai-cognitive/db";
 
 export type OutboxQueue<T> = { add(name: string, payload: T, options: { jobId: string }): Promise<unknown> };
-type OutboxTransaction = Pick<typeof prisma, "ingestionRun" | "bookAnalysisRun" | "job">;
+type OutboxTransaction = Pick<typeof prisma, "$executeRaw" | "ingestionRun" | "bookAnalysisRun" | "job">;
 export type DispatchOptions<T> = { topic: string; queue: OutboxQueue<T>; jobName: string; parse(payload: unknown): T; jobId(payload: T): string; afterDispatch?(tx: OutboxTransaction, payload: T, jobId: string): Promise<void>; batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; aggregateIds?: string[]; beforeFinalize?: (eventId: string) => Promise<void> | void };
 
 /** Shared PostgreSQL-authoritative transactional-outbox claim, enqueue and finalization protocol. */
