@@ -390,7 +390,7 @@ export async function requestShortVideoGeneration(
 async function claim(runId: string, token: string) {
   const rows = await prisma.$queryRaw<
     Array<{ jobId: string }>
-  >`UPDATE "ShortVideoGenerationRun" SET "status"='RUNNING'::"ShortVideoGenerationStatus", "stage"=CASE WHEN "stage"='QUEUED'::"ShortVideoGenerationStage" THEN 'CONTEXT_RETRIEVAL'::"ShortVideoGenerationStage" ELSE "stage" END, "startedAt"=COALESCE("startedAt", NOW()), "executionClaimToken"=${token}, "executionClaimedAt"=NOW(), "executionLeaseUntil"=NOW()+INTERVAL '2 minutes', "errorCode"=NULL WHERE "id"=${runId} AND "status" <> 'SUCCEEDED'::"ShortVideoGenerationStatus" AND ("executionClaimToken" IS NULL OR "executionLeaseUntil" < NOW()) RETURNING "jobId"`;
+  >`UPDATE "ShortVideoGenerationRun" SET "status"='RUNNING'::"ShortVideoGenerationStatus", "stage"=CASE WHEN "stage"='QUEUED'::"ShortVideoGenerationStage" THEN 'CONTEXT_RETRIEVAL'::"ShortVideoGenerationStage" ELSE "stage" END, "startedAt"=COALESCE("startedAt", NOW()), "executionClaimToken"=${token}, "executionClaimedAt"=NOW(), "executionLeaseUntil"=NOW()+INTERVAL '2 minutes', "errorCode"=NULL WHERE "id"=${runId} AND "status" IN ('QUEUED'::"ShortVideoGenerationStatus", 'RUNNING'::"ShortVideoGenerationStatus") AND ("executionClaimToken" IS NULL OR "executionLeaseUntil" < NOW()) RETURNING "jobId"`;
   if (!rows.length) return false;
   await prisma.job.update({
     where: { id: rows[0]!.jobId },
@@ -1107,7 +1107,7 @@ export async function dispatchPendingShortVideoGeneration(
       options: { jobId: string },
     ): Promise<unknown>;
   },
-  options: { aggregateIds?: string[]; dispatchConcurrency?: number; topic?: string; beforeFinalize?: (eventId: string) => Promise<void> | void } = {},
+  options: { aggregateIds?: string[]; dispatchConcurrency?: number; topic?: string; beforeFinalize?: (eventId: string) => Promise<void> | void; afterGenerationRead?: (backendPid: number) => Promise<void> | void } = {},
 ) {
   return dispatchPendingOutbox<{ shortVideoGenerationRunId: string; dispatchGeneration: number }>({
     topic: options.topic ?? SHORT_VIDEO_GENERATION_TOPIC,
@@ -1125,9 +1125,9 @@ export async function dispatchPendingShortVideoGeneration(
     dispatchConcurrency: options.dispatchConcurrency,
     beforeFinalize: options.beforeFinalize,
     afterDispatch: async (tx, payload, queueJobId) => {
-      const run = await prisma.shortVideoGenerationRun.findUniqueOrThrow({
-        where: { id: payload.shortVideoGenerationRunId },
-      });
+      const [run] = await tx.$queryRaw<Array<{ dispatchGeneration: number; jobId: string; backendPid: number }>>`SELECT "dispatchGeneration", "jobId", pg_backend_pid() AS "backendPid" FROM "ShortVideoGenerationRun" WHERE "id" = ${payload.shortVideoGenerationRunId} FOR UPDATE`;
+      if (!run) throw new Error("SHORT_VIDEO_GENERATION_RUN_NOT_FOUND");
+      await options.afterGenerationRead?.(run.backendPid);
       if (run.dispatchGeneration === payload.dispatchGeneration) await tx.job.update({ where: { id: run.jobId }, data: { queueJobId } });
     },
   });

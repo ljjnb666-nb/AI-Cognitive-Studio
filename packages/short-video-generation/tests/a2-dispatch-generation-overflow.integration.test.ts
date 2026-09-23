@@ -18,6 +18,16 @@ async function fixture(generation: number) {
   return { run, job };
 }
 
+async function waitForGenerationOrBlockedUpdate(blockerPid: number, runId: string, expectedGeneration: number) {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    const [state] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (SELECT 1 FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND ${blockerPid} = ANY(pg_blocking_pids(activity.pid))) AS blocked`;
+    if (state?.blocked) return "BLOCKED" as const;
+    if ((await prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: runId }, select: { dispatchGeneration: true } })).dispatchGeneration !== expectedGeneration) return "ADVANCED" as const;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  throw new Error("FINALIZER_REARM_RACE_DID_NOT_PROGRESS:ShortVideoGenerationRun");
+}
+
 describe("A2 Short Video dispatch generation overflow", () => {
   it("accepts the largest safe transport generation but fences it against the persisted generation before provider resolution", async () => {
     const { run, job } = await fixture(0);
@@ -61,6 +71,28 @@ describe("A2 Short Video dispatch generation overflow", () => {
       expect(provider).toBe(beforeStale);
     } finally { await Promise.all([worker.close(), queue.obliterate({ force: true }), queue.close()]); }
   });
+  it("gives FAILED Short Video generation N zero authority on same-generation BullMQ redelivery", async () => {
+    const { run, job } = await fixture(0);
+    await prisma.job.update({ where: { id: job.id }, data: { attemptCount: 4, completedAt: new Date() } });
+    const prefix = `a2-video-failed-redelivery-${randomUUID()}`;
+    const counters = { provider: 0, embedding: 0, tts: 0, renderer: 0 };
+    const environment = { REDIS_URL: process.env.REDIS_URL!, S3_ENDPOINT: "http://localhost:9000", S3_REGION: "us-east-1", S3_BUCKET: "ai-cognitive-studio-dev", S3_ACCESS_KEY: "local-development-only", S3_SECRET_KEY: "local-development-only", S3_FORCE_PATH_STYLE: true, WORKER_SHORT_VIDEO_GENERATION_CONCURRENCY: 1 } as unknown as Parameters<typeof createShortVideoGenerationWorker>[0];
+    const worker = createShortVideoGenerationWorker(environment, { providerForRun: async () => { counters.provider++; throw new Error("FAILED_RUN_PROVIDER_RESOLVED"); }, embeddingProviderForRun: async () => { counters.embedding++; throw new Error("FAILED_RUN_EMBEDDING_RESOLVED"); }, ttsForRun: async () => { counters.tts++; throw new Error("FAILED_RUN_TTS_RESOLVED"); }, renderer: { render: async () => { counters.renderer++; throw new Error("FAILED_RUN_RENDERED"); } } as never }, { prefix });
+    const queue = createShortVideoGenerationQueue(environment, { prefix });
+    try {
+      await worker.waitUntilReady();
+      const beforeRun = await prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } });
+      const beforeJob = await prisma.job.findUniqueOrThrow({ where: { id: job.id } });
+      const beforeBusiness = await Promise.all([prisma.shortVideoScene.count({ where: { shortVideoGenerationRunId: run.id } }), prisma.providerInvocation.count({ where: { workspaceId: run.workspaceId } })]);
+      const delivered = await queue.add("a2-failed-same-generation", { shortVideoGenerationRunId: run.id, dispatchGeneration: 0 }, { jobId: `${run.id}-failed-redelivery` });
+      await expect.poll(async () => delivered.getState(), { timeout: 10_000 }).toBe("failed");
+      const [afterRun, afterJob] = await Promise.all([prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } }), prisma.job.findUniqueOrThrow({ where: { id: job.id } })]);
+      expect({ status: afterRun.status, generation: afterRun.dispatchGeneration, stage: afterRun.stage, errorCode: afterRun.errorCode, claimToken: afterRun.executionClaimToken, claimedAt: afterRun.executionClaimedAt, leaseUntil: afterRun.executionLeaseUntil, completedAt: afterRun.completedAt, jobId: afterRun.jobId }).toEqual({ status: beforeRun.status, generation: beforeRun.dispatchGeneration, stage: beforeRun.stage, errorCode: beforeRun.errorCode, claimToken: beforeRun.executionClaimToken, claimedAt: beforeRun.executionClaimedAt, leaseUntil: beforeRun.executionLeaseUntil, completedAt: beforeRun.completedAt, jobId: beforeRun.jobId });
+      expect({ status: afterJob.status, attempts: afterJob.attemptCount, queueJobId: afterJob.queueJobId, completedAt: afterJob.completedAt }).toEqual({ status: beforeJob.status, attempts: beforeJob.attemptCount, queueJobId: beforeJob.queueJobId, completedAt: beforeJob.completedAt });
+      expect(counters).toEqual({ provider: 0, embedding: 0, tts: 0, renderer: 0 });
+      expect(await Promise.all([prisma.shortVideoScene.count({ where: { shortVideoGenerationRunId: run.id } }), prisma.providerInvocation.count({ where: { workspaceId: run.workspaceId } })])).toEqual(beforeBusiness);
+    } finally { await Promise.all([worker.close(), queue.obliterate({ force: true }), queue.close()]); }
+  });
   it("keeps active capacity, reacquires terminal capacity, and rolls back when full", async () => { const prior = process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT; process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = "2"; try { const active = await fixture(0); await prisma.job.update({ where: { id: active.job.id }, data: { status: "QUEUED" } }); await prisma.job.create({ data: { workspaceId: active.run.workspaceId, type: "book.analysis", payload: {}, status: "QUEUED" } }); await expect(rearmShortVideoGenerationRunById(active.run.id, 0)).resolves.toBe("REARMED"); expect(await prisma.job.count({ where: { workspaceId: active.run.workspaceId, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); const terminal = await fixture(0); await prisma.job.create({ data: { workspaceId: terminal.run.workspaceId, type: "book.analysis", payload: {}, status: "QUEUED" } }); await expect(rearmShortVideoGenerationRunById(terminal.run.id, 0)).resolves.toBe("REARMED"); expect(await prisma.job.count({ where: { workspaceId: terminal.run.workspaceId, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); const full = await fixture(0); await prisma.job.createMany({ data: ["a", "b"].map(id => ({ workspaceId: full.run.workspaceId, type: "book.analysis", payload: {}, status: "QUEUED", idempotencyKey: `a2-full-${id}-${randomUUID()}` })) }); const before = await Promise.all([prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: full.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: full.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: full.run.id } })]); await expect(rearmShortVideoGenerationRunById(full.run.id, 0)).resolves.toBe("CAPACITY_BLOCKED"); expect(await Promise.all([prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: full.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: full.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: full.run.id } })])).toEqual(before); } finally { if (prior === undefined) delete process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT; else process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = prior; } });
   it("does not rearm a Short Video run with a live execution lease", async () => { const { run, job } = await fixture(0); await prisma.shortVideoGenerationRun.update({ where: { id: run.id }, data: { status: "RUNNING", executionLeaseUntil: new Date(Date.now() + 60_000) } }); const before = await Promise.all([prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } }), prisma.job.findUniqueOrThrow({ where: { id: job.id } }), prisma.outboxEvent.count({ where: { aggregateId: run.id } })]); await expect(rearmShortVideoGenerationRunById(run.id, 0)).resolves.toBe("NOT_ELIGIBLE"); expect(await Promise.all([prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } }), prisma.job.findUniqueOrThrow({ where: { id: job.id } }), prisma.outboxEvent.count({ where: { aggregateId: run.id } })])).toEqual(before); });
   it("allows exactly one concurrent max-minus-one rearm and never persists an overflow", async () => {
@@ -75,22 +107,28 @@ describe("A2 Short Video dispatch generation overflow", () => {
     expect(await prisma.outboxEvent.count({ where: { aggregateId: run.id, topic: "a2.overflow.concurrent.video" } })).toBe(1);
   });
 
-  it("fences a stale outbox finalizer after same-run rearm", async () => {
+  it("serializes the Short Video outbox finalizer with exact rearm after reading the locked generation", async () => {
     const { run, job } = await fixture(0);
     await prisma.outboxEvent.create({ data: { topic: SHORT_VIDEO_GENERATION_TOPIC, aggregateId: run.id, payload: { shortVideoGenerationRunId: run.id, dispatchGeneration: 0 } } });
     let reached!: () => void;
     let release!: () => void;
     const reachedP = new Promise<void>((resolve) => (reached = resolve));
     const releaseP = new Promise<void>((resolve) => (release = resolve));
-    const stale = dispatchPendingShortVideoGeneration(
+    let authorityBackendPid = 0;
+    const finalization = dispatchPendingShortVideoGeneration(
       { add: async () => ({}) },
-      { aggregateIds: [run.id], beforeFinalize: async () => { reached(); await releaseP; } },
+      { aggregateIds: [run.id], afterGenerationRead: async backendPid => { authorityBackendPid = backendPid; reached(); await releaseP; } },
     );
     await reachedP;
-    await expect(rearmShortVideoGenerationRunById(run.id, 0)).resolves.toBe("REARMED");
-    release();
-    await stale;
-    expect((await prisma.job.findUniqueOrThrow({ where: { id: job.id } })).queueJobId).toBeNull();
+    const rearm = rearmShortVideoGenerationRunById(run.id, 0);
+    let ordering: "BLOCKED" | "ADVANCED";
+    try { ordering = await waitForGenerationOrBlockedUpdate(authorityBackendPid, run.id, 0); }
+    finally { release(); }
+    await expect(rearm).resolves.toBe("REARMED");
+    await finalization;
+    expect(ordering!).toBe("BLOCKED");
+    const current = await prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id }, include: { job: true } });
+    expect([current.dispatchGeneration, current.jobId, current.job.queueJobId]).toEqual([1, job.id, null]);
     const queueIds: string[] = [];
     await dispatchPendingShortVideoGeneration(
       { add: async (_name, _payload, options) => { queueIds.push(options.jobId); return {}; } },

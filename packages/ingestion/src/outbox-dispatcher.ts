@@ -2,7 +2,7 @@ import { prisma } from "@ai-cognitive/db";
 
 export type OutboxQueue<T> = { add(name: string, payload: T, options: { jobId: string }): Promise<unknown> };
 export const MAX_PERSISTED_DISPATCH_GENERATION = 2_147_483_647;
-type OutboxTransaction = Pick<typeof prisma, "$executeRaw" | "ingestionRun" | "bookAnalysisRun" | "podcastGenerationRun" | "shortVideoGenerationRun" | "job">;
+type OutboxTransaction = Pick<typeof prisma, "$executeRaw" | "$queryRaw" | "ingestionRun" | "bookAnalysisRun" | "podcastGenerationRun" | "shortVideoGenerationRun" | "job">;
 export type DispatchOptions<T> = { topic: string; queue: OutboxQueue<T>; jobName: string; parse(payload: unknown): T; jobId(payload: T): string; afterDispatch?(tx: OutboxTransaction, payload: T, jobId: string): Promise<void>; batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; aggregateIds?: string[]; beforeFinalize?: (eventId: string) => Promise<void> | void };
 
 /** Historical events omit generation; newly written events must carry a safe non-negative integer. */

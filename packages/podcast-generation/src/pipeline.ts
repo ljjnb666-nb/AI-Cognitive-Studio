@@ -436,8 +436,23 @@ export async function processPodcastGenerationRun(runId: string, dependencies: P
   }
 }
 
-export async function dispatchPendingPodcastGeneration(queue: { add(name: string, payload: { podcastGenerationRunId: string; dispatchGeneration: number }, options: { jobId: string }): Promise<unknown> }, options: { aggregateIds?: string[]; dispatchConcurrency?: number; topic?: string; beforeFinalize?: (eventId: string) => Promise<void> | void } = {}) {
-  return dispatchPendingOutbox<{ podcastGenerationRunId: string; dispatchGeneration: number }>({ topic: options.topic ?? PODCAST_GENERATION_TOPIC, queue, jobName: PODCAST_GENERATION_JOB, parse: (payload: unknown) => { const value = payload as { podcastGenerationRunId?: unknown; dispatchGeneration?: unknown }; if (typeof value?.podcastGenerationRunId !== "string") throw new Error("PODCAST_OUTBOX_PAYLOAD_INVALID"); return { podcastGenerationRunId: value.podcastGenerationRunId, dispatchGeneration: normalizeDispatchGeneration(value) }; }, jobId: payload => payload.dispatchGeneration === 0 ? payload.podcastGenerationRunId : `${payload.podcastGenerationRunId}-g${payload.dispatchGeneration}`, aggregateIds: options.aggregateIds, dispatchConcurrency: options.dispatchConcurrency, beforeFinalize: options.beforeFinalize, afterDispatch: async (tx, payload, queueJobId) => { const run = await tx.podcastGenerationRun.findUniqueOrThrow({ where: { id: payload.podcastGenerationRunId } }); if (run.dispatchGeneration === payload.dispatchGeneration) await tx.job.update({ where: { id: run.jobId }, data: { queueJobId } }); } });
+export async function dispatchPendingPodcastGeneration(queue: { add(name: string, payload: { podcastGenerationRunId: string; dispatchGeneration: number }, options: { jobId: string }): Promise<unknown> }, options: { aggregateIds?: string[]; dispatchConcurrency?: number; topic?: string; beforeFinalize?: (eventId: string) => Promise<void> | void; afterGenerationRead?: (backendPid: number) => Promise<void> | void } = {}) {
+  return dispatchPendingOutbox<{ podcastGenerationRunId: string; dispatchGeneration: number }>({
+    topic: options.topic ?? PODCAST_GENERATION_TOPIC,
+    queue,
+    jobName: PODCAST_GENERATION_JOB,
+    parse: (payload: unknown) => { const value = payload as { podcastGenerationRunId?: unknown; dispatchGeneration?: unknown }; if (typeof value?.podcastGenerationRunId !== "string") throw new Error("PODCAST_OUTBOX_PAYLOAD_INVALID"); return { podcastGenerationRunId: value.podcastGenerationRunId, dispatchGeneration: normalizeDispatchGeneration(value) }; },
+    jobId: payload => payload.dispatchGeneration === 0 ? payload.podcastGenerationRunId : `${payload.podcastGenerationRunId}-g${payload.dispatchGeneration}`,
+    aggregateIds: options.aggregateIds,
+    dispatchConcurrency: options.dispatchConcurrency,
+    beforeFinalize: options.beforeFinalize,
+    afterDispatch: async (tx, payload, queueJobId) => {
+      const [run] = await tx.$queryRaw<Array<{ dispatchGeneration: number; jobId: string; backendPid: number }>>`SELECT "dispatchGeneration", "jobId", pg_backend_pid() AS "backendPid" FROM "PodcastGenerationRun" WHERE "id" = ${payload.podcastGenerationRunId} FOR UPDATE`;
+      if (!run) throw new Error("PODCAST_GENERATION_RUN_NOT_FOUND");
+      await options.afterGenerationRead?.(run.backendPid);
+      if (run.dispatchGeneration === payload.dispatchGeneration) await tx.job.update({ where: { id: run.jobId }, data: { queueJobId } });
+    },
+  });
 }
 
 export async function rearmPodcastGenerationRunById(runId: string, expectedDispatchGeneration: number, topic = PODCAST_GENERATION_TOPIC): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
