@@ -387,10 +387,10 @@ export async function requestShortVideoGeneration(
   }
 }
 
-async function claim(runId: string, token: string) {
+async function claim(runId: string, token: string, expectedDispatchGeneration?: number) {
   const rows = await prisma.$queryRaw<
     Array<{ jobId: string }>
-  >`UPDATE "ShortVideoGenerationRun" SET "status"='RUNNING'::"ShortVideoGenerationStatus", "stage"=CASE WHEN "stage"='QUEUED'::"ShortVideoGenerationStage" THEN 'CONTEXT_RETRIEVAL'::"ShortVideoGenerationStage" ELSE "stage" END, "startedAt"=COALESCE("startedAt", NOW()), "executionClaimToken"=${token}, "executionClaimedAt"=NOW(), "executionLeaseUntil"=NOW()+INTERVAL '2 minutes', "errorCode"=NULL WHERE "id"=${runId} AND "status" IN ('QUEUED'::"ShortVideoGenerationStatus", 'RUNNING'::"ShortVideoGenerationStatus") AND ("executionClaimToken" IS NULL OR "executionLeaseUntil" < NOW()) RETURNING "jobId"`;
+  >`UPDATE "ShortVideoGenerationRun" SET "status"='RUNNING'::"ShortVideoGenerationStatus", "stage"=CASE WHEN "stage"='QUEUED'::"ShortVideoGenerationStage" THEN 'CONTEXT_RETRIEVAL'::"ShortVideoGenerationStage" ELSE "stage" END, "startedAt"=COALESCE("startedAt", NOW()), "executionClaimToken"=${token}, "executionClaimedAt"=NOW(), "executionLeaseUntil"=NOW()+INTERVAL '2 minutes', "errorCode"=NULL WHERE "id"=${runId} AND (${expectedDispatchGeneration ?? null}::integer IS NULL OR "dispatchGeneration"=${expectedDispatchGeneration ?? null}) AND "status" IN ('QUEUED'::"ShortVideoGenerationStatus", 'RUNNING'::"ShortVideoGenerationStatus") AND ("executionClaimToken" IS NULL OR "executionLeaseUntil" < NOW()) RETURNING "jobId"`;
   if (!rows.length) return false;
   await prisma.job.update({
     where: { id: rows[0]!.jobId },
@@ -720,7 +720,7 @@ export async function processShortVideoGenerationRun(
   if (run.dispatchGeneration !== expectedDispatchGeneration) return run;
   if (run.status === "SUCCEEDED") return run;
   const token = randomUUID();
-  if (!(await claim(run.id, token))) {
+  if (!(await claim(run.id, token, expectedDispatchGeneration))) {
     run = await load(run.id);
     if (run.status === "SUCCEEDED") return run;
     throw new Error("SHORT_VIDEO_ALREADY_CLAIMED");
@@ -1135,7 +1135,21 @@ export async function dispatchPendingShortVideoGeneration(
 
 /** Exact-target transport rearm; no liveness discovery or provider work. */
 export async function rearmShortVideoGenerationRunById(runId: string, expectedDispatchGeneration: number, topic = SHORT_VIDEO_GENERATION_TOPIC): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
-  try { return await prisma.$transaction(async tx => { const run = await tx.shortVideoGenerationRun.findUnique({ where: { id: runId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.shortVideoGenerationRun.updateMany({ where: { id: run.id, dispatchGeneration: expectedDispatchGeneration }, data: { dispatchGeneration: { increment: 1 }, status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null } }); if (changed.count !== 1) return "RACE_LOST"; const current = await tx.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { shortVideoGenerationRunId: current.id, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
+  try { return await prisma.$transaction(async tx => { const run = await tx.shortVideoGenerationRun.findUnique({ where: { id: runId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.$queryRaw<Array<{ id: string }>>`
+UPDATE "ShortVideoGenerationRun"
+SET "dispatchGeneration" = "dispatchGeneration" + 1,
+    "status" = 'QUEUED'::"ShortVideoGenerationStatus",
+    "errorCode" = NULL,
+    "executionClaimToken" = NULL,
+    "executionClaimedAt" = NULL,
+    "executionLeaseUntil" = NULL,
+    "completedAt" = NULL
+WHERE "id" = ${run.id}
+  AND "dispatchGeneration" = ${expectedDispatchGeneration}
+  AND "dispatchGeneration" < ${MAX_PERSISTED_DISPATCH_GENERATION}
+  AND "status" IN ('QUEUED'::"ShortVideoGenerationStatus", 'RUNNING'::"ShortVideoGenerationStatus", 'FAILED'::"ShortVideoGenerationStatus")
+  AND NOT ("status" = 'RUNNING'::"ShortVideoGenerationStatus" AND "executionClaimToken" IS NOT NULL AND "executionLeaseUntil" > NOW())
+RETURNING "id"`; if (changed.length !== 1) return "RACE_LOST"; const current = await tx.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { shortVideoGenerationRunId: current.id, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
 }
 export interface VideoRenderer {
   render(input: {

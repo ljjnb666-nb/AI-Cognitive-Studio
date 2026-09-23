@@ -128,6 +128,46 @@ async function waitForGenerationOrBlockedUpdate(blockerPid: number, table: "Book
   throw new Error(`FINALIZER_REARM_RACE_DID_NOT_PROGRESS:${table}`);
 }
 
+async function holdA2RunRowLock(runId: string) {
+  let locked!: (pid: number) => void;
+  let release!: () => void;
+  const lockedP = new Promise<number>(resolve => locked = resolve);
+  const releaseP = new Promise<void>(resolve => release = resolve);
+  const holding = prisma.$transaction(async tx => {
+    const [session] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    if (!session) throw new Error("A2_BOOK_ROW_LOCK_SESSION_MISSING");
+    const { pid } = session;
+    await tx.$queryRaw`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${runId} FOR UPDATE`;
+    locked(pid);
+    await releaseP;
+  }, { maxWait: 10_000, timeout: 60_000 });
+  const pid = await lockedP;
+  return { pid, release, done: holding };
+}
+
+async function waitForBlockedBookUpdates(blockerPid: number, expectedCount: number) {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    const [state] = await prisma.$queryRaw<Array<{ blockedCount: number }>>`WITH RECURSIVE wait_chain(origin_pid, blocker_pid, depth) AS (
+      SELECT activity.pid, blocker.pid, 1 FROM pg_stat_activity activity CROSS JOIN LATERAL unnest(pg_blocking_pids(activity.pid)) AS blocker(pid)
+      WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid() AND activity.wait_event_type = 'Lock' AND activity.query ILIKE '%UPDATE%BookAnalysisRun%'
+      UNION ALL
+      SELECT chain.origin_pid, next_blocker.pid, chain.depth + 1 FROM wait_chain chain CROSS JOIN LATERAL unnest(pg_blocking_pids(chain.blocker_pid)) AS next_blocker(pid) WHERE chain.depth < 8
+    ) SELECT COUNT(DISTINCT origin_pid)::int AS "blockedCount" FROM wait_chain WHERE blocker_pid = ${blockerPid}`;
+    if ((state?.blockedCount ?? 0) >= expectedCount) return;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  const waiters = await prisma.$queryRaw<Array<{ pid: number; waitEvent: string | null; blockers: number[]; query: string }>>`SELECT activity.pid, activity.wait_event AS "waitEvent", pg_blocking_pids(activity.pid) AS blockers, activity.query FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid() AND activity.wait_event_type = 'Lock'`;
+  throw new Error(`A2_BOOK_EXPECTED_${expectedCount}_BLOCKED_RUN_UPDATES:${JSON.stringify(waiters)}`);
+}
+
+async function waitForSignal(signal: () => boolean, message: string) {
+  for (let attempt = 0; attempt < 10_000; attempt++) {
+    if (signal()) return;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  throw new Error(message);
+}
+
 afterEach(async () => {
   for (const workspaceId of workspaces.splice(0)) {
     await prisma.providerEmbeddingResult.deleteMany({ where: { workspaceId } });
@@ -156,6 +196,125 @@ afterEach(async () => {
 afterAll(() => prisma.$disconnect());
 
 describe("durable Phase 2 orchestration", () => {
+  describe("A2 claim/rearm authority races", () => {
+    it("lets rearm N→N+1 win before a stale Book claim and gives the stale processor zero authority", async () => {
+      const data = await fixture();
+      await prisma.$transaction([
+        prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "QUEUED", executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }),
+        prisma.job.update({ where: { id: data.job.id }, data: { status: "QUEUED", userId: data.user.id } }),
+      ]);
+      const blocker = await holdA2RunRowLock(data.run.id);
+      let staleProviderResolutions = 0, staleEmbeddingResolutions = 0;
+      let rearm: ReturnType<typeof rearmBookAnalysisRunById> | undefined;
+      let staleDelivery: ReturnType<typeof processBookAnalysisRun> | undefined;
+      try {
+        rearm = rearmBookAnalysisRunById(data.run.id, 0);
+        await waitForBlockedBookUpdates(blocker.pid, 1);
+        staleDelivery = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(), {
+          analysisProviderForRun: async () => { staleProviderResolutions++; throw new Error("A2_STALE_BOOK_PROVIDER_RESOLVED"); },
+          embeddingGatewayForRun: () => { staleEmbeddingResolutions++; return data.gateway.embeddingGateway; },
+        }), 0);
+        await waitForBlockedBookUpdates(blocker.pid, 2);
+      } finally {
+        blocker.release();
+        await blocker.done;
+        await Promise.allSettled([...(rearm ? [rearm] : []), ...(staleDelivery ? [staleDelivery] : [])]);
+      }
+      const [rearmResult, staleResult] = await Promise.all([rearm!, Promise.allSettled([staleDelivery!])]);
+      const after = await Promise.all([
+        prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }),
+        prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }),
+        prisma.outboxEvent.count({ where: { aggregateId: data.run.id } }),
+        prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } }),
+      ]);
+      expect(rearmResult).toBe("REARMED");
+      expect([after[0].dispatchGeneration, after[0].status, after[0].executionClaimToken, after[1].status]).toEqual([1, "QUEUED", null, "QUEUED"]);
+      expect(staleResult[0]!.status).toBe("fulfilled");
+      expect([staleProviderResolutions, staleEmbeddingResolutions]).toEqual([0, 0]);
+      expect(after[2]).toBe(2);
+      expect(after[3]).toBe(0);
+      const generationOneOutbox = await prisma.outboxEvent.findFirstOrThrow({ where: { aggregateId: data.run.id, payload: { path: ["dispatchGeneration"], equals: 1 } } });
+      expect(generationOneOutbox.status).toBe("PENDING");
+    });
+
+    it("allows only one concurrent Book rearm per expected generation and fences repeats", async () => {
+      const data = await fixture();
+      await prisma.$transaction([
+        prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "QUEUED", executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }),
+        prisma.job.update({ where: { id: data.job.id }, data: { status: "QUEUED", userId: data.user.id } }),
+      ]);
+      const topic = `a2.concurrent-rearm.book.${crypto.randomUUID()}`;
+      const blocker = await holdA2RunRowLock(data.run.id);
+      let first: ReturnType<typeof rearmBookAnalysisRunById> | undefined;
+      let second: ReturnType<typeof rearmBookAnalysisRunById> | undefined;
+      try {
+        first = rearmBookAnalysisRunById(data.run.id, 0, topic);
+        await waitForBlockedBookUpdates(blocker.pid, 1);
+        second = rearmBookAnalysisRunById(data.run.id, 0, topic);
+        await waitForBlockedBookUpdates(blocker.pid, 2);
+      } finally {
+        blocker.release();
+        await blocker.done;
+        await Promise.allSettled([...(first ? [first] : []), ...(second ? [second] : [])]);
+      }
+      const results = await Promise.all([first!, second!]);
+      expect(results.filter(result => result === "REARMED")).toHaveLength(1);
+      expect(results.filter(result => result === "RACE_LOST")).toHaveLength(1);
+      const current = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id }, include: { job: true } });
+      expect([current.dispatchGeneration, current.status, current.jobId, current.job.status]).toEqual([1, "QUEUED", data.job.id, "QUEUED"]);
+      expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id, topic } })).toBe(1);
+      await expect(rearmBookAnalysisRunById(data.run.id, 0, topic)).resolves.toBe("NOT_ELIGIBLE");
+      expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id, topic } })).toBe(1);
+    });
+
+    it("lets a live Book claim win before stale rearm and preserves its owner, lease, Job, and Outbox", async () => {
+      const data = await fixture();
+      await prisma.$transaction([
+        prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "QUEUED", executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }),
+        prisma.job.update({ where: { id: data.job.id }, data: { status: "QUEUED", userId: data.user.id } }),
+      ]);
+      const blocker = await holdA2RunRowLock(data.run.id);
+      let releaseProvider!: () => void;
+      const providerGate = new Promise<void>(resolve => releaseProvider = resolve);
+      let providerDidEnter = false;
+      let rearm: ReturnType<typeof rearmBookAnalysisRunById> | undefined;
+      let worker: ReturnType<typeof processBookAnalysisRun> | undefined;
+      try {
+        worker = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(), {
+          analysisProviderForRun: async () => { providerDidEnter = true; await providerGate; throw new Error("A2_STOP_AFTER_BOOK_CLAIM"); },
+        }), 0);
+        await waitForBlockedBookUpdates(blocker.pid, 1);
+        rearm = rearmBookAnalysisRunById(data.run.id, 0);
+        await waitForBlockedBookUpdates(blocker.pid, 2);
+        blocker.release();
+        await blocker.done;
+        await waitForSignal(() => providerDidEnter, "A2_BOOK_CLAIM_DID_NOT_REACH_PROVIDER_RESOLVER");
+        const beforeRearm = await Promise.all([
+          prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }),
+          prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }),
+          prisma.outboxEvent.count({ where: { aggregateId: data.run.id } }),
+        ]);
+        const [lease] = await prisma.$queryRaw<Array<{ leaseValid: boolean }>>`SELECT "executionLeaseUntil" > NOW() AS "leaseValid" FROM "BookAnalysisRun" WHERE "id" = ${data.run.id}`;
+        if (!lease) throw new Error("A2_BOOK_LEASE_SNAPSHOT_MISSING");
+        const rearmResult = await rearm!;
+        const afterRearm = await Promise.all([
+          prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }),
+          prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }),
+          prisma.outboxEvent.count({ where: { aggregateId: data.run.id } }),
+        ]);
+        expect([beforeRearm[0].dispatchGeneration, beforeRearm[0].status, beforeRearm[0].executionClaimToken, beforeRearm[1].status]).toEqual([0, "RUNNING", expect.any(String), "RUNNING"]);
+        expect(lease.leaseValid).toBe(true);
+        expect(rearmResult).toMatch(/^(RACE_LOST|NOT_ELIGIBLE)$/);
+        expect(afterRearm).toEqual(beforeRearm);
+      } finally {
+        blocker.release();
+        await blocker.done.catch(() => undefined);
+        releaseProvider();
+        await Promise.allSettled([...(rearm ? [rearm] : []), ...(worker ? [worker] : [])]);
+      }
+    });
+  });
+
   it("accepts the largest safe transport generation but fences it against a persisted Book generation before provider resolution", async () => {
     const data = await fixture();
     const prefix = `a2-book-safe-integer-${crypto.randomUUID()}`;
@@ -174,6 +333,7 @@ describe("durable Phase 2 orchestration", () => {
   });
   it("dispatches distinct real BullMQ Book gen0 and gen1 jobs, then fences stale gen0 redelivery", async () => {
     const data = await fixture();
+    await prisma.job.update({ where: { id: data.job.id }, data: { userId: data.user.id } });
     const prefix = `a2-book-gen0-gen1-${crypto.randomUUID()}`;
     let provider = 0;
     const environment = { REDIS_URL: process.env.REDIS_URL!, WORKER_BOOK_ANALYSIS_CONCURRENCY: 1 } as unknown as Environment;
@@ -185,11 +345,13 @@ describe("durable Phase 2 orchestration", () => {
       const gen0 = await queue.getJob(data.job.id);
       expect(gen0).toBeTruthy();
       await expect.poll(async () => gen0!.getState(), { timeout: 10_000 }).toBe("failed");
+      const providerAfterGen0 = provider;
       await expect(rearmBookAnalysisRunById(data.run.id, 0)).resolves.toBe("REARMED");
       await dispatchPendingBookAnalysis(queue, { aggregateIds: [data.run.id] });
       const gen1 = await queue.getJob(`${data.job.id}-g1`);
       expect(gen1).toBeTruthy();
       await expect.poll(async () => gen1!.getState(), { timeout: 10_000 }).toBe("failed");
+      expect(provider).toBeGreaterThan(providerAfterGen0);
       expect([gen0!.id, gen1!.id]).toEqual([data.job.id, `${data.job.id}-g1`]);
       const beforeStale = provider;
       const stale = await queue.add("a2-stale-redelivery", { analysisRunId: data.run.id, dispatchGeneration: 0 }, { jobId: `${data.job.id}-g0-redelivery` });
@@ -222,7 +384,7 @@ describe("durable Phase 2 orchestration", () => {
       expect(await Promise.all([prisma.analysisArtifact.count({ where: { analysisRunId: data.run.id } }), prisma.bookMemoryItem.count({ where: { analysisRunId: data.run.id } }), prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })])).toEqual(beforeBusiness);
     } finally { await Promise.all([worker.close(), queue.obliterate({ force: true }), queue.close()]); }
   });
-  it("keeps active capacity, reacquires terminal capacity, and rolls back when full", async () => { const prior = process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT; process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = "2"; const expensive = { in: ["book.analysis", "podcast.generation", "short-video.generation"] }; try { const active = await fixture(); await prisma.job.update({ where: { id: active.job.id }, data: { status: "QUEUED" } }); await prisma.job.create({ data: { workspaceId: active.workspace.id, type: "podcast.generation", payload: {}, status: "QUEUED" } }); await expect(rearmBookAnalysisRunById(active.run.id, 0)).resolves.toBe("REARMED"); expect(await prisma.job.count({ where: { workspaceId: active.workspace.id, type: expensive, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); const terminal = await fixture(); await prisma.$transaction([prisma.bookAnalysisRun.update({ where: { id: terminal.run.id }, data: { status: "FAILED" } }), prisma.job.update({ where: { id: terminal.job.id }, data: { status: "FAILED" } })]); await prisma.job.create({ data: { workspaceId: terminal.workspace.id, type: "podcast.generation", payload: {}, status: "QUEUED" } }); await expect(rearmBookAnalysisRunById(terminal.run.id, 0)).resolves.toBe("REARMED"); expect(await prisma.job.count({ where: { workspaceId: terminal.workspace.id, type: expensive, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); const full = await fixture(); await prisma.$transaction([prisma.bookAnalysisRun.update({ where: { id: full.run.id }, data: { status: "FAILED" } }), prisma.job.update({ where: { id: full.job.id }, data: { status: "FAILED" } })]); await prisma.job.createMany({ data: ["a", "b"].map(id => ({ workspaceId: full.workspace.id, type: "podcast.generation", payload: {}, status: "QUEUED", idempotencyKey: `a2-book-full-${id}-${crypto.randomUUID()}` })) }); const before = await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: full.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: full.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: full.run.id } })]); await expect(rearmBookAnalysisRunById(full.run.id, 0)).resolves.toBe("CAPACITY_BLOCKED"); expect(await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: full.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: full.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: full.run.id } })])).toEqual(before); } finally { if (prior === undefined) delete process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT; else process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = prior; } });
+  it("keeps active capacity, reacquires terminal capacity, and rolls back when full", async () => { const prior = process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT; process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = "2"; const expensive = { in: ["book.analysis", "podcast.generation", "short-video.generation"] }; try { const active = await fixture(); await prisma.job.update({ where: { id: active.job.id }, data: { status: "QUEUED" } }); await prisma.job.create({ data: { workspaceId: active.workspace.id, type: "podcast.generation", payload: {}, status: "QUEUED" } }); await expect(rearmBookAnalysisRunById(active.run.id, 0)).resolves.toBe("REARMED"); expect(await prisma.job.count({ where: { workspaceId: active.workspace.id, type: expensive, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); const terminal = await fixture(); await prisma.$transaction([prisma.bookAnalysisRun.update({ where: { id: terminal.run.id }, data: { status: "FAILED" } }), prisma.job.update({ where: { id: terminal.job.id }, data: { status: "FAILED" } })]); await prisma.job.create({ data: { workspaceId: terminal.workspace.id, type: "podcast.generation", payload: {}, status: "QUEUED" } }); await expect(rearmBookAnalysisRunById(terminal.run.id, 0)).resolves.toBe("REARMED"); expect(await prisma.job.count({ where: { workspaceId: terminal.workspace.id, type: expensive, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); const full = await fixture(); await prisma.$transaction([prisma.bookAnalysisRun.update({ where: { id: full.run.id }, data: { status: "FAILED" } }), prisma.job.update({ where: { id: full.job.id }, data: { status: "FAILED" } })]); await prisma.job.createMany({ data: ["a", "b"].map(id => ({ workspaceId: full.workspace.id, type: "podcast.generation", payload: {}, status: "QUEUED", idempotencyKey: `a2-book-full-${id}-${crypto.randomUUID()}` })) }); const before = await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: full.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: full.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: full.run.id } })]); await expect(rearmBookAnalysisRunById(full.run.id, 0)).resolves.toBe("CAPACITY_BLOCKED"); expect(await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: full.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: full.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: full.run.id } })])).toEqual(before); expect(await prisma.job.count({ where: { workspaceId: full.workspace.id, type: expensive, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); } finally { if (prior === undefined) delete process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT; else process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = prior; } });
   it("does not rearm a Book run with a live execution lease", async () => { const data = await fixture(); await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "RUNNING", executionLeaseUntil: new Date(Date.now() + 60_000) } }); const before = await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })]); await expect(rearmBookAnalysisRunById(data.run.id, 0)).resolves.toBe("NOT_ELIGIBLE"); expect(await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })])).toEqual(before); });
   it("allows exactly one concurrent max-minus-one rearm without persisted overflow", async () => { const data = await fixture(); await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED", dispatchGeneration: 2_147_483_646 } }); await prisma.job.update({ where: { id: data.job.id }, data: { status: "FAILED" } }); const results = await Promise.all([rearmBookAnalysisRunById(data.run.id, 2_147_483_646, "a2.overflow.concurrent.book"), rearmBookAnalysisRunById(data.run.id, 2_147_483_646, "a2.overflow.concurrent.book")]); expect(results.filter(result => result === "REARMED")).toHaveLength(1); expect(results.every(result => result === "REARMED" || result === "RACE_LOST" || result === "NOT_ELIGIBLE")).toBe(true); expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).dispatchGeneration).toBe(2_147_483_647); expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id, topic: "a2.overflow.concurrent.book" } })).toBe(1); });
   it("serializes the Book outbox finalizer with exact rearm after reading the locked generation", async () => {
@@ -266,7 +428,7 @@ describe("durable Phase 2 orchestration", () => {
     await dispatchPendingBookAnalysis({ add: async (_name, _payload, options) => { ids.push(options.jobId); return {}; } }, { aggregateIds: [data.run.id] });
     expect([ids, (await prisma.job.findUniqueOrThrow({ where: { id: retried.job.id } })).queueJobId]).toEqual([[`${retried.job.id}-g1`], `${retried.job.id}-g1`]);
   });
-  it("advances max-minus-one once and refuses the persisted dispatch-generation maximum without mutation", async () => { const data = await fixture(); await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED", dispatchGeneration: 2_147_483_646 } }); await prisma.job.update({ where: { id: data.job.id }, data: { status: "FAILED" } }); const before = await prisma.outboxEvent.count({ where: { aggregateId: data.run.id } }); await expect(rearmBookAnalysisRunById(data.run.id, 2_147_483_646, "a2.overflow.book")).resolves.toBe("REARMED"); expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).dispatchGeneration).toBe(2_147_483_647); expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })).toBe(before + 1); const snapshot = await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })]); await expect(rearmBookAnalysisRunById(data.run.id, 2_147_483_647, "a2.overflow.book")).resolves.toBe("NOT_ELIGIBLE"); expect(await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })])).toEqual(snapshot); });
+  it("advances max-minus-one once and refuses the persisted dispatch-generation maximum without mutation", async () => { const data = await fixture(); await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED", dispatchGeneration: 2_147_483_646 } }); await prisma.job.update({ where: { id: data.job.id }, data: { status: "FAILED" } }); const before = await prisma.outboxEvent.count({ where: { aggregateId: data.run.id } }); await expect(rearmBookAnalysisRunById(data.run.id, 2_147_483_646, "a2.overflow.book")).resolves.toBe("REARMED"); expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).dispatchGeneration).toBe(2_147_483_647); expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })).toBe(before + 1); const snapshot = await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })]); const capacityBefore = await prisma.job.count({ where: { workspaceId: data.workspace.id, type: { in: ["book.analysis", "podcast.generation", "short-video.generation"] }, status: { in: ["QUEUED", "RUNNING"] } } }); const providerInvocationsBefore = await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } }); await expect(rearmBookAnalysisRunById(data.run.id, 2_147_483_647, "a2.overflow.book")).resolves.toBe("NOT_ELIGIBLE"); expect(await Promise.all([prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })])).toEqual(snapshot); expect(await prisma.job.count({ where: { workspaceId: data.workspace.id, type: { in: ["book.analysis", "podcast.generation", "short-video.generation"] }, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(capacityBefore); expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })).toBe(providerInvocationsBefore); });
   it("guards both Book retry paths at the persisted dispatch-generation maximum", async () => {
     const data = await fixture();
     await prisma.$transaction([

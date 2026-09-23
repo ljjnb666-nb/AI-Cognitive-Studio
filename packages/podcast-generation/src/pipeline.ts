@@ -405,7 +405,7 @@ export async function processPodcastGenerationRun(runId: string, dependencies: P
   if (run.dispatchGeneration !== expectedDispatchGeneration) return run;
   if (run.status === "SUCCEEDED") return run;
   const token = randomUUID();
-  if (!await claimPodcastGenerationRun(run.id, token)) { run = await loadRun(run.id); if (run.status === "SUCCEEDED") return run; throw new Error("PODCAST_GENERATION_ALREADY_CLAIMED"); }
+  if (!await claimPodcastGenerationRun(run.id, token, expectedDispatchGeneration)) { run = await loadRun(run.id); if (run.status === "SUCCEEDED") return run; throw new Error("PODCAST_GENERATION_ALREADY_CLAIMED"); }
   try {
     const provider = dependencies.providerForRun ? await dependencies.providerForRun({ workspaceId: run.workspaceId, podcastGenerationRunId: run.id, provider: run.provider, model: run.model }) : dependencies.provider;
     const embeddingProvider = dependencies.embeddingProviderForRun ? await dependencies.embeddingProviderForRun({ workspaceId: run.workspaceId, podcastGenerationRunId: run.id }) : dependencies.embeddingProvider;
@@ -456,5 +456,19 @@ export async function dispatchPendingPodcastGeneration(queue: { add(name: string
 }
 
 export async function rearmPodcastGenerationRunById(runId: string, expectedDispatchGeneration: number, topic = PODCAST_GENERATION_TOPIC): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
-  try { return await prisma.$transaction(async tx => { const run = await tx.podcastGenerationRun.findUnique({ where: { id: runId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.podcastGenerationRun.updateMany({ where: { id: run.id, dispatchGeneration: expectedDispatchGeneration }, data: { dispatchGeneration: { increment: 1 }, status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null } }); if (changed.count !== 1) return "RACE_LOST"; const current = await tx.podcastGenerationRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { podcastGenerationRunId: current.id, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
+  try { return await prisma.$transaction(async tx => { const run = await tx.podcastGenerationRun.findUnique({ where: { id: runId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.$queryRaw<Array<{ id: string }>>`
+UPDATE "PodcastGenerationRun"
+SET "dispatchGeneration" = "dispatchGeneration" + 1,
+    "status" = 'QUEUED'::"PodcastGenerationStatus",
+    "errorCode" = NULL,
+    "executionClaimToken" = NULL,
+    "executionClaimedAt" = NULL,
+    "executionLeaseUntil" = NULL,
+    "completedAt" = NULL
+WHERE "id" = ${run.id}
+  AND "dispatchGeneration" = ${expectedDispatchGeneration}
+  AND "dispatchGeneration" < ${MAX_PERSISTED_DISPATCH_GENERATION}
+  AND "status" IN ('QUEUED'::"PodcastGenerationStatus", 'RUNNING'::"PodcastGenerationStatus", 'FAILED'::"PodcastGenerationStatus")
+  AND NOT ("status" = 'RUNNING'::"PodcastGenerationStatus" AND "executionClaimToken" IS NOT NULL AND "executionLeaseUntil" > NOW())
+RETURNING "id"`; if (changed.length !== 1) return "RACE_LOST"; const current = await tx.podcastGenerationRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { podcastGenerationRunId: current.id, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
 }

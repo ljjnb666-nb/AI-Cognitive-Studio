@@ -637,7 +637,7 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
   if (initial.dispatchGeneration !== expectedDispatchGeneration) return initial;
   if (initial.status === "SUCCEEDED") return initial;
   const executionClaimToken = randomUUID();
-  if (!await claimBookAnalysisRun(initial.id, executionClaimToken)) return prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: initial.id } });
+  if (!await claimBookAnalysisRun(initial.id, executionClaimToken, expectedDispatchGeneration)) return prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: initial.id } });
   logger.info("book.analysis.claimed", logFields(initial, dependencies.correlationId));
   try {
     let activeDependencies: ActiveBookAnalysisDependencies;
@@ -705,7 +705,21 @@ export async function dispatchPendingBookAnalysis(queue: { add(name: string, pay
 
 /** Exact-target transport rearm; liveness discovery belongs to PR-A. */
 export async function rearmBookAnalysisRunById(analysisRunId: string, expectedDispatchGeneration: number, topic = BOOK_ANALYSIS_TOPIC): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
-  try { return await prisma.$transaction(async tx => { const run = await tx.bookAnalysisRun.findUnique({ where: { id: analysisRunId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.bookAnalysisRun.updateMany({ where: { id: run.id, dispatchGeneration: expectedDispatchGeneration }, data: { dispatchGeneration: { increment: 1 }, status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null } }); if (changed.count !== 1) return "RACE_LOST"; const current = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { analysisRunId: current.id, queueJobId: current.jobId, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
+  try { return await prisma.$transaction(async tx => { const run = await tx.bookAnalysisRun.findUnique({ where: { id: analysisRunId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.$queryRaw<Array<{ id: string }>>`
+UPDATE "BookAnalysisRun"
+SET "dispatchGeneration" = "dispatchGeneration" + 1,
+    "status" = 'QUEUED'::"AnalysisRunStatus",
+    "errorCode" = NULL,
+    "executionClaimToken" = NULL,
+    "executionClaimedAt" = NULL,
+    "executionLeaseUntil" = NULL,
+    "completedAt" = NULL
+WHERE "id" = ${run.id}
+  AND "dispatchGeneration" = ${expectedDispatchGeneration}
+  AND "dispatchGeneration" < ${MAX_PERSISTED_DISPATCH_GENERATION}
+  AND "status" IN ('QUEUED'::"AnalysisRunStatus", 'RUNNING'::"AnalysisRunStatus", 'FAILED'::"AnalysisRunStatus")
+  AND NOT ("status" = 'RUNNING'::"AnalysisRunStatus" AND "executionClaimToken" IS NOT NULL AND "executionLeaseUntil" > NOW())
+RETURNING "id"`; if (changed.length !== 1) return "RACE_LOST"; const current = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { analysisRunId: current.id, queueJobId: current.jobId, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
 }
 
 export async function retrieveBookKnowledge(input: { workspaceId: string; sourceDocumentId: string; query: string; limit: number; embeddingProvider: EmbeddingProvider }) {
