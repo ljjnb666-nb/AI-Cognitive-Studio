@@ -80,7 +80,7 @@ export async function requestPodcastGeneration(context: TrustedRequestContext, i
       const job = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: PODCAST_GENERATION_JOB, payload: { episodeId: episode.id }, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.podcastGenerationRun.create({ data: { workspaceId: context.workspaceId, podcastProjectId: episode.podcastProjectId, episodeId: episode.id, styleProfileId: episode.styleProfileId, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersion: input.modelVersion, modelVersionKey, hostConfigurationHash, hostConfigurationVersion, generationIdentityHash, idempotencyKey, correlationId: input.correlationId } });
       await tx.podcastGenerationSource.createMany({ data: current.map((item) => ({ podcastGenerationRunId: run.id, workspaceId: context.workspaceId, episodeId: episode.id, sourceDocumentId: item.sourceDocumentId, extractionId: item.extractionId, chunkSetId: item.chunkSetId, analysisRunId: item.analysisRunId })) });
-      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? PODCAST_GENERATION_TOPIC, aggregateId: run.id, payload: { podcastGenerationRunId: run.id } } });
+      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? PODCAST_GENERATION_TOPIC, aggregateId: run.id, payload: { podcastGenerationRunId: run.id, dispatchGeneration: run.dispatchGeneration } } });
       return { run, job };
     });
   } catch (error) {

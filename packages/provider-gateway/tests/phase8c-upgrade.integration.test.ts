@@ -125,6 +125,6 @@ describe("Phase 8C 2A to 2B upgrade acceptance", () => {
       await prisma("migrate deploy", databaseUrl);
       db = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
       expect((await migrationCount(db))[0]?.count).toBe(currentMigrationCount);
-    } finally { stage("UPGRADE_STAGE_11_CLEANUP"); await db?.$disconnect(); await admin.$disconnect(); const cleanup = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_TEST } } }); await cleanup.$executeRawUnsafe('DROP DATABASE IF EXISTS "ai_cognitive_studio_phase8c2b_upgrade_test"'); await cleanup.$disconnect(); if (fixture) rmSync(fixture, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); expect(existsSync(real2BMigration)).toBe(true); }
+    } finally { stage("UPGRADE_STAGE_11_CLEANUP"); await db?.$disconnect(); await admin.$disconnect(); const cleanup = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL_TEST } } }); await cleanup.$executeRawUnsafe('DROP DATABASE IF EXISTS "ai_cognitive_studio_phase8c2b_upgrade_test"'); await cleanup.$disconnect(); if (fixture) rmSync(fixture, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); expect(existsSync(real2BMigration)).toBe(true); }
   }, 120_000);
 });

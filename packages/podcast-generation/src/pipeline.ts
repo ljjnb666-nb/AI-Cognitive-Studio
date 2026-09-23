@@ -1,9 +1,9 @@
 /* Prisma rows are deliberately structurally typed at this orchestration boundary. */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { randomUUID } from "node:crypto";
-import { prisma } from "@ai-cognitive/db";
+import { admitWorkspaceExpensiveOperation, Prisma, prisma } from "@ai-cognitive/db";
 import { buildBookContextForIntelligence, estimateAnalysisTokens, type EmbeddingProvider } from "@ai-cognitive/book-intelligence";
-import { dispatchPendingOutbox } from "@ai-cognitive/ingestion";
+import { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "@ai-cognitive/ingestion";
 import { logger } from "@ai-cognitive/shared";
 import { estimateSpokenDurationMs } from "./duration.js";
 import { evaluatePodcastScriptData } from "./evaluation.js";
@@ -16,6 +16,7 @@ import { podcastConsumerFingerprint } from "./consumer-fingerprint.js";
 import { buildDraftDestinationProjection, buildHumanizationDestinationProjection, buildNarrativeDestinationProjection, buildOutlineDestinationProjection, buildPlanningDestinationProjection } from "./destination-projection.js";
 
 const PLANNING_CONTEXT_BUDGET = 4_000;
+const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
 const SEGMENT_CONTEXT_BUDGET = 2_400;
 type DurableStage = "EPISODE_PLANNING" | "NARRATIVE_DESIGN" | "SEGMENT_OUTLINE" | "SEGMENT_DRAFTING" | "HUMANIZATION" | "GROUNDING_VALIDATION" | "FINALIZING" | "COMPLETED";
 type FaultPoint = "afterPlanningRetrieval" | "afterTextReceipt" | "afterPlanning" | "afterNarrative" | "afterOutline" | "afterSegmentDraft" | "afterQualityDecision" | "afterQualityRedraftMaterialization" | "afterSegmentHumanization" | "afterSegmentGrounding" | "beforeFinalization";
@@ -399,8 +400,9 @@ async function runFinalization(run: any, token: string, dependencies: ProcessPod
   });
 }
 
-export async function processPodcastGenerationRun(runId: string, dependencies: ProcessPodcastDependencies) {
+export async function processPodcastGenerationRun(runId: string, dependencies: ProcessPodcastDependencies, expectedDispatchGeneration = 0) {
   let run = await loadRun(runId);
+  if (run.dispatchGeneration !== expectedDispatchGeneration) return run;
   if (run.status === "SUCCEEDED") return run;
   const token = randomUUID();
   if (!await claimPodcastGenerationRun(run.id, token)) { run = await loadRun(run.id); if (run.status === "SUCCEEDED") return run; throw new Error("PODCAST_GENERATION_ALREADY_CLAIMED"); }
@@ -434,6 +436,10 @@ export async function processPodcastGenerationRun(runId: string, dependencies: P
   }
 }
 
-export async function dispatchPendingPodcastGeneration(queue: { add(name: string, payload: { podcastGenerationRunId: string }, options: { jobId: string }): Promise<unknown> }, options: { aggregateIds?: string[]; dispatchConcurrency?: number; topic?: string } = {}) {
-  return dispatchPendingOutbox<{ podcastGenerationRunId: string }>({ topic: options.topic ?? PODCAST_GENERATION_TOPIC, queue, jobName: PODCAST_GENERATION_JOB, parse: (payload: unknown) => { const value = payload as { podcastGenerationRunId?: unknown }; if (typeof value?.podcastGenerationRunId !== "string") throw new Error("PODCAST_OUTBOX_PAYLOAD_INVALID"); return { podcastGenerationRunId: value.podcastGenerationRunId }; }, jobId: (payload: { podcastGenerationRunId: string }) => payload.podcastGenerationRunId, aggregateIds: options.aggregateIds, dispatchConcurrency: options.dispatchConcurrency, afterDispatch: async (tx, payload: { podcastGenerationRunId: string }, queueJobId: string) => { const run = await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: payload.podcastGenerationRunId } }); await tx.job.update({ where: { id: run.jobId }, data: { queueJobId } }); } });
+export async function dispatchPendingPodcastGeneration(queue: { add(name: string, payload: { podcastGenerationRunId: string; dispatchGeneration: number }, options: { jobId: string }): Promise<unknown> }, options: { aggregateIds?: string[]; dispatchConcurrency?: number; topic?: string; beforeFinalize?: (eventId: string) => Promise<void> | void } = {}) {
+  return dispatchPendingOutbox<{ podcastGenerationRunId: string; dispatchGeneration: number }>({ topic: options.topic ?? PODCAST_GENERATION_TOPIC, queue, jobName: PODCAST_GENERATION_JOB, parse: (payload: unknown) => { const value = payload as { podcastGenerationRunId?: unknown; dispatchGeneration?: unknown }; if (typeof value?.podcastGenerationRunId !== "string") throw new Error("PODCAST_OUTBOX_PAYLOAD_INVALID"); return { podcastGenerationRunId: value.podcastGenerationRunId, dispatchGeneration: normalizeDispatchGeneration(value) }; }, jobId: payload => payload.dispatchGeneration === 0 ? payload.podcastGenerationRunId : `${payload.podcastGenerationRunId}-g${payload.dispatchGeneration}`, aggregateIds: options.aggregateIds, dispatchConcurrency: options.dispatchConcurrency, beforeFinalize: options.beforeFinalize, afterDispatch: async (tx, payload, queueJobId) => { const run = await tx.podcastGenerationRun.findUniqueOrThrow({ where: { id: payload.podcastGenerationRunId } }); if (run.dispatchGeneration === payload.dispatchGeneration) await tx.job.update({ where: { id: run.jobId }, data: { queueJobId } }); } });
+}
+
+export async function rearmPodcastGenerationRunById(runId: string, expectedDispatchGeneration: number, topic = PODCAST_GENERATION_TOPIC): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
+  try { return await prisma.$transaction(async tx => { const run = await tx.podcastGenerationRun.findUnique({ where: { id: runId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.podcastGenerationRun.updateMany({ where: { id: run.id, dispatchGeneration: expectedDispatchGeneration }, data: { dispatchGeneration: { increment: 1 }, status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null } }); if (changed.count !== 1) return "RACE_LOST"; const current = await tx.podcastGenerationRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { podcastGenerationRunId: current.id, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
 }
