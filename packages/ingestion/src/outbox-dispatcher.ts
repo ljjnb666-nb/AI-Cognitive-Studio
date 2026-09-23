@@ -1,8 +1,17 @@
 import { prisma } from "@ai-cognitive/db";
 
 export type OutboxQueue<T> = { add(name: string, payload: T, options: { jobId: string }): Promise<unknown> };
-type OutboxTransaction = Pick<typeof prisma, "$executeRaw" | "ingestionRun" | "bookAnalysisRun" | "job">;
+export const MAX_PERSISTED_DISPATCH_GENERATION = 2_147_483_647;
+type OutboxTransaction = Pick<typeof prisma, "$executeRaw" | "$queryRaw" | "ingestionRun" | "bookAnalysisRun" | "podcastGenerationRun" | "shortVideoGenerationRun" | "job">;
 export type DispatchOptions<T> = { topic: string; queue: OutboxQueue<T>; jobName: string; parse(payload: unknown): T; jobId(payload: T): string; afterDispatch?(tx: OutboxTransaction, payload: T, jobId: string): Promise<void>; batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; aggregateIds?: string[]; beforeFinalize?: (eventId: string) => Promise<void> | void };
+
+/** Historical events omit generation; newly written events must carry a safe non-negative integer. */
+export function normalizeDispatchGeneration(payload: Record<string, unknown>): number {
+  if (!Object.hasOwn(payload, "dispatchGeneration")) return 0;
+  const value = payload.dispatchGeneration;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("OUTBOX_PAYLOAD_INVALID");
+  return value;
+}
 
 /** Shared PostgreSQL-authoritative transactional-outbox claim, enqueue and finalization protocol. */
 export async function dispatchPendingOutbox<T>(options: DispatchOptions<T>): Promise<number> {
@@ -14,7 +23,21 @@ export async function dispatchPendingOutbox<T>(options: DispatchOptions<T>): Pro
   const concurrency = options.dispatchConcurrency ?? 1;
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new Error("OUTBOX_DISPATCH_CONCURRENCY_INVALID");
   let next = 0;
-  const dispatchOne = async (event: { id: string; payload: unknown; claimToken: string }) => { const payload = options.parse(event.payload), jobId = options.jobId(payload); try { await options.queue.add(options.jobName, payload, { jobId }); await options.beforeFinalize?.(event.id); await prisma.$transaction(async (tx) => { const marked = await tx.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'DISPATCHED'::"OutboxStatus", "dispatchedAt" = NOW(), "leaseUntil" = NULL, "claimToken" = NULL, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus" AND "claimToken" = ${event.claimToken}`; if (marked !== 1) throw new Error("OUTBOX_CLAIM_LOST"); await options.afterDispatch?.(tx, payload, jobId); }); } catch (error) { const lastError = error instanceof Error ? error.message.slice(0, 2000) : "UNEXPECTED_ERROR"; await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = CASE WHEN "attemptCount" >= ${maxAttempts} THEN 'FAILED'::"OutboxStatus" ELSE 'PENDING'::"OutboxStatus" END, "leaseUntil" = NULL, "claimToken" = NULL, "lastError" = ${lastError}, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus" AND "claimToken" = ${event.claimToken}`; } };
+  const dispatchOne = async (event: { id: string; payload: unknown; claimToken: string }) => {
+    try {
+      const payload = options.parse(event.payload), jobId = options.jobId(payload);
+      await options.queue.add(options.jobName, payload, { jobId });
+      await options.beforeFinalize?.(event.id);
+      await prisma.$transaction(async (tx) => {
+        const marked = await tx.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'DISPATCHED'::"OutboxStatus", "dispatchedAt" = NOW(), "leaseUntil" = NULL, "claimToken" = NULL, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus" AND "claimToken" = ${event.claimToken}`;
+        if (marked !== 1) throw new Error("OUTBOX_CLAIM_LOST");
+        await options.afterDispatch?.(tx, payload, jobId);
+      });
+    } catch (error) {
+      const lastError = error instanceof Error ? error.message.slice(0, 2000) : "UNEXPECTED_ERROR";
+      await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = CASE WHEN "attemptCount" >= ${maxAttempts} THEN 'FAILED'::"OutboxStatus" ELSE 'PENDING'::"OutboxStatus" END, "leaseUntil" = NULL, "claimToken" = NULL, "lastError" = ${lastError}, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus" AND "claimToken" = ${event.claimToken}`;
+    }
+  };
   await Promise.all(Array.from({ length: Math.min(concurrency, events.length) }, async () => { while (next < events.length) { const event = events[next++]; if (event) await dispatchOne(event); } }));
   return events.length;
 }

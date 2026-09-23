@@ -9,7 +9,7 @@ import { parseDocument } from "./document-parsers.js";
 import { SourceError } from "./source-errors.js";
 import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
 import { dispatchPendingOutbox } from "./outbox-dispatcher.js";
-export { dispatchPendingOutbox } from "./outbox-dispatcher.js";
+export { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "./outbox-dispatcher.js";
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export { parseDocument, DEFAULT_PARSER_LIMITS } from "./document-parsers.js";

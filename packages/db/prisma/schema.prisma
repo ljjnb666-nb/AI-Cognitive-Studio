@@ -1286,6 +1286,8 @@ model BookAnalysisRun {
   executionClaimToken      String?
   executionClaimedAt       DateTime?
   executionLeaseUntil      DateTime?
+  /// Durable transport fence. Historical rows and deliveries are generation zero.
+  dispatchGeneration       Int                       @default(0)
   analysisStage            AnalysisRunStage          @default(QUEUED)
   createdAt                DateTime                  @default(now())
   startedAt                DateTime?
@@ -1778,6 +1780,8 @@ model PodcastGenerationRun {
   executionClaimToken      String?
   executionClaimedAt       DateTime?
   executionLeaseUntil      DateTime?
+  /// Durable transport fence. Historical rows and deliveries are generation zero.
+  dispatchGeneration       Int                         @default(0)
   correlationId            String?
   createdAt                DateTime                    @default(now())
   startedAt                DateTime?
@@ -2482,6 +2486,8 @@ model ShortVideoGenerationRun {
   executionClaimToken    String?
   executionClaimedAt     DateTime?
   executionLeaseUntil    DateTime?
+  /// Durable transport fence. Historical rows and deliveries are generation zero.
+  dispatchGeneration     Int                           @default(0)
   errorCode              String?
   createdAt              DateTime                      @default(now())
   startedAt              DateTime?

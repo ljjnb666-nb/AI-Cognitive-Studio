@@ -3,7 +3,7 @@ import { ProviderExecutionRepository, ProviderGatewayRepository, testCipher } fr
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { materializeChunkSet } from "../src/persistence.js";
-import { processBookAnalysisRun, recoverBookAnalysisForUser, requestBookAnalysisForUser, type ProcessBookAnalysisDependencies } from "../src/pipeline.js";
+import { processBookAnalysisRun, rearmBookAnalysisRunById, recoverBookAnalysisForUser, requestBookAnalysisForUser, type ProcessBookAnalysisDependencies } from "../src/pipeline.js";
 import type { AnalysisProvider, AnalysisResponse } from "../src/analysis.js";
 import { DeterministicFakeEmbeddingProvider, embeddingIdentityWithHash } from "../src/embeddings.js";
 import { materializeBookMemoryEmbeddings, materializeDocumentChunkEmbeddings } from "../src/gateway-materialization.js";
@@ -119,7 +119,8 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     );
     await processBookAnalysisRun(newer.run.id, deps(data, { embeddingVersion: "newer" }));
     await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED", analysisStage: "FINALIZING", completedAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
-    await processBookAnalysisRun(data.run.id, deps(data));
+    await expect(rearmBookAnalysisRunById(data.run.id, 0)).resolves.toBe("REARMED");
+    await processBookAnalysisRun(data.run.id, deps(data), 1);
     expect(await prisma.currentBookIntelligence.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } } })).toMatchObject({ analysisRunId: newer.run.id, extractionId: data.extraction.id });
   });
 
@@ -138,7 +139,8 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     await expect(processBookAnalysisRun(data.run.id, deps(data, { faultInjector: point => { if (point === "afterEmbeddingMaterialization" && !crashed) { crashed = true; throw new Error("CASE02B_AFTER_FIRST_BATCH"); } } }))).rejects.toThrow("CASE02B_AFTER_FIRST_BATCH");
     expect(data.gateway.remoteInputs()).toHaveLength(1);
     expect(data.gateway.remoteInputs()[0]).toHaveLength(2);
-    await processBookAnalysisRun(data.run.id, deps(data));
+    await expect(rearmBookAnalysisRunById(data.run.id, 0)).resolves.toBe("REARMED");
+    await processBookAnalysisRun(data.run.id, deps(data), 1);
     const chunks = await prisma.documentChunk.findMany({ where: { chunkSetId: data.chunkSet.id }, orderBy: [{ ordinal: "asc" }, { id: "asc" }] });
     const memories = await prisma.bookMemoryItem.findMany({ where: { analysisRunId: data.run.id }, orderBy: [{ ordinal: "asc" }, { id: "asc" }] });
     const targets = [...chunks.map(item => item.content), ...memories.map(item => item.content)];
@@ -155,7 +157,7 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     const data = await fixture(); const crash = { faultInjector: (point: string) => { if (point === "afterEmbeddingGatewayPersist") throw new Error("CASE03"); } };
     await expect(processBookAnalysisRun(data.run.id, deps(data, crash))).rejects.toThrow("CASE03");
     expect(data.gateway.remoteCallCount()).toBe(1); expect(await receipt(data.workspace.id)).toMatchObject({ consumedAt: null, purgedAt: null, ciphertext: expect.any(String), iv: expect.any(String), authTag: expect.any(String), keyVersion: expect.any(String) });
-    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(0); await processBookAnalysisRun(data.run.id, deps(data));
+    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(0); await expect(rearmBookAnalysisRunById(data.run.id, 0)).resolves.toBe("REARMED"); await processBookAnalysisRun(data.run.id, deps(data), 1);
     expect(data.gateway.remoteCallCount()).toBe(1); expect((await receipt(data.workspace.id)).consumedAt).not.toBeNull();
   });
 
@@ -163,7 +165,8 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     const data = await fixture(); const crash = { faultInjector: (point: string) => { if (point === "afterEmbeddingMaterialization") throw new Error("CASE04"); } };
     await expect(processBookAnalysisRun(data.run.id, deps(data, crash))).rejects.toThrow("CASE04");
     const before = await accounting(data.workspace.id); expect((await receipt(data.workspace.id)).consumedAt).not.toBeNull();
-    await processBookAnalysisRun(data.run.id, deps(data)); expect(data.gateway.remoteCallCount()).toBe(1); expect(await accounting(data.workspace.id)).toEqual(before);
+    await expect(rearmBookAnalysisRunById(data.run.id, 0)).resolves.toBe("REARMED");
+    await processBookAnalysisRun(data.run.id, deps(data), 1); expect(data.gateway.remoteCallCount()).toBe(1); expect(await accounting(data.workspace.id)).toEqual(before);
     expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).analysisStage).toBe("COMPLETED");
   });
 
@@ -207,7 +210,7 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
 
   it("CASE11 identical existing destinations are accepted", async () => {
     const data = await fixture(); await processBookAnalysisRun(data.run.id, deps(data));
-    const before = await accounting(data.workspace.id); await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED", analysisStage: "EMBEDDINGS", completedAt: null } });
+    const before = await accounting(data.workspace.id); await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "RUNNING", analysisStage: "EMBEDDINGS", completedAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: new Date(0) } });
     await processBookAnalysisRun(data.run.id, deps(data)); expect(await accounting(data.workspace.id)).toEqual(before); expect(data.gateway.remoteCallCount()).toBe(1);
   });
 
@@ -237,7 +240,8 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     const identityB = embeddingIdentityWithHash({ provider: "identity-b", model: "identity-b", embeddingVersion: "identity-b", dimensions: 4 });
     const chunks = await prisma.documentChunk.findMany({ where: { chunkSetId: data.chunkSet.id } });
     for (const chunk of chunks) await prisma.documentChunkEmbedding.create({ data: { chunkId: chunk.id, workspaceId: data.workspace.id, extractionId: data.extraction.id, provider: "identity-b", model: "identity-b", embeddingVersion: "identity-b", embeddingIdentityHash: identityB.hash, dimensions: 4, vector: [1, 0, 0, 0] } });
-    await processBookAnalysisRun(data.run.id, deps(data));
+    await expect(rearmBookAnalysisRunById(data.run.id, 0)).resolves.toBe("REARMED");
+    await processBookAnalysisRun(data.run.id, deps(data), 1);
     expect(data.gateway.remoteCallCount()).toBe(1); expect(await accounting(data.workspace.id)).toEqual(before);
     expect((await prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }).then(job => job.result as { embeddingIdentityHash?: string; embeddingVersion?: string })).embeddingIdentityHash).toBe(identityA.embeddingIdentityHash);
     expect((await prisma.job.findUniqueOrThrow({ where: { id: data.job.id } }).then(job => job.result as { embeddingIdentityHash?: string; embeddingVersion?: string })).embeddingVersion).toBe("gateway");
@@ -246,7 +250,8 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     await expect(processBookAnalysisRun(negative.run.id, deps(negative, { faultInjector: (point) => { if (point === "afterEmbeddingMaterialization") throw new Error("CASE14_NEGATIVE"); } }))).rejects.toThrow("CASE14_NEGATIVE");
     const negativeBefore = await accounting(negative.workspace.id), missing = await prisma.documentChunkEmbedding.findFirstOrThrow({ where: { workspaceId: negative.workspace.id } });
     await prisma.documentChunkEmbedding.delete({ where: { id: missing.id } });
-    await expect(processBookAnalysisRun(negative.run.id, deps(negative))).rejects.toThrow("Consumed document embedding destination is invalid");
+    await expect(rearmBookAnalysisRunById(negative.run.id, 0)).resolves.toBe("REARMED");
+    await expect(processBookAnalysisRun(negative.run.id, deps(negative), 1)).rejects.toThrow("Consumed document embedding destination is invalid");
     expect(negative.gateway.remoteCallCount()).toBe(1); expect(await accounting(negative.workspace.id)).toEqual(negativeBefore); expect(await prisma.documentChunkEmbedding.findUnique({ where: { id: missing.id } })).toBeNull();
     expect((await receipt(negative.workspace.id)).consumedAt).not.toBeNull(); expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: negative.run.id } })).analysisStage).toBe("EMBEDDINGS");
   });
@@ -265,7 +270,8 @@ describe("Phase 8C Checkpoint 3A CASE01-16 acceptance matrix", () => {
     const providerB = await routes.createConnection({ workspaceId: data.workspace.id, userId: data.user.id }, { providerKey: "deterministic-test", protocol: "TEST", displayName: "checkpoint3a-provider-b" });
     await routes.rotateCredential({ workspaceId: data.workspace.id, userId: data.user.id }, providerB.id, "checkpoint3a-provider-b-credential");
     await routes.setRoute({ workspaceId: data.workspace.id, userId: data.user.id }, { routeSlot: "EMBEDDING", connectionId: providerB.id, modelId: "deterministic-vector-v1" });
-    await expect(processBookAnalysisRun(data.run.id, deps(data))).rejects.toThrow();
+    await expect(rearmBookAnalysisRunById(data.run.id, 0)).resolves.toBe("REARMED");
+    await expect(processBookAnalysisRun(data.run.id, deps(data), 1)).rejects.toThrow();
     expect(data.gateway.remoteCallCount()).toBe(1); expect(await accounting(data.workspace.id)).toEqual(before);
     expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(0); expect((await receipt(data.workspace.id)).consumedAt).toBeNull();
   });

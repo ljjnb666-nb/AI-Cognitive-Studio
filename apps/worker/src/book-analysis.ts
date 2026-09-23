@@ -1,5 +1,6 @@
 import { Queue, Worker } from "bullmq";
 import { BOOK_ANALYSIS_JOB, dispatchPendingBookAnalysis, processBookAnalysisRun, type ProcessBookAnalysisDependencies } from "../../../packages/book-intelligence/src/index.js";
+import { normalizeDispatchGeneration } from "@ai-cognitive/ingestion";
 import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
 
 export const BOOK_ANALYSIS_QUEUE = "book.analysis";
@@ -7,9 +8,9 @@ export type BookAnalysisQueueOptions = { prefix?: string; concurrency?: number }
 export function createBookAnalysisWorker(environment: Environment, dependencies?: ProcessBookAnalysisDependencies, options: BookAnalysisQueueOptions = {}) {
   if (!dependencies?.analysisProvider && !dependencies?.analysisProviderForRun) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED");
   if (!dependencies.embeddingGateway && !dependencies.embeddingGatewayForRun) throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_NOT_CONFIGURED");
-  return new Worker<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, async (job) => processBookAnalysisRun(job.data.analysisRunId, dependencies), { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_BOOK_ANALYSIS_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) });
+  return new Worker<{ analysisRunId: string; dispatchGeneration?: number }>(BOOK_ANALYSIS_QUEUE, async (job) => { try { return await processBookAnalysisRun(job.data.analysisRunId, dependencies, normalizeDispatchGeneration(job.data)); } catch (error) { if (error instanceof Error && error.message === "OUTBOX_PAYLOAD_INVALID") return; throw error; } }, { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_BOOK_ANALYSIS_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) });
 }
-export function createBookAnalysisQueue(environment: Environment, options: BookAnalysisQueueOptions = {}) { return new Queue<{ analysisRunId: string }>(BOOK_ANALYSIS_QUEUE, { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) }); }
+export function createBookAnalysisQueue(environment: Environment, options: BookAnalysisQueueOptions = {}) { return new Queue<{ analysisRunId: string; dispatchGeneration?: number }>(BOOK_ANALYSIS_QUEUE, { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) }); }
 export function dispatchBookAnalysisWithQueue(queue: Queue<{ analysisRunId: string }>, options?: Parameters<typeof dispatchPendingBookAnalysis>[1]): Promise<number> { return dispatchPendingBookAnalysis(queue, options); }
 export async function dispatchBookAnalysis(environment: Environment): Promise<number> { const queue = createBookAnalysisQueue(environment); try { return await dispatchBookAnalysisWithQueue(queue); } finally { await queue.close(); } }
 export { BOOK_ANALYSIS_JOB };

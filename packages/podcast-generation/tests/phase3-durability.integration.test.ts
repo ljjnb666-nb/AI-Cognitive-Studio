@@ -1,7 +1,9 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
+import { type Environment } from "@ai-cognitive/shared/server";
+import { createPodcastGenerationQueue, createPodcastGenerationWorker } from "../../../apps/worker/src/podcast-generation.js";
 import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysis, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "@ai-cognitive/book-intelligence";
-import { claimPodcastGenerationRun, createEpisode, createPodcastProject, evaluatePodcastScript, getEpisodeScript, getPodcastGenerationStatus, PODCAST_GENERATION_OWNERSHIP_LOST, processPodcastGenerationRun, requestPodcastGeneration, type DialogueOutput, type EpisodePlanOutput, type HumanizationOutput, type NarrativeOutput, type PodcastGenerationProvider, type SegmentOutlineOutput } from "../src/index.js";
+import { claimPodcastGenerationRun, createEpisode, createPodcastProject, dispatchPendingPodcastGeneration, evaluatePodcastScript, getEpisodeScript, getPodcastGenerationStatus, PODCAST_GENERATION_OWNERSHIP_LOST, processPodcastGenerationRun, rearmPodcastGenerationRunById, requestPodcastGeneration, type DialogueOutput, type EpisodePlanOutput, type HumanizationOutput, type NarrativeOutput, type PodcastGenerationProvider, type SegmentOutlineOutput } from "../src/index.js";
 import { clearBookAnalysisEmbeddingGatewayFixtureState, createBookAnalysisEmbeddingGatewayFixture } from "../../book-intelligence/tests/helpers/book-analysis-embedding-gateway.js";
 
 const workspaces: string[] = [], users: string[] = [];
@@ -69,6 +71,54 @@ async function moveCurrentIntelligenceToB(data: Awaited<ReturnType<typeof fixtur
   return requested.run;
 }
 async function expire(runId: string) { await prisma.$executeRaw`UPDATE "PodcastGenerationRun" SET "executionLeaseUntil" = NOW() - INTERVAL '1 second' WHERE "id" = ${runId}`; }
+async function waitForGenerationOrBlockedUpdate(blockerPid: number, runId: string, expectedGeneration: number) {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    const [state] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (SELECT 1 FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND ${blockerPid} = ANY(pg_blocking_pids(activity.pid))) AS blocked`;
+    if (state?.blocked) return "BLOCKED" as const;
+    if ((await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId }, select: { dispatchGeneration: true } })).dispatchGeneration !== expectedGeneration) return "ADVANCED" as const;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  throw new Error("FINALIZER_REARM_RACE_DID_NOT_PROGRESS:PodcastGenerationRun");
+}
+
+async function holdA2RunRowLock(runId: string) {
+  let locked!: (pid: number) => void;
+  let release!: () => void;
+  const lockedP = new Promise<number>(resolve => locked = resolve);
+  const releaseP = new Promise<void>(resolve => release = resolve);
+  const holding = prisma.$transaction(async tx => {
+    const [session] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    if (!session) throw new Error("A2_PODCAST_ROW_LOCK_SESSION_MISSING");
+    const { pid } = session;
+    await tx.$queryRaw`SELECT "id" FROM "PodcastGenerationRun" WHERE "id" = ${runId} FOR UPDATE`;
+    locked(pid);
+    await releaseP;
+  }, { maxWait: 10_000, timeout: 60_000 });
+  const pid = await lockedP;
+  return { pid, release, done: holding };
+}
+
+async function waitForBlockedPodcastUpdates(blockerPid: number, expectedCount: number) {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    const [state] = await prisma.$queryRaw<Array<{ blockedCount: number }>>`WITH RECURSIVE wait_chain(origin_pid, blocker_pid, depth) AS (
+      SELECT activity.pid, blocker.pid, 1 FROM pg_stat_activity activity CROSS JOIN LATERAL unnest(pg_blocking_pids(activity.pid)) AS blocker(pid)
+      WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid() AND activity.wait_event_type = 'Lock' AND activity.query ILIKE '%UPDATE%PodcastGenerationRun%'
+      UNION ALL
+      SELECT chain.origin_pid, next_blocker.pid, chain.depth + 1 FROM wait_chain chain CROSS JOIN LATERAL unnest(pg_blocking_pids(chain.blocker_pid)) AS next_blocker(pid) WHERE chain.depth < 8
+    ) SELECT COUNT(DISTINCT origin_pid)::int AS "blockedCount" FROM wait_chain WHERE blocker_pid = ${blockerPid}`;
+    if ((state?.blockedCount ?? 0) >= expectedCount) return;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  throw new Error(`A2_PODCAST_EXPECTED_${expectedCount}_BLOCKED_RUN_UPDATES`);
+}
+
+async function waitForSignal(signal: () => boolean, message: string) {
+  for (let attempt = 0; attempt < 10_000; attempt++) {
+    if (signal()) return;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  throw new Error(message);
+}
 
 async function cleanupWorkspace(workspaceId: string) {
   await clearBookAnalysisEmbeddingGatewayFixtureState(workspaceId);
@@ -106,12 +156,258 @@ afterEach(async () => { for (const workspaceId of workspaces.splice(0)) await cl
 afterAll(() => prisma.$disconnect());
 
 describe("durable Phase 3 generation", () => {
+  describe("A2 claim/rearm authority races", () => {
+    it("lets rearm N→N+1 win before a stale Podcast claim and gives the stale processor zero authority", async () => {
+      const data = await fixture();
+      const runId = data.requested.run.id;
+      const providerInvocationsBefore = await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } });
+      const blocker = await holdA2RunRowLock(runId);
+      let staleProviderResolutions = 0, staleEmbeddingResolutions = 0;
+      let rearm: ReturnType<typeof rearmPodcastGenerationRunById> | undefined;
+      let staleDelivery: ReturnType<typeof processPodcastGenerationRun> | undefined;
+      try {
+        rearm = rearmPodcastGenerationRunById(runId, 0);
+        await waitForBlockedPodcastUpdates(blocker.pid, 1);
+        staleDelivery = processPodcastGenerationRun(runId, {
+          providerForRun: async () => { staleProviderResolutions++; throw new Error("A2_STALE_PODCAST_PROVIDER_RESOLVED"); },
+          embeddingProviderForRun: async () => { staleEmbeddingResolutions++; return data.embeddings; },
+        }, 0);
+        await waitForBlockedPodcastUpdates(blocker.pid, 2);
+      } finally {
+        blocker.release();
+        await blocker.done;
+        await Promise.allSettled([...(rearm ? [rearm] : []), ...(staleDelivery ? [staleDelivery] : [])]);
+      }
+      const [rearmResult, staleResult] = await Promise.all([rearm!, Promise.allSettled([staleDelivery!])]);
+      const after = await Promise.all([
+        prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId } }),
+        prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }),
+        prisma.outboxEvent.count({ where: { aggregateId: runId } }),
+        prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } }),
+      ]);
+      expect(rearmResult).toBe("REARMED");
+      expect([after[0].dispatchGeneration, after[0].status, after[0].executionClaimToken, after[1].status]).toEqual([1, "QUEUED", null, "QUEUED"]);
+      expect(staleResult[0]!.status).toBe("rejected");
+      expect((staleResult[0] as PromiseRejectedResult).reason).toMatchObject({ message: "PODCAST_GENERATION_ALREADY_CLAIMED" });
+      expect([staleProviderResolutions, staleEmbeddingResolutions]).toEqual([0, 0]);
+      expect(after[2]).toBe(2);
+      expect(after[3]).toBe(providerInvocationsBefore);
+      const generationOneOutbox = await prisma.outboxEvent.findFirstOrThrow({ where: { aggregateId: runId, payload: { path: ["dispatchGeneration"], equals: 1 } } });
+      expect(generationOneOutbox.status).toBe("PENDING");
+    });
+
+    it("allows only one concurrent Podcast rearm per expected generation and fences repeats", async () => {
+      const data = await fixture();
+      const runId = data.requested.run.id;
+      await prisma.$transaction([
+        prisma.podcastGenerationRun.update({ where: { id: runId }, data: { status: "QUEUED", executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }),
+        prisma.job.update({ where: { id: data.requested.job.id }, data: { status: "QUEUED" } }),
+      ]);
+      const topic = `a2.concurrent-rearm.podcast.${crypto.randomUUID()}`;
+      const blocker = await holdA2RunRowLock(runId);
+      let first: ReturnType<typeof rearmPodcastGenerationRunById> | undefined;
+      let second: ReturnType<typeof rearmPodcastGenerationRunById> | undefined;
+      try {
+        first = rearmPodcastGenerationRunById(runId, 0, topic);
+        await waitForBlockedPodcastUpdates(blocker.pid, 1);
+        second = rearmPodcastGenerationRunById(runId, 0, topic);
+        await waitForBlockedPodcastUpdates(blocker.pid, 2);
+      } finally {
+        blocker.release();
+        await blocker.done;
+        await Promise.allSettled([...(first ? [first] : []), ...(second ? [second] : [])]);
+      }
+      const results = await Promise.all([first!, second!]);
+      expect(results.filter(result => result === "REARMED")).toHaveLength(1);
+      expect(results.filter(result => result === "RACE_LOST")).toHaveLength(1);
+      const current = await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId }, include: { job: true } });
+      expect([current.dispatchGeneration, current.status, current.jobId, current.job.status]).toEqual([1, "QUEUED", data.requested.job.id, "QUEUED"]);
+      expect(await prisma.outboxEvent.count({ where: { aggregateId: runId, topic } })).toBe(1);
+      await expect(rearmPodcastGenerationRunById(runId, 0, topic)).resolves.toBe("NOT_ELIGIBLE");
+      expect(await prisma.outboxEvent.count({ where: { aggregateId: runId, topic } })).toBe(1);
+    });
+
+    it("lets a live Podcast claim win before stale rearm and preserves its owner, lease, Job, and Outbox", async () => {
+      const data = await fixture();
+      const runId = data.requested.run.id;
+      const blocker = await holdA2RunRowLock(runId);
+      let releaseProvider!: () => void;
+      const providerGate = new Promise<void>(resolve => releaseProvider = resolve);
+      let providerDidEnter = false;
+      let rearm: ReturnType<typeof rearmPodcastGenerationRunById> | undefined;
+      let worker: ReturnType<typeof processPodcastGenerationRun> | undefined;
+      try {
+        worker = processPodcastGenerationRun(runId, {
+          providerForRun: async () => { providerDidEnter = true; await providerGate; throw new Error("A2_STOP_AFTER_PODCAST_CLAIM"); },
+          embeddingProviderForRun: async () => data.embeddings,
+        }, 0);
+        await waitForBlockedPodcastUpdates(blocker.pid, 1);
+        rearm = rearmPodcastGenerationRunById(runId, 0);
+        await waitForBlockedPodcastUpdates(blocker.pid, 2);
+        blocker.release();
+        await blocker.done;
+        await waitForSignal(() => providerDidEnter, "A2_PODCAST_CLAIM_DID_NOT_REACH_PROVIDER_RESOLVER");
+        const beforeRearm = await Promise.all([
+          prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId } }),
+          prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }),
+          prisma.outboxEvent.count({ where: { aggregateId: runId } }),
+        ]);
+        const [lease] = await prisma.$queryRaw<Array<{ leaseValid: boolean }>>`SELECT "executionLeaseUntil" > NOW() AS "leaseValid" FROM "PodcastGenerationRun" WHERE "id" = ${runId}`;
+        if (!lease) throw new Error("A2_PODCAST_LEASE_SNAPSHOT_MISSING");
+        const rearmResult = await rearm!;
+        const afterRearm = await Promise.all([
+          prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId } }),
+          prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }),
+          prisma.outboxEvent.count({ where: { aggregateId: runId } }),
+        ]);
+        expect([beforeRearm[0].dispatchGeneration, beforeRearm[0].status, beforeRearm[0].executionClaimToken, beforeRearm[1].status]).toEqual([0, "RUNNING", expect.any(String), "RUNNING"]);
+        expect(lease.leaseValid).toBe(true);
+        expect(rearmResult).toMatch(/^(RACE_LOST|NOT_ELIGIBLE)$/);
+        expect(afterRearm).toEqual(beforeRearm);
+      } finally {
+        blocker.release();
+        await blocker.done.catch(() => undefined);
+        releaseProvider();
+        await Promise.allSettled([...(rearm ? [rearm] : []), ...(worker ? [worker] : [])]);
+      }
+    });
+  });
+
+  it("accepts the largest safe transport generation but fences it against a persisted Podcast generation before provider resolution", async () => {
+    const data = await fixture();
+    const prefix = `a2-podcast-safe-integer-${crypto.randomUUID()}`;
+    let provider = 0, embedding = 0;
+    const environment = { REDIS_URL: process.env.REDIS_URL!, WORKER_PODCAST_GENERATION_CONCURRENCY: 1 } as unknown as Environment;
+    const worker = createPodcastGenerationWorker(environment, { providerForRun: async () => { provider++; throw new Error("UNEXPECTED_PROVIDER"); }, embeddingProviderForRun: async () => { embedding++; throw new Error("UNEXPECTED_EMBEDDING"); } } as never, { prefix });
+    const queue = createPodcastGenerationQueue(environment, { prefix });
+    try {
+      await worker.waitUntilReady();
+      const before = await Promise.all([prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }), prisma.providerInvocation.count()]);
+      const delivered = await queue.add("a2-safe-integer", { podcastGenerationRunId: data.requested.run.id, dispatchGeneration: Number.MAX_SAFE_INTEGER }, { jobId: `${data.requested.run.id}-safe` });
+      await expect.poll(async () => delivered.getState(), { timeout: 10_000 }).toBe("completed");
+      expect([provider, embedding]).toEqual([0, 0]);
+      expect(await Promise.all([prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }), prisma.providerInvocation.count()])).toEqual(before);
+    } finally { await Promise.all([worker.close(), queue.obliterate({ force: true }), queue.close()]); }
+  });
+  it("dispatches distinct real BullMQ Podcast gen0 and gen1 jobs, then fences stale gen0 redelivery", async () => {
+    const data = await fixture();
+    const prefix = `a2-podcast-gen0-gen1-${crypto.randomUUID()}`;
+    let provider = 0;
+    const environment = { REDIS_URL: process.env.REDIS_URL!, WORKER_PODCAST_GENERATION_CONCURRENCY: 1 } as unknown as Environment;
+    const worker = createPodcastGenerationWorker(environment, { providerForRun: async () => { provider++; throw new Error("A2_EXPECTED_PROVIDER_FAILURE"); }, embeddingProviderForRun: async () => { throw new Error("UNEXPECTED_EMBEDDING"); } } as never, { prefix });
+    const queue = createPodcastGenerationQueue(environment, { prefix });
+    try {
+      await worker.waitUntilReady();
+      await dispatchPendingPodcastGeneration(queue, { aggregateIds: [data.requested.run.id] });
+      const gen0 = await queue.getJob(data.requested.run.id);
+      expect(gen0).toBeTruthy();
+      await expect.poll(async () => gen0!.getState(), { timeout: 10_000 }).toBe("failed");
+      const providerAfterGen0 = provider;
+      await expect(rearmPodcastGenerationRunById(data.requested.run.id, 0)).resolves.toBe("REARMED");
+      await dispatchPendingPodcastGeneration(queue, { aggregateIds: [data.requested.run.id] });
+      const gen1 = await queue.getJob(`${data.requested.run.id}-g1`);
+      expect(gen1).toBeTruthy();
+      await expect.poll(async () => gen1!.getState(), { timeout: 10_000 }).toBe("failed");
+      expect(provider).toBeGreaterThan(providerAfterGen0);
+      expect([gen0!.id, gen1!.id]).toEqual([data.requested.run.id, `${data.requested.run.id}-g1`]);
+      const beforeStale = provider;
+      const stale = await queue.add("a2-stale-redelivery", { podcastGenerationRunId: data.requested.run.id, dispatchGeneration: 0 }, { jobId: `${data.requested.run.id}-g0-redelivery` });
+      await expect.poll(async () => stale.getState(), { timeout: 10_000 }).toBe("completed");
+      expect(provider).toBe(beforeStale);
+    } finally { await Promise.all([worker.close(), queue.obliterate({ force: true }), queue.close()]); }
+  });
+  it("gives FAILED Podcast generation N zero authority on same-generation BullMQ redelivery", async () => {
+    const data = await fixture();
+    await prisma.$transaction([
+      prisma.podcastGenerationRun.update({ where: { id: data.requested.run.id }, data: { status: "FAILED", completedAt: new Date(), errorCode: "PRIOR_FAILURE", executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }),
+      prisma.job.update({ where: { id: data.requested.job.id }, data: { status: "FAILED", attemptCount: 4, completedAt: new Date() } }),
+    ]);
+    const prefix = `a2-podcast-failed-redelivery-${crypto.randomUUID()}`;
+    const counters = { provider: 0, embedding: 0 };
+    const environment = { REDIS_URL: process.env.REDIS_URL!, WORKER_PODCAST_GENERATION_CONCURRENCY: 1 } as unknown as Environment;
+    const worker = createPodcastGenerationWorker(environment, { providerForRun: async () => { counters.provider++; throw new Error("FAILED_RUN_PROVIDER_RESOLVED"); }, embeddingProviderForRun: async () => { counters.embedding++; throw new Error("FAILED_RUN_EMBEDDING_RESOLVED"); } } as never, { prefix });
+    const queue = createPodcastGenerationQueue(environment, { prefix });
+    try {
+      await worker.waitUntilReady();
+      const beforeRun = await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } });
+      const beforeJob = await prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } });
+      const beforeEpisode = await prisma.podcastEpisode.findUniqueOrThrow({ where: { id: data.episode.id } });
+      const beforeBusiness = await Promise.all([prisma.podcastPlanContextItem.count({ where: { podcastGenerationRunId: data.requested.run.id } }), prisma.episodeSegment.count({ where: { podcastGenerationRunId: data.requested.run.id } }), prisma.podcastScriptRevision.count({ where: { generationRunId: data.requested.run.id } }), prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })]);
+      const delivered = await queue.add("a2-failed-same-generation", { podcastGenerationRunId: data.requested.run.id, dispatchGeneration: 0 }, { jobId: `${data.requested.run.id}-failed-redelivery` });
+      await expect.poll(async () => delivered.getState(), { timeout: 10_000 }).toBe("failed");
+      const [afterRun, afterJob, afterEpisode] = await Promise.all([prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }), prisma.podcastEpisode.findUniqueOrThrow({ where: { id: data.episode.id } })]);
+      expect({ status: afterRun.status, generation: afterRun.dispatchGeneration, stage: afterRun.stage, errorCode: afterRun.errorCode, claimToken: afterRun.executionClaimToken, claimedAt: afterRun.executionClaimedAt, leaseUntil: afterRun.executionLeaseUntil, completedAt: afterRun.completedAt, jobId: afterRun.jobId }).toEqual({ status: beforeRun.status, generation: beforeRun.dispatchGeneration, stage: beforeRun.stage, errorCode: beforeRun.errorCode, claimToken: beforeRun.executionClaimToken, claimedAt: beforeRun.executionClaimedAt, leaseUntil: beforeRun.executionLeaseUntil, completedAt: beforeRun.completedAt, jobId: beforeRun.jobId });
+      expect({ status: afterJob.status, attempts: afterJob.attemptCount, queueJobId: afterJob.queueJobId, completedAt: afterJob.completedAt }).toEqual({ status: beforeJob.status, attempts: beforeJob.attemptCount, queueJobId: beforeJob.queueJobId, completedAt: beforeJob.completedAt });
+      expect(afterEpisode.status).toBe(beforeEpisode.status);
+      expect(counters).toEqual({ provider: 0, embedding: 0 });
+      expect(await Promise.all([prisma.podcastPlanContextItem.count({ where: { podcastGenerationRunId: data.requested.run.id } }), prisma.episodeSegment.count({ where: { podcastGenerationRunId: data.requested.run.id } }), prisma.podcastScriptRevision.count({ where: { generationRunId: data.requested.run.id } }), prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })])).toEqual(beforeBusiness);
+    } finally { await Promise.all([worker.close(), queue.obliterate({ force: true }), queue.close()]); }
+  });
+  it("keeps active capacity, reacquires terminal capacity, and rolls back when full", async () => { const prior = process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT; process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = "2"; const expensive = { in: ["book.analysis", "podcast.generation", "short-video.generation"] }; try { const active = await fixture(); await prisma.job.update({ where: { id: active.requested.job.id }, data: { status: "QUEUED" } }); await prisma.job.create({ data: { workspaceId: active.workspace.id, type: "book.analysis", payload: {}, status: "QUEUED" } }); await expect(rearmPodcastGenerationRunById(active.requested.run.id, 0)).resolves.toBe("REARMED"); expect(await prisma.job.count({ where: { workspaceId: active.workspace.id, type: expensive, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); const terminal = await fixture(); await prisma.$transaction([prisma.podcastGenerationRun.update({ where: { id: terminal.requested.run.id }, data: { status: "FAILED" } }), prisma.job.update({ where: { id: terminal.requested.job.id }, data: { status: "FAILED" } })]); await prisma.job.create({ data: { workspaceId: terminal.workspace.id, type: "book.analysis", payload: {}, status: "QUEUED" } }); await expect(rearmPodcastGenerationRunById(terminal.requested.run.id, 0)).resolves.toBe("REARMED"); expect(await prisma.job.count({ where: { workspaceId: terminal.workspace.id, type: expensive, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); const full = await fixture(); await prisma.$transaction([prisma.podcastGenerationRun.update({ where: { id: full.requested.run.id }, data: { status: "FAILED" } }), prisma.job.update({ where: { id: full.requested.job.id }, data: { status: "FAILED" } })]); await prisma.job.createMany({ data: ["a", "b"].map(id => ({ workspaceId: full.workspace.id, type: "book.analysis", payload: {}, status: "QUEUED", idempotencyKey: `a2-podcast-full-${id}-${crypto.randomUUID()}` })) }); const before = await Promise.all([prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: full.requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: full.requested.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: full.requested.run.id } })]); await expect(rearmPodcastGenerationRunById(full.requested.run.id, 0)).resolves.toBe("CAPACITY_BLOCKED"); expect(await Promise.all([prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: full.requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: full.requested.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: full.requested.run.id } })])).toEqual(before); expect(await prisma.job.count({ where: { workspaceId: full.workspace.id, type: expensive, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(2); } finally { if (prior === undefined) delete process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT; else process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = prior; } });
+  it("does not rearm a Podcast run with a live execution lease", async () => { const data = await fixture(); await prisma.podcastGenerationRun.update({ where: { id: data.requested.run.id }, data: { status: "RUNNING", executionLeaseUntil: new Date(Date.now() + 60_000) } }); const before = await Promise.all([prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.requested.run.id } })]); await expect(rearmPodcastGenerationRunById(data.requested.run.id, 0)).resolves.toBe("NOT_ELIGIBLE"); expect(await Promise.all([prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.requested.run.id } })])).toEqual(before); });
+  it("allows exactly one concurrent max-minus-one rearm without persisted overflow", async () => { const data = await fixture(); await prisma.podcastGenerationRun.update({ where: { id: data.requested.run.id }, data: { status: "FAILED", dispatchGeneration: 2_147_483_646 } }); await prisma.job.update({ where: { id: data.requested.job.id }, data: { status: "FAILED" } }); const results = await Promise.all([rearmPodcastGenerationRunById(data.requested.run.id, 2_147_483_646, "a2.overflow.concurrent.podcast"), rearmPodcastGenerationRunById(data.requested.run.id, 2_147_483_646, "a2.overflow.concurrent.podcast")]); expect(results.filter(result => result === "REARMED")).toHaveLength(1); expect(results.every(result => result === "REARMED" || result === "RACE_LOST" || result === "NOT_ELIGIBLE")).toBe(true); expect((await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } })).dispatchGeneration).toBe(2_147_483_647); expect(await prisma.outboxEvent.count({ where: { aggregateId: data.requested.run.id, topic: "a2.overflow.concurrent.podcast" } })).toBe(1); });
+  it("fences a stale outbox finalizer after same-run rearm", async () => { const data = await fixture(); let reached!: () => void, release!: () => void; const reachedP = new Promise<void>(resolve => reached = resolve), releaseP = new Promise<void>(resolve => release = resolve); const stale = dispatchPendingPodcastGeneration({ add: async () => ({}) }, { aggregateIds: [data.requested.run.id], topic: "podcast.generation.requested", beforeFinalize: async () => { reached(); await releaseP; } } as never); await reachedP; await expect(rearmPodcastGenerationRunById(data.requested.run.id, 0)).resolves.toBe("REARMED"); release(); await stale; expect((await prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } })).queueJobId).toBeNull(); const ids: string[] = []; await dispatchPendingPodcastGeneration({ add: async (_name, _payload, options) => { ids.push(options.jobId); return {}; } }, { aggregateIds: [data.requested.run.id] }); expect([ids, (await prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } })).queueJobId]).toEqual([[`${data.requested.run.id}-g1`], `${data.requested.run.id}-g1`]); });
+  it("serializes the Podcast outbox finalizer with exact rearm after reading the locked generation", async () => {
+    const data = await fixture();
+    let reached!: () => void, release!: () => void;
+    const reachedP = new Promise<void>(resolve => reached = resolve), releaseP = new Promise<void>(resolve => release = resolve);
+    const runId = data.requested.run.id;
+    let authorityBackendPid = 0;
+    const finalization = dispatchPendingPodcastGeneration({ add: async () => ({}) }, { aggregateIds: [runId], afterGenerationRead: async backendPid => { authorityBackendPid = backendPid; reached(); await releaseP; } });
+    await reachedP;
+    const rearm = rearmPodcastGenerationRunById(runId, 0);
+    let ordering: "BLOCKED" | "ADVANCED";
+    try { ordering = await waitForGenerationOrBlockedUpdate(authorityBackendPid, runId, 0); }
+    finally { release(); }
+    await expect(rearm).resolves.toBe("REARMED");
+    await finalization;
+    expect(ordering!).toBe("BLOCKED");
+    const current = await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId }, include: { job: true } });
+    expect([current.dispatchGeneration, current.jobId, current.job.queueJobId]).toEqual([1, data.requested.job.id, null]);
+    const ids: string[] = [];
+    await dispatchPendingPodcastGeneration({ add: async (_name, _payload, options) => { ids.push(options.jobId); return {}; } }, { aggregateIds: [runId] });
+    expect([ids, (await prisma.job.findUniqueOrThrow({ where: { id: current.jobId } })).queueJobId]).toEqual([[`${runId}-g1`], `${runId}-g1`]);
+  });
+  it("advances max-minus-one once and refuses the persisted dispatch-generation maximum without mutation", async () => { const data = await fixture(); await prisma.podcastGenerationRun.update({ where: { id: data.requested.run.id }, data: { status: "FAILED", dispatchGeneration: 2_147_483_646 } }); await prisma.job.update({ where: { id: data.requested.job.id }, data: { status: "FAILED" } }); const before = await prisma.outboxEvent.count({ where: { aggregateId: data.requested.run.id } }); await expect(rearmPodcastGenerationRunById(data.requested.run.id, 2_147_483_646, "a2.overflow.podcast")).resolves.toBe("REARMED"); expect((await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } })).dispatchGeneration).toBe(2_147_483_647); expect(await prisma.outboxEvent.count({ where: { aggregateId: data.requested.run.id } })).toBe(before + 1); const snapshot = await Promise.all([prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.requested.run.id } })]); const capacityBefore = await prisma.job.count({ where: { workspaceId: data.workspace.id, type: { in: ["book.analysis", "podcast.generation", "short-video.generation"] }, status: { in: ["QUEUED", "RUNNING"] } } }); const providerInvocationsBefore = await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } }); await expect(rearmPodcastGenerationRunById(data.requested.run.id, 2_147_483_647, "a2.overflow.podcast")).resolves.toBe("NOT_ELIGIBLE"); expect(await Promise.all([prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } }), prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }), prisma.outboxEvent.count({ where: { aggregateId: data.requested.run.id } })])).toEqual(snapshot); expect(await prisma.job.count({ where: { workspaceId: data.workspace.id, type: { in: ["book.analysis", "podcast.generation", "short-video.generation"] }, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(capacityBefore); expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })).toBe(providerInvocationsBefore); });
   it("persists real source-copy risk from exact revision generation lineage", async () => { const data = await fixture(); const copied = (await prisma.sourceBlock.findFirstOrThrow({ where: { extraction: { sourceDocumentId: data.document.id }, ordinal: 1 } })).text; const revision = await prisma.podcastScriptRevision.create({ data: { workspaceId: data.workspace.id, episodeId: data.episode.id, generationRunId: data.requested.run.id, revisionNumber: 1, source: "GENERATED", status: "FINAL", estimatedDurationSeconds: 60, scriptSnapshot: { utterances: [{ speakerHostId: "host", segmentOrdinal: 1, text: copied, utteranceType: "STATEMENT", substantive: true, evidenceCount: 1, evidenceMemoryIds: ["memory"] }] } } }); const evaluation = await evaluatePodcastScript(data.context, revision.id, "phase3-source-copy-regression"); expect(evaluation.result?.sourceCopyRiskScore).toBe(0); expect(evaluation.result?.hardFailures).toContain("SOURCE_COPY_HARD_GATE"); expect(evaluation.result?.warnings).toContain("SOURCE_COPY_OVERLAP"); });
   it("keeps every provider and persisted context item pinned to intelligence A after current moves to B", async () => { const data = await fixture(); const pinned = await prisma.podcastGenerationSource.findFirstOrThrow({ where: { podcastGenerationRunId: data.requested.run.id } }); const intelligenceB = await moveCurrentIntelligenceToB(data); expect(intelligenceB.id).not.toBe(pinned.analysisRunId); const provider = new PodcastFixtureProvider(); await processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.retrievalEmbeddings }); const providerContext = provider.calls.flatMap((call) => (call.context ?? []) as Array<{ analysisRunId: string; extractionId: string; chunkSetId: string; content: string }>); expect(providerContext.length).toBeGreaterThan(0); expect(providerContext.every((item) => item.analysisRunId === pinned.analysisRunId && item.extractionId === pinned.extractionId && item.chunkSetId === pinned.chunkSetId && !item.content.includes("B_ONLY_CONTEXT"))).toBe(true); const [plan, segments] = await Promise.all([prisma.podcastPlanContextItem.findMany({ where: { podcastGenerationRunId: data.requested.run.id } }), prisma.podcastSegmentContextItem.findMany({ where: { podcastGenerationRunId: data.requested.run.id } })]); expect([...plan, ...segments].every((item) => item.analysisRunId === pinned.analysisRunId && item.extractionId === pinned.extractionId && item.chunkSetId === pinned.chunkSetId)).toBe(true); });
-  it("atomically requests idempotently, resumes persisted stages and segments, grounds, evaluates, and makes terminal redelivery a strict no-op", async () => { const data = await fixture(); const same = await requestPodcastGeneration(data.context, { episodeId: data.episode.id, pipelineVersion: "phase3-v1", promptVersion: "prompt-v1", provider: "deterministic-podcast", model: "podcast-test", modelVersion: "1" }); expect(same.run.id).toBe(data.requested.run.id); expect(await prisma.outboxEvent.count({ where: { topic: "podcast.generation.requested", aggregateId: data.requested.run.id } })).toBe(1); const provider = new PodcastFixtureProvider(); let drafts = 0; await expect(processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.retrievalEmbeddings, faultInjector: (point) => { if (point === "afterSegmentDraft" && ++drafts === 1) throw new Error("SEGMENT_CRASH"); } })).rejects.toThrow("SEGMENT_CRASH"); const persisted = await prisma.podcastUtterance.count({ where: { podcastGenerationRunId: data.requested.run.id } }); expect(persisted).toBeGreaterThan(0); await processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.retrievalEmbeddings }); const status = await getPodcastGenerationStatus(data.context, data.requested.run.id), script = await getEpisodeScript(data.context, data.episode.id); expect([status.status, status.stage, status.job.status]).toEqual(["SUCCEEDED", "COMPLETED", "SUCCEEDED"]); expect(status.segments.every((segment) => segment.status === "GROUNDED")).toBe(true); expect(script.revision.evaluations[0]?.result?.hardFailures).toEqual([]); const before = { attempts: status.job.attemptCount, utterances: await prisma.podcastUtterance.count({ where: { podcastGenerationRunId: data.requested.run.id } }), revisions: await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } }) }; await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.retrievalEmbeddings }); const afterStatus = await getPodcastGenerationStatus(data.context, data.requested.run.id); expect({ attempts: afterStatus.job.attemptCount, utterances: await prisma.podcastUtterance.count({ where: { podcastGenerationRunId: data.requested.run.id } }), revisions: await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } }) }).toEqual(before); expect(provider.calls.filter((call) => call.stage === "SEGMENT_DRAFTING").length).toBe(status.segments.length); });
+  it("atomically requests idempotently, resumes persisted stages and segments, grounds, evaluates, and makes terminal redelivery a strict no-op", async () => {
+    const data = await fixture();
+    const same = await requestPodcastGeneration(data.context, { episodeId: data.episode.id, pipelineVersion: "phase3-v1", promptVersion: "prompt-v1", provider: "deterministic-podcast", model: "podcast-test", modelVersion: "1" });
+    expect(same.run.id).toBe(data.requested.run.id);
+    expect(await prisma.outboxEvent.count({ where: { topic: "podcast.generation.requested", aggregateId: data.requested.run.id } })).toBe(1);
+    const provider = new PodcastFixtureProvider();
+    let drafts = 0;
+    await expect(processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.retrievalEmbeddings, faultInjector: (point) => { if (point === "afterSegmentDraft" && ++drafts === 1) throw new Error("SEGMENT_CRASH"); } })).rejects.toThrow("SEGMENT_CRASH");
+    const persisted = await prisma.podcastUtterance.count({ where: { podcastGenerationRunId: data.requested.run.id } });
+    expect(persisted).toBeGreaterThan(0);
+    await expect(rearmPodcastGenerationRunById(data.requested.run.id, 0)).resolves.toBe("REARMED");
+    await processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.retrievalEmbeddings }, 1);
+    const status = await getPodcastGenerationStatus(data.context, data.requested.run.id), script = await getEpisodeScript(data.context, data.episode.id);
+    expect([status.status, status.stage, status.job.status]).toEqual(["SUCCEEDED", "COMPLETED", "SUCCEEDED"]);
+    expect(status.segments.every((segment) => segment.status === "GROUNDED")).toBe(true);
+    expect(script.revision.evaluations[0]?.result?.hardFailures).toEqual([]);
+    for (const stage of ["EPISODE_PLANNING", "NARRATIVE_DESIGN", "SEGMENT_OUTLINE"])
+      expect(provider.calls.filter((call) => call.stage === stage), `${stage} must be reused after rearm`).toHaveLength(1);
+    const before = { attempts: status.job.attemptCount, utterances: await prisma.podcastUtterance.count({ where: { podcastGenerationRunId: data.requested.run.id } }), revisions: await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } }) };
+    await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.retrievalEmbeddings });
+    const afterStatus = await getPodcastGenerationStatus(data.context, data.requested.run.id);
+    expect({ attempts: afterStatus.job.attemptCount, utterances: await prisma.podcastUtterance.count({ where: { podcastGenerationRunId: data.requested.run.id } }), revisions: await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } }) }).toEqual(before);
+    expect(provider.calls.filter((call) => call.stage === "SEGMENT_DRAFTING").length).toBe(status.segments.length);
+  });
   it("has one claim winner, permits deterministic stale reclaim, rejects stale writes and stale failure", async () => { const data = await fixture(), stale = new BarrierPodcastProvider(); const a = processPodcastGenerationRun(data.requested.run.id, { provider: stale, embeddingProvider: data.embeddings }); await stale.entered; expect(await claimPodcastGenerationRun(data.requested.run.id, crypto.randomUUID())).toBe(false); await expire(data.requested.run.id); await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.embeddings }); stale.unblock(); await expect(a).rejects.toThrow(PODCAST_GENERATION_OWNERSHIP_LOST); const final = await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id }, include: { job: true } }); expect([final.status, final.stage, final.job.status]).toEqual(["SUCCEEDED", "COMPLETED", "SUCCEEDED"]); });
   it("enforces workspace access and database source lineage", async () => { const data = await fixture(); const outsider = await prisma.user.create({ data: { email: `${crypto.randomUUID()}@outsider.test` } }); users.push(outsider.id); await expect(getPodcastGenerationStatus({ workspaceId: data.workspace.id, userId: outsider.id }, data.requested.run.id)).rejects.toThrow("WORKSPACE_ACCESS_DENIED"); await expect(prisma.podcastGenerationSource.create({ data: { podcastGenerationRunId: data.requested.run.id, workspaceId: data.workspace.id, episodeId: data.episode.id, sourceDocumentId: data.document.id, extractionId: "wrong", chunkSetId: "wrong", analysisRunId: "wrong" } })).rejects.toThrow(); });
-  it("resumes humanization per segment without re-humanizing durable completed work", async () => { const data = await fixture(), provider = new PodcastFixtureProvider(); let humanized = 0; await expect(processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.embeddings, faultInjector: (point) => { if (point === "afterSegmentHumanization" && ++humanized === 1) throw new Error("HUMANIZATION_CRASH"); } })).rejects.toThrow("HUMANIZATION_CRASH"); const completedBeforeRetry = await prisma.episodeSegment.count({ where: { podcastGenerationRunId: data.requested.run.id, status: "HUMANIZED" } }); expect(completedBeforeRetry).toBe(1); await processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.embeddings }); const segmentCount = await prisma.episodeSegment.count({ where: { podcastGenerationRunId: data.requested.run.id } }); expect(provider.calls.filter((call) => call.stage === "HUMANIZATION")).toHaveLength(segmentCount); });
+  it("resumes humanization per segment without re-humanizing durable completed work", async () => {
+    const data = await fixture(), provider = new PodcastFixtureProvider();
+    let humanized = 0;
+    await expect(processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.embeddings, faultInjector: (point) => { if (point === "afterSegmentHumanization" && ++humanized === 1) throw new Error("HUMANIZATION_CRASH"); } })).rejects.toThrow("HUMANIZATION_CRASH");
+    const completedBeforeRetry = await prisma.episodeSegment.count({ where: { podcastGenerationRunId: data.requested.run.id, status: "HUMANIZED" } });
+    expect(completedBeforeRetry).toBe(1);
+    await expect(rearmPodcastGenerationRunById(data.requested.run.id, 0)).resolves.toBe("REARMED");
+    await processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.embeddings }, 1);
+    const segmentCount = await prisma.episodeSegment.count({ where: { podcastGenerationRunId: data.requested.run.id } });
+    expect(provider.calls.filter((call) => call.stage === "HUMANIZATION")).toHaveLength(segmentCount);
+  });
   it("regenerates only the unsupported segment within the bounded retry limit", async () => { const data = await fixture(), provider = new RegeneratingPodcastProvider(); await processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.embeddings }); const attempts = [...provider.draftsBySegment.values()].sort((a, b) => b - a); expect(attempts).toEqual([2, 1]); const segments = await prisma.episodeSegment.findMany({ where: { podcastGenerationRunId: data.requested.run.id } }); expect(segments.map((segment) => segment.generationAttemptCount).sort((a, b) => b - a)).toEqual([2, 1]); const retried = provider.calls.filter((call) => call.stage === "SEGMENT_DRAFTING" && call.segmentId === [...provider.draftsBySegment.entries()].find(([, count]) => count === 2)?.[0]).map((call) => call.generationAttempt); expect(retried).toEqual([1, 2]); });
   it("creates immutable revision lineage and moves only the episode current pointer", async () => { const data = await fixture(); await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.embeddings }); const second = await requestPodcastGeneration(data.context, { episodeId: data.episode.id, pipelineVersion: "phase3-v1", promptVersion: "prompt-v2", provider: "deterministic-podcast", model: "podcast-test", modelVersion: "1" }); expect(second.run.id).not.toBe(data.requested.run.id); await processPodcastGenerationRun(second.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.embeddings }); const [revisions, current] = await Promise.all([prisma.podcastScriptRevision.findMany({ where: { episodeId: data.episode.id }, orderBy: { revisionNumber: "asc" } }), prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id } })]); expect(revisions).toHaveLength(2); expect([revisions[0]!.status, revisions[1]!.status, revisions[1]!.parentRevisionId, current.revisionId]).toEqual(["SUPERSEDED", "FINAL", revisions[0]!.id, revisions[1]!.id]); });
   it("rejects provider evidence outside the persisted bounded context", async () => { const data = await fixture(); await expect(processPodcastGenerationRun(data.requested.run.id, { provider: new UnsupportedEvidenceProvider(), embeddingProvider: data.embeddings })).rejects.toThrow("PODCAST_DIALOGUE_LINEAGE_INVALID"); expect((await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } })).status).toBe("FAILED"); });

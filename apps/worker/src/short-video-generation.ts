@@ -9,6 +9,7 @@ import {
 } from "@ai-cognitive/short-video-generation";
 import type { EmbeddingProvider } from "@ai-cognitive/book-intelligence";
 import { logger } from "@ai-cognitive/shared";
+import { normalizeDispatchGeneration } from "@ai-cognitive/ingestion";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import {
   createRedisConnection,
@@ -42,15 +43,16 @@ export function createShortVideoGenerationWorker(
     secretKey: environment.S3_SECRET_KEY,
     forcePathStyle: environment.S3_FORCE_PATH_STYLE,
   });
-  return new Worker<{ shortVideoGenerationRunId: string }>(
+  return new Worker<{ shortVideoGenerationRunId: string; dispatchGeneration?: number }>(
     SHORT_VIDEO_GENERATION_QUEUE,
     async (job) => {
       try {
         return await processShortVideoGenerationRun(job.data.shortVideoGenerationRunId, {
           ...dependencies,
           storage,
-        });
+        }, normalizeDispatchGeneration(job.data));
       } catch (error) {
+        if (error instanceof Error && error.message === "OUTBOX_PAYLOAD_INVALID") return;
         const diagnostic = videoRenderFailureDetails(error);
         logger.error("short_video.worker.failed", {
           shortVideoGenerationRunId: job.data.shortVideoGenerationRunId,
@@ -66,7 +68,7 @@ export function createShortVideoGenerationWorker(
   );
 }
 export function createShortVideoGenerationQueue(environment: Environment, options: ShortVideoGenerationQueueOptions = {}) {
-  return new Queue<{ shortVideoGenerationRunId: string }>(
+  return new Queue<{ shortVideoGenerationRunId: string; dispatchGeneration?: number }>(
     SHORT_VIDEO_GENERATION_QUEUE,
     { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) },
   );
