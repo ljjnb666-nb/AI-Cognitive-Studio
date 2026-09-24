@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { admitWorkspaceExpensiveOperation, Prisma, prisma } from "../../db/src/index.js";
+import { admitWorkspaceExpensiveOperation, Prisma, prisma, type ExpensiveOperationRecoveryTarget } from "../../db/src/index.js";
 import { logger } from "@ai-cognitive/shared";
 import {
   estimateAnalysisTokens,
@@ -704,8 +704,27 @@ export async function dispatchPendingBookAnalysis(queue: { add(name: string, pay
 }
 
 /** Exact-target transport rearm; liveness discovery belongs to PR-A. */
-export async function rearmBookAnalysisRunById(analysisRunId: string, expectedDispatchGeneration: number, topic = BOOK_ANALYSIS_TOPIC): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
-  try { return await prisma.$transaction(async tx => { const run = await tx.bookAnalysisRun.findUnique({ where: { id: analysisRunId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.$queryRaw<Array<{ id: string }>>`
+export async function rearmBookAnalysisRunById(analysisRunId: string, expectedDispatchGeneration: number, topic = BOOK_ANALYSIS_TOPIC, expectedTarget?: ExpensiveOperationRecoveryTarget): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
+  try {
+    return await prisma.$transaction(async tx => {
+      if (expectedTarget) {
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${analysisRunId} FOR UPDATE`;
+        if (locked.length !== 1) return "NOT_ELIGIBLE";
+      }
+      const run = await tx.bookAnalysisRun.findUnique({ where: { id: analysisRunId }, include: { job: true } });
+      if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE";
+      const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now;
+      if (expectedTarget && (expectedTarget.jobType !== BOOK_ANALYSIS_JOB || expectedTarget.workspaceId !== run.workspaceId || expectedTarget.jobId !== run.jobId || run.job.workspaceId !== run.workspaceId || run.job.type !== BOOK_ANALYSIS_JOB || !(["QUEUED", "RUNNING"] as string[]).includes(run.job.status) || !(["QUEUED", "RUNNING"] as string[]).includes(run.status) || run.job.status !== run.status)) return "NOT_ELIGIBLE";
+      if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE";
+      if (expectedTarget && run.status === "RUNNING") {
+        const leaseAbsent = run.executionClaimToken === null && run.executionClaimedAt === null && run.executionLeaseUntil === null;
+        const leaseComplete = run.executionClaimToken !== null && run.executionClaimedAt !== null && run.executionLeaseUntil !== null;
+        if (!leaseAbsent && !leaseComplete) return "NOT_ELIGIBLE";
+      }
+      if (expectedTarget && run.status === "QUEUED" && (run.executionClaimToken || run.executionClaimedAt || run.executionLeaseUntil)) return "NOT_ELIGIBLE";
+      if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE";
+      if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit());
+      const changed = await tx.$queryRaw<Array<{ id: string }>>`
 UPDATE "BookAnalysisRun"
 SET "dispatchGeneration" = "dispatchGeneration" + 1,
     "status" = 'QUEUED'::"AnalysisRunStatus",
@@ -719,9 +738,18 @@ WHERE "id" = ${run.id}
   AND "dispatchGeneration" < ${MAX_PERSISTED_DISPATCH_GENERATION}
   AND "status" IN ('QUEUED'::"AnalysisRunStatus", 'RUNNING'::"AnalysisRunStatus", 'FAILED'::"AnalysisRunStatus")
   AND NOT ("status" = 'RUNNING'::"AnalysisRunStatus" AND "executionClaimToken" IS NOT NULL AND "executionLeaseUntil" > NOW())
-RETURNING "id"`; if (changed.length !== 1) return "RACE_LOST"; const current = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { analysisRunId: current.id, queueJobId: current.jobId, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
+RETURNING "id"`;
+      if (changed.length !== 1) return "RACE_LOST";
+      const current = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } });
+      await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } });
+      await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { analysisRunId: current.id, queueJobId: current.jobId, dispatchGeneration: current.dispatchGeneration } } });
+      return "REARMED";
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED";
+    throw error;
+  }
 }
-
 export async function retrieveBookKnowledge(input: { workspaceId: string; sourceDocumentId: string; query: string; limit: number; embeddingProvider: EmbeddingProvider }) {
   const [current, extraction] = await Promise.all([
     prisma.currentBookIntelligence.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: input.sourceDocumentId, workspaceId: input.workspaceId } } }),

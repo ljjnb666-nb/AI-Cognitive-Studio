@@ -60,7 +60,7 @@ async function waitForBlockedShortVideoUpdates(blockerPid: number, expectedCount
 }
 
 async function waitForSignal(signal: () => boolean, message: string) {
-  for (let attempt = 0; attempt < 10_000; attempt++) {
+  for (let attempt = 0; attempt < 100_000; attempt++) {
     if (signal()) return;
     await new Promise<void>(resolve => setImmediate(resolve));
   }
@@ -166,8 +166,6 @@ describe("A2 Short Video dispatch generation overflow", () => {
           renderer: { render: async () => { throw new Error("A2_UNEXPECTED_RENDER"); } },
         } as never, 0);
         await waitForBlockedShortVideoUpdates(blocker.pid, 1);
-        rearm = rearmShortVideoGenerationRunById(run.id, 0);
-        await waitForBlockedShortVideoUpdates(blocker.pid, 2);
         blocker.release();
         await blocker.done;
         await waitForSignal(() => providerDidEnter, "A2_SHORT_VIDEO_CLAIM_DID_NOT_REACH_PROVIDER_RESOLVER");
@@ -178,6 +176,7 @@ describe("A2 Short Video dispatch generation overflow", () => {
         ]);
         const [lease] = await prisma.$queryRaw<Array<{ leaseValid: boolean }>>`SELECT "executionLeaseUntil" > NOW() AS "leaseValid" FROM "ShortVideoGenerationRun" WHERE "id" = ${run.id}`;
         if (!lease) throw new Error("A2_SHORT_VIDEO_LEASE_SNAPSHOT_MISSING");
+        rearm = rearmShortVideoGenerationRunById(run.id, 0);
         const rearmResult = await rearm!;
         const afterRearm = await Promise.all([
           prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } }),

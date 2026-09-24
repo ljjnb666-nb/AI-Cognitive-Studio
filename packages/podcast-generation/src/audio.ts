@@ -3,7 +3,7 @@
  * possible without trusting a provider supplied duration or metadata. */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createHash, randomUUID } from "node:crypto";
-import { Prisma, admitWorkspaceExpensiveOperation, prisma } from "@ai-cognitive/db";
+import { Prisma, admitWorkspaceExpensiveOperation, prisma, type ExpensiveOperationRecoveryTarget } from "@ai-cognitive/db";
 import { dispatchPendingOutbox } from "@ai-cognitive/ingestion";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { logger } from "@ai-cognitive/shared";
@@ -222,7 +222,7 @@ function sameDurableHostVoiceMapping(left: Array<{ hostId: string; voiceIdentity
  * Lock order: AudioGenerationRun row, semantic advisory lock, optional
  * workspace admission lock, then Job update and Outbox creation.
  */
-export async function rearmPodcastAudioGenerationById(audioGenerationRunId: string, expectedDispatchGeneration: number, topic = AUDIO_GENERATION_TOPIC): Promise<PodcastAudioRearmResult> {
+export async function rearmPodcastAudioGenerationById(audioGenerationRunId: string, expectedDispatchGeneration: number, topic = AUDIO_GENERATION_TOPIC, expectedTarget?: ExpensiveOperationRecoveryTarget): Promise<PodcastAudioRearmResult> {
   if (!Number.isSafeInteger(expectedDispatchGeneration) || expectedDispatchGeneration < 0) return "NOT_ELIGIBLE";
   try {
     return await prisma.$transaction(async tx => {
@@ -234,12 +234,28 @@ export async function rearmPodcastAudioGenerationById(audioGenerationRunId: stri
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${run.workspaceId}:${semanticIdentityHash}`}))`;
       const current = await tx.audioGenerationRun.findUniqueOrThrow({ where: { id: audioGenerationRunId }, include: { job: true, audioConfig: true, hostVoices: true } });
       if (current.dispatchGeneration !== expectedDispatchGeneration) return "RACE_LOST";
+      if (expectedTarget && (
+        expectedTarget.jobType !== AUDIO_GENERATION_JOB ||
+        expectedTarget.workspaceId !== current.workspaceId ||
+        expectedTarget.jobId !== current.jobId ||
+        current.job.workspaceId !== current.workspaceId ||
+        current.job.type !== AUDIO_GENERATION_JOB ||
+        !(["QUEUED", "RUNNING"] as string[]).includes(current.job.status) ||
+        !(["QUEUED", "RUNNING"] as string[]).includes(current.status) ||
+        current.job.status !== current.status
+      )) return "NOT_ELIGIBLE";
       const quarantine = await tx.podcastAudioPaidOutcomeQuarantine.findFirst({ where: { workspaceId: current.workspaceId, semanticIdentityHash, status: "OPEN" } });
       if (quarantine) return "PAID_OUTCOME_QUARANTINED";
       const equivalent = await tx.audioGenerationRun.findMany({ where: { episodeId: current.episodeId, scriptRevisionId: current.scriptRevisionId, audioConfigId: current.audioConfigId, provider: current.provider, model: current.model, modelVersion: current.modelVersion, pipelineVersion: current.pipelineVersion, speechPreparationVersion: current.speechPreparationVersion, assemblyVersion: current.assemblyVersion, normalizationVersion: current.normalizationVersion, outputFormat: current.outputFormat }, include: { audioConfig: true, hostVoices: true } });
       if (equivalent.some(other => other.id !== current.id && other.status !== "FAILED" && audioSemanticIdentityForRun(other) === semanticIdentityHash && sameDurableHostVoiceMapping(other.hostVoices, current.hostVoices))) return "SUPERSEDED";
       const leaseLive = current.executionLeaseUntil !== null && current.executionLeaseUntil.getTime() > (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now.getTime();
       if (current.status === "SUCCEEDED" || (current.status === "RUNNING" && leaseLive)) return "NOT_ELIGIBLE";
+      if (expectedTarget && current.status === "RUNNING") {
+        const leaseAbsent = current.executionClaimToken === null && current.executionClaimedAt === null && current.executionLeaseUntil === null;
+        const leaseComplete = current.executionClaimToken !== null && current.executionClaimedAt !== null && current.executionLeaseUntil !== null;
+        if (!leaseAbsent && !leaseComplete) return "NOT_ELIGIBLE";
+      }
+      if (expectedTarget && current.status === "QUEUED" && (current.executionClaimToken || current.executionClaimedAt || current.executionLeaseUntil)) return "NOT_ELIGIBLE";
       const jobIsActive = current.job.status === "QUEUED" || current.job.status === "RUNNING";
       if (!jobIsActive) await admitWorkspaceExpensiveOperation(tx, current.workspaceId, workspaceOperationLimit());
       const nextGeneration = expectedDispatchGeneration + 1;
