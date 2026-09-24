@@ -26,7 +26,7 @@ import { AUDIO_GENERATION_QUEUE } from "../src/audio-generation.js";
 import { BOOK_ANALYSIS_QUEUE } from "../src/book-analysis.js";
 import { PODCAST_GENERATION_QUEUE } from "../src/podcast-generation.js";
 import { SHORT_VIDEO_GENERATION_QUEUE } from "../src/short-video-generation.js";
-import { DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE, DURABLE_OPERATION_RECONCILIATION_INTERVAL_MS, scheduleDurableOperationReconciliation, reconcileDurableExpensiveOperationsBatch, type DurableOperationDomain, type ReconciliationCursor, type ReconciliationQueue, type ReconciliationHooks, type ReconciliationQueues, type ReconciliationTopics } from "../src/durable-operation-reconciliation.js";
+import { DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE, DURABLE_OPERATION_RECONCILIATION_INTERVAL_MS, scheduleDurableOperationReconciliation, reconcileDurableExpensiveOperationsBatch, reconcileDurableExpensiveOperationsSweep, type DurableOperationDomain, type ReconciliationCursor, type ReconciliationQueue, type ReconciliationHooks, type ReconciliationQueues, type ReconciliationSweepState, type ReconciliationTopics } from "../src/durable-operation-reconciliation.js";
 
 type BookPayload = { analysisRunId: string; queueJobId?: string; dispatchGeneration: number };
 type PodcastPayload = { podcastGenerationRunId: string; dispatchGeneration: number };
@@ -44,6 +44,7 @@ let priorOperationLimit: string | undefined;
 type PodcastScaffold = { projectId: string; styleProfileId: string; episodeId: string; scriptRevisionId: string; audioConfigId: string };
 type BookScaffold = { sourceDocumentId: string; extractionId: string; chunkSetId: string };
 type VideoScaffold = { projectId: string; styleProfileId: string };
+type AudioVoiceFixture = { hosts: Array<{ id: string; voiceProfileId: string; voiceIdentityHash: string }>; projectId: string; episodeId: string };
 type SeededOperation = {
   domain: DurableOperationDomain;
   workspaceId: string;
@@ -96,6 +97,43 @@ async function workspaceId(): Promise<string> {
   const workspace = await prisma.workspace.create({ data: { name: `${topicPrefix}-workspace-${randomUUID()}` } });
   workspaceIds.add(workspace.id);
   return workspace.id;
+}
+
+async function seedOrphanJob(order: number): Promise<string> {
+  const workspace = await workspaceId();
+  const job = await prisma.job.create({ data: { workspaceId: workspace, type: BOOK_ANALYSIS_JOB, payload: {}, status: "QUEUED", idempotencyKey: `${topicPrefix}-orphan-${randomUUID()}` } });
+  await prisma.job.update({ where: { id: job.id }, data: { createdAt: new Date(Date.UTC(2025, 0, 1, 0, 0, order)) } });
+  return job.id;
+}
+
+async function audioVoiceFixture(workspace: string, scaffold: PodcastScaffold): Promise<AudioVoiceFixture> {
+  const hosts: AudioVoiceFixture["hosts"] = [];
+  for (const [ordinal, name] of ["A", "B"].entries()) {
+    const host = await prisma.podcastHost.create({ data: {
+      workspaceId: workspace, podcastProjectId: scaffold.projectId, ordinal,
+      displayName: `PR-A host ${name}`, role: "host", speakingStyle: "clear", knowledgeStyle: "generalist",
+      temperament: "curious", questionStyle: "direct", disagreementStyle: "respectful",
+      preferredSentenceLength: "medium", fillerPreference: "none",
+    } });
+    const voiceProfile = await prisma.podcastVoiceProfile.create({ data: {
+      workspaceId: workspace, podcastProjectId: scaffold.projectId, displayName: `PR-A voice ${name}`,
+      language: "en", provider: "fixture-tts", providerVoiceId: `pr-a-${workspace}-${name}`,
+      voiceVersion: "1", model: "fixture-model", modelVersion: "1",
+    } });
+    hosts.push({ id: host.id, voiceProfileId: voiceProfile.id, voiceIdentityHash: `voice-hash-${name}` });
+  }
+  return { hosts, projectId: scaffold.projectId, episodeId: scaffold.episodeId };
+}
+
+async function attachAudioVoiceMapping(seed: SeededOperation, fixture: AudioVoiceFixture, swapped = false): Promise<void> {
+  const [a, b] = fixture.hosts;
+  if (!a || !b) throw new Error("PR_A_AUDIO_VOICE_FIXTURE_INCOMPLETE");
+  const assignments = swapped ? [{ host: a, voice: b }, { host: b, voice: a }] : [{ host: a, voice: a }, { host: b, voice: b }];
+  await prisma.audioGenerationHostVoice.createMany({ data: assignments.map(({ host, voice }) => ({
+    audioGenerationRunId: seed.runId, workspaceId: seed.workspaceId, podcastProjectId: fixture.projectId,
+    episodeId: fixture.episodeId, hostId: host.id, voiceProfileId: voice.voiceProfileId,
+    voiceIdentityHash: voice.voiceIdentityHash,
+  })) });
 }
 
 async function podcastScaffold(workspace: string): Promise<PodcastScaffold> {
@@ -587,5 +625,154 @@ describe("STABILITY PR-A durable operation reconciliation", () => {
     expect(result.recovered).toBe(4);
     expect(await prisma.providerInvocation.count({ where: { workspaceId: { in: seeds.map(seed => seed.workspaceId) } } })).toBe(before);
     expect(result.decisions.map(item => item.decision)).toEqual(["RECOVERED_TRANSPORT", "RECOVERED_TRANSPORT", "RECOVERED_TRANSPORT", "RECOVERED_TRANSPORT"]);
+  });
+
+  it("PR-A-R1-01 revisits a skipped candidate while later arrivals keep the pages full", async () => {
+    const old = await seedOperation("BOOK_ANALYSIS");
+    await setState(old, "QUEUED", "QUEUED");
+    await markDispatched(old);
+    await prisma.job.update({ where: { id: old.jobId }, data: { createdAt: new Date(Date.UTC(2024, 0, 1)) } });
+    let transientQueueFailure = true;
+    const queues: ReconciliationQueues = { BOOK_ANALYSIS: { getJob: async id => {
+      if (id === queueJobId(old) && transientQueueFailure) { transientQueueFailure = false; throw new Error("TEMPORARY_QUEUE_READ_FAILURE"); }
+      return null;
+    } } };
+    const candidateIds = [old.jobId];
+    let state: ReconciliationSweepState | undefined;
+    const first = await reconcileDurableExpensiveOperationsSweep({ state, batchSize: 1, candidateJobIds: candidateIds, queues, topics: { BOOK_ANALYSIS: old.topic } });
+    state = first.nextState;
+    expect(first.lane).toBe("FORWARD");
+    expect(first.decisions[0]).toMatchObject({ jobId: old.jobId, decision: "INFRA_FAILURE" });
+
+    for (const order of [1, 2, 3]) candidateIds.push(await seedOrphanJob(order));
+    const repaired = await reconcileDurableExpensiveOperationsSweep({ state, batchSize: 1, candidateJobIds: candidateIds, queues, topics: { BOOK_ANALYSIS: old.topic } });
+    state = repaired.nextState;
+    expect(repaired.lane).toBe("REVISIT");
+    expect(repaired.discovered).toBe(1);
+    expect(repaired.decisions[0]).toMatchObject({ jobId: old.jobId, decision: "RECOVERED_TRANSPORT" });
+    expect(await runFor(old)).toMatchObject({ status: "QUEUED", generation: 1 });
+
+    for (const order of [4, 5, 6, 7]) {
+      candidateIds.push(await seedOrphanJob(order));
+      const page = await reconcileDurableExpensiveOperationsSweep({ state, batchSize: 1, candidateJobIds: candidateIds, queues, topics: { BOOK_ANALYSIS: old.topic } });
+      state = page.nextState;
+      expect(page.discovered).toBe(1);
+    }
+    expect(transientQueueFailure).toBe(false);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: old.workspaceId } })).toBe(0);
+  });
+
+  it("PR-A-R1-02 alternates revisits with forward progress to the tail during continuing arrivals", async () => {
+    const candidateIds = [await seedOrphanJob(101), await seedOrphanJob(102), await seedOrphanJob(103)];
+    let state: ReconciliationSweepState | undefined;
+    const forwardVisited = new Set<string>();
+    const revisitVisited = new Set<string>();
+    const lanes: string[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      const page = await reconcileDurableExpensiveOperationsSweep({ state, batchSize: 1, candidateJobIds: candidateIds });
+      state = page.nextState;
+      lanes.push(page.lane);
+      const visited = page.decisions[0]?.jobId;
+      if (visited) (page.lane === "FORWARD" ? forwardVisited : revisitVisited).add(visited);
+      if (index < 7) candidateIds.push(await seedOrphanJob(104 + index));
+    }
+    expect(lanes).toEqual(["FORWARD", "REVISIT", "FORWARD", "REVISIT", "FORWARD", "REVISIT", "FORWARD", "REVISIT"]);
+    expect(revisitVisited.has(candidateIds[0]!)).toBe(true);
+    expect(forwardVisited.has(candidateIds[3]!)).toBe(true);
+    expect(forwardVisited.size).toBeGreaterThan(1);
+  });
+
+  it("PR-A-R1-03 releases only an active legacy audio duplicate superseded by an equivalent active run", async () => {
+    const old = await seedOperation("PODCAST_AUDIO_GENERATION");
+    const newer = await seedOperation("PODCAST_AUDIO_GENERATION", { workspaceId: old.workspaceId });
+    const scaffold = await podcastScaffold(old.workspaceId);
+    const voices = await audioVoiceFixture(old.workspaceId, scaffold);
+    await attachAudioVoiceMapping(old, voices);
+    await attachAudioVoiceMapping(newer, voices);
+    await setState(old, "QUEUED", "QUEUED");
+    await setState(newer, "QUEUED", "QUEUED");
+    await markDispatched(old);
+    const providerCallsBefore = await prisma.providerInvocation.count({ where: { workspaceId: old.workspaceId } });
+    const result = await reconcile([old]);
+    const [oldRun, oldJob, newerRun, newerJob] = await Promise.all([
+      prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: old.runId } }),
+      prisma.job.findUniqueOrThrow({ where: { id: old.jobId } }),
+      prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: newer.runId } }),
+      prisma.job.findUniqueOrThrow({ where: { id: newer.jobId } }),
+    ]);
+    expect(result.decisions[0]).toMatchObject({ decision: "CONVERGED_TERMINAL", reason: "AUDIO_GENERATION_SUPERSEDED" });
+    expect([oldRun.status, oldRun.errorCode, oldJob.status, oldJob.error]).toEqual(["FAILED", "AUDIO_GENERATION_SUPERSEDED", "FAILED", { code: "AUDIO_GENERATION_SUPERSEDED" }]);
+    expect([newerRun.status, newerRun.dispatchGeneration, newerJob.status]).toEqual(["QUEUED", 0, "QUEUED"]);
+    expect(await prisma.job.count({ where: { workspaceId: old.workspaceId, type: AUDIO_GENERATION_JOB, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(1);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: old.workspaceId } })).toBe(providerCallsBefore);
+  });
+
+  it("PR-A-R1-04 releases an active ghost superseded by a successful equivalent without copying success", async () => {
+    const old = await seedOperation("PODCAST_AUDIO_GENERATION");
+    const successful = await seedOperation("PODCAST_AUDIO_GENERATION", { workspaceId: old.workspaceId });
+    const voices = await audioVoiceFixture(old.workspaceId, await podcastScaffold(old.workspaceId));
+    await attachAudioVoiceMapping(old, voices);
+    await attachAudioVoiceMapping(successful, voices);
+    await setState(old, "QUEUED", "QUEUED");
+    await setState(successful, "SUCCEEDED", "SUCCEEDED");
+    await markDispatched(old);
+    const providerCallsBefore = await prisma.providerInvocation.count({ where: { workspaceId: old.workspaceId } });
+    const result = await reconcile([old]);
+    const [oldRun, oldJob, successRun, successJob] = await Promise.all([
+      prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: old.runId } }),
+      prisma.job.findUniqueOrThrow({ where: { id: old.jobId } }),
+      prisma.audioGenerationRun.findUniqueOrThrow({ where: { id: successful.runId } }),
+      prisma.job.findUniqueOrThrow({ where: { id: successful.jobId } }),
+    ]);
+    expect(result.decisions[0]).toMatchObject({ decision: "CONVERGED_TERMINAL", reason: "AUDIO_GENERATION_SUPERSEDED" });
+    expect([oldRun.status, oldRun.errorCode, oldJob.status, oldJob.error]).toEqual(["FAILED", "AUDIO_GENERATION_SUPERSEDED", "FAILED", { code: "AUDIO_GENERATION_SUPERSEDED" }]);
+    expect([successRun.status, successRun.errorCode, successJob.status]).toEqual(["SUCCEEDED", null, "SUCCEEDED"]);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: old.workspaceId } })).toBe(providerCallsBefore);
+  });
+
+  it("PR-A-R1-05 does not supersede an audio run when host-to-voice assignments are swapped", async () => {
+    const old = await seedOperation("PODCAST_AUDIO_GENERATION");
+    const swapped = await seedOperation("PODCAST_AUDIO_GENERATION", { workspaceId: old.workspaceId });
+    const voices = await audioVoiceFixture(old.workspaceId, await podcastScaffold(old.workspaceId));
+    await attachAudioVoiceMapping(old, voices);
+    await attachAudioVoiceMapping(swapped, voices, true);
+    await setState(old, "QUEUED", "QUEUED");
+    await setState(swapped, "QUEUED", "QUEUED");
+    await markDispatched(old);
+    const result = await reconcile([old]);
+    expect(result.decisions[0]).toMatchObject({ decision: "RECOVERED_TRANSPORT" });
+    expect(await runFor(old)).toMatchObject({ status: "QUEUED", generation: 1 });
+    expect(await runFor(swapped)).toMatchObject({ status: "QUEUED", generation: 0 });
+    expect(await prisma.job.findUniqueOrThrow({ where: { id: old.jobId }, select: { status: true, error: true } })).toEqual({ status: "QUEUED", error: null });
+  });
+
+  it("PR-A-R1-06 keeps an OPEN paid-outcome quarantine ahead of audio superseded convergence", async () => {
+    const old = await seedOperation("PODCAST_AUDIO_GENERATION");
+    const equivalent = await seedOperation("PODCAST_AUDIO_GENERATION", { workspaceId: old.workspaceId });
+    const voices = await audioVoiceFixture(old.workspaceId, await podcastScaffold(old.workspaceId));
+    await attachAudioVoiceMapping(old, voices);
+    await attachAudioVoiceMapping(equivalent, voices);
+    await setState(old, "QUEUED", "QUEUED");
+    await setState(equivalent, "QUEUED", "QUEUED");
+    await markDispatched(old);
+    await createAudioQuarantine(old);
+    const providerCallsBefore = await prisma.providerInvocation.count({ where: { workspaceId: old.workspaceId } });
+    const before = await prisma.job.findUniqueOrThrow({ where: { id: old.jobId }, select: { status: true, error: true } });
+    const result = await reconcile([old]);
+    expect(result.decisions[0]).toMatchObject({ decision: "AMBIGUOUS_SKIPPED", reason: "AUDIO_PAID_OUTCOME_QUARANTINED" });
+    expect(await runFor(old)).toMatchObject({ status: "QUEUED", generation: 0 });
+    expect(await prisma.job.findUniqueOrThrow({ where: { id: old.jobId }, select: { status: true, error: true } })).toEqual(before);
+    expect(await runFor(equivalent)).toMatchObject({ status: "QUEUED", generation: 0 });
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: old.workspaceId } })).toBe(providerCallsBefore);
+  });
+
+  it("PR-A-R1-07 leaves an orphan active expensive Job untouched with a stable diagnostic", async () => {
+    const orphanJobId = await seedOrphanJob(900);
+    const before = await prisma.job.findUniqueOrThrow({ where: { id: orphanJobId } });
+    const providerCallsBefore = await prisma.providerInvocation.count({ where: { workspaceId: before.workspaceId! } });
+    const result = await reconcileDurableExpensiveOperationsBatch({ batchSize: 1, candidateJobIds: [orphanJobId] });
+    expect(result.decisions[0]).toMatchObject({ jobId: orphanJobId, decision: "AMBIGUOUS_SKIPPED", reason: "DURABLE_RUN_IDENTITY_MISSING" });
+    expect(await prisma.job.findUniqueOrThrow({ where: { id: orphanJobId } })).toEqual(before);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: before.workspaceId! } })).toBe(providerCallsBefore);
   });
 });

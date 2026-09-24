@@ -1,7 +1,7 @@
 import { expensiveJobTypes, lockWorkspaceExpensiveOperationCapacity, Prisma, prisma, type ExpensiveOperationRecoveryTarget } from "@ai-cognitive/db";
 import { normalizeDispatchGeneration } from "@ai-cognitive/ingestion";
 import { rearmBookAnalysisRunById } from "@ai-cognitive/book-intelligence";
-import { AUDIO_GENERATION_JOB, rearmPodcastAudioGenerationById, rearmPodcastGenerationRunById } from "@ai-cognitive/podcast-generation";
+import { AUDIO_GENERATION_JOB, convergeSupersededPodcastAudioGenerationById, rearmPodcastAudioGenerationById, rearmPodcastGenerationRunById } from "@ai-cognitive/podcast-generation";
 import { SHORT_VIDEO_GENERATION_JOB, rearmShortVideoGenerationRunById } from "@ai-cognitive/short-video-generation";
 import { logger } from "@ai-cognitive/shared";
 import { BOOK_ANALYSIS_JOB } from "@ai-cognitive/book-intelligence";
@@ -20,6 +20,12 @@ export function scheduleDurableOperationReconciliation(run: () => void, schedule
 }
 
 export type ReconciliationCursor = { createdAt: Date; id: string };
+export type ReconciliationSweepState = {
+  nextLane: "FORWARD" | "REVISIT";
+  forwardCursor: ReconciliationCursor | null;
+  revisitCursor: ReconciliationCursor | null;
+  revisitThrough: ReconciliationCursor | null;
+};
 export type ReconciliationQueue = {
   getJob(id: string): Promise<{ id: string; data: unknown; getState(): Promise<string> } | null | undefined>;
 };
@@ -134,13 +140,14 @@ function baseRecord(candidate: { domain: DurableOperationDomain; jobId: string; 
   return record({ domain: candidate.domain, jobId: candidate.jobId, workspaceId: candidate.workspaceId, runId: candidate.runId ?? null, dispatchGeneration: candidate.dispatchGeneration ?? candidate.generation ?? null, decision, reason });
 }
 
-async function discoverCandidates(batchSize: number, cursor: ReconciliationCursor | null, candidateJobIds?: readonly string[]): Promise<CandidateRow[]> {
+async function discoverCandidates(batchSize: number, cursor: ReconciliationCursor | null, candidateJobIds?: readonly string[], through?: ReconciliationCursor | null): Promise<CandidateRow[]> {
   return await prisma.job.findMany({
     where: {
       ...(candidateJobIds ? { id: { in: [...candidateJobIds] } } : {}),
       type: { in: [...expensiveJobTypes] },
       status: { in: [...activeStatuses] },
       ...(cursor ? { OR: [{ createdAt: { gt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { gt: cursor.id } }] } : {}),
+      ...(through ? { AND: [{ OR: [{ createdAt: { lt: through.createdAt } }, { createdAt: through.createdAt, id: { lte: through.id } }] }] } : {}),
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: batchSize,
@@ -156,6 +163,19 @@ async function discoverCandidates(batchSize: number, cursor: ReconciliationCurso
       audioGenerationRun: { select: { id: true, workspaceId: true, jobId: true, status: true, dispatchGeneration: true } },
     },
   }) as CandidateRow[];
+}
+
+async function discoverActiveFrontier(candidateJobIds?: readonly string[]): Promise<ReconciliationCursor | null> {
+  const row = await prisma.job.findFirst({
+    where: {
+      ...(candidateJobIds ? { id: { in: [...candidateJobIds] } } : {}),
+      type: { in: [...expensiveJobTypes] },
+      status: { in: [...activeStatuses] },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { createdAt: true, id: true },
+  });
+  return row;
 }
 
 type Candidate = { domain: DurableOperationDomain; jobId: string; workspaceId: string | null; runId: string | null; generation: number | null; identityError?: string };
@@ -366,29 +386,25 @@ async function reconcileOne(candidate: Candidate, options: { queues: Reconciliat
   const recovery = await invokeExactRecovery(target, options.topics[target.domain]);
   if (recovery === "REARMED") return baseRecord(target, "RECOVERED_TRANSPORT", "CURRENT_GENERATION_TRANSPORT_LOST");
 
+  if (recovery === "SUPERSEDED" && target.domain === "PODCAST_AUDIO_GENERATION") {
+    const convergence = await convergeSupersededPodcastAudioGenerationById(target.runId, target.dispatchGeneration, { workspaceId: target.workspaceId, jobId: target.jobId, jobType: target.jobType });
+    if (convergence === "CONVERGED") return baseRecord(target, "CONVERGED_TERMINAL", "AUDIO_GENERATION_SUPERSEDED");
+    if (convergence === "PAID_OUTCOME_QUARANTINED") return baseRecord(target, "AMBIGUOUS_SKIPPED", "AUDIO_PAID_OUTCOME_QUARANTINED");
+    if (convergence === "RACE_LOST") return baseRecord(target, "STALE_GENERATION_IGNORED", "AUDIO_TARGET_GENERATION_CHANGED");
+    const refreshed = await assessFreshCandidate(freshCandidate);
+    if ("record" in refreshed) return refreshed.record;
+    return baseRecord(refreshed.target, "AMBIGUOUS_SKIPPED", convergence === "SUPERSEDER_LOCKED" ? "AUDIO_SUPERSEDER_REVALIDATION_LOCKED" : "AUDIO_SUPERSEDED_PEER_NO_LONGER_LEGITIMATE");
+  }
+
   const refreshed = await assessFreshCandidate(freshCandidate);
   if ("record" in refreshed) return refreshed.record;
   if (recovery === "PAID_OUTCOME_QUARANTINED") return baseRecord(refreshed.target, "AMBIGUOUS_SKIPPED", "AUDIO_PAID_OUTCOME_QUARANTINED");
-  if (recovery === "SUPERSEDED") return baseRecord(refreshed.target, "AMBIGUOUS_SKIPPED", "AUDIO_SEMANTIC_TARGET_SUPERSEDED");
   if (recovery === "CAPACITY_BLOCKED") return baseRecord(refreshed.target, "AMBIGUOUS_SKIPPED", "CAPACITY_RECHECK_BLOCKED");
   return baseRecord(refreshed.target, "AMBIGUOUS_SKIPPED", "EXACT_RECOVERY_REJECTED");
 }
 
-/** One stable keyset page; it does not replay providers and never scans without a bound. */
-export async function reconcileDurableExpensiveOperationsBatch(options: {
-  cursor?: ReconciliationCursor | null;
-  batchSize?: number;
-  /** Optional exact-ID restriction for deterministic callers and integration tests. */
-  candidateJobIds?: readonly string[];
-  queues?: ReconciliationQueues;
-  topics?: ReconciliationTopics;
-  hooks?: ReconciliationHooks;
-} = {}): Promise<ReconciliationBatchResult> {
-  const requested = options.batchSize ?? DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE;
-  if (!Number.isInteger(requested) || requested < 1 || requested > MAX_DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE) throw new Error("DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE_INVALID");
-  const candidates = await discoverCandidates(requested, options.cursor ?? null, options.candidateJobIds);
+async function processCandidates(candidates: CandidateRow[], requested: number, settings: { queues: ReconciliationQueues; topics: ReconciliationTopics; hooks: ReconciliationHooks }): Promise<ReconciliationBatchResult> {
   const result: ReconciliationBatchResult = { discovered: candidates.length, processed: 0, converged: 0, recovered: 0, skipped: 0, nextCursor: candidates.length === requested ? { createdAt: candidates[candidates.length - 1]!.createdAt, id: candidates[candidates.length - 1]!.id } : null, decisions: [] };
-  const settings = { queues: options.queues ?? {}, topics: options.topics ?? {}, hooks: options.hooks ?? {} };
   for (const row of candidates) {
     const candidate = makeCandidate(row);
     if (!candidate) continue;
@@ -405,4 +421,64 @@ export async function reconcileDurableExpensiveOperationsBatch(options: {
     result.decisions.push(outcome);
   }
   return result;
+}
+
+/** One stable keyset page; it does not replay providers and never scans without a bound. */
+export async function reconcileDurableExpensiveOperationsBatch(options: {
+  cursor?: ReconciliationCursor | null;
+  batchSize?: number;
+  /** Optional exact-ID restriction for deterministic callers and integration tests. */
+  candidateJobIds?: readonly string[];
+  queues?: ReconciliationQueues;
+  topics?: ReconciliationTopics;
+  hooks?: ReconciliationHooks;
+} = {}): Promise<ReconciliationBatchResult> {
+  const requested = options.batchSize ?? DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE;
+  if (!Number.isInteger(requested) || requested < 1 || requested > MAX_DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE) throw new Error("DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE_INVALID");
+  const candidates = await discoverCandidates(requested, options.cursor ?? null, options.candidateJobIds);
+  return processCandidates(candidates, requested, { queues: options.queues ?? {}, topics: options.topics ?? {}, hooks: options.hooks ?? {} });
+}
+
+/**
+ * Runs one bounded lane per sweep. The forward keyset visits every row in
+ * stable order; the revisit lane repeatedly scans only through a captured
+ * active-row frontier. Alternating the lanes guarantees that arrivals cannot
+ * extend a revisit epoch forever and that revisits cannot starve forward work.
+ */
+export async function reconcileDurableExpensiveOperationsSweep(options: {
+  state?: ReconciliationSweepState;
+  batchSize?: number;
+  candidateJobIds?: readonly string[];
+  queues?: ReconciliationQueues;
+  topics?: ReconciliationTopics;
+  hooks?: ReconciliationHooks;
+} = {}): Promise<ReconciliationBatchResult & { lane: "FORWARD" | "REVISIT"; nextState: ReconciliationSweepState }> {
+  const requested = options.batchSize ?? DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE;
+  if (!Number.isInteger(requested) || requested < 1 || requested > MAX_DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE) throw new Error("DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE_INVALID");
+  const state = options.state ?? { nextLane: "FORWARD", forwardCursor: null, revisitCursor: null, revisitThrough: null };
+  const lane = state.nextLane;
+  const settings = { queues: options.queues ?? {}, topics: options.topics ?? {}, hooks: options.hooks ?? {} };
+  if (lane === "FORWARD") {
+    const result = await reconcileDurableExpensiveOperationsBatch({ ...settings, batchSize: requested, candidateJobIds: options.candidateJobIds, cursor: state.forwardCursor });
+    return { ...result, lane, nextState: { ...state, forwardCursor: result.nextCursor, nextLane: "REVISIT" } };
+  }
+
+  const through = state.revisitThrough ?? await discoverActiveFrontier(options.candidateJobIds);
+  if (!through) {
+    const empty: ReconciliationBatchResult = { discovered: 0, processed: 0, converged: 0, recovered: 0, skipped: 0, nextCursor: null, decisions: [] };
+    return { ...empty, lane, nextState: { ...state, revisitCursor: null, revisitThrough: null, nextLane: "FORWARD" } };
+  }
+  const candidates = await discoverCandidates(requested, state.revisitCursor, options.candidateJobIds, through);
+  const result = await processCandidates(candidates, requested, settings);
+  const epochComplete = candidates.length < requested;
+  return {
+    ...result,
+    lane,
+    nextState: {
+      ...state,
+      revisitCursor: epochComplete ? null : result.nextCursor,
+      revisitThrough: epochComplete ? null : through,
+      nextLane: "FORWARD",
+    },
+  };
 }

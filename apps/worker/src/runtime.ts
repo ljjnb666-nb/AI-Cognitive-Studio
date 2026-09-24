@@ -13,7 +13,7 @@ import { createHealthCheckWorker } from "./worker.js";
 import { createBookProductionGatewayRuntime, createPodcastAudioProductionGatewayRuntime, createPodcastProductionGatewayRuntime, createShortVideoProductionGatewayRuntime, type BookGatewayRuntime, type BookProductionGatewayRuntimeOverrides, type PodcastAudioGatewayRuntime, type PodcastGatewayRuntime, type ShortVideoGatewayRuntime } from "./provider-gateway-runtime.js";
 import { startProcessingHeartbeat } from "./processing-heartbeat.js";
 import { resolveCredentialKeyring, resolveProviderCatalog } from "@ai-cognitive/provider-gateway";
-import { DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE, scheduleDurableOperationReconciliation, reconcileDurableExpensiveOperationsBatch, type ReconciliationCursor, type ReconciliationQueue, type ReconciliationQueues, type ReconciliationTopics } from "./durable-operation-reconciliation.js";
+import { DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE, scheduleDurableOperationReconciliation, reconcileDurableExpensiveOperationsSweep, type ReconciliationQueue, type ReconciliationQueues, type ReconciliationSweepState, type ReconciliationTopics } from "./durable-operation-reconciliation.js";
 
 export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider> };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
@@ -128,15 +128,15 @@ export async function startWorkerRuntime(environment: Environment, options: Work
     ...(options.outboxTopics?.shortVideo ? { SHORT_VIDEO_GENERATION: options.outboxTopics.shortVideo } : {}),
     ...(options.outboxTopics?.podcastAudio ? { PODCAST_AUDIO_GENERATION: options.outboxTopics.podcastAudio } : {}),
   };
-  let reconciliationCursor: ReconciliationCursor | null = null;
+  let reconciliationSweepState: ReconciliationSweepState | undefined;
   const reconcileDurableOperations = dispatch("durable-operation-reconciliation", async () => {
-    const result = await reconcileDurableExpensiveOperationsBatch({
+    const result = await reconcileDurableExpensiveOperationsSweep({
       batchSize: DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE,
-      cursor: reconciliationCursor,
+      state: reconciliationSweepState,
       queues: reconciliationQueues,
       topics: reconciliationTopics,
     });
-    reconciliationCursor = result.nextCursor;
+    reconciliationSweepState = result.nextState;
   }, undefined, false);
   schedules.push(scheduleDurableOperationReconciliation(() => { void reconcileDurableOperations(); }));
   // Startup work is one bounded page and does not delay readiness.
