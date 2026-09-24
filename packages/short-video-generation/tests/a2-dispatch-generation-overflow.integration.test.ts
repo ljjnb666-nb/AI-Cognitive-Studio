@@ -59,14 +59,6 @@ async function waitForBlockedShortVideoUpdates(blockerPid: number, expectedCount
   throw new Error(`A2_SHORT_VIDEO_EXPECTED_${expectedCount}_BLOCKED_RUN_UPDATES`);
 }
 
-async function waitForSignal(signal: () => boolean, message: string) {
-  for (let attempt = 0; attempt < 10_000; attempt++) {
-    if (signal()) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
-  }
-  throw new Error(message);
-}
-
 describe("A2 Short Video dispatch generation overflow", () => {
   describe("A2 claim/rearm authority races", () => {
     it("lets rearm N→N+1 win before a stale Short Video claim and gives the stale processor zero authority", async () => {
@@ -154,12 +146,14 @@ describe("A2 Short Video dispatch generation overflow", () => {
       const blocker = await holdA2RunRowLock(run.id);
       let releaseProvider!: () => void;
       const providerGate = new Promise<void>(resolve => releaseProvider = resolve);
+      let signalProviderEntered!: () => void;
+      const providerEntered = new Promise<void>(resolve => signalProviderEntered = resolve);
       let providerDidEnter = false;
       let rearm: ReturnType<typeof rearmShortVideoGenerationRunById> | undefined;
       let worker: ReturnType<typeof processShortVideoGenerationRun> | undefined;
       try {
         worker = processShortVideoGenerationRun(run.id, {
-          providerForRun: async () => { providerDidEnter = true; await providerGate; throw new Error("A2_STOP_AFTER_SHORT_VIDEO_CLAIM"); },
+          providerForRun: async () => { providerDidEnter = true; signalProviderEntered(); await providerGate; throw new Error("A2_STOP_AFTER_SHORT_VIDEO_CLAIM"); },
           embeddingProviderForRun: async () => { throw new Error("A2_UNEXPECTED_EMBEDDING_RESOLUTION"); },
           ttsForRun: async () => { throw new Error("A2_UNEXPECTED_TTS_RESOLUTION"); },
           storage: {} as never,
@@ -170,7 +164,11 @@ describe("A2 Short Video dispatch generation overflow", () => {
         await waitForBlockedShortVideoUpdates(blocker.pid, 2);
         blocker.release();
         await blocker.done;
-        await waitForSignal(() => providerDidEnter, "A2_SHORT_VIDEO_CLAIM_DID_NOT_REACH_PROVIDER_RESOLVER");
+        const workerExitBeforeProvider = worker.then(
+          () => { throw new Error("A2_SHORT_VIDEO_WORKER_RETURNED_BEFORE_PROVIDER_RESOLVER"); },
+          error => { if (!providerDidEnter) throw error; },
+        );
+        await Promise.race([providerEntered, workerExitBeforeProvider]);
         const beforeRearm = await Promise.all([
           prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } }),
           prisma.job.findUniqueOrThrow({ where: { id: job.id } }),

@@ -9,9 +9,10 @@ export default defineConfig({
   webServer: {
     command: "pnpm dev",
     url: "http://localhost:3001",
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     env: {
       NODE_ENV: "test",
+      WEB_DEV_BOOTSTRAP_IDENTITY: "false",
       BETTER_AUTH_SECRET: "playwright-test-secret-must-be-at-least-32-characters",
       BETTER_AUTH_URL: "http://localhost:3001",
       BETTER_AUTH_TRUSTED_ORIGINS: "http://localhost:3001",
