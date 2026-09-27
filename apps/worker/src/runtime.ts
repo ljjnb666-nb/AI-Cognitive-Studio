@@ -1,4 +1,4 @@
-import type { EmbeddingProvider, ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
+import { reconcileStaleBookAnalysisJobs, type EmbeddingProvider, type ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
 import type { PodcastGenerationProvider, DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
 import { logger } from "@ai-cognitive/shared";
 import type { Environment } from "@ai-cognitive/shared/server";
@@ -110,7 +110,11 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   // Provider-wait repair is deliberately coarse-grained, rather than tied to
   // the high-frequency outbox dispatcher, so an unconfigured workspace cannot poll tightly.
   schedules.push(setInterval(() => { if (!stopping) void Promise.all([reconcileHistoricalBookAnalysisBootstraps(25), reconcileWaitingBookAnalysisBootstraps(25, source)]).catch(error => logger.warn("worker.book_analysis_bootstrap_reconciliation.failed", { error: error instanceof Error ? error.message : String(error) })); }, 60_000));
+  // This bounded domain sweep has its own dispatch guard and error boundary;
+  // the PR #46 durable-operation sweep is scheduled independently below.
+  const reconcileBookAnalysisStale = dispatch("book-analysis-stale-reconciliation", () => reconcileStaleBookAnalysisJobs(25), 60_000);
   const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); }];
+  initial.push(reconcileBookAnalysisStale);
   if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (podcastQueue) initial.push(dispatch("podcast-generation", () => dispatchPodcastGenerationWithQueue(podcastQueue, { ...(options.outboxTopics?.podcastGeneration ? { topic: options.outboxTopics.podcastGeneration } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (audioQueue) initial.push(dispatch("podcast-audio", () => dispatchPodcastAudioGenerationWithQueue(audioQueue, { ...(options.outboxTopics?.podcastAudio ? { topic: options.outboxTopics.podcastAudio } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));

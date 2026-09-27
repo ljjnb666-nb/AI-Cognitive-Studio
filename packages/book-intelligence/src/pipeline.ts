@@ -555,28 +555,103 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
   }
 }
 
-export type StaleBookAnalysisJobReconciliation = "STALE_RUN_FAILED" | "ORPHAN_JOB_FAILED" | "NOT_ELIGIBLE";
+export type StaleBookAnalysisJobReconciliation = "STALE_RUN_FAILED" | "SKIPPED_VALID_LEASE" | "AMBIGUOUS_SKIPPED" | "ALREADY_TERMINAL" | "LOST_RACE" | "NOT_STALE";
+
+export type StaleBookAnalysisSweepResult = {
+  discovered: number;
+  reconciled: number;
+  skipped_valid_lease: number;
+  ambiguous_skipped: number;
+  already_terminal: number;
+  lost_race: number;
+  not_stale: number;
+  errors: number;
+  provider_calls: 0;
+};
+
+class StaleBookAnalysisJobLostRace extends Error {}
 
 /**
- * Exact-job operator reconciliation for durable Book analysis records that can
- * no longer be consumed. It never touches a live lease and never creates a
- * retry; normal recovery may be requested only after this releases the stale
- * admission slot.
+ * Exact-job stale reconciliation. It takes the BookAnalysisRun row lock first,
+ * matching the durable-operation reconciler's lock order, then revalidates the
+ * Job/run identity and lease before conditional terminalization.
  */
 export async function reconcileStaleBookAnalysisJob(jobId: string, now = new Date()): Promise<StaleBookAnalysisJobReconciliation> {
-  return prisma.$transaction(async (tx) => {
-    const job = await tx.job.findUnique({ where: { id: jobId }, select: { id: true, type: true, status: true } });
-    if (!job || job.type !== BOOK_ANALYSIS_JOB || !["QUEUED", "RUNNING"].includes(job.status)) return "NOT_ELIGIBLE";
-    const run = await tx.bookAnalysisRun.findUnique({ where: { jobId: job.id }, select: { id: true, status: true, executionLeaseUntil: true } });
-    if (!run) {
-      await tx.job.update({ where: { id: job.id }, data: { status: "FAILED", error: { code: "BOOK_ANALYSIS_ORPHANED_JOB" }, completedAt: now } });
-      return "ORPHAN_JOB_FAILED";
-    }
-    if (run.status !== "RUNNING" || !run.executionLeaseUntil || run.executionLeaseUntil >= now) return "NOT_ELIGIBLE";
-    await tx.bookAnalysisRun.update({ where: { id: run.id }, data: { status: "FAILED", errorCode: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED", completedAt: now, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
-    await tx.job.update({ where: { id: job.id }, data: { status: "FAILED", error: { code: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED" }, completedAt: now } });
-    return "STALE_RUN_FAILED";
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "jobId" = ${jobId} FOR UPDATE`;
+      if (locked.length !== 1) {
+        const orphan = await tx.job.findUnique({ where: { id: jobId }, select: { id: true, type: true, status: true } });
+        return orphan?.type === BOOK_ANALYSIS_JOB && ["QUEUED", "RUNNING"].includes(orphan.status) ? "AMBIGUOUS_SKIPPED" : "NOT_STALE";
+      }
+      const run = await tx.bookAnalysisRun.findUnique({ where: { jobId }, select: { id: true, jobId: true, workspaceId: true, dispatchGeneration: true, status: true, executionClaimToken: true, executionClaimedAt: true, executionLeaseUntil: true } });
+      const job = await tx.job.findUnique({ where: { id: jobId }, select: { id: true, workspaceId: true, type: true, status: true } });
+      if (!run || !job) return "AMBIGUOUS_SKIPPED";
+      if (job.type !== BOOK_ANALYSIS_JOB || run.jobId !== job.id || !job.workspaceId || run.workspaceId !== job.workspaceId) return "AMBIGUOUS_SKIPPED";
+      if (job.status === "SUCCEEDED" || job.status === "FAILED" || run.status === "SUCCEEDED" || run.status === "FAILED") return "ALREADY_TERMINAL";
+      if (!["QUEUED", "RUNNING"].includes(job.status) || !["QUEUED", "RUNNING"].includes(run.status)) return "AMBIGUOUS_SKIPPED";
+      if (job.status !== run.status) return "AMBIGUOUS_SKIPPED";
+      if (run.status !== "RUNNING") return "NOT_STALE";
+      if (run.executionLeaseUntil && run.executionLeaseUntil > now) return "SKIPPED_VALID_LEASE";
+      if (!run.executionClaimToken || !run.executionClaimedAt || !run.executionLeaseUntil) return "AMBIGUOUS_SKIPPED";
+
+      const terminalized = await tx.bookAnalysisRun.updateMany({
+        where: {
+          id: run.id,
+          jobId: job.id,
+          workspaceId: job.workspaceId,
+          status: "RUNNING",
+          dispatchGeneration: run.dispatchGeneration,
+          executionClaimToken: run.executionClaimToken,
+          executionClaimedAt: run.executionClaimedAt,
+          executionLeaseUntil: { lte: now },
+        },
+        data: { status: "FAILED", errorCode: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED", completedAt: now, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null },
+      });
+      if (terminalized.count !== 1) return "LOST_RACE";
+      const jobTerminalized = await tx.job.updateMany({
+        where: { id: job.id, workspaceId: job.workspaceId, type: BOOK_ANALYSIS_JOB, status: "RUNNING" },
+        data: { status: "FAILED", error: { code: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED" }, completedAt: now },
+      });
+      if (jobTerminalized.count !== 1) throw new StaleBookAnalysisJobLostRace();
+      return "STALE_RUN_FAILED";
+    });
+  } catch (error) {
+    if (error instanceof StaleBookAnalysisJobLostRace) return "LOST_RACE";
+    throw error;
+  }
+}
+
+/** Bounded discovery of authoritative stale run identities; orphans stay in the ambiguity lane. */
+export async function reconcileStaleBookAnalysisJobs(limit = 25, now = new Date()): Promise<StaleBookAnalysisSweepResult> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("BOOK_ANALYSIS_STALE_RECONCILIATION_LIMIT_INVALID");
+  const candidates = await prisma.bookAnalysisRun.findMany({
+    where: {
+      status: "RUNNING",
+      executionLeaseUntil: { lte: now },
+      job: { is: { type: BOOK_ANALYSIS_JOB, status: "RUNNING" } },
+    },
+    orderBy: [{ executionLeaseUntil: "asc" }, { id: "asc" }],
+    take: limit,
+    select: { jobId: true },
   });
+  const result: StaleBookAnalysisSweepResult = { discovered: candidates.length, reconciled: 0, skipped_valid_lease: 0, ambiguous_skipped: 0, already_terminal: 0, lost_race: 0, not_stale: 0, errors: 0, provider_calls: 0 };
+  for (const candidate of candidates) {
+    try {
+      const outcome = await reconcileStaleBookAnalysisJob(candidate.jobId, now);
+      if (outcome === "STALE_RUN_FAILED") result.reconciled += 1;
+      else if (outcome === "SKIPPED_VALID_LEASE") result.skipped_valid_lease += 1;
+      else if (outcome === "AMBIGUOUS_SKIPPED") result.ambiguous_skipped += 1;
+      else if (outcome === "ALREADY_TERMINAL") result.already_terminal += 1;
+      else if (outcome === "LOST_RACE") result.lost_race += 1;
+      else result.not_stale += 1;
+    } catch (error) {
+      result.errors += 1;
+      logger.warn("book.analysis.stale_reconciliation.failed", { jobId: candidate.jobId, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  logger.info("book.analysis.stale_reconciliation.completed", result);
+  return result;
 }
 
 async function runFinalizingStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {

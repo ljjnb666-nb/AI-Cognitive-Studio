@@ -12,6 +12,7 @@ import {
 import {
   BOOK_ANALYSIS_JOB,
   dispatchPendingBookAnalysis,
+  reconcileStaleBookAnalysisJob,
 } from "@ai-cognitive/book-intelligence";
 import {
   PODCAST_GENERATION_JOB,
@@ -375,6 +376,42 @@ describe("STABILITY PR-A durable operation reconciliation", () => {
     expect(result.decisions[0]?.decision).toBe("NOOP_ACTIVE_OWNER");
     expect(await runFor(seed)).toEqual(before);
     expect(await prisma.outboxEvent.count({ where: { aggregateId: seed.runId } })).toBe(1);
+  });
+
+  it("serializes the Book stale sweep with PR-A recovery so only one authority wins", async () => {
+    const seed = await seedOperation("BOOK_ANALYSIS");
+    await setState(seed, "RUNNING", "RUNNING", "EXPIRED");
+    await markDispatched(seed);
+    const [providerCallsBefore, outboxBefore] = await Promise.all([
+      prisma.providerInvocation.count({ where: { workspaceId: seed.workspaceId } }),
+      prisma.outboxEvent.count({ where: { aggregateId: seed.runId } }),
+    ]);
+    const [staleOutcome, durableOutcome] = await Promise.all([
+      reconcileStaleBookAnalysisJob(seed.jobId),
+      reconcile([seed]),
+    ]);
+    const [run, job, outboxAfter, providerCallsAfter] = await Promise.all([
+      prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: seed.runId }, select: { status: true, dispatchGeneration: true, executionClaimToken: true } }),
+      prisma.job.findUniqueOrThrow({ where: { id: seed.jobId }, select: { status: true } }),
+      prisma.outboxEvent.count({ where: { aggregateId: seed.runId } }),
+      prisma.providerInvocation.count({ where: { workspaceId: seed.workspaceId } }),
+    ]);
+    if (run.status === "FAILED") {
+      expect(staleOutcome).toBe("STALE_RUN_FAILED");
+      expect(["CONVERGED_TERMINAL", "NOOP_ALREADY_CONVERGED"]).toContain(durableOutcome.decisions[0]?.decision);
+      expect(run.dispatchGeneration).toBe(0);
+      expect(job.status).toBe("FAILED");
+    } else {
+      expect(run.status).toBe("QUEUED");
+      expect(staleOutcome).toBe("NOT_STALE");
+      expect(durableOutcome.decisions[0]?.decision).toBe("RECOVERED_TRANSPORT");
+      expect(run.dispatchGeneration).toBe(1);
+      expect(job.status).toBe("QUEUED");
+    }
+    expect(outboxBefore).toBe(1);
+    expect(outboxAfter).toBeGreaterThanOrEqual(outboxBefore);
+    expect(outboxAfter).toBeLessThanOrEqual(outboxBefore + 1);
+    expect(providerCallsAfter).toBe(providerCallsBefore);
   });
 
   it.each([

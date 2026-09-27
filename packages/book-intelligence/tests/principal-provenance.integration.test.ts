@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
-import { materializeChunkSet, reconcileStaleBookAnalysisJob, recoverBookAnalysisForUser, requestBookAnalysis, requestBookAnalysisForUser, sha256 } from "../src/index.js";
+import { materializeChunkSet, reconcileStaleBookAnalysisJob, reconcileStaleBookAnalysisJobs, recoverBookAnalysisForUser, requestBookAnalysis, requestBookAnalysisForUser, sha256 } from "../src/index.js";
 
 const workspaces: string[] = [], users: string[] = [];
 
@@ -122,11 +122,94 @@ describe("BookAnalysis durable initiating principal", () => {
     await expect(prisma.job.findUniqueOrThrow({ where: { id: requested.job.id } })).resolves.toMatchObject({ status: "FAILED", error: { code: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED" } });
   });
 
-  it("reconciles an active Book Job that has no durable analysis run", async () => {
+  it("allows exactly one concurrent batch reconciler to terminalize an expired run", async () => {
+    const value = await fixture();
+    const requested = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
+    const expiredAt = new Date(Date.now() - 1_000);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "RUNNING", executionClaimToken: crypto.randomUUID(), executionClaimedAt: expiredAt, executionLeaseUntil: expiredAt } });
+    await prisma.job.update({ where: { id: requested.job.id }, data: { status: "RUNNING" } });
+    const [left, right] = await Promise.all([reconcileStaleBookAnalysisJobs(), reconcileStaleBookAnalysisJobs()]);
+    expect(left.reconciled + right.reconciled).toBe(1);
+    expect(left.errors + right.errors).toBe(0);
+    expect(left.provider_calls + right.provider_calls).toBe(0);
+    await expect(prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } })).resolves.toMatchObject({ status: "FAILED", errorCode: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED", executionClaimToken: null });
+    await expect(prisma.job.findUniqueOrThrow({ where: { id: requested.job.id } })).resolves.toMatchObject({ status: "FAILED", error: { code: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED" } });
+  });
+
+  it("leaves a valid active lease unchanged and classifies the sweep result", async () => {
+    const value = await fixture();
+    const requested = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
+    const validUntil = new Date(Date.now() + 60_000);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "RUNNING", executionClaimToken: crypto.randomUUID(), executionClaimedAt: new Date(), executionLeaseUntil: validUntil } });
+    await prisma.job.update({ where: { id: requested.job.id }, data: { status: "RUNNING" } });
+    const [runBefore, jobBefore] = await Promise.all([
+      prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } }),
+      prisma.job.findUniqueOrThrow({ where: { id: requested.job.id } }),
+    ]);
+    await expect(reconcileStaleBookAnalysisJob(requested.job.id)).resolves.toBe("SKIPPED_VALID_LEASE");
+    await expect(reconcileStaleBookAnalysisJobs()).resolves.toMatchObject({ discovered: 0, reconciled: 0, skipped_valid_lease: 0, errors: 0, provider_calls: 0 });
+    await expect(prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } })).resolves.toEqual(runBefore);
+    await expect(prisma.job.findUniqueOrThrow({ where: { id: requested.job.id } })).resolves.toEqual(jobBefore);
+  });
+
+  it("skips an active orphan Book Job as ambiguous without mutating it", async () => {
     const value = await fixture();
     const orphan = await prisma.job.create({ data: { workspaceId: value.workspace.id, userId: value.owner.id, type: "book.analysis", status: "QUEUED", payload: { sourceDocumentId: value.document.id }, idempotencyKey: `orphan:${crypto.randomUUID()}` } });
-    await expect(reconcileStaleBookAnalysisJob(orphan.id)).resolves.toBe("ORPHAN_JOB_FAILED");
-    await expect(prisma.job.findUniqueOrThrow({ where: { id: orphan.id } })).resolves.toMatchObject({ status: "FAILED", error: { code: "BOOK_ANALYSIS_ORPHANED_JOB" } });
+    const before = await prisma.job.findUniqueOrThrow({ where: { id: orphan.id } });
+    const [invocationsBefore, outboxBefore] = await Promise.all([
+      prisma.providerInvocation.count({ where: { workspaceId: value.workspace.id } }),
+      prisma.outboxEvent.count({ where: { aggregateId: orphan.id } }),
+    ]);
+    await expect(reconcileStaleBookAnalysisJob(orphan.id)).resolves.toBe("AMBIGUOUS_SKIPPED");
+    await expect(prisma.job.findUniqueOrThrow({ where: { id: orphan.id } })).resolves.toEqual(before);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: value.workspace.id } })).toBe(invocationsBefore);
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: orphan.id } })).toBe(outboxBefore);
+  });
+
+  it("reports bounded stale sweep outcomes and is idempotent after reconciliation", async () => {
+    const value = await fixture();
+    const requested = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
+    const expiredAt = new Date(Date.now() - 1_000);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "RUNNING", executionClaimToken: crypto.randomUUID(), executionClaimedAt: expiredAt, executionLeaseUntil: expiredAt } });
+    await prisma.job.update({ where: { id: requested.job.id }, data: { status: "RUNNING" } });
+    const first = await reconcileStaleBookAnalysisJobs(1);
+    const second = await reconcileStaleBookAnalysisJobs(1);
+    expect(first).toMatchObject({ discovered: 1, reconciled: 1, errors: 0, provider_calls: 0 });
+    expect(second).toMatchObject({ discovered: 0, reconciled: 0, errors: 0, provider_calls: 0 });
+    await expect(prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } })).resolves.toMatchObject({ status: "FAILED", errorCode: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED" });
+  });
+
+  it("lets an authoritative success win while the stale reconciler waits for the run lock", async () => {
+    const value = await fixture();
+    const requested = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
+    const expiredAt = new Date(Date.now() - 1_000);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "RUNNING", executionClaimToken: crypto.randomUUID(), executionClaimedAt: expiredAt, executionLeaseUntil: expiredAt } });
+    await prisma.job.update({ where: { id: requested.job.id }, data: { status: "RUNNING" } });
+    let release!: () => void;
+    let signalLock!: () => void;
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const locked = new Promise<void>(resolve => { signalLock = resolve; });
+    const ownerTransaction = prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${requested.run.id} FOR UPDATE`;
+      signalLock();
+      await hold;
+      await tx.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "SUCCEEDED", completedAt: new Date(), executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
+      await tx.job.update({ where: { id: requested.job.id }, data: { status: "SUCCEEDED", completedAt: new Date() } });
+    });
+    await locked;
+    const staleReconciliation = reconcileStaleBookAnalysisJob(requested.job.id);
+    try {
+      await expect.poll(async () => {
+        const rows = await prisma.$queryRaw<Array<{ count: number }>>`SELECT COUNT(*)::int AS "count" FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM "BookAnalysisRun" WHERE "jobId"%'`;
+        return rows[0]?.count ?? 0;
+      }, { timeout: 5_000, interval: 25 }).toBeGreaterThan(0);
+    } finally {
+      release();
+      await ownerTransaction;
+    }
+    await expect(staleReconciliation).resolves.toBe("ALREADY_TERMINAL");
+    await expect(prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: requested.run.id } })).resolves.toMatchObject({ status: "SUCCEEDED", errorCode: null });
+    await expect(prisma.job.findUniqueOrThrow({ where: { id: requested.job.id } })).resolves.toMatchObject({ status: "SUCCEEDED" });
   });
 
   it("allocates a new durable recovery key when a later failed retry has no BullMQ attempt increment", async () => {
