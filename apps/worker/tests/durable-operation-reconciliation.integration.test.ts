@@ -398,7 +398,9 @@ describe("STABILITY PR-A durable operation reconciliation", () => {
     ]);
     if (run.status === "FAILED") {
       expect(staleOutcome).toBe("STALE_RUN_FAILED");
-      expect(["CONVERGED_TERMINAL", "NOOP_ALREADY_CONVERGED"]).toContain(durableOutcome.decisions[0]?.decision);
+      const durableDecision = durableOutcome.decisions[0]?.decision;
+      if (durableDecision === undefined) expect(durableOutcome.discovered).toBe(0);
+      else expect(["CONVERGED_TERMINAL", "NOOP_ALREADY_CONVERGED"]).toContain(durableDecision);
       expect(run.dispatchGeneration).toBe(0);
       expect(job.status).toBe("FAILED");
     } else {

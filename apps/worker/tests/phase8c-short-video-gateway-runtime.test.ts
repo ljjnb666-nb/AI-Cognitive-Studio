@@ -86,6 +86,15 @@ describe("Phase 8C Short Video Gateway worker autonomy", () => it("runs the real
       await prisma.shortVideoGenerationRun.update({ where: { id: lineageRun.run.id }, data: { status: "RUNNING", stage: "SCENE_PLANNING", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null } });
       await expect(processShortVideoGenerationRun(lineageRun.run.id, { provider: await lineageRuntime.createTextProviderForRun({ workspaceId: workspace.id, shortVideoGenerationRunId: lineageRun.run.id, provider: "deepseek", model: "short-video-script" }), embeddingProvider: retrievalEmbeddings, tts: await lineageRuntime.createSpeechProviderForRun({ workspaceId: workspace.id, shortVideoGenerationRunId: lineageRun.run.id }), storage })).rejects.toThrow("SHORT_VIDEO_TEXT_RECONCILIATION_REQUIRED");
       expect([textCalls, embeddingCalls, speechCalls]).toEqual(lineageBaseline);
+      const lineageJob = await prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: lineageRun.run.id }, select: { jobId: true } });
+      const alternateAnalysisJob = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: alternateAnalysis.run.id }, select: { jobId: true } });
+      await prisma.$transaction(async tx => {
+        const completedAt = new Date();
+        await tx.shortVideoGenerationRun.updateMany({ where: { id: lineageRun.run.id, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "FAILED", errorCode: "TEST_LINEAGE_RECONCILIATION_COMPLETE", completedAt, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
+        await tx.job.updateMany({ where: { id: lineageJob.jobId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "FAILED", error: { code: "TEST_LINEAGE_RECONCILIATION_COMPLETE" }, completedAt } });
+        await tx.bookAnalysisRun.updateMany({ where: { id: alternateAnalysis.run.id, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "FAILED", errorCode: "TEST_LINEAGE_RECONCILIATION_COMPLETE", completedAt, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
+        await tx.job.updateMany({ where: { id: alternateAnalysisJob.jobId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "FAILED", error: { code: "TEST_LINEAGE_RECONCILIATION_COMPLETE" }, completedAt } });
+      });
     } finally { await lineageRuntime.close(); }
     // A second actual document/BookAnalysisRun proves every retrieval source is
     // pinned to one compatible, consumed vector-space identity before a query.
@@ -216,9 +225,13 @@ describe("Phase 8C Short Video Gateway worker autonomy", () => it("runs the real
       await prisma.job.update({ where: { id: principalJob.id }, data: { userId: null } });
       await expect(principalRuntime.createTextProviderForRun(principalInput)).rejects.toThrow("SHORT_VIDEO_DURABLE_PRINCIPAL_MISSING");
       await prisma.job.update({ where: { id: principalJob.id }, data: { userId: user.id } });
-      await prisma.workspaceMember.delete({ where: { workspaceId_userId: { workspaceId: workspace.id, userId: user.id } } });
+      const unreferencedPrincipal = await prisma.user.create({ data: { email: `${suffix}-unreferenced-principal@checkpoint6.test` } });
+      await prisma.workspaceMember.create({ data: { workspaceId: workspace.id, userId: unreferencedPrincipal.id, role: "VIEWER" } });
+      await prisma.job.update({ where: { id: principalJob.id }, data: { userId: unreferencedPrincipal.id } });
+      await prisma.workspaceMember.delete({ where: { workspaceId_userId: { workspaceId: workspace.id, userId: unreferencedPrincipal.id } } });
       await expect(principalRuntime.createTextProviderForRun(principalInput)).rejects.toThrow("SHORT_VIDEO_DURABLE_PRINCIPAL_MISSING");
-      await prisma.workspaceMember.create({ data: { workspaceId: workspace.id, userId: user.id, role: "OWNER" } });
+      await prisma.job.update({ where: { id: principalJob.id }, data: { userId: user.id } });
+      await prisma.user.delete({ where: { id: unreferencedPrincipal.id } });
       const alternateWorkspace = await prisma.workspace.create({ data: { name: `${suffix}-mismatch` } });
       await prisma.job.update({ where: { id: principalJob.id }, data: { workspaceId: alternateWorkspace.id } });
       await expect(principalRuntime.createTextProviderForRun(principalInput)).rejects.toThrow("SHORT_VIDEO_DURABLE_PRINCIPAL_WORKSPACE_MISMATCH");
