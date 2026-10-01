@@ -10,6 +10,16 @@ function routeForm(page: import("@playwright/test").Page, slot: string) {
   return page.locator("form").filter({ has: page.getByRole("heading", { name: new RegExp(`\\(${slot}\\)$`) }) });
 }
 
+// The Provider creation form is identified by its field contract (displayName + secret
+// inputs plus its own submit button), never by DOM order: StableBookRouteForm renders
+// an earlier <form> on the same page.
+function providerConnectionForm(page: import("@playwright/test").Page) {
+  return page.locator("form")
+    .filter({ has: page.locator('input[name="displayName"]') })
+    .filter({ has: page.locator('input[name="secret"]') })
+    .filter({ has: page.getByRole("button", { name: "保存 Provider" }) });
+}
+
 function testPdf(lines: string[]) {
   const escape = (value: string) => value.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
   const pages = Array.from({ length: Math.ceil(lines.length / 5) }, (_, page) => lines.slice(page * 5, page * 5 + 5));
@@ -39,7 +49,8 @@ async function signUp(page: import("@playwright/test").Page, email: string) {
 
 async function configureAllRoutes(page: import("@playwright/test").Page, displayName: string, secret: string) {
   await page.goto("/studio/settings/providers");
-  const connectionForm = page.locator("form").first();
+  const connectionForm = providerConnectionForm(page);
+  await expect(connectionForm).toHaveCount(1);
   await connectionForm.locator('input[name="displayName"]').fill(displayName);
   await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
   await connectionForm.locator('input[name="secret"]').fill(secret);
@@ -84,7 +95,8 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
 
   await page.goto("/studio/settings/providers");
   await expect(page.getByRole("heading", { name: "AI Providers" })).toBeVisible();
-  const connectionForm = page.locator("form").first();
+  const connectionForm = providerConnectionForm(page);
+  await expect(connectionForm).toHaveCount(1);
   await expect(connectionForm.locator('input[name="secret"]')).toBeVisible();
   await connectionForm.locator('input[name="displayName"]').fill("Phase 9 test provider");
   await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
@@ -98,7 +110,7 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   const createdConnection = createdBody.connections.find(connection => connection.displayName === "Phase 9 test provider");
   expect(createdConnection).toBeTruthy();
   await expect.poll(() => prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: createdConnection!.id, workspaceId } }, select: { workspaceId: true } })).toMatchObject({ workspaceId });
-  await expect(page.getByText("Phase 9 test provider", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Phase 9 test provider" })).toBeVisible();
   await expect(page.getByText(/API Key: 已配置/)).toBeVisible();
   const initialCredential = await prisma.providerCredentialVersion.findFirstOrThrow({ where: { workspaceId, connectionId: createdConnection!.id } });
   expect(initialCredential).toMatchObject({ workspaceId, connectionId: createdConnection!.id, credentialVersion: 1, status: "ACTIVE" });
