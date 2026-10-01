@@ -28,7 +28,7 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: ghcr.io/ljjnb666-nb/acs-ci-minio:RELEASE.2025-04-22T22-12-26Z@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: local-development-only
@@ -46,7 +46,7 @@ services:
       retries: 10
 
   minio-init:
-    image: minio/mc:RELEASE.2025-05-21T01-59-54Z
+    image: ghcr.io/ljjnb666-nb/acs-ci-minio-mc:RELEASE.2025-05-21T01-59-54Z@sha256:415aa133ebbe1ca750a6eb7cfcef9c70700febaf10963a31f3d56659eebe3b4a
     depends_on:
       minio:
         condition: service_healthy
