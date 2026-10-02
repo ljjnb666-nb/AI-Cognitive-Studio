@@ -6,6 +6,41 @@ import { startWorkerRuntime } from "../../../worker/src/runtime.js";
 
 function wav(seed: number) { const rate = 8_000, samples = 20_000, bytes = new Uint8Array(44 + samples * 2), view = new DataView(bytes.buffer); bytes.set(new TextEncoder().encode("RIFF")); view.setUint32(4, bytes.length - 8, true); bytes.set(new TextEncoder().encode("WAVEfmt "), 8); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); bytes.set(new TextEncoder().encode("data"), 36); view.setUint32(40, samples * 2, true); for (let index = 0; index < samples; index++) view.setInt16(44 + index * 2, Math.round(Math.sin(index * (seed + 1) / 19) * 2_000), true); return bytes; }
 
+async function bookResponse(request: any) {
+  // GatewayAnalysisProvider carries run/job identity in every text operation key.
+  // sourceBlockIds/boundedChunk are not forwarded through the gateway transport.
+  const identity = /^book-analysis-text:([^:]+):([^:]+):(CHUNK|SECTION|CHAPTER|BOOK):(.+)$/.exec(request.idempotencyKey ?? "");
+  if (!identity) throw new Error("PHASE9_BOOK_REQUEST_LINEAGE_REQUIRED");
+  const [, analysisRunId, jobId, stage, operation] = identity;
+  const run = await prisma.bookAnalysisRun.findFirst({ where: { id: analysisRunId, jobId, workspaceId: request.workspaceId } });
+  if (!run) throw new Error("PHASE9_BOOK_RUN_LINEAGE_MISMATCH");
+  if (stage !== "CHUNK") return { summary: "Bounded intelligence from the workspace route." };
+  const chunkIdentity = /^chunk:([^:]+):([^:]+)$/.exec(operation!);
+  if (!chunkIdentity) throw new Error("PHASE9_BOOK_CHUNK_LINEAGE_REQUIRED");
+  const chunk = await prisma.documentChunk.findFirst({
+    where: { id: chunkIdentity[1], contentHash: chunkIdentity[2], chunkSetId: run.chunkSetId, workspaceId: run.workspaceId },
+    include: { sourceSpans: { include: { sourceBlock: { include: { extraction: true } } }, orderBy: [{ sourceBlock: { ordinal: "asc" } }, { startOffset: "asc" }] } },
+  });
+  if (!chunk || chunk.content !== request.text?.messages?.[0]?.content || !chunk.sourceSpans.length)
+    throw new Error("PHASE9_BOOK_CHUNK_LINEAGE_MISMATCH");
+  for (const span of chunk.sourceSpans) {
+    const block = span.sourceBlock;
+    if (block.extractionId !== run.extractionId || block.extraction.sourceDocumentId !== run.sourceDocumentId || block.extraction.workspaceId !== run.workspaceId || span.startOffset < 0 || span.endOffset <= span.startOffset || span.endOffset > block.text.length)
+      throw new Error("PHASE9_BOOK_BLOCK_LINEAGE_MISMATCH");
+  }
+  // Keep the fixture's single evidence anchor per Book. Later bounded chunks
+  // contribute claims, so retrieval input size does not grow with quote count.
+  if (chunk.ordinal !== 0) return { summary: "Bounded intelligence from the workspace route.", memory: [{ type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence." }] };
+  const span = chunk.sourceSpans[0]!, block = span.sourceBlock;
+  const knownEvidence = "Evidence is the starting point for reliable AI conclusions.";
+  const candidateOffset = block.text.indexOf(knownEvidence, span.startOffset);
+  const hasKnownEvidence = candidateOffset >= span.startOffset && candidateOffset + knownEvidence.length <= span.endOffset;
+  const startOffset = hasKnownEvidence ? candidateOffset : span.startOffset;
+  const endOffset = hasKnownEvidence ? startOffset + knownEvidence.length : Math.min(startOffset + 20, span.endOffset);
+  const quoteText = block.text.slice(startOffset, endOffset);
+  return { summary: "Bounded intelligence from the workspace route.", memory: [{ type: "QUOTE", content: quoteText, evidence: [{ sourceBlockId: block.id, startOffset, endOffset, quoteText }] }, { type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence." }] };
+}
+
 function podcastResponse(input: any) {
   const stage = input.metadata?.stage, hosts = input.hosts ?? [], memory = input.context?.find((item: any) => item.sourceBlockEvidenceSpans?.length)?.memoryItemId ?? input.context?.[0]?.memoryItemId ?? input.availableMemoryIds?.[0];
   if (stage === "EPISODE_PLANNING") return { centralQuestion: "How does evidence make AI useful?", listenerStartingPoint: "curious", listenerTakeaway: "verify evidence", coreThesis: "Grounded systems retain provenance.", tensions: ["speed and trust"], surprisingIdeas: ["citations are executable context"], misconceptions: ["a model answer is proof"], keyConcepts: ["provenance"], candidateStories: [], candidateExamples: ["a source quote"], openQuestions: ["what should be checked?"] };
@@ -37,12 +72,7 @@ async function main() {
     if (schemaName === "short_video_plan") return { response: { type: "STRUCTURED", structured: videoResponse({ ...input, metadata: { stage: "VIDEO_PLANNING" } }) }, usage: { inputTokens: 1, outputTokens: 1 }, remoteRequestId: `phase9-text-${++calls}` };
     if (schemaName === "short_video_scenes") return { response: { type: "STRUCTURED", structured: videoResponse({ ...input, metadata: { stage: "SCENE_PLANNING" } }) }, usage: { inputTokens: 1, outputTokens: 1 }, remoteRequestId: `phase9-text-${++calls}` };
     if (input?.metadata?.stage) return { response: { type: "STRUCTURED", structured: podcastResponse(input) }, usage: { inputTokens: 1, outputTokens: 1 }, remoteRequestId: `phase9-text-${++calls}` };
-    const block = await prisma.sourceBlock.findFirst({ where: { extraction: { sourceDocument: { workspaceId: request.workspaceId } } }, orderBy: { createdAt: "asc" } });
-    const knownEvidence = "Evidence is the starting point for reliable AI conclusions.";
-    const candidateOffset = block?.text.indexOf(knownEvidence) ?? -1;
-    const startOffset = candidateOffset >= 0 ? candidateOffset : 0;
-    const quoteText = block?.text.slice(startOffset, startOffset + (candidateOffset >= 0 ? knownEvidence.length : Math.min(20, block.text.length))) ?? "";
-    return { response: { type: "STRUCTURED", structured: { summary: "Bounded intelligence from the workspace route.", memory: block ? [{ type: "QUOTE", content: quoteText, evidence: [{ sourceBlockId: block.id, startOffset, endOffset: startOffset + quoteText.length, quoteText }] }, { type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence." }] : [{ type: "SUMMARY", content: "Bounded intelligence" }] } }, usage: { inputTokens: 1, outputTokens: 1 }, remoteRequestId: `phase9-book-${++calls}` };
+    return { response: { type: "STRUCTURED", structured: await bookResponse(request) }, usage: { inputTokens: 1, outputTokens: 1 }, remoteRequestId: `phase9-book-${++calls}` };
   } }) }, dispatchIntervalMs: 200, bullmqPrefix: process.env.PHASE9_BULLMQ_PREFIX, outboxTopics: { sourceIngestion: process.env.PHASE9_SOURCE_TOPIC, bookAnalysis: process.env.PHASE9_BOOK_TOPIC, podcastGeneration: process.env.PHASE9_PODCAST_TOPIC, podcastAudio: process.env.PHASE9_AUDIO_TOPIC, shortVideo: process.env.PHASE9_VIDEO_TOPIC } });
   if (!runtime.bookWorker || !runtime.podcastWorker || !runtime.audioWorker || !runtime.shortVideoWorker) throw new Error("PHASE9_RUNTIME_WORKER_NOT_CONFIGURED");
   const readyFile = process.env.PHASE9_RUNTIME_READY_FILE;
