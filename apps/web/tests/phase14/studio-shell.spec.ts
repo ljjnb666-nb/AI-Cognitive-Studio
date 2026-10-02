@@ -677,14 +677,32 @@ test("desktop navigation keeps one clear active destination", async ({
     owner.memberships[0]!.workspaceId,
     owner.id,
   );
-  await page.route("**/api/studio/book-intelligence", async (route) => {
-    await route.fulfill({
-      status: 500,
-      contentType: "application/json",
-      body: JSON.stringify({ error: sentinels[0] }),
-    });
-  });
+  // A durable pending source renders WAITING_FOR_ANALYSIS on load; the generic
+  // failure copy may appear only after the user-initiated recovery request
+  // fails, and the raw backend sentinel must never reach the page.
+  await page.route(
+    `**/api/studio/processing/${pendingSource.document.id}/recover`,
+    async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: sentinels[0] }),
+      });
+    },
+  );
   await page.goto(`/studio/library/${pendingSource.document.id}`);
+  await expect(page.getByText("解析完成，准备进行 AI 深度理解")).toBeVisible();
+  const recoverButton = page.getByRole("button", { name: "恢复深度理解" });
+  await expect(recoverButton).toBeVisible();
+  const recoverResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url().endsWith(
+        `/api/studio/processing/${pendingSource.document.id}/recover`,
+      ),
+  );
+  await recoverButton.click();
+  expect((await recoverResponse).status()).toBe(500);
   await expect(page.getByText("暂时无法完成这一步，请稍后重试。")).toBeVisible();
   await expect(page.locator("body")).not.toContainText(sentinels[0]!);
 
@@ -695,7 +713,7 @@ test("desktop navigation keeps one clear active destination", async ({
     sentinels[1]!,
   );
   await page.goto(`/studio/library/${terminalFailure}`);
-  await expect(page.getByText("暂时无法完成这一步，请稍后重试。")).toBeVisible();
+  await expect(page.getByText("AI 深度理解失败")).toBeVisible();
   await expect(page.locator("body")).not.toContainText(sentinels[1]!);
 
   const providerFailure = await failedBookAnalysis(
@@ -705,9 +723,12 @@ test("desktop navigation keeps one clear active destination", async ({
   );
   await page.goto(`/studio/library/${providerFailure}`);
   await expect(
-    page.getByText("需要先配置 Provider，才能继续理解这本书。"),
+    page.getByText("书籍解析完成。配置 AI Provider 后开始深度理解。"),
   ).toBeVisible();
   await expect(page.getByRole("link", { name: "配置 AI Provider" })).toBeVisible();
+  await expect(
+    page.locator("body"),
+  ).not.toContainText("AI_PROVIDER_CONFIGURATION_REQUIRED");
 });
 
 test("mobile Studio pages have usable navigation and no horizontal overflow", async ({
