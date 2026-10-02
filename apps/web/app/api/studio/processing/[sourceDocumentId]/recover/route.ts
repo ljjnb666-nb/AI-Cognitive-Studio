@@ -25,11 +25,11 @@ export async function POST(_: Request, { params }: { params: Promise<{ sourceDoc
       const storage = new S3CompatibleStorageProvider({ endpoint: environment.S3_ENDPOINT, region: environment.S3_REGION, bucket: environment.S3_BUCKET, accessKey: environment.S3_ACCESS_KEY, secretKey: environment.S3_SECRET_KEY, forcePathStyle: environment.S3_FORCE_PATH_STYLE });
       await createIngestionService(storage).recoverIngestionForUser(identity, sourceDocumentId, process.env.PHASE9_SOURCE_TOPIC ? { outboxTopic: process.env.PHASE9_SOURCE_TOPIC } : undefined);
     } else if (status.recoveryAction === "RETRY_ANALYSIS") {
-      // A FAILED run is immutable pinned execution history. Retrying through the
-      // normal current-plan request boundary lets requestBookAnalysisCore decide:
-      // an unchanged identity safely requeues the same run, while a changed
-      // routePlanHash creates a new run and keeps the old one as history.
-      // Only stale in-flight runs must resume their own durable identity.
+      // A FAILED semantic run retries through the normal current-plan request
+      // boundary. A matching semantic routePlanHash keeps the BookAnalysisRun
+      // identity but creates a fresh Job execution attempt carrying today's
+      // pinned route plan; a changed semantic hash creates a new run. Only stale
+      // in-flight work resumes its existing execution attempt identity.
       if (status.state === "WAITING_FOR_ANALYSIS" || status.state === "ANALYSIS_FAILED") await requestAnalysis(identity, sourceDocumentId);
       else await recoverBookAnalysisForUser(identity, sourceDocumentId, { outboxTopic: process.env.PHASE9_BOOK_TOPIC?.trim() || undefined });
     } else if (status.recoveryAction === "REPAIR_CURRENT_INTELLIGENCE") {

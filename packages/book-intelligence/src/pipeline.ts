@@ -37,6 +37,17 @@ export const BOOK_ANALYSIS_JOB = "book.analysis";
 export const BOOK_ANALYSIS_TOPIC = "book.analysis.requested";
 const contextLimit = 8_000;
 const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
+
+function bookExecutionAttemptPayload(sourceDocumentId: string, chunkSetId: string, routePlan?: BookAnalysisRoutePlan, routePlanHash?: string) {
+  return { sourceDocumentId, chunkSetId, ...(routePlan ? { routePlan, routePlanHash } : {}) };
+}
+
+async function nextBookRecoveryJobIdempotencyKey(tx: Prisma.TransactionClient, workspaceId: string, analysisIdentityHash: string): Promise<string> {
+  const prefix = `book:${analysisIdentityHash}:recovery:`;
+  const jobs = await tx.job.findMany({ where: { workspaceId, idempotencyKey: { startsWith: prefix } }, select: { idempotencyKey: true } });
+  const ordinal = Math.max(0, ...jobs.map(job => Number((job.idempotencyKey ?? "").slice(prefix.length))).filter(Number.isSafeInteger));
+  return `${prefix}${ordinal + 1}`;
+}
 const stageOrder = ["CHUNK_ANALYSIS", "SECTION_ANALYSIS", "CHAPTER_ANALYSIS", "BOOK_SYNTHESIS", "MEMORY_FINALIZATION", "EMBEDDINGS", "FINALIZING", "COMPLETED"] as const;
 type DurableStage = typeof stageOrder[number];
 type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "afterEmbeddingGatewayPersist" | "beforeEmbeddingMaterialization" | "afterEmbeddingMaterialization" | "beforeEmbeddingStageAdvance" | "beforeFinalization" | "afterCurrentExtractionLock";
@@ -102,13 +113,27 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   if (existing) {
     if (existing.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION) throw new Error("BOOK_ANALYSIS_DISPATCH_GENERATION_EXHAUSTED");
     const requeued = await prisma.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${existing.id} FOR UPDATE`;
+      if (locked.length !== 1) return null;
+      const fresh = await tx.bookAnalysisRun.findUnique({ where: { id: existing.id }, include: { job: true } });
+      if (!fresh || fresh.status !== "FAILED" || fresh.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION) return null;
       await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
-      const updated = await tx.bookAnalysisRun.updateMany({ where: { id: existing.id, status: "FAILED", dispatchGeneration: { lt: MAX_PERSISTED_DISPATCH_GENERATION } }, data: { status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null, dispatchGeneration: { increment: 1 } } });
-      if (updated.count !== 1) return null;
-      const retryJob = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey: `book:${analysisIdentityHash}:retry:${existing.job.attemptCount + 1}`, correlationId: input.correlationId } });
-      const recovered = await tx.bookAnalysisRun.update({ where: { id: existing.id }, data: { jobId: retryJob.id } });
-      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: existing.id, payload: { analysisRunId: existing.id, queueJobId: retryJob.id, dispatchGeneration: recovered.dispatchGeneration } } });
-      return tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: existing.id }, include: { job: true } });
+      const retryJob = await tx.job.create({ data: {
+        workspaceId: input.workspaceId,
+        ...(requestedByUserId ? { userId: requestedByUserId } : {}),
+        type: BOOK_ANALYSIS_JOB,
+        payload: bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash) as never,
+        idempotencyKey: await nextBookRecoveryJobIdempotencyKey(tx, input.workspaceId, analysisIdentityHash),
+        correlationId: input.correlationId,
+      } });
+      const updated = await tx.bookAnalysisRun.updateMany({
+        where: { id: fresh.id, status: "FAILED", dispatchGeneration: fresh.dispatchGeneration },
+        data: { jobId: retryJob.id, status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null, dispatchGeneration: { increment: 1 } },
+      });
+      if (updated.count !== 1) throw new Error("BOOK_ANALYSIS_RETRY_RACE_LOST");
+      const recovered = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: fresh.id } });
+      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: fresh.id, payload: { analysisRunId: fresh.id, queueJobId: retryJob.id, dispatchGeneration: recovered.dispatchGeneration } } });
+      return tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: fresh.id }, include: { job: true } });
     });
     if (requeued) return { run: requeued, job: requeued.job };
     const concurrent = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { analysisIdentityHash }, include: { job: true } });
@@ -118,7 +143,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   try {
     return await prisma.$transaction(async (tx) => {
       await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
-      const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey, correlationId: input.correlationId } });
+      const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash) as never, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider, model, modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash, ...(routePlan ? { routePlan: routePlan as never, routePlanHash } : {}) } });
       await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id, queueJobId: job.id, dispatchGeneration: run.dispatchGeneration } } });
       logger.info("book.analysis.requested", { ...logFields(run, input.correlationId), extractionId: current.extractionId, jobId: job.id, provider, model, ...(routePlanHash ? { routePlanHash } : {}) });
@@ -504,7 +529,11 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
   const recover = () => prisma.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "SourceDocument" WHERE "id" = ${sourceDocumentId} AND "workspaceId" = ${context.workspaceId} FOR UPDATE`;
     if (locked.length !== 1) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
-    const run = await tx.bookAnalysisRun.findFirst({ where: { sourceDocumentId, workspaceId: context.workspaceId }, orderBy: { createdAt: "desc" }, include: { job: true } });
+    const selected = await tx.bookAnalysisRun.findFirst({ where: { sourceDocumentId, workspaceId: context.workspaceId }, orderBy: { createdAt: "desc" }, select: { id: true } });
+    if (!selected) throw new Error("BOOK_ANALYSIS_NOT_REQUESTED");
+    const runLock = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${selected.id} FOR UPDATE`;
+    if (runLock.length !== 1) throw new Error("BOOK_ANALYSIS_NOT_REQUESTED");
+    const run = await tx.bookAnalysisRun.findUnique({ where: { id: selected.id }, include: { job: true } });
     if (!run) throw new Error("BOOK_ANALYSIS_NOT_REQUESTED");
     if (run.status === "SUCCEEDED") {
       const current = await tx.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId, workspaceId: context.workspaceId } } });
@@ -523,13 +552,16 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
     const staleAfterMs = Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000);
     if (run.status !== "FAILED" && Date.now() - (run.startedAt?.getTime() ?? run.createdAt.getTime()) <= staleAfterMs) return { run, action: "RETRY_ANALYSIS" as const, repaired: false, created: false };
     if (run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION) throw new Error("BOOK_ANALYSIS_DISPATCH_GENERATION_EXHAUSTED");
-    // BullMQ attemptCount belongs to the individual durable Job and may remain
-    // zero after a provider-stage failure.  The source-document lock makes this
-    // run-scoped count an idempotent, collision-free recovery sequence.
-    const recoveryKeyPrefix = `book:${run.analysisIdentityHash}:recovery:`;
-    const recoveryJobs = await tx.job.findMany({ where: { workspaceId: context.workspaceId, idempotencyKey: { startsWith: recoveryKeyPrefix } }, select: { idempotencyKey: true } });
-    const recoveryOrdinal = Math.max(0, ...recoveryJobs.map(job => Number((job.idempotencyKey ?? "").slice(recoveryKeyPrefix.length))).filter(Number.isSafeInteger));
-    const retryJob = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId, chunkSetId: run.chunkSetId }, idempotencyKey: `${recoveryKeyPrefix}${recoveryOrdinal + 1}` } });
+    // Recovery identity is run-scoped rather than BullMQ-attempt-scoped.  Both
+    // recovery entry points serialize on the run row before allocating the
+    // durable ordinal, while the Job payload preserves the exact attempt plan.
+    const retryJob = await tx.job.create({ data: {
+      workspaceId: context.workspaceId,
+      userId: context.userId,
+      type: BOOK_ANALYSIS_JOB,
+      payload: run.job.payload as never,
+      idempotencyKey: await nextBookRecoveryJobIdempotencyKey(tx, context.workspaceId, run.analysisIdentityHash),
+    } });
     const advanced = await tx.bookAnalysisRun.updateMany({ where: { id: run.id, dispatchGeneration: { lt: MAX_PERSISTED_DISPATCH_GENERATION } }, data: { jobId: retryJob.id, status: "QUEUED", analysisStage: "QUEUED", errorCode: null, startedAt: new Date(), completedAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, dispatchGeneration: { increment: 1 } } });
     if (advanced.count !== 1) throw new Error("BOOK_ANALYSIS_DISPATCH_GENERATION_EXHAUSTED");
     const recovered = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } });

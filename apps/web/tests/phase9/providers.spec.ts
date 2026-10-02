@@ -264,8 +264,8 @@ test("a real failed Book analysis exposes an explicit browser retry without re-u
   await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
   const runA = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" } });
   expect(runA.status).toBe("FAILED");
-  // Same-plan recovery requeues the same pinned run (dispatchGeneration advances)
-  // instead of forking a new one — identity authority lives in requestBookAnalysisCore.
+  // Same-plan recovery keeps the same semantic run while allocating a fresh
+  // Job execution attempt (dispatchGeneration advances).
   const samePlanRetry = page.waitForResponse(response => response.url().includes(`/api/studio/processing/${sourceDocumentId}/recover`) && response.request().method() === "POST");
   await page.getByRole("button", { name: "恢复深度理解" }).click();
   expect((await samePlanRetry).ok()).toBeTruthy();
@@ -273,11 +273,31 @@ test("a real failed Book analysis exposes an explicit browser retry without re-u
   const requeued = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: runA.id }, select: { dispatchGeneration: true } });
   expect(requeued.dispatchGeneration).toBe(runA.dispatchGeneration + 1);
   await expect.poll(() => prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: runA.id }, select: { status: true } }).then(row => row.status), { timeout: 120_000 }).toBe("FAILED");
-  // KNOWN GAP (routePlanHash contract): the pinned-plan hash does not cover
-  // endpoint/connectionId, so switching routes to a healthy connection keeps the
-  // identity unchanged and this run keeps retrying its pinned failing plan.
-  // Closing that gap requires a deliberate routePlanHash semantics change.
+  const failedAttempt = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: runA.id }, select: { jobId: true } });
+  const failedAttemptJob = await prisma.job.findUniqueOrThrow({ where: { id: failedAttempt.jobId }, select: { id: true, idempotencyKey: true, payload: true } });
+  const failedAttemptPayload = failedAttemptJob.payload as { routePlan?: { routes?: Record<string, { connectionId?: string }> } };
+  expect(failedAttemptJob.idempotencyKey).toBe(`book:${runA.analysisIdentityHash}:recovery:1`);
+  expect(failedAttemptPayload.routePlan?.routes?.BOOK_CHUNK_ANALYSIS?.connectionId).toBe(failing);
+
+  // Built-in connection identity is intentionally excluded from the semantic
+  // routePlanHash. A second retry must therefore keep the same semantic run but
+  // create a fresh execution attempt whose Job payload pins the new connection.
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"]) await setRoute(page, slot, good.id, slot === "EMBEDDING" ? "phase9-embed" : "phase9-text");
+  await page.reload();
+  await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
+  const switchedRetry = page.waitForResponse(response => response.url().includes(`/api/studio/processing/${sourceDocumentId}/recover`) && response.request().method() === "POST");
+  await page.getByRole("button", { name: "恢复深度理解" }).click();
+  expect((await switchedRetry).ok()).toBeTruthy();
+  await expect.poll(() => prisma.currentBookIntelligence.count({ where: { workspaceId, sourceDocumentId } }), { timeout: 120_000 }).toBe(1);
+
+  const recoveredRun = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: runA.id }, select: { id: true, jobId: true, status: true } });
+  expect(recoveredRun).toMatchObject({ id: runA.id, status: "SUCCEEDED" });
+  expect(recoveredRun.jobId).not.toBe(failedAttemptJob.id);
+  const recoveredJob = await prisma.job.findUniqueOrThrow({ where: { id: recoveredRun.jobId }, select: { idempotencyKey: true, payload: true } });
+  const recoveredPayload = recoveredJob.payload as { routePlan?: { routes?: Record<string, { connectionId?: string }> } };
+  expect(recoveredJob.idempotencyKey).toBe(`book:${runA.analysisIdentityHash}:recovery:2`);
+  expect(recoveredPayload.routePlan?.routes?.BOOK_CHUNK_ANALYSIS?.connectionId).toBe(good.id);
+  expect((await prisma.job.findUniqueOrThrow({ where: { id: failedAttemptJob.id }, select: { payload: true } })).payload).toEqual(failedAttemptJob.payload);
   expect(await prisma.ingestionRun.count({ where: { sourceDocumentId } })).toBe(1);
   expect(await prisma.bookAnalysisRun.count({ where: { sourceDocumentId } })).toBe(1);
 });

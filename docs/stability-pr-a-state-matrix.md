@@ -11,6 +11,8 @@
 
 Each run points to one `Job` through `jobId`. The run status is business truth. `Job.status` (`QUEUED` or `RUNNING`) is what consumes workspace capacity. The configured capacity remains 2 and admission serializes on the workspace-scoped `phase18-expensive-operation:<workspaceId>` advisory transaction lock.
 
+For Book Analysis, `analysisIdentityHash` and `bookRoutePlanHash` are semantic identities. Built-in connection IDs, credential versions, and provider endpoints are execution facts and deliberately do not fork the semantic run. Every new Book execution attempt is represented by a fresh `Job`; its payload pins that attempt's normalized full route plan. The worker reads the current Job attempt plan first and falls back to `BookAnalysisRun.routePlan` only for legacy jobs. This keeps prior Job attempts immutable while allowing a failed semantic run to recover through a newly selected healthy connection. Book recovery job keys use the run-scoped durable sequence `book:<analysisIdentityHash>:recovery:<N>`, never BullMQ `attemptCount`.
+
 Outbox events are not relationally attached to runs; `aggregateId` and the run ID plus `dispatchGeneration` in the payload identify the target. `DISPATCHED` records only that the dispatcher called BullMQ and finalized its database claim. It does not prove the BullMQ job still exists. Queue job IDs are generation-scoped by the domain dispatchers, and `Job.queueJobId` is written during outbox finalization. Run claim tokens and lease expiry are the execution-ownership authority.
 
 ## Decision matrix
