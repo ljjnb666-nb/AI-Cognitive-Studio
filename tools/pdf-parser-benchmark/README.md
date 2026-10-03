@@ -1,8 +1,8 @@
 # PDF Parser Benchmark (isolated)
 
-Smoke-benchmark harness for PDF parsers, built on a dedicated git worktree
-(`D:\AI-Cognitive-Studio-PDF-Benchmark`, branch
-`codex/pdf-parser-benchmark-phase-1`). It is **not** part of the pnpm
+Smoke-benchmark harness for PDF parsers, built on the dedicated git worktree
+(`C:\Users\LJJ2004\所有项目\90_Worktrees\AI-Cognitive-Studio-pdf-parser-benchmark`,
+branch `codex/pdf-parser-benchmark`). It is **not** part of the pnpm
 workspace (`pnpm-workspace.yaml` only covers `apps/*` and `packages/*`) and
 production code must never import it.
 
@@ -19,6 +19,33 @@ production code must never import it.
   HF_HOME/MINERU_HOME are redirected explicitly).
 - Parser output is treated as untrusted: schema validation, semantic checks
   and path containment run before anything is recorded (#29/#30).
+
+## Run evidence (immutable run directories)
+
+Every parser execution persists as an immutable, self-contained run directory —
+one `runId` maps to exactly one directory, cold and warm runs never share one,
+and later runs (success or failure) never overwrite earlier evidence:
+
+```
+outputs/<fixtureId>/<parserKey>/runs/<runId>/
+  result.json        # completion marker, written LAST via temp-file rename
+  normalized.json
+  metrics.json
+  stdout.log
+  stderr.log
+  raw/               # raw parser artifacts for THIS run only
+```
+
+- `<parserKey>` is per mode (`pdfjs`, `liteparse`, `docling`, `mineru-flash`,
+  `mineru-basic`, …), so parser modes never share result directories.
+- A run directory without a parsable `result.json` is an incomplete run; the
+  aggregate report lists it under "Skipped / invalid artifacts" and never
+  counts it as a successful benchmark result.
+- The aggregate report reads ALL persisted runs — cold and warm stay separate
+  rows; nothing is merged or averaged, and no winner is computed.
+- Legacy artifacts from the retired flat layout
+  (`outputs/<fixture>/<parser>/result.json`) are not read by the report; only
+  run-level evidence under `runs/` counts.
 
 ## Parsers under test (Phase 1)
 

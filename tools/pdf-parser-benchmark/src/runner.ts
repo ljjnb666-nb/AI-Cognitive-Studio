@@ -207,3 +207,15 @@ export async function ensureCleanDir(dir: string): Promise<void> {
 export async function writeJsonFile(path: string, value: unknown): Promise<void> {
   await writeFile(path, JSON.stringify(value, null, 2), "utf8");
 }
+
+/**
+ * Atomic JSON write for run evidence: a crash mid-write must never leave a
+ * half-written artifact at the final path (temp file → rename).
+ */
+export async function writeJsonFileAtomic(path: string, value: unknown): Promise<void> {
+  const { rename } = await import("node:fs/promises");
+  const { randomUUID } = await import("node:crypto");
+  const tmp = `${path}.tmp-${randomUUID()}`;
+  await writeFile(tmp, JSON.stringify(value, null, 2), "utf8");
+  await rename(tmp, path);
+}

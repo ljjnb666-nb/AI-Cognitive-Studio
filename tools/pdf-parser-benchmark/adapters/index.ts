@@ -7,8 +7,9 @@ export type ParserMode = string;
 export type AdapterRunContext = {
   mode: ParserMode;
   fixture: FixtureRecord;
-  /** Per-run working dir under D:\ai-cognitive-pdf-benchmark-data\temp — cleaned by the harness afterwards. */
+  /** Per-run working dir under <DATA_ROOT>\temp — cleaned by the harness afterwards. */
   tempDir: string;
+  /** Per-run raw-evidence dir inside the run's own runs/<runId>/ directory — never shared across runs. */
   rawDir: string;
   cold: boolean;
   timeoutOverrideMs?: number;

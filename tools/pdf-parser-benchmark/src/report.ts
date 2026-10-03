@@ -1,68 +1,126 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OUTPUTS_ROOT } from "./filesystem-guard.js";
-import type { BenchmarkResult } from "./schema.js";
+import { parseBenchmarkResult, type BenchmarkResult, type NormalizedOutput } from "./schema.js";
 
 export type AggregateReport = {
   markdown: string;
   results: BenchmarkResult[];
+  /** Run directories whose evidence exists but could not be trusted as a result. */
+  skipped: Array<{ path: string; reason: string }>;
+};
+
+type RunEntry = {
+  parserKey: string;
+  runId: string;
+  runDir: string;
+  result: BenchmarkResult;
 };
 
 /**
- * Aggregates every outputs/<fixture>/<parser>/result.json into a factual
- * summary: metrics table + capability matrix + text samples. Facts only —
- * no scores, no winner (#40).
+ * Aggregates EVERY persisted run directory (outputs/<fixture>/<parser>/runs/
+ * <runId>/result.json) into a factual summary. Each execution — cold, warm,
+ * repeated or failed — appears as its own row; nothing is merged or averaged
+ * (#40 facts only, no scoring, no winner). Incomplete or corrupt run dirs are
+ * reported as skipped-invalid artifacts instead of crashing the report or
+ * silently passing.
  */
 export async function buildAggregateReport(): Promise<AggregateReport> {
   const results: BenchmarkResult[] = [];
+  const entries: RunEntry[] = [];
+  const skipped: Array<{ path: string; reason: string }> = [];
+
   const fixtureDirs = await readdir(OUTPUTS_ROOT, { withFileTypes: true }).catch(() => []);
   for (const fixtureDir of fixtureDirs.filter((entry) => entry.isDirectory())) {
     const parserDirs = await readdir(join(OUTPUTS_ROOT, fixtureDir.name), { withFileTypes: true }).catch(() => []);
     for (const parserDir of parserDirs.filter((entry) => entry.isDirectory())) {
-      const resultPath = join(OUTPUTS_ROOT, fixtureDir.name, parserDir.name, "result.json");
-      const raw = await readFile(resultPath, "utf8").catch(() => null);
-      if (!raw) continue;
-      try {
-        results.push(JSON.parse(raw) as BenchmarkResult);
-      } catch {
-        // unreadable result — skip, note below
+      const runsRoot = join(OUTPUTS_ROOT, fixtureDir.name, parserDir.name, "runs");
+      const runDirs = await readdir(runsRoot, { withFileTypes: true }).catch(() => []);
+      for (const runDir of runDirs.filter((entry) => entry.isDirectory())) {
+        const runPath = join(runsRoot, runDir.name);
+        const resultPath = join(runPath, "result.json");
+        const raw = await readFile(resultPath, "utf8").catch(() => null);
+        if (raw === null) {
+          skipped.push({ path: runPath, reason: "INCOMPLETE_RUN: no result.json (run never finished or crash before completion marker)" });
+          continue;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          skipped.push({ path: resultPath, reason: "UNPARSABLE_RESULT: result.json is not valid JSON" });
+          continue;
+        }
+        try {
+          const result = parseBenchmarkResult(parsed);
+          results.push(result);
+          entries.push({ parserKey: parserDir.name, runId: runDir.name, runDir: runPath, result });
+        } catch (error) {
+          skipped.push({ path: resultPath, reason: `SCHEMA_INVALID_RESULT: ${error instanceof Error ? error.message : String(error)}` });
+        }
       }
     }
   }
 
+  entries.sort(
+    (a, b) =>
+      a.result.document.fixtureId.localeCompare(b.result.document.fixtureId) ||
+      a.parserKey.localeCompare(b.parserKey) ||
+      a.runId.localeCompare(b.runId),
+  );
+
   const lines: string[] = [];
   lines.push("# PDF Parser Smoke Benchmark — Factual Summary");
   lines.push("");
-  lines.push("Phase 1 smoke results. Facts only; no scoring and no winner determination (#40).");
+  lines.push("Aggregated from every persisted run directory. Facts only; no scoring and no winner determination (#40). Cold and warm runs are separate rows and are never merged or averaged.");
   lines.push("");
 
-  lines.push("## Metrics (per run)");
+  lines.push(`## Metrics (per run, ${entries.length} run${entries.length === 1 ? "" : "s"})`);
   lines.push("");
-  lines.push("| fixture | parser | cold | status | wall ms | peak RSS MB | pages | chars | blocks | exit | timeout |");
-  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-  for (const result of results.sort((a, b) => a.document.fixtureId.localeCompare(b.document.fixtureId) || a.parser.name.localeCompare(b.parser.name))) {
+  if (entries.length === 0 && skipped.length === 0) lines.push("_No persisted runs found._");
+  lines.push("| fixture | parser | run id | cold | status | wall ms | peak RSS MB | pages | chars | blocks | exit | timeout | warnings |");
+  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+  for (const entry of entries) {
+    const r = entry.result;
+    const failed =
+      r.reliability.crashed ||
+      r.reliability.timeout ||
+      r.reliability.oom ||
+      r.reliability.partialOutput ||
+      (r.reliability.exitCode !== null && r.reliability.exitCode !== 0);
     lines.push(
-      `| ${result.document.fixtureId} | ${result.parser.name}${result.parser.mode && result.parser.mode !== "default" ? `:${result.parser.mode}` : ""} | ${result.run.coldStart ? "C" : "W"} | ${result.reliability.crashed ? "FAILED" : "OK"} | ${result.performance.wallTimeMs} | ${result.performance.peakRssMb ?? "n/a"} | ${result.extraction.extractedPages} | ${result.extraction.characters} | ${result.extraction.blocks} | ${result.reliability.exitCode ?? "null"} | ${result.reliability.timeout} |`,
+      `| ${r.document.fixtureId} | ${entry.parserKey} | ${entry.runId} | ${r.run.coldStart ? "COLD" : "WARM"} | ${failed ? "FAILED" : "OK"} | ${r.performance.wallTimeMs} | ${r.performance.peakRssMb ?? "n/a"} | ${r.extraction.extractedPages} | ${r.extraction.characters} | ${r.extraction.blocks} | ${r.reliability.exitCode ?? "null"} | ${r.reliability.timeout} | ${r.reliability.warnings.length} |`,
     );
   }
   lines.push("");
 
   lines.push("## Warnings / failures");
   lines.push("");
-  for (const result of results) {
-    for (const warning of result.reliability.warnings) lines.push(`- ${result.document.fixtureId} / ${result.parser.name}: ${warning}`);
+  let warningCount = 0;
+  for (const entry of entries) {
+    for (const warning of entry.result.reliability.warnings) {
+      warningCount++;
+      lines.push(`- ${entry.result.document.fixtureId} / ${entry.parserKey} / ${entry.runId}: ${warning}`);
+    }
   }
+  if (warningCount === 0) lines.push("_none._");
   lines.push("");
 
-  lines.push("## Capability matrix (observed across ALL fixtures per parser)");
+  lines.push("## Skipped / invalid artifacts");
+  lines.push("");
+  if (skipped.length === 0) lines.push("_none._");
+  for (const item of skipped) lines.push(`- SKIPPED_INVALID_ARTIFACT ${item.path}: ${item.reason}`);
+  lines.push("");
+
+  lines.push("## Capability matrix (observed across ALL persisted runs per parser)");
   lines.push("");
   lines.push("| parser | page | bbox | heading | table | figure | equation | list | rule | reading-order | confidence | printed-label |");
   lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-  const byParser = new Map<string, BenchmarkResult[]>();
-  for (const result of results) {
-    const list = byParser.get(resultKey(result)) ?? [];
-    list.push(result);
-    byParser.set(resultKey(result), list);
+  const byParser = new Map<string, RunEntry[]>();
+  for (const entry of entries) {
+    const list = byParser.get(entry.parserKey) ?? [];
+    list.push(entry);
+    byParser.set(entry.parserKey, list);
   }
   for (const [key, group] of byParser.entries()) {
     const kinds = new Set<string>();
@@ -71,11 +129,9 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
     let readingOrder = false;
     let confidence = false;
     let printedLabel = false;
-    for (const result of group) {
-      const normalizedPath = join(OUTPUTS_ROOT, result.document.fixtureId, key, "normalized.json");
-      const raw = await readFile(normalizedPath, "utf8").catch(() => null);
-      if (!raw) continue;
-      const normalized = JSON.parse(raw) as { pages: Array<{ pageIndex: number; printedPageLabel: string | null; blocks: Array<{ kind: string; bbox: unknown; confidence: unknown }> }> };
+    for (const entry of group) {
+      const normalized = await readRunNormalized(entry.runDir);
+      if (!normalized) continue;
       for (const pageEntry of normalized.pages) {
         if (Number.isInteger(pageEntry.pageIndex)) page = true;
         if (pageEntry.printedPageLabel !== null) printedLabel = true;
@@ -85,7 +141,7 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
           if (block.confidence !== null) confidence = true;
         }
       }
-      readingOrder = readingOrder || group.some((g) => g.evidence.readingOrder);
+      readingOrder = readingOrder || normalized.readingOrderAvailable || group.some((g) => g.result.evidence.readingOrder);
     }
     const has = (kind: string) => (kinds.has(kind) ? "true" : "false");
     lines.push(
@@ -94,27 +150,31 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
   }
   lines.push("");
 
-  lines.push("## Text samples (first page, up to 3 blocks, 300 chars each)");
+  lines.push("## Text samples (first run per parser, first page, up to 3 blocks, 300 chars each)");
   lines.push("");
   for (const [key, group] of byParser.entries()) {
     lines.push(`### ${key}`);
     const first = group[0]!;
-    const normalizedPath = join(OUTPUTS_ROOT, first.document.fixtureId, key, "normalized.json");
-    const raw = await readFile(normalizedPath, "utf8").catch(() => null);
-    if (!raw) {
+    const normalized = await readRunNormalized(first.runDir);
+    if (!normalized) {
       lines.push("_no normalized output_");
       continue;
     }
-    const normalized = JSON.parse(raw) as { pages: Array<{ blocks: Array<{ kind: string; text: string }> }> };
     for (const block of (normalized.pages[0]?.blocks ?? []).slice(0, 3)) {
       lines.push(`- [${block.kind}] ${block.text.slice(0, 300).replaceAll("\n", " ⏎ ")}`);
     }
     lines.push("");
   }
 
-  return { markdown: lines.join("\n"), results };
+  return { markdown: lines.join("\n"), results, skipped };
 }
 
-function resultKey(result: BenchmarkResult): string {
-  return result.parser.name === "mineru" ? `mineru-${result.parser.mode ?? "flash"}` : result.parser.name === "pdfjs-isolated" ? "pdfjs" : result.parser.name;
+async function readRunNormalized(runDir: string): Promise<NormalizedOutput | null> {
+  const raw = await readFile(join(runDir, "normalized.json"), "utf8").catch(() => null);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as NormalizedOutput;
+  } catch {
+    return null;
+  }
 }

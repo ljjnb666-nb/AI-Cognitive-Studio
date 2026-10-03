@@ -133,6 +133,8 @@ async function runAll(): Promise<void> {
         summary.push({
           fixture,
           parser: `${entry.parser}${entry.parser === "mineru" ? `-${entry.mode}` : ""}`,
+          runId: outcome.result?.run.id ?? null,
+          runDir: outcome.outputDir,
           cold,
           status: outcome.status,
           wallTimeMs: outcome.result?.performance.wallTimeMs ?? null,

@@ -10,7 +10,7 @@ import {
   assertFixturePath,
 } from "./filesystem-guard.js";
 import { diskFreeBytes, gpuState, ramAvailableBytes } from "./resource-monitor.js";
-import { Runner, ensureCleanDir, sha256File, writeJsonFile } from "./runner.js";
+import { Runner, ensureCleanDir, sha256File, writeJsonFileAtomic } from "./runner.js";
 import {
   buildBenchmarkResult,
   parseBenchmarkResult,
@@ -105,6 +105,22 @@ function runIdFor(parserKey: string, fixtureId: string, cold: boolean): string {
   return `${parserKey}-${fixtureId}-${cold ? "cold" : "warm"}-${new Date().toISOString().replace(/[:.]/g, "-")}`;
 }
 
+/**
+ * Reserves a fresh run directory: outputs/<fixtureId>/<parserKey>/runs/<runId>.
+ * One runId → one immutable run directory; a colliding runId (same millisecond)
+ * is suffixed instead of reusing or clearing the existing directory.
+ */
+async function reserveRunDir(parserKey: string, fixtureId: string, runId: string): Promise<{ runId: string; dir: string }> {
+  let candidate = runId;
+  let dir = join(OUTPUTS_ROOT, fixtureId, parserKey, "runs", candidate);
+  for (let suffix = 1; existsSync(dir); suffix++) {
+    candidate = `${runId}-${suffix}`;
+    dir = join(OUTPUTS_ROOT, fixtureId, parserKey, "runs", candidate);
+  }
+  await mkdir(join(dir, "raw"), { recursive: true });
+  return { runId: candidate, dir };
+}
+
 /** One isolated parser run: preflight → spawn → normalize → persist → cleanup. */
 export async function runParser(
   parserId: ParserId,
@@ -132,13 +148,11 @@ export async function runParser(
   }
 
   const fixture = await loadFixture(fixtureId);
-  const runId = runIdFor(parserKey, fixtureId, options.cold);
-  const outDir = join(OUTPUTS_ROOT, fixtureId, parserKey);
+  const reserved = await reserveRunDir(parserKey, fixtureId, runIdFor(parserKey, fixtureId, options.cold));
+  const runId = reserved.runId;
+  const outDir = reserved.dir;
   const rawDir = join(outDir, "raw");
-  const logsDir = join(outDir, "logs");
   const tempDir = join(TEMP_ROOT, parserKey, runId);
-  await mkdir(rawDir, { recursive: true });
-  await mkdir(logsDir, { recursive: true });
   await ensureCleanDir(tempDir);
 
   const startedAt = new Date().toISOString();
@@ -160,13 +174,15 @@ export async function runParser(
       warnings,
     });
 
-    await writeFile(join(logsDir, `${runId}.stdout.log`), outcome.stdout ?? "", "utf8").catch(() => undefined);
-    await writeFile(join(logsDir, `${runId}.stderr.log`), outcome.stderr ?? "", "utf8").catch(() => undefined);
-    await writeJsonFile(join(outDir, "metrics.json"), outcome.metrics);
+    // Run-scoped evidence: stdout/stderr and every artifact land inside this
+    // run's own directory, so no later run can overwrite an earlier one.
+    await writeFile(join(outDir, "stdout.log"), outcome.stdout ?? "", "utf8").catch(() => undefined);
+    await writeFile(join(outDir, "stderr.log"), outcome.stderr ?? "", "utf8").catch(() => undefined);
+    await writeJsonFileAtomic(join(outDir, "metrics.json"), outcome.metrics);
 
     if (outcome.normalizedCandidate) {
       normalized = parseNormalizedOutput(outcome.normalizedCandidate);
-      await writeJsonFile(join(outDir, "normalized.json"), normalized);
+      await writeJsonFileAtomic(join(outDir, "normalized.json"), normalized);
     } else {
       childFailed = true;
       failureWarnings = outcome.warnings;
@@ -198,7 +214,6 @@ export async function runParser(
       normalized,
     });
     parseBenchmarkResult(result);
-    await writeJsonFile(join(outDir, "result.json"), result);
   } catch (error) {
     childFailed = true;
     const message = error instanceof Error ? error.message : String(error);
@@ -222,6 +237,17 @@ export async function runParser(
       evidence: { physicalPageIndex: false, bbox: false, confidence: false, readingOrder: false, printedPageLabel: false },
     };
     warnings.push(message);
+  }
+
+  // result.json is the run-completion marker and is written LAST: a run dir
+  // without a parsable result.json is an incomplete run, never valid evidence.
+  try {
+    await writeJsonFileAtomic(join(outDir, "result.json"), result);
+  } catch (persistError) {
+    const message = persistError instanceof Error ? persistError.message : String(persistError);
+    warnings.push(`RESULT_PERSIST_FAILED: ${message}`);
+    result.reliability.warnings.push(`RESULT_PERSIST_FAILED: ${message}`);
+    childFailed = true;
   }
 
   // Temp cleanup (#34): success, failure and timeout paths must all clean up.

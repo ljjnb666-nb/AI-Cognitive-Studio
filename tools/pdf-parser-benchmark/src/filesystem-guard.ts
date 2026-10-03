@@ -7,7 +7,8 @@ import { isAbsolute, join, resolve, sep } from "node:path";
  */
 
 export const DATA_ROOT = process.env.BENCH_DATA_ROOT ?? "D:\\ai-cognitive-pdf-benchmark-data";
-export const WORKTREE_ROOT = process.env.BENCH_WORKTREE_ROOT ?? "D:\\AI-Cognitive-Studio-PDF-Benchmark";
+export const WORKTREE_ROOT =
+  process.env.BENCH_WORKTREE_ROOT ?? "C:\\Users\\LJJ2004\\所有项目\\90_Worktrees\\AI-Cognitive-Studio-pdf-parser-benchmark";
 export const FIXTURES_ROOT = join(DATA_ROOT, "fixtures");
 export const OUTPUTS_ROOT = join(DATA_ROOT, "outputs");
 export const TEMP_ROOT = join(DATA_ROOT, "temp");
