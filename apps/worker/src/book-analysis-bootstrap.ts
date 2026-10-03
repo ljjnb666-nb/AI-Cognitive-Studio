@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Queue, Worker } from "bullmq";
-import { prisma } from "@ai-cognitive/db";
+import { prisma, workspaceExpensiveOperationCapacityAvailable } from "@ai-cognitive/db";
 import { materializeChunkSet, requestBookAnalysisForUser, resolveBookAnalysisVersions, resolveBookProductExecution } from "@ai-cognitive/book-intelligence";
 import { BOOK_ANALYSIS_BOOTSTRAP_TOPIC, dispatchPendingOutbox } from "@ai-cognitive/ingestion";
 import { resolveCredentialKeyring } from "@ai-cognitive/provider-gateway";
@@ -9,6 +9,7 @@ import { createRedisConnection, type Environment } from "@ai-cognitive/shared/se
 export const BOOK_ANALYSIS_BOOTSTRAP_QUEUE = "book.analysis.bootstrap";
 export const BOOK_ANALYSIS_BOOTSTRAP_JOB = "book.analysis.bootstrap";
 export type BookAnalysisBootstrapPayload = { bootstrapId: string; dispatchGeneration: number };
+export type BookAnalysisBootstrapBlockingReason = "NONE" | "CAPACITY_LIMIT" | "PROVIDER_NOT_READY" | "ACTIVE_LEASE" | "RECOVERY_REQUIRED";
 export type BookAnalysisBootstrapQueueOptions = { prefix?: string; concurrency?: number; source?: NodeJS.ProcessEnv };
 export type BookAnalysisBootstrapFaultPoint = "afterClaim" | "afterChunkSetMaterialization" | "afterBookAnalysisRequest";
 export type ProcessBookAnalysisBootstrapOptions = { source?: NodeJS.ProcessEnv; expectedDispatchGeneration?: number; faultInjector?: (point: BookAnalysisBootstrapFaultPoint, input: { bootstrapId: string; analysisRunId?: string }) => Promise<void> | void };
@@ -20,10 +21,19 @@ export function bookAnalysisBootstrapJobId(payload: BookAnalysisBootstrapPayload
   return `book-analysis-bootstrap-${payload.bootstrapId}-g${payload.dispatchGeneration}`;
 }
 const readyErrors = new Set(["AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"]);
+const capacityError = "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED";
 const errorCode = (error: unknown): string => error instanceof Error ? error.message.split(":")[0] ?? "BOOK_ANALYSIS_BOOTSTRAP_FAILED" : "BOOK_ANALYSIS_BOOTSTRAP_FAILED";
 const assertGatewayRuntimeReady = (source: NodeJS.ProcessEnv = process.env) => { if (!resolveCredentialKeyring(source)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED"); };
+const workspaceOperationLimit = (source: NodeJS.ProcessEnv = process.env) => Number(source.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
 const permanentCodes = new Set(["BOOK_ANALYSIS_BOOTSTRAP_LINEAGE_INVALID", "BOOK_ANALYSIS_BOOTSTRAP_CURRENT_EXTRACTION_MISMATCH", "INGESTION_INITIATOR_REQUIRED"]);
 export function classifyBootstrapError(error: unknown): "PERMANENT" | "RECOVERABLE" { const code = errorCode(error); if (permanentCodes.has(code)) return "PERMANENT"; const structured = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code ?? "") : ""; if (["ECONNRESET", "ETIMEDOUT", "P1001", "P2024"].includes(structured)) return "RECOVERABLE"; return "RECOVERABLE"; }
+export function bookAnalysisBootstrapBlockingReason(input: { status: string; errorCode?: string | null; executionLeaseUntil?: Date | null }, now = new Date()): BookAnalysisBootstrapBlockingReason {
+  if (input.executionLeaseUntil && input.executionLeaseUntil > now) return "ACTIVE_LEASE";
+  if (input.errorCode === capacityError) return "CAPACITY_LIMIT";
+  if (input.status === "WAITING_FOR_PROVIDER") return "PROVIDER_NOT_READY";
+  if (input.status === "RUNNING" && input.executionLeaseUntil && input.executionLeaseUntil <= now) return "RECOVERY_REQUIRED";
+  return "NONE";
+}
 
 async function claimBootstrap(id: string, expectedGeneration: number, token: string): Promise<boolean> {
   const changed = await prisma.$executeRaw`
@@ -48,6 +58,14 @@ export async function renewBookAnalysisBootstrapLease(id: string, token: string,
 async function waitForProvider(id: string, token: string, code: string) {
   await owned(id, token, { status: "WAITING_FOR_PROVIDER", errorCode: code, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null });
 }
+async function deferForCapacity(id: string, token: string) {
+  // Backpressure is not an execution retry: retain its normal retry budget and
+  // let the reconciler rediscover this explicit blocking reason.
+  await owned(id, token, { status: "PENDING", errorCode: capacityError, nextAttemptAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null });
+}
+async function capacityAvailable(workspaceId: string, source: NodeJS.ProcessEnv = process.env) {
+  return prisma.$transaction(tx => workspaceExpensiveOperationCapacityAvailable(tx, workspaceId, workspaceOperationLimit(source)));
+}
 
 /** PostgreSQL is the authority: BullMQ carries only this durable intent ID. */
 export async function processBookAnalysisBootstrap(bootstrapId: string, options: ProcessBookAnalysisBootstrapOptions = {}) {
@@ -64,6 +82,7 @@ export async function processBookAnalysisBootstrap(bootstrapId: string, options:
     const current = await prisma.currentDocumentExtraction.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: bootstrap.sourceDocumentId, workspaceId: bootstrap.workspaceId } } });
     if (!current || current.extractionId !== bootstrap.extractionId) throw new Error("BOOK_ANALYSIS_BOOTSTRAP_CURRENT_EXTRACTION_MISMATCH");
     assertGatewayRuntimeReady(options.source);
+    if (!await capacityAvailable(bootstrap.workspaceId, options.source)) { await deferForCapacity(bootstrapId, token); return; }
     const chunkSet = await materializeChunkSet({ workspaceId: bootstrap.workspaceId, sourceDocumentId: bootstrap.sourceDocumentId, correlationId: bootstrap.id });
     await renewBookAnalysisBootstrapLease(bootstrap.id, token);
     await options.faultInjector?.("afterChunkSetMaterialization", { bootstrapId: bootstrap.id });
@@ -79,6 +98,7 @@ export async function processBookAnalysisBootstrap(bootstrapId: string, options:
     // stalled-job recovery can safely redeliver the deterministic bootstrap ID.
     if (code === "BOOK_ANALYSIS_BOOTSTRAP_SIMULATED_CRASH") throw error;
     if (readyErrors.has(code)) { await waitForProvider(bootstrapId, token, code); return; }
+    if (code === capacityError) { await deferForCapacity(bootstrapId, token); return; }
     if (classifyBootstrapError(error) === "RECOVERABLE") { const retryCount = Number((initial as { retryCount?: number }).retryCount ?? 0) + 1, delay = Math.min(300_000, 5_000 * 2 ** Math.min(retryCount, 6)); await owned(bootstrapId, token, { status: "PENDING", errorCode: code, retryCount, nextAttemptAt: new Date(Date.now() + delay), executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null }); return; }
     await owned(bootstrapId, token, { status: "FAILED_TERMINAL", errorCode: code, completedAt: new Date(), executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null });
     throw error;
@@ -132,30 +152,33 @@ export async function reconcileHistoricalBookAnalysisBootstraps(limit = 25) {
   }
   return adopted;
 }
-export type BookAnalysisBootstrapRearm = "REARMED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "NOT_READY";
+export type BookAnalysisBootstrapRearm = "REARMED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "NOT_READY" | "CAPACITY_DEFERRED";
 
 /** Rearms exactly one durable bootstrap; readiness always precedes mutation. */
 export async function rearmBookAnalysisBootstrapById(bootstrapId: string, source: NodeJS.ProcessEnv = process.env): Promise<BookAnalysisBootstrapRearm> {
-  const bootstrap = await prisma.bookAnalysisBootstrap.findUnique({ where: { id: bootstrapId }, select: { id: true, status: true, workspaceId: true, nextAttemptAt: true, executionLeaseUntil: true } });
+  const bootstrap = await prisma.bookAnalysisBootstrap.findUnique({ where: { id: bootstrapId }, select: { id: true, status: true, workspaceId: true, nextAttemptAt: true, executionLeaseUntil: true, errorCode: true, analysisRunId: true } });
   if (!bootstrap) return "NOT_FOUND";
   const now = new Date();
-  const eligible = bootstrap.status === "WAITING_FOR_PROVIDER" || (bootstrap.status === "PENDING" && !!bootstrap.nextAttemptAt && bootstrap.nextAttemptAt <= now) || (bootstrap.status === "RUNNING" && !!bootstrap.executionLeaseUntil && bootstrap.executionLeaseUntil < now);
+  const capacityBlocked = bootstrap.status === "PENDING" && bootstrap.errorCode === capacityError && !bootstrap.analysisRunId && !bootstrap.executionLeaseUntil;
+  const eligible = bootstrap.status === "WAITING_FOR_PROVIDER" || capacityBlocked || (bootstrap.status === "PENDING" && !!bootstrap.nextAttemptAt && bootstrap.nextAttemptAt <= now) || (bootstrap.status === "RUNNING" && !!bootstrap.executionLeaseUntil && bootstrap.executionLeaseUntil < now);
   if (!eligible) return "NOT_ELIGIBLE";
   try { assertGatewayRuntimeReady(source); await resolveBookProductExecution(bootstrap.workspaceId); }
   catch (error) { if (readyErrors.has(errorCode(error))) return "NOT_READY"; throw error; }
-  let rearmed = false;
-  await prisma.$transaction(async tx => {
+  const result = await prisma.$transaction(async tx => {
+    if (!await workspaceExpensiveOperationCapacityAvailable(tx, bootstrap.workspaceId, workspaceOperationLimit(source))) return "CAPACITY_DEFERRED" as const;
     const changed = bootstrap.status === "RUNNING"
       ? await tx.$queryRaw<Array<{ dispatchGeneration: number }>>`UPDATE "BookAnalysisBootstrap" SET "status" = 'PENDING'::"BookAnalysisBootstrapStatus", "errorCode" = NULL, "nextAttemptAt" = NULL, "dispatchGeneration" = "dispatchGeneration" + 1, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${bootstrap.id} AND "status" = 'RUNNING'::"BookAnalysisBootstrapStatus" AND "executionLeaseUntil" < NOW() RETURNING "dispatchGeneration"`
-      : await tx.bookAnalysisBootstrap.updateMany({ where: { id: bootstrap.id, status: bootstrap.status, ...(bootstrap.status === "PENDING" ? { nextAttemptAt: { lte: now } } : {}) }, data: { status: "PENDING", errorCode: null, nextAttemptAt: null, dispatchGeneration: { increment: 1 }, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }).then(async result => result.count ? [await tx.bookAnalysisBootstrap.findUniqueOrThrow({ where: { id: bootstrap.id }, select: { dispatchGeneration: true } })] : []);
-    if (changed.length === 1) { rearmed = true; await tx.outboxEvent.create({ data: { topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC, aggregateId: bootstrap.id, payload: { bootstrapId: bootstrap.id, dispatchGeneration: changed[0]!.dispatchGeneration } } }); }
+      : await tx.bookAnalysisBootstrap.updateMany({ where: { id: bootstrap.id, status: bootstrap.status, analysisRunId: null, ...(capacityBlocked ? { errorCode: capacityError, executionLeaseUntil: null } : bootstrap.status === "PENDING" ? { nextAttemptAt: { lte: now } } : {}) }, data: { status: "PENDING", errorCode: null, nextAttemptAt: null, dispatchGeneration: { increment: 1 }, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }).then(async updated => updated.count ? [await tx.bookAnalysisBootstrap.findUniqueOrThrow({ where: { id: bootstrap.id }, select: { dispatchGeneration: true } })] : []);
+    if (changed.length !== 1) return "NOT_ELIGIBLE" as const;
+    await tx.outboxEvent.create({ data: { topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC, aggregateId: bootstrap.id, payload: { bootstrapId: bootstrap.id, dispatchGeneration: changed[0]!.dispatchGeneration } } });
+    return "REARMED" as const;
   });
-  return rearmed ? "REARMED" : "NOT_ELIGIBLE";
+  return result;
 }
 
 /** Bounded discovery delegates every candidate to the exact-target rearm core. */
 export async function reconcileWaitingBookAnalysisBootstraps(limit = 25, source: NodeJS.ProcessEnv = process.env) {
-  const waiting = await prisma.bookAnalysisBootstrap.findMany({ where: { OR: [{ status: "WAITING_FOR_PROVIDER" }, { status: "PENDING", nextAttemptAt: { lte: new Date() } }, { status: "RUNNING", executionLeaseUntil: { lt: new Date() } }] }, orderBy: { updatedAt: "asc" }, take: limit, select: { id: true } });
+  const waiting = await prisma.bookAnalysisBootstrap.findMany({ where: { OR: [{ status: "WAITING_FOR_PROVIDER" }, { status: "PENDING", nextAttemptAt: { lte: new Date() } }, { status: "PENDING", errorCode: capacityError, analysisRunId: null, executionLeaseUntil: null }, { status: "RUNNING", executionLeaseUntil: { lt: new Date() } }] }, orderBy: { updatedAt: "asc" }, take: limit, select: { id: true } });
   for (const row of waiting) await rearmBookAnalysisBootstrapById(row.id, source);
   return waiting.length;
 }

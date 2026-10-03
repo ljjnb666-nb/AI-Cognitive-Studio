@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { prisma } from "../../db/src/index.js";
+import { prisma, PrismaClient, lockWorkspaceExpensiveOperationCapacity } from "../../db/src/index.js";
 import { type Environment } from "@ai-cognitive/shared/server";
 import { createBookAnalysisQueue, createBookAnalysisWorker } from "../../../apps/worker/src/book-analysis.js";
 import {
@@ -24,9 +24,22 @@ import {
   type ProcessBookAnalysisDependencies,
 } from "../src/index.js";
 import { createBookAnalysisEmbeddingGatewayFixture } from "./helpers/book-analysis-embedding-gateway.js";
+import { reconcileDurableExpensiveOperationsBatch } from "../../../apps/worker/src/durable-operation-reconciliation.js";
+import { reconcileStaleBookAnalysisJob } from "../src/index.js";
+import { admitWorkspaceExpensiveOperation, expensiveJobTypes } from "../../db/src/index.js";
 
 const workspaces: string[] = [];
 const users: string[] = [];
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// Test-only lock observer: PostgreSQL introspection must never compete with the
+// application pool under test, so it runs on its own single-connection client
+// derived from the same integration-test DATABASE_URL set by the test setup.
+const observerDatabaseUrl = new URL(process.env.DATABASE_URL ?? "");
+if (observerDatabaseUrl.protocol !== "postgres:" && observerDatabaseUrl.protocol !== "postgresql:") throw new Error("A2_OBSERVER_DATABASE_URL_MISSING");
+observerDatabaseUrl.searchParams.set("connection_limit", "1");
+const observerPrisma = new PrismaClient({ datasourceUrl: observerDatabaseUrl.toString() });
 async function fixture(blockTexts = ["# Chapter", ...Array.from({ length: 6 }, (_, index) => `Paragraph ${index} ${"evidence ".repeat(7)}`)], gatewayOptions: { pauseRemote?: boolean } = {}) {
   const suffix = crypto.randomUUID();
   const user = await prisma.user.create({ data: { email: `${suffix}@durability.test` } });
@@ -112,18 +125,19 @@ async function createReplacementExtraction(data: Awaited<ReturnType<typeof fixtu
 
 async function waitForPostgresRowLock(backendPid: number) {
   for (let attempt = 0; attempt < 200; attempt++) {
-    const [state] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT cardinality(pg_blocking_pids(${backendPid}::int)) > 0 AS blocked`;
+    const [state] = await observerPrisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT cardinality(pg_blocking_pids(${backendPid}::int)) > 0 AS blocked`;
     if (state?.blocked) return;
+    await sleep(10);
   }
   throw new Error("EXPECTED_CURRENT_EXTRACTION_ROW_LOCK");
 }
 
 async function waitForGenerationOrBlockedUpdate(blockerPid: number, table: "BookAnalysisRun" | "PodcastGenerationRun" | "ShortVideoGenerationRun", readGeneration: () => Promise<number>, expectedGeneration: number) {
   for (let attempt = 0; attempt < 500; attempt++) {
-    const [state] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (SELECT 1 FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND ${blockerPid} = ANY(pg_blocking_pids(activity.pid))) AS blocked`;
+    const [state] = await observerPrisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (SELECT 1 FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND ${blockerPid} = ANY(pg_blocking_pids(activity.pid))) AS blocked`;
     if (state?.blocked) return "BLOCKED" as const;
     if (await readGeneration() !== expectedGeneration) return "ADVANCED" as const;
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await sleep(10);
   }
   throw new Error(`FINALIZER_REARM_RACE_DID_NOT_PROGRESS:${table}`);
 }
@@ -147,16 +161,16 @@ async function holdA2RunRowLock(runId: string) {
 
 async function waitForBlockedBookUpdates(blockerPid: number, expectedCount: number) {
   for (let attempt = 0; attempt < 500; attempt++) {
-    const [state] = await prisma.$queryRaw<Array<{ blockedCount: number }>>`WITH RECURSIVE wait_chain(origin_pid, blocker_pid, depth) AS (
+    const [state] = await observerPrisma.$queryRaw<Array<{ blockedCount: number }>>`WITH RECURSIVE wait_chain(origin_pid, blocker_pid, depth) AS (
       SELECT activity.pid, blocker.pid, 1 FROM pg_stat_activity activity CROSS JOIN LATERAL unnest(pg_blocking_pids(activity.pid)) AS blocker(pid)
-      WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid() AND activity.wait_event_type = 'Lock' AND activity.query ILIKE '%UPDATE%BookAnalysisRun%'
+      WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid() AND activity.wait_event_type = 'Lock' AND activity.query ILIKE '%BookAnalysisRun%' AND (activity.query ILIKE '%UPDATE%' OR activity.query ILIKE '%FOR UPDATE%')
       UNION ALL
       SELECT chain.origin_pid, next_blocker.pid, chain.depth + 1 FROM wait_chain chain CROSS JOIN LATERAL unnest(pg_blocking_pids(chain.blocker_pid)) AS next_blocker(pid) WHERE chain.depth < 8
     ) SELECT COUNT(DISTINCT origin_pid)::int AS "blockedCount" FROM wait_chain WHERE blocker_pid = ${blockerPid}`;
     if ((state?.blockedCount ?? 0) >= expectedCount) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await sleep(10);
   }
-  const waiters = await prisma.$queryRaw<Array<{ pid: number; waitEvent: string | null; blockers: number[]; query: string }>>`SELECT activity.pid, activity.wait_event AS "waitEvent", pg_blocking_pids(activity.pid) AS blockers, activity.query FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid() AND activity.wait_event_type = 'Lock'`;
+  const waiters = await observerPrisma.$queryRaw<Array<{ pid: number; waitEvent: string | null; blockers: number[]; query: string }>>`SELECT activity.pid, activity.wait_event AS "waitEvent", pg_blocking_pids(activity.pid) AS blockers, activity.query FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid() AND activity.wait_event_type = 'Lock'`;
   throw new Error(`A2_BOOK_EXPECTED_${expectedCount}_BLOCKED_RUN_UPDATES:${JSON.stringify(waiters)}`);
 }
 
@@ -193,9 +207,80 @@ afterEach(async () => {
   }
   await prisma.user.deleteMany({ where: { id: { in: users.splice(0) } } });
 });
-afterAll(() => prisma.$disconnect());
+afterAll(() => Promise.all([prisma.$disconnect(), observerPrisma.$disconnect()]));
 
 describe("durable Phase 2 orchestration", () => {
+  it("FR01A serializes failed retry against new workspace admission at limit one", async () => {
+    const data = await fixture();
+    await prisma.$transaction([prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED" } }), prisma.job.update({ where: { id: data.job.id }, data: { status: "FAILED" } })]);
+    const priorLimit = process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT;
+    process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = "1";
+    try {
+      const input = { workspaceId: data.workspace.id, sourceDocumentId: data.document.id, pipelineVersion: data.run.pipelineVersion, promptVersion: data.run.promptVersion, provider: data.run.provider, model: data.run.model, modelVersion: data.run.modelVersion ?? undefined };
+      const results = await Promise.allSettled([
+        requestBookAnalysis(input),
+        prisma.$transaction(async tx => {
+          await admitWorkspaceExpensiveOperation(tx, data.workspace.id, 1);
+          return tx.job.create({ data: { workspaceId: data.workspace.id, type: "book.analysis", payload: {}, idempotencyKey: `fr01a-admission:${crypto.randomUUID()}` } });
+        }),
+      ]);
+      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+      const rejected = results.find(result => result.status === "rejected");
+      expect(rejected?.status === "rejected" ? rejected.reason.message : undefined).toBe("WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED");
+      expect(await prisma.job.count({ where: { workspaceId: data.workspace.id, type: { in: [...expensiveJobTypes] }, status: { in: ["QUEUED", "RUNNING"] } } })).toBe(1);
+      expect(await prisma.job.count({ where: { workspaceId: data.workspace.id, type: "book.analysis" } })).toBe(2);
+      expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })).toBe(results[0]!.status === "fulfilled" ? 2 : 1);
+    } finally {
+      if (priorLimit === undefined) delete process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT;
+      else process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT = priorLimit;
+    }
+  });
+
+  it.each(["durable", "stale"] as const)("FR01A serializes failed request retry against %s reconciliation", async reconciliation => {
+    const data = await fixture();
+    await prisma.$transaction([
+      prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: reconciliation === "durable" ? { status: "FAILED" } : { status: "RUNNING", executionClaimToken: "fr01a-expired-owner", executionClaimedAt: new Date(0), executionLeaseUntil: new Date(1) } }),
+      prisma.job.update({ where: { id: data.job.id }, data: { status: "RUNNING" } }),
+    ]);
+    const input = { workspaceId: data.workspace.id, sourceDocumentId: data.document.id, pipelineVersion: data.run.pipelineVersion, promptVersion: data.run.promptVersion, provider: data.run.provider, model: data.run.model, modelVersion: data.run.modelVersion ?? undefined };
+    await Promise.all([
+      requestBookAnalysis(input),
+      reconciliation === "durable" ? reconcileDurableExpensiveOperationsBatch({ candidateJobIds: [data.job.id] }) : reconcileStaleBookAnalysisJob(data.job.id),
+    ]);
+    // If the request read RUNNING before stale terminalization, it was a
+    // duplicate of that generation. A replay now must accept exactly one retry.
+    const retried = await requestBookAnalysis(input);
+    const current = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id }, include: { job: true } });
+    expect([current.dispatchGeneration, current.status, current.jobId, current.job.status]).toEqual([1, "QUEUED", retried.job.id, "QUEUED"]);
+    expect(current.jobId).not.toBe(data.job.id);
+    expect(await prisma.job.count({ where: { workspaceId: data.workspace.id, idempotencyKey: { startsWith: `book:${data.run.analysisIdentityHash}:recovery:` } } })).toBe(1);
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id, payload: { path: ["dispatchGeneration"], equals: 1 } } })).toBe(1);
+  });
+  it("FR01A locks the run before reacquiring capacity for ordinary failed rearm", async () => {
+    const data = await fixture();
+    await prisma.$transaction([prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "FAILED" } }), prisma.job.update({ where: { id: data.job.id }, data: { status: "FAILED" } })]);
+    let locked!: (pid: number) => void, acquireCapacity!: () => void;
+    const lockedP = new Promise<number>(resolve => locked = resolve);
+    const capacityP = new Promise<void>(resolve => acquireCapacity = resolve);
+    const retryLockPhase = prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${data.run.id} FOR UPDATE`;
+      const [session] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+      locked(session!.pid);
+      await capacityP;
+      await lockWorkspaceExpensiveOperationCapacity(tx, data.workspace.id);
+    }, { timeout: 15_000 });
+    const pid = await lockedP;
+    const rearm = rearmBookAnalysisRunById(data.run.id, 0);
+    // Observe a real blocked rearm before letting the retry lock phase proceed.
+    try {
+      await waitForGenerationOrBlockedUpdate(pid, "BookAnalysisRun", async () => 0, 0);
+    } finally {
+      acquireCapacity();
+    }
+    const outcomes = await Promise.allSettled([retryLockPhase, rearm]);
+    expect(outcomes.map(result => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(await rearm).toBe("REARMED");
+  });
   describe("A2 claim/rearm authority races", () => {
     it("lets rearm N→N+1 win before a stale Book claim and gives the stale processor zero authority", async () => {
       const data = await fixture();
@@ -237,20 +322,21 @@ describe("durable Phase 2 orchestration", () => {
       expect(generationOneOutbox.status).toBe("PENDING");
     });
 
-    it("allows only one concurrent Book rearm per expected generation and fences repeats", async () => {
+    it.each([false, true])("allows only one concurrent Book rearm per expected generation and fences repeats (exact target: %s)", async exactTarget => {
       const data = await fixture();
       await prisma.$transaction([
         prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: { status: "QUEUED", executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } }),
         prisma.job.update({ where: { id: data.job.id }, data: { status: "QUEUED", userId: data.user.id } }),
       ]);
       const topic = `a2.concurrent-rearm.book.${crypto.randomUUID()}`;
+      const target = exactTarget ? { workspaceId: data.workspace.id, jobId: data.job.id, jobType: "book.analysis" } : undefined;
       const blocker = await holdA2RunRowLock(data.run.id);
       let first: ReturnType<typeof rearmBookAnalysisRunById> | undefined;
       let second: ReturnType<typeof rearmBookAnalysisRunById> | undefined;
       try {
-        first = rearmBookAnalysisRunById(data.run.id, 0, topic);
+        first = rearmBookAnalysisRunById(data.run.id, 0, topic, target);
         await waitForBlockedBookUpdates(blocker.pid, 1);
-        second = rearmBookAnalysisRunById(data.run.id, 0, topic);
+        second = rearmBookAnalysisRunById(data.run.id, 0, topic, target);
         await waitForBlockedBookUpdates(blocker.pid, 2);
       } finally {
         blocker.release();
@@ -259,7 +345,7 @@ describe("durable Phase 2 orchestration", () => {
       }
       const results = await Promise.all([first!, second!]);
       expect(results.filter(result => result === "REARMED")).toHaveLength(1);
-      expect(results.filter(result => result === "RACE_LOST")).toHaveLength(1);
+      expect(results.filter(result => result === "NOT_ELIGIBLE")).toHaveLength(1);
       const current = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id }, include: { job: true } });
       expect([current.dispatchGeneration, current.status, current.jobId, current.job.status]).toEqual([1, "QUEUED", data.job.id, "QUEUED"]);
       expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id, topic } })).toBe(1);

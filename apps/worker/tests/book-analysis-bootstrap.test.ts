@@ -8,8 +8,10 @@ const state = vi.hoisted(() => ({
     sourceDocument: {}, extraction: { ingestionRunId: "ingestion-1", sourceDocumentId: "source-1" }, requestedBy: { workspaceId: "workspace-1", userId: "user-1" },
   },
   keyring: true,
+  capacity: true,
   updates: [] as unknown[],
   findUnique: vi.fn(), findUniqueOrThrow: vi.fn(), findMany: vi.fn(), updateMany: vi.fn(), bootstrapCreate: vi.fn(), ingestionFindMany: vi.fn(), executeRaw: vi.fn(), queryRaw: vi.fn(), transaction: vi.fn(), outboxCreate: vi.fn(),
+  capacityCheck: vi.fn(),
   dispatch: vi.fn(),
 }));
 
@@ -19,18 +21,18 @@ vi.mock("@ai-cognitive/db", () => ({ prisma: {
   currentDocumentExtraction: { findUnique: vi.fn() },
   outboxEvent: { create: state.outboxCreate },
   $executeRaw: state.executeRaw, $transaction: state.transaction,
-} }));
+}, workspaceExpensiveOperationCapacityAvailable: state.capacityCheck }));
 vi.mock("@ai-cognitive/book-intelligence", () => ({ materializeChunkSet: vi.fn(), requestBookAnalysisForUser: vi.fn(), resolveBookProductExecution: vi.fn(), resolveBookAnalysisVersions: () => ({ pipelineVersion: "product-v1", promptVersion: "product-v1" }) }));
 vi.mock("@ai-cognitive/ingestion", () => ({ BOOK_ANALYSIS_BOOTSTRAP_TOPIC: "book.analysis.bootstrap.requested", dispatchPendingOutbox: state.dispatch }));
 vi.mock("@ai-cognitive/provider-gateway", () => ({ resolveCredentialKeyring: () => state.keyring ? { activeVersion: "test", keys: {} } : undefined }));
 
 import { materializeChunkSet, requestBookAnalysisForUser, resolveBookProductExecution } from "@ai-cognitive/book-intelligence";
 import { prisma } from "@ai-cognitive/db";
-import { adoptHistoricalBookAnalysisBootstrapForIngestionRun, bookAnalysisBootstrapJobId, classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, rearmBookAnalysisBootstrapById, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
+import { adoptHistoricalBookAnalysisBootstrapForIngestionRun, bookAnalysisBootstrapBlockingReason, bookAnalysisBootstrapJobId, classifyBootstrapError, dispatchBookAnalysisBootstrapWithQueue, processBookAnalysisBootstrap, rearmBookAnalysisBootstrapById, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "../src/book-analysis-bootstrap.js";
 
 describe("BookAnalysisBootstrap fault boundaries", () => {
   beforeEach(() => {
-    state.keyring = true; state.updates.length = 0; state.initial.status = "PENDING"; state.initial.retryCount = 0; state.initial.dispatchGeneration = 1;
+    state.keyring = true; state.capacity = true; state.updates.length = 0; state.initial.status = "PENDING"; state.initial.retryCount = 0; state.initial.dispatchGeneration = 1;
     state.detail.ingestionRun.status = "SUCCEEDED";
     state.dispatch.mockReset().mockResolvedValue(1);
     state.findUnique.mockReset().mockResolvedValue(state.initial);
@@ -43,10 +45,20 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     state.outboxCreate.mockReset().mockResolvedValue({ id: "outbox-1" });
     state.bootstrapCreate.mockReset().mockResolvedValue({ id: "bootstrap-1", dispatchGeneration: 1 });
     state.transaction.mockReset().mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => callback({ $queryRaw: state.queryRaw, ingestionRun: { findUniqueOrThrow: state.findUniqueOrThrow }, currentDocumentExtraction: prisma.currentDocumentExtraction, bookAnalysisBootstrap: { updateMany: state.updateMany, findUniqueOrThrow: state.findUniqueOrThrow, findUnique: state.findUnique, create: state.bootstrapCreate }, outboxEvent: { create: state.outboxCreate } }));
+    state.capacityCheck.mockReset().mockImplementation(async () => state.capacity);
     vi.mocked(prisma.currentDocumentExtraction.findUnique).mockReset().mockResolvedValue({ extractionId: "extraction-1" } as never);
     vi.mocked(materializeChunkSet).mockReset().mockResolvedValue({ id: "chunk-set-1" } as never);
     vi.mocked(resolveBookProductExecution).mockReset().mockResolvedValue({ provider: "fixture", model: "book", configuration: {}, routePlan: { version: 1, routes: {} } } as never);
     vi.mocked(requestBookAnalysisForUser).mockReset().mockResolvedValue({ run: { id: "analysis-1" } } as never);
+  });
+
+  it("derives capacity, provider, lease, and recovery blocking reasons without a new durable state", () => {
+    const now = new Date("2026-09-13T00:00:00.000Z");
+    expect(bookAnalysisBootstrapBlockingReason({ status: "PENDING", errorCode: "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED" }, now)).toBe("CAPACITY_LIMIT");
+    expect(bookAnalysisBootstrapBlockingReason({ status: "WAITING_FOR_PROVIDER" }, now)).toBe("PROVIDER_NOT_READY");
+    expect(bookAnalysisBootstrapBlockingReason({ status: "RUNNING", executionLeaseUntil: new Date("2026-09-13T00:01:00.000Z") }, now)).toBe("ACTIVE_LEASE");
+    expect(bookAnalysisBootstrapBlockingReason({ status: "RUNNING", executionLeaseUntil: new Date("2026-09-12T23:59:00.000Z") }, now)).toBe("RECOVERY_REQUIRED");
+    expect(bookAnalysisBootstrapBlockingReason({ status: "PENDING" }, now)).toBe("NONE");
   });
 
   it("releases ownership into WAITING_FOR_PROVIDER without invoking chunking", async () => {
@@ -54,6 +66,27 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 });
     expect(materializeChunkSet).not.toHaveBeenCalled();
     expect(state.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "WAITING_FOR_PROVIDER", executionClaimToken: null }) }));
+  });
+
+  it("defers capacity backpressure without consuming retry budget, chunking, or provider work", async () => {
+    state.capacity = false;
+    await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 });
+    expect(materializeChunkSet).not.toHaveBeenCalled();
+    expect(requestBookAnalysisForUser).not.toHaveBeenCalled();
+    expect(state.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "PENDING", errorCode: "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED", nextAttemptAt: null }) }));
+  });
+
+  it("keeps repeated capacity deferral on the same generation and retry budget", async () => {
+    state.capacity = false;
+    await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 });
+    await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 });
+    expect(requestBookAnalysisForUser).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
+    expect(state.updates).toHaveLength(2);
+    for (const update of state.updates as Array<{ data: { retryCount?: number; errorCode?: string } }>) {
+      expect(update.data).toMatchObject({ errorCode: "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED" });
+      expect(update.data.retryCount).toBeUndefined();
+    }
   });
 
   it("keeps the lease-owned row recoverable when a fault simulates a process crash", async () => {
@@ -114,7 +147,7 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     state.findUnique.mockResolvedValueOnce({ id: "bootstrap-b", status: "WAITING_FOR_PROVIDER", workspaceId: "workspace-b", nextAttemptAt: null, executionLeaseUntil: null }).mockResolvedValueOnce({ id: "bootstrap-b", status: "PENDING", workspaceId: "workspace-b", nextAttemptAt: null, executionLeaseUntil: null });
     state.findUniqueOrThrow.mockResolvedValue({ dispatchGeneration: 2 });
     await expect(rearmBookAnalysisBootstrapById("bootstrap-b")).resolves.toBe("REARMED");
-    expect(state.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "bootstrap-b", status: "WAITING_FOR_PROVIDER" } }));
+    expect(state.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "bootstrap-b", status: "WAITING_FOR_PROVIDER" }) }));
     expect(state.outboxCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ aggregateId: "bootstrap-b", payload: { bootstrapId: "bootstrap-b", dispatchGeneration: 2 } }) }));
     await expect(rearmBookAnalysisBootstrapById("bootstrap-b")).resolves.toBe("NOT_ELIGIBLE");
     expect(state.outboxCreate).toHaveBeenCalledTimes(1);
@@ -126,6 +159,40 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     state.findUnique.mockResolvedValueOnce({ id: "bootstrap-1", status: "WAITING_FOR_PROVIDER", workspaceId: "workspace-1", nextAttemptAt: null, executionLeaseUntil: null });
     state.keyring = false;
     await expect(rearmBookAnalysisBootstrapById("bootstrap-1")).resolves.toBe("NOT_READY");
+    expect(state.updateMany).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
+  });
+
+  it("discovers capacity-blocked work but exact rearm leaves it untouched while capacity remains full", async () => {
+    state.findUnique.mockResolvedValue({ id: "bootstrap-1", status: "PENDING", workspaceId: "workspace-1", nextAttemptAt: null, executionLeaseUntil: null, errorCode: "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED", analysisRunId: null });
+    state.capacity = false;
+    await expect(rearmBookAnalysisBootstrapById("bootstrap-1")).resolves.toBe("CAPACITY_DEFERRED");
+    expect(state.updateMany).not.toHaveBeenCalled();
+    expect(state.outboxCreate).not.toHaveBeenCalled();
+  });
+
+  it("rearms capacity-blocked work after a slot is released and publishes one new generation", async () => {
+    state.findUnique.mockResolvedValue({ id: "bootstrap-1", status: "PENDING", workspaceId: "workspace-1", nextAttemptAt: null, executionLeaseUntil: null, errorCode: "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED", analysisRunId: null });
+    state.findUniqueOrThrow.mockResolvedValueOnce({ dispatchGeneration: 2 }).mockResolvedValue(state.detail);
+    state.capacity = true;
+
+    await expect(rearmBookAnalysisBootstrapById("bootstrap-1")).resolves.toBe("REARMED");
+
+    expect(state.capacityCheck).toHaveBeenCalledWith(expect.any(Object), "workspace-1", 2);
+    expect(state.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: "bootstrap-1", status: "PENDING", errorCode: "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED", analysisRunId: null, executionLeaseUntil: null }),
+      data: expect.objectContaining({ status: "PENDING", errorCode: null, dispatchGeneration: { increment: 1 } }),
+    }));
+    expect(state.outboxCreate).toHaveBeenCalledTimes(1);
+    expect(state.outboxCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ aggregateId: "bootstrap-1", payload: { bootstrapId: "bootstrap-1", dispatchGeneration: 2 } }) }));
+  });
+
+  it("routes a capacity-blocked candidate through the exact rearm core", async () => {
+    state.findMany.mockResolvedValue([{ id: "bootstrap-1" }]);
+    state.findUnique.mockResolvedValue({ id: "bootstrap-1", status: "PENDING", workspaceId: "workspace-1", nextAttemptAt: null, executionLeaseUntil: null, errorCode: "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED", analysisRunId: null });
+    state.capacity = false;
+    await expect(reconcileWaitingBookAnalysisBootstraps()).resolves.toBe(1);
+    expect(state.capacityCheck).toHaveBeenCalledTimes(1);
     expect(state.updateMany).not.toHaveBeenCalled();
     expect(state.outboxCreate).not.toHaveBeenCalled();
   });
@@ -146,7 +213,7 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     state.findUnique.mockResolvedValue({ id: "bootstrap-1", status: "WAITING_FOR_PROVIDER", workspaceId: "workspace-1", nextAttemptAt: null, executionLeaseUntil: null });
     state.findUniqueOrThrow.mockResolvedValueOnce({ dispatchGeneration: 2 }).mockResolvedValue(state.detail);
     await reconcileWaitingBookAnalysisBootstraps();
-    expect(state.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "bootstrap-1", status: "WAITING_FOR_PROVIDER" }, data: expect.objectContaining({ status: "PENDING", dispatchGeneration: { increment: 1 } }) }));
+    expect(state.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "bootstrap-1", status: "WAITING_FOR_PROVIDER" }), data: expect.objectContaining({ status: "PENDING", dispatchGeneration: { increment: 1 } }) }));
     expect(state.outboxCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ payload: { bootstrapId: "bootstrap-1", dispatchGeneration: 2 } }) }));
     await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 2 });
     expect(requestBookAnalysisForUser).toHaveBeenCalledTimes(1);

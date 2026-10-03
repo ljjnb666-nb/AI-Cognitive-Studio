@@ -3,7 +3,7 @@
  * possible without trusting a provider supplied duration or metadata. */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { createHash, randomUUID } from "node:crypto";
-import { Prisma, admitWorkspaceExpensiveOperation, prisma } from "@ai-cognitive/db";
+import { Prisma, admitWorkspaceExpensiveOperation, lockWorkspaceExpensiveOperationCapacity, prisma, type ExpensiveOperationRecoveryTarget } from "@ai-cognitive/db";
 import { dispatchPendingOutbox } from "@ai-cognitive/ingestion";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { logger } from "@ai-cognitive/shared";
@@ -18,6 +18,7 @@ const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPE
 export type PodcastAudioDispatchPayload = { audioGenerationRunId: string; dispatchGeneration: number };
 export type PodcastAudioDispatchOptions = { aggregateIds?: string[]; dispatchConcurrency?: number; topic?: string; beforeFinalize?: (eventId: string) => Promise<void> | void };
 export type PodcastAudioRearmResult = "REARMED" | "NOT_FOUND" | "NOT_ELIGIBLE" | "RACE_LOST" | "SUPERSEDED" | "PAID_OUTCOME_QUARANTINED" | "CAPACITY_BLOCKED";
+export type PodcastAudioSupersededConvergenceResult = "CONVERGED" | "NOT_SUPERSEDED" | "NOT_ELIGIBLE" | "RACE_LOST" | "PAID_OUTCOME_QUARANTINED" | "SUPERSEDER_LOCKED";
 /** Generation zero keeps the deployed Run-ID-only BullMQ identity readable. */
 export function podcastAudioGenerationJobId(payload: PodcastAudioDispatchPayload): string {
   return payload.dispatchGeneration === 0 ? payload.audioGenerationRunId : `podcast-audio-${payload.audioGenerationRunId}-g${payload.dispatchGeneration}`;
@@ -222,7 +223,7 @@ function sameDurableHostVoiceMapping(left: Array<{ hostId: string; voiceIdentity
  * Lock order: AudioGenerationRun row, semantic advisory lock, optional
  * workspace admission lock, then Job update and Outbox creation.
  */
-export async function rearmPodcastAudioGenerationById(audioGenerationRunId: string, expectedDispatchGeneration: number, topic = AUDIO_GENERATION_TOPIC): Promise<PodcastAudioRearmResult> {
+export async function rearmPodcastAudioGenerationById(audioGenerationRunId: string, expectedDispatchGeneration: number, topic = AUDIO_GENERATION_TOPIC, expectedTarget?: ExpensiveOperationRecoveryTarget): Promise<PodcastAudioRearmResult> {
   if (!Number.isSafeInteger(expectedDispatchGeneration) || expectedDispatchGeneration < 0) return "NOT_ELIGIBLE";
   try {
     return await prisma.$transaction(async tx => {
@@ -234,12 +235,28 @@ export async function rearmPodcastAudioGenerationById(audioGenerationRunId: stri
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${run.workspaceId}:${semanticIdentityHash}`}))`;
       const current = await tx.audioGenerationRun.findUniqueOrThrow({ where: { id: audioGenerationRunId }, include: { job: true, audioConfig: true, hostVoices: true } });
       if (current.dispatchGeneration !== expectedDispatchGeneration) return "RACE_LOST";
+      if (expectedTarget && (
+        expectedTarget.jobType !== AUDIO_GENERATION_JOB ||
+        expectedTarget.workspaceId !== current.workspaceId ||
+        expectedTarget.jobId !== current.jobId ||
+        current.job.workspaceId !== current.workspaceId ||
+        current.job.type !== AUDIO_GENERATION_JOB ||
+        !(["QUEUED", "RUNNING"] as string[]).includes(current.job.status) ||
+        !(["QUEUED", "RUNNING"] as string[]).includes(current.status) ||
+        current.job.status !== current.status
+      )) return "NOT_ELIGIBLE";
       const quarantine = await tx.podcastAudioPaidOutcomeQuarantine.findFirst({ where: { workspaceId: current.workspaceId, semanticIdentityHash, status: "OPEN" } });
       if (quarantine) return "PAID_OUTCOME_QUARANTINED";
       const equivalent = await tx.audioGenerationRun.findMany({ where: { episodeId: current.episodeId, scriptRevisionId: current.scriptRevisionId, audioConfigId: current.audioConfigId, provider: current.provider, model: current.model, modelVersion: current.modelVersion, pipelineVersion: current.pipelineVersion, speechPreparationVersion: current.speechPreparationVersion, assemblyVersion: current.assemblyVersion, normalizationVersion: current.normalizationVersion, outputFormat: current.outputFormat }, include: { audioConfig: true, hostVoices: true } });
       if (equivalent.some(other => other.id !== current.id && other.status !== "FAILED" && audioSemanticIdentityForRun(other) === semanticIdentityHash && sameDurableHostVoiceMapping(other.hostVoices, current.hostVoices))) return "SUPERSEDED";
       const leaseLive = current.executionLeaseUntil !== null && current.executionLeaseUntil.getTime() > (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now.getTime();
       if (current.status === "SUCCEEDED" || (current.status === "RUNNING" && leaseLive)) return "NOT_ELIGIBLE";
+      if (expectedTarget && current.status === "RUNNING") {
+        const leaseAbsent = current.executionClaimToken === null && current.executionClaimedAt === null && current.executionLeaseUntil === null;
+        const leaseComplete = current.executionClaimToken !== null && current.executionClaimedAt !== null && current.executionLeaseUntil !== null;
+        if (!leaseAbsent && !leaseComplete) return "NOT_ELIGIBLE";
+      }
+      if (expectedTarget && current.status === "QUEUED" && (current.executionClaimToken || current.executionClaimedAt || current.executionLeaseUntil)) return "NOT_ELIGIBLE";
       const jobIsActive = current.job.status === "QUEUED" || current.job.status === "RUNNING";
       if (!jobIsActive) await admitWorkspaceExpensiveOperation(tx, current.workspaceId, workspaceOperationLimit());
       const nextGeneration = expectedDispatchGeneration + 1;
@@ -253,6 +270,113 @@ export async function rearmPodcastAudioGenerationById(audioGenerationRunId: stri
     if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED";
     throw error;
   }
+}
+
+/**
+ * Terminalizes only an exact active audio target whose same-semantic, exact
+ * host-to-voice peer is still a legitimate non-FAILED durable run. Lock order
+ * matches rearm: target run, semantic identity, peer run(s), workspace
+ * capacity, then target Job and Outbox.
+ */
+export async function convergeSupersededPodcastAudioGenerationById(
+  audioGenerationRunId: string,
+  expectedDispatchGeneration: number,
+  expectedTarget: ExpensiveOperationRecoveryTarget,
+): Promise<PodcastAudioSupersededConvergenceResult> {
+  if (!Number.isSafeInteger(expectedDispatchGeneration) || expectedDispatchGeneration < 0) return "NOT_ELIGIBLE";
+  return await prisma.$transaction(async tx => {
+    const targetLock = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "AudioGenerationRun" WHERE "id" = ${audioGenerationRunId} FOR UPDATE`;
+    if (targetLock.length !== 1) return "NOT_ELIGIBLE";
+    const loadTarget = () => tx.audioGenerationRun.findUnique({ where: { id: audioGenerationRunId }, include: { job: true, audioConfig: true, hostVoices: true } });
+    const target = await loadTarget();
+    if (!target) return "NOT_ELIGIBLE";
+    if (target.dispatchGeneration !== expectedDispatchGeneration) return "RACE_LOST";
+    const identity = audioSemanticIdentityForRun(target);
+    if (
+      expectedTarget.jobType !== AUDIO_GENERATION_JOB ||
+      expectedTarget.workspaceId !== target.workspaceId ||
+      expectedTarget.jobId !== target.jobId ||
+      target.job.id !== target.jobId ||
+      target.job.workspaceId !== target.workspaceId ||
+      target.job.type !== AUDIO_GENERATION_JOB ||
+      !(target.status === "QUEUED" || target.status === "RUNNING") ||
+      target.job.status !== target.status
+    ) return "NOT_ELIGIBLE";
+
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${target.workspaceId}:${identity}`}))`;
+    const current = await loadTarget();
+    if (!current || current.dispatchGeneration !== expectedDispatchGeneration) return "RACE_LOST";
+    if (current.jobId !== expectedTarget.jobId || current.workspaceId !== expectedTarget.workspaceId || current.job.status !== current.status || current.job.type !== AUDIO_GENERATION_JOB || !(current.status === "QUEUED" || current.status === "RUNNING")) return "NOT_ELIGIBLE";
+    const quarantine = await tx.podcastAudioPaidOutcomeQuarantine.findFirst({ where: { workspaceId: current.workspaceId, semanticIdentityHash: identity, status: "OPEN" }, select: { id: true } });
+    if (quarantine) return "PAID_OUTCOME_QUARANTINED";
+
+    const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now;
+    const targetLeaseAbsent = current.executionClaimToken === null && current.executionClaimedAt === null && current.executionLeaseUntil === null;
+    const targetLeaseComplete = current.executionClaimToken !== null && current.executionClaimedAt !== null && current.executionLeaseUntil !== null;
+    if (current.status === "RUNNING" && targetLeaseComplete && current.executionLeaseUntil!.getTime() > now.getTime()) return "NOT_ELIGIBLE";
+    if ((current.status === "RUNNING" && !targetLeaseAbsent && !targetLeaseComplete) || (current.status === "QUEUED" && !targetLeaseAbsent)) return "NOT_ELIGIBLE";
+
+    const peers = await tx.audioGenerationRun.findMany({
+      where: {
+        workspaceId: current.workspaceId,
+        episodeId: current.episodeId,
+        scriptRevisionId: current.scriptRevisionId,
+        audioConfigId: current.audioConfigId,
+        provider: current.provider,
+        model: current.model,
+        modelVersion: current.modelVersion,
+        pipelineVersion: current.pipelineVersion,
+        speechPreparationVersion: current.speechPreparationVersion,
+        assemblyVersion: current.assemblyVersion,
+        normalizationVersion: current.normalizationVersion,
+        outputFormat: current.outputFormat,
+        id: { not: current.id },
+      },
+      select: { id: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    let foundSuperseder = false;
+    let sawLockedPeer = false;
+    for (const peerId of peers) {
+      const peerLock = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "AudioGenerationRun" WHERE "id" = ${peerId.id} FOR UPDATE SKIP LOCKED`;
+      if (peerLock.length !== 1) { sawLockedPeer = true; continue; }
+      const peer = await tx.audioGenerationRun.findUnique({ where: { id: peerId.id }, include: { job: true, audioConfig: true, hostVoices: true } });
+      if (!peer || peer.id === current.id || peer.workspaceId !== current.workspaceId || peer.jobId !== peer.job.id || peer.job.workspaceId !== current.workspaceId || peer.job.type !== AUDIO_GENERATION_JOB) continue;
+      if (!(peer.status === "QUEUED" || peer.status === "RUNNING" || peer.status === "SUCCEEDED") || peer.job.status !== peer.status) continue;
+      if (!Number.isSafeInteger(peer.dispatchGeneration) || peer.dispatchGeneration < 0) continue;
+      const peerLeaseAbsent = peer.executionClaimToken === null && peer.executionClaimedAt === null && peer.executionLeaseUntil === null;
+      const peerLeaseComplete = peer.executionClaimToken !== null && peer.executionClaimedAt !== null && peer.executionLeaseUntil !== null;
+      if ((peer.status === "QUEUED" && !peerLeaseAbsent) || (peer.status === "RUNNING" && !peerLeaseAbsent && !peerLeaseComplete) || (peer.status === "SUCCEEDED" && (!peer.completedAt || !peer.job.completedAt))) continue;
+      if (audioSemanticIdentityForRun(peer) !== identity || !sameDurableHostVoiceMapping(peer.hostVoices, current.hostVoices)) continue;
+      foundSuperseder = true;
+      break;
+    }
+    if (!foundSuperseder) return sawLockedPeer ? "SUPERSEDER_LOCKED" : "NOT_SUPERSEDED";
+
+    await lockWorkspaceExpensiveOperationCapacity(tx, current.workspaceId);
+    const targetJobLock = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "Job" WHERE "id" = ${current.jobId} FOR UPDATE`;
+    if (targetJobLock.length !== 1) return "NOT_ELIGIBLE";
+    const job = await tx.job.findUnique({ where: { id: current.jobId }, select: { id: true, workspaceId: true, type: true, status: true } });
+    if (!job || job.workspaceId !== current.workspaceId || job.type !== AUDIO_GENERATION_JOB || job.status !== current.status) return "NOT_ELIGIBLE";
+    const completedAt = new Date();
+    const changedRun = await tx.audioGenerationRun.updateMany({
+      where: { id: current.id, workspaceId: current.workspaceId, jobId: current.jobId, dispatchGeneration: expectedDispatchGeneration, status: current.status },
+      data: { status: "FAILED", errorCode: "AUDIO_GENERATION_SUPERSEDED", completedAt, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null },
+    });
+    if (changedRun.count !== 1) return "RACE_LOST";
+    const changedJob = await tx.job.updateMany({
+      where: { id: current.jobId, workspaceId: current.workspaceId, type: AUDIO_GENERATION_JOB, status: { in: ["QUEUED", "RUNNING"] } },
+      data: { status: "FAILED", error: { code: "AUDIO_GENERATION_SUPERSEDED" }, completedAt },
+    });
+    if (changedJob.count !== 1) return "RACE_LOST";
+    await tx.$executeRaw`UPDATE "OutboxEvent"
+SET "status" = 'FAILED'::"OutboxStatus", "leaseUntil" = NULL, "claimToken" = NULL,
+    "lastError" = 'AUDIO_GENERATION_SUPERSEDED', "updatedAt" = NOW()
+WHERE "aggregateId" = ${current.id}
+  AND "payload" ->> 'audioGenerationRunId' = ${current.id}
+  AND ("status" = 'PENDING'::"OutboxStatus" OR ("status" = 'PROCESSING'::"OutboxStatus" AND "leaseUntil" < NOW()))`;
+    return "CONVERGED";
+  });
 }
 
 export async function dispatchPendingPodcastAudioGeneration(queue: { add(name: string, payload: PodcastAudioDispatchPayload, options: { jobId: string }): Promise<unknown> }, options: PodcastAudioDispatchOptions = {}) {

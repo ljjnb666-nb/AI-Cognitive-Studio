@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { prisma } from "@ai-cognitive/db";
+import { prisma, PrismaClient } from "@ai-cognitive/db";
 import { type Environment } from "@ai-cognitive/shared/server";
 import { createPodcastGenerationQueue, createPodcastGenerationWorker } from "../../../apps/worker/src/podcast-generation.js";
 import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysis, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "@ai-cognitive/book-intelligence";
@@ -7,6 +7,16 @@ import { claimPodcastGenerationRun, createEpisode, createPodcastProject, dispatc
 import { clearBookAnalysisEmbeddingGatewayFixtureState, createBookAnalysisEmbeddingGatewayFixture } from "../../book-intelligence/tests/helpers/book-analysis-embedding-gateway.js";
 
 const workspaces: string[] = [], users: string[] = [];
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// Test-only lock observer: PostgreSQL introspection must never compete with the
+// application pool under test, so it runs on its own single-connection client
+// derived from the same integration-test DATABASE_URL set by the test setup.
+const observerDatabaseUrl = new URL(process.env.DATABASE_URL ?? "");
+if (observerDatabaseUrl.protocol !== "postgres:" && observerDatabaseUrl.protocol !== "postgresql:") throw new Error("A2_OBSERVER_DATABASE_URL_MISSING");
+observerDatabaseUrl.searchParams.set("connection_limit", "1");
+const observerPrisma = new PrismaClient({ datasourceUrl: observerDatabaseUrl.toString() });
 class AnalysisFixtureProvider implements AnalysisProvider {
   constructor(private readonly blocks: Array<{ id: string; text: string }>) {}
   async generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> { if (request.stage !== "CHUNK") return { summary: `derived ${request.stage}`, memory: request.stage === "BOOK" ? [{ type: "SUMMARY", content: "A bounded book synthesis" }] : undefined }; const block = this.blocks.find((item) => request.sourceBlockIds.includes(item.id) && item.text.includes(request.content)); const offset = block?.text.indexOf(request.content) ?? -1; return { summary: `chunk ${request.content}`, memory: block && offset >= 0 ? [{ type: "QUOTE", content: request.content, evidence: [{ sourceBlockId: block.id, startOffset: offset, endOffset: offset + request.content.length, quoteText: request.content }] }, { type: "CLAIM", content: `Interpretation of ${request.content}` }] : [{ type: "CLAIM", content: request.content }] }; }
@@ -73,10 +83,10 @@ async function moveCurrentIntelligenceToB(data: Awaited<ReturnType<typeof fixtur
 async function expire(runId: string) { await prisma.$executeRaw`UPDATE "PodcastGenerationRun" SET "executionLeaseUntil" = NOW() - INTERVAL '1 second' WHERE "id" = ${runId}`; }
 async function waitForGenerationOrBlockedUpdate(blockerPid: number, runId: string, expectedGeneration: number) {
   for (let attempt = 0; attempt < 500; attempt++) {
-    const [state] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (SELECT 1 FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND ${blockerPid} = ANY(pg_blocking_pids(activity.pid))) AS blocked`;
+    const [state] = await observerPrisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (SELECT 1 FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND ${blockerPid} = ANY(pg_blocking_pids(activity.pid))) AS blocked`;
     if (state?.blocked) return "BLOCKED" as const;
     if ((await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId }, select: { dispatchGeneration: true } })).dispatchGeneration !== expectedGeneration) return "ADVANCED" as const;
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await sleep(10);
   }
   throw new Error("FINALIZER_REARM_RACE_DID_NOT_PROGRESS:PodcastGenerationRun");
 }
@@ -100,14 +110,14 @@ async function holdA2RunRowLock(runId: string) {
 
 async function waitForBlockedPodcastUpdates(blockerPid: number, expectedCount: number) {
   for (let attempt = 0; attempt < 500; attempt++) {
-    const [state] = await prisma.$queryRaw<Array<{ blockedCount: number }>>`WITH RECURSIVE wait_chain(origin_pid, blocker_pid, depth) AS (
+    const [state] = await observerPrisma.$queryRaw<Array<{ blockedCount: number }>>`WITH RECURSIVE wait_chain(origin_pid, blocker_pid, depth) AS (
       SELECT activity.pid, blocker.pid, 1 FROM pg_stat_activity activity CROSS JOIN LATERAL unnest(pg_blocking_pids(activity.pid)) AS blocker(pid)
       WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid() AND activity.wait_event_type = 'Lock' AND activity.query ILIKE '%UPDATE%PodcastGenerationRun%'
       UNION ALL
       SELECT chain.origin_pid, next_blocker.pid, chain.depth + 1 FROM wait_chain chain CROSS JOIN LATERAL unnest(pg_blocking_pids(chain.blocker_pid)) AS next_blocker(pid) WHERE chain.depth < 8
     ) SELECT COUNT(DISTINCT origin_pid)::int AS "blockedCount" FROM wait_chain WHERE blocker_pid = ${blockerPid}`;
     if ((state?.blockedCount ?? 0) >= expectedCount) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await sleep(10);
   }
   throw new Error(`A2_PODCAST_EXPECTED_${expectedCount}_BLOCKED_RUN_UPDATES`);
 }
@@ -153,7 +163,7 @@ async function cleanupWorkspace(workspaceId: string) {
   await prisma.workspace.delete({ where: { id: workspaceId } });
 }
 afterEach(async () => { for (const workspaceId of workspaces.splice(0)) await cleanupWorkspace(workspaceId); await prisma.user.deleteMany({ where: { id: { in: users.splice(0) } } }); });
-afterAll(() => prisma.$disconnect());
+afterAll(() => Promise.all([prisma.$disconnect(), observerPrisma.$disconnect()]));
 
 describe("durable Phase 3 generation", () => {
   describe("A2 claim/rearm authority races", () => {

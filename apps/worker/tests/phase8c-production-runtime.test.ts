@@ -158,4 +158,35 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     expect(changed.run.id).not.toBe(first.run.id);
     expect(changed.run.analysisIdentityHash).not.toBe(first.run.analysisIdentityHash);
   });
+  it("P25 executes a failed semantic run through the fresh Job attempt plan after a connection switch", async () => {
+    const f = await fixture(), document = await bookLineage(f), calls = { text: 0, embedding: 0 }, r = runtime(calls);
+    const { store, connection: firstConnection } = await routes(f);
+    const firstPlan = await durableRoutePlan(f.workspaceId);
+    const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "p25", promptVersion: "p", provider: "fixture", model: "fixture-model", routePlan: firstPlan });
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "FAILED", errorCode: "P25_FIRST_CONNECTION_FAILED" } });
+    await prisma.job.update({ where: { id: requested.job.id }, data: { status: "FAILED", error: { code: "P25_FIRST_CONNECTION_FAILED" }, completedAt: new Date() } });
+
+    const secondConnection = await store.createConnection(f, { providerKey: "fixture", protocol: "TEST", displayName: "fixture-recovery" });
+    await store.rotateCredential(f, secondConnection.id, "fixture-recovery-secret");
+    for (const routeSlot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"] as const) {
+      await store.setRoute(f, { routeSlot, connectionId: secondConnection.id, modelId: "fixture-model", configuration: routeSlot === "EMBEDDING" ? { embeddingDimensions: 3 } : {} });
+    }
+    const secondPlan = await durableRoutePlan(f.workspaceId);
+    const retried = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "p25", promptVersion: "p", provider: "fixture", model: "fixture-model", routePlan: secondPlan });
+
+    expect(retried.run.id).toBe(requested.run.id);
+    expect(retried.run.dispatchGeneration).toBe(requested.run.dispatchGeneration + 1);
+    expect(retried.job.id).not.toBe(requested.job.id);
+    expect((retried.run.routePlan as { routes: Record<string, { connectionId: string }> }).routes.BOOK_CHUNK_ANALYSIS!.connectionId).toBe(firstConnection.id);
+    expect(((retried.job.payload as { routePlan?: { routes?: Record<string, { connectionId?: string }> } }).routePlan?.routes?.BOOK_CHUNK_ANALYSIS?.connectionId)).toBe(secondConnection.id);
+    expect(((requested.job.payload as { routePlan?: { routes?: Record<string, { connectionId?: string }> } }).routePlan?.routes?.BOOK_CHUNK_ANALYSIS?.connectionId)).toBe(firstConnection.id);
+
+    await expect(processBookAnalysisRun(retried.run.id, { analysisProviderForRun: input => r.createAnalysisProvider(input), embeddingGatewayForRun: input => r.createEmbeddingGatewayForRun(input) }, retried.run.dispatchGeneration)).resolves.toMatchObject({ status: "SUCCEEDED", analysisStage: "COMPLETED" });
+    const snapshots = await prisma.providerExecutionSnapshot.findMany({ where: { workspaceId: f.workspaceId }, select: { connectionId: true } });
+    expect(snapshots.length).toBeGreaterThan(0);
+    expect(new Set(snapshots.map(snapshot => snapshot.connectionId))).toEqual(new Set([secondConnection.id]));
+    expect(calls.text).toBeGreaterThan(0);
+    expect(calls.embedding).toBe(1);
+  });
+
 });

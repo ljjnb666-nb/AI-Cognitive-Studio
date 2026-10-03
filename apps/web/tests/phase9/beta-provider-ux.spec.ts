@@ -31,25 +31,29 @@ test("fresh zero-env owner saves an encrypted built-in Provider, configures rout
   const { userId, workspaceId } = await ownerWorkspace(account);
   await page.goto("/studio/settings/providers");
   await expect(page.getByRole("heading", { name: "AI Providers" })).toBeVisible();
-  await expect(page.locator("form").first().locator("select")).toHaveValue("openai");
-  await expect(page.locator("form").first().locator("select")).toContainText("DeepSeek");
+  // The Provider creation form is identified by its business action, not DOM
+  // order: the settings page also hosts the stable-config route form, whose
+  // own selects precede this form in the document.
+  const providerForm = page.locator("form").filter({ has: page.getByRole("button", { name: "保存 Provider" }) });
+  const providerType = providerForm.locator('label:text-is("提供商 (Provider)") + select');
+  await expect(providerType).toHaveValue("openai");
+  await expect(providerType).toContainText("DeepSeek");
   await expect(page.getByText("OPENAI_RESPONSES", { exact: true })).toBeHidden();
   await expect(page.getByText("BOOK_CHUNK_ANALYSIS", { exact: false })).toBeHidden();
 
-  const form = page.locator("form").first();
-  await form.locator('input[name="displayName"]').fill("Zero env OpenAI");
-  await form.locator('input[name="secret"]').fill(secret);
-  await form.getByRole("button", { name: "测试连接" }).click();
+  await providerForm.locator('input[name="displayName"]').fill("Zero env OpenAI");
+  await providerForm.locator('input[name="secret"]').fill(secret);
+  await providerForm.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText("✓ API Key 可用，确认后点击保存 Provider。")).toBeVisible();
-  await form.getByRole("button", { name: "保存 Provider" }).click();
-  await expect(page.getByText("Zero env OpenAI", { exact: true })).toBeVisible();
+  await providerForm.getByRole("button", { name: "保存 Provider" }).click();
+  await expect(page.getByRole("heading", { name: "Zero env OpenAI" })).toBeVisible();
 
   const connection = await prisma.providerConnection.findFirstOrThrow({ where: { workspaceId, displayName: "Zero env OpenAI" } });
   const beforeAuto = await prisma.providerCredentialVersion.findFirstOrThrow({ where: { workspaceId, connectionId: connection.id } });
   expect(JSON.stringify({ connection, beforeAuto })).not.toContain(secret);
   expect(beforeAuto.ciphertext).not.toContain(secret);
   expect(beforeAuto.displayHint ?? "").not.toContain(secret);
-  await page.getByRole("button", { name: "自动配置推荐用途" }).click();
+  await page.getByRole("button", { name: "填补未绑定的默认路由" }).click();
   await expect(page.getByText(/已自动配置 8 个推荐用途/)).toBeVisible();
 
   const routes = await prisma.providerRouteBinding.findMany({ where: { workspaceId }, orderBy: { routeSlot: "asc" } });
@@ -79,14 +83,15 @@ test("JSON-mode DeepSeek never auto-binds Teach Back", async ({ page }) => {
   await signUp(page, account);
   const { workspaceId } = await ownerWorkspace(account);
   await page.goto("/studio/settings/providers");
-  const form = page.locator("form").first();
-  await form.locator("select").selectOption("deepseek");
-  await form.locator('input[name="displayName"]').fill("Zero env DeepSeek");
-  await form.locator('input[name="secret"]').fill("beta-deepseek-secret");
-  await form.getByRole("button", { name: "测试连接" }).click();
+  const providerForm = page.locator("form").filter({ has: page.getByRole("button", { name: "保存 Provider" }) });
+  const providerType = providerForm.locator('label:text-is("提供商 (Provider)") + select');
+  await providerType.selectOption("deepseek");
+  await providerForm.locator('input[name="displayName"]').fill("Zero env DeepSeek");
+  await providerForm.locator('input[name="secret"]').fill("beta-deepseek-secret");
+  await providerForm.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText("✓ API Key 可用，确认后点击保存 Provider。")).toBeVisible();
-  await form.getByRole("button", { name: "保存 Provider" }).click();
-  await page.getByRole("button", { name: "自动配置推荐用途" }).click();
+  await providerForm.getByRole("button", { name: "保存 Provider" }).click();
+  await page.getByRole("button", { name: "填补未绑定的默认路由" }).click();
   expect(await prisma.providerRouteBinding.count({ where: { workspaceId, routeSlot: "TEACH_BACK_ASSESSMENT" } })).toBe(0);
   expect(await prisma.providerRouteBinding.count({ where: { workspaceId, routeSlot: { in: ["PODCAST_TTS", "SHORT_VIDEO_TTS"] } } })).toBe(0);
 });

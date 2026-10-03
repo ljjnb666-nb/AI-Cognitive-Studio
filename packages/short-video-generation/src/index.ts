@@ -22,7 +22,7 @@ export {
   type ExternalProcessDiagnostic,
   type VideoRenderFailureDetails,
 } from "./process-diagnostics.js";
-import { admitWorkspaceExpensiveOperation, Prisma, prisma } from "@ai-cognitive/db";
+import { admitWorkspaceExpensiveOperation, Prisma, prisma, type ExpensiveOperationRecoveryTarget } from "@ai-cognitive/db";
 import {
   buildBookContextForIntelligence,
   estimateAnalysisTokens,
@@ -1134,8 +1134,27 @@ export async function dispatchPendingShortVideoGeneration(
 }
 
 /** Exact-target transport rearm; no liveness discovery or provider work. */
-export async function rearmShortVideoGenerationRunById(runId: string, expectedDispatchGeneration: number, topic = SHORT_VIDEO_GENERATION_TOPIC): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
-  try { return await prisma.$transaction(async tx => { const run = await tx.shortVideoGenerationRun.findUnique({ where: { id: runId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.$queryRaw<Array<{ id: string }>>`
+export async function rearmShortVideoGenerationRunById(runId: string, expectedDispatchGeneration: number, topic = SHORT_VIDEO_GENERATION_TOPIC, expectedTarget?: ExpensiveOperationRecoveryTarget): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
+  try {
+    return await prisma.$transaction(async tx => {
+      if (expectedTarget) {
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "ShortVideoGenerationRun" WHERE "id" = ${runId} FOR UPDATE`;
+        if (locked.length !== 1) return "NOT_ELIGIBLE";
+      }
+      const run = await tx.shortVideoGenerationRun.findUnique({ where: { id: runId }, include: { job: true } });
+      if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE";
+      const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now;
+      if (expectedTarget && (expectedTarget.jobType !== SHORT_VIDEO_GENERATION_JOB || expectedTarget.workspaceId !== run.workspaceId || expectedTarget.jobId !== run.jobId || run.job.workspaceId !== run.workspaceId || run.job.type !== SHORT_VIDEO_GENERATION_JOB || !(["QUEUED", "RUNNING"] as string[]).includes(run.job.status) || !(["QUEUED", "RUNNING"] as string[]).includes(run.status) || run.job.status !== run.status)) return "NOT_ELIGIBLE";
+      if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE";
+      if (expectedTarget && run.status === "RUNNING") {
+        const leaseAbsent = run.executionClaimToken === null && run.executionClaimedAt === null && run.executionLeaseUntil === null;
+        const leaseComplete = run.executionClaimToken !== null && run.executionClaimedAt !== null && run.executionLeaseUntil !== null;
+        if (!leaseAbsent && !leaseComplete) return "NOT_ELIGIBLE";
+      }
+      if (expectedTarget && run.status === "QUEUED" && (run.executionClaimToken || run.executionClaimedAt || run.executionLeaseUntil)) return "NOT_ELIGIBLE";
+      if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE";
+      if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit());
+      const changed = await tx.$queryRaw<Array<{ id: string }>>`
 UPDATE "ShortVideoGenerationRun"
 SET "dispatchGeneration" = "dispatchGeneration" + 1,
     "status" = 'QUEUED'::"ShortVideoGenerationStatus",
@@ -1149,8 +1168,20 @@ WHERE "id" = ${run.id}
   AND "dispatchGeneration" < ${MAX_PERSISTED_DISPATCH_GENERATION}
   AND "status" IN ('QUEUED'::"ShortVideoGenerationStatus", 'RUNNING'::"ShortVideoGenerationStatus", 'FAILED'::"ShortVideoGenerationStatus")
   AND NOT ("status" = 'RUNNING'::"ShortVideoGenerationStatus" AND "executionClaimToken" IS NOT NULL AND "executionLeaseUntil" > NOW())
-RETURNING "id"`; if (changed.length !== 1) return "RACE_LOST"; const current = await tx.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { shortVideoGenerationRunId: current.id, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
+RETURNING "id"`;
+      if (changed.length !== 1) return "RACE_LOST";
+      const current = await tx.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } });
+      await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } });
+      await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { shortVideoGenerationRunId: current.id, dispatchGeneration: current.dispatchGeneration } } });
+      return "REARMED";
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED";
+    throw error;
+  }
 }
+
+
 export interface VideoRenderer {
   render(input: {
     durationMs: number;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { admitWorkspaceExpensiveOperation } from "../src/expensive-operations.js";
+import { admitWorkspaceExpensiveOperation, workspaceExpensiveOperationCapacityAvailable } from "../src/expensive-operations.js";
 import { prisma } from "../src/index.js";
 
 const workspaces: string[] = [];
@@ -21,5 +21,11 @@ describe("Phase 18 workspace expensive-operation admission", () => {
     expect(results.filter((result) => result.status === "rejected").map((result) => (result as PromiseRejectedResult).reason.message)).toEqual(["WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED"]);
     expect(await prisma.job.count({ where: { workspaceId: a.id } })).toBe(3);
     expect(await prisma.job.count({ where: { workspaceId: b.id } })).toBe(1);
+    await expect(prisma.$transaction(tx => workspaceExpensiveOperationCapacityAvailable(tx, a.id, 2))).resolves.toBe(false);
+    await expect(prisma.$transaction(tx => workspaceExpensiveOperationCapacityAvailable(tx, b.id, 2))).resolves.toBe(true);
+
+    const completedJob = await prisma.job.findFirstOrThrow({ where: { workspaceId: a.id, type: "book.analysis" } });
+    await prisma.job.update({ where: { id: completedJob.id }, data: { status: "SUCCEEDED" } });
+    await expect(prisma.$transaction(tx => workspaceExpensiveOperationCapacityAvailable(tx, a.id, 2))).resolves.toBe(true);
   });
 });

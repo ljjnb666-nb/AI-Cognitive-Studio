@@ -1,10 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
-import { prisma } from "@ai-cognitive/db";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { prisma, PrismaClient } from "@ai-cognitive/db";
 import { createShortVideoGenerationQueue, createShortVideoGenerationWorker } from "../../../apps/worker/src/short-video-generation.js";
 import { dispatchPendingShortVideoGeneration, processShortVideoGenerationRun, rearmShortVideoGenerationRunById, SHORT_VIDEO_GENERATION_TOPIC } from "../src/index.js";
 
 const owned: Array<{ workspaceId: string; runId: string; jobId: string }> = [];
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// Test-only lock observer: PostgreSQL introspection must never compete with the
+// application pool under test, so it runs on its own single-connection client
+// derived from the same integration-test DATABASE_URL set by the test setup.
+const observerDatabaseUrl = new URL(process.env.DATABASE_URL ?? "");
+if (observerDatabaseUrl.protocol !== "postgres:" && observerDatabaseUrl.protocol !== "postgresql:") throw new Error("A2_OBSERVER_DATABASE_URL_MISSING");
+observerDatabaseUrl.searchParams.set("connection_limit", "1");
+const observerPrisma = new PrismaClient({ datasourceUrl: observerDatabaseUrl.toString() });
 afterEach(async () => { for (const item of owned.splice(0)) { await prisma.outboxEvent.deleteMany({ where: { aggregateId: item.runId } }); await prisma.shortVideoGenerationRun.deleteMany({ where: { id: item.runId } }); await prisma.job.deleteMany({ where: { workspaceId: item.workspaceId } }); await prisma.shortVideoStyleProfile.deleteMany({ where: { workspaceId: item.workspaceId } }); await prisma.shortVideoProject.deleteMany({ where: { workspaceId: item.workspaceId } }); await prisma.workspace.deleteMany({ where: { id: item.workspaceId } }); } });
 
 async function fixture(generation: number) {
@@ -20,10 +30,10 @@ async function fixture(generation: number) {
 
 async function waitForGenerationOrBlockedUpdate(blockerPid: number, runId: string, expectedGeneration: number) {
   for (let attempt = 0; attempt < 500; attempt++) {
-    const [state] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (SELECT 1 FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND ${blockerPid} = ANY(pg_blocking_pids(activity.pid))) AS blocked`;
+    const [state] = await observerPrisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (SELECT 1 FROM pg_stat_activity activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND ${blockerPid} = ANY(pg_blocking_pids(activity.pid))) AS blocked`;
     if (state?.blocked) return "BLOCKED" as const;
     if ((await prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: runId }, select: { dispatchGeneration: true } })).dispatchGeneration !== expectedGeneration) return "ADVANCED" as const;
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await sleep(10);
   }
   throw new Error("FINALIZER_REARM_RACE_DID_NOT_PROGRESS:ShortVideoGenerationRun");
 }
@@ -47,24 +57,16 @@ async function holdA2RunRowLock(runId: string) {
 
 async function waitForBlockedShortVideoUpdates(blockerPid: number, expectedCount: number) {
   for (let attempt = 0; attempt < 500; attempt++) {
-    const [state] = await prisma.$queryRaw<Array<{ blockedCount: number }>>`WITH RECURSIVE wait_chain(origin_pid, blocker_pid, depth) AS (
+    const [state] = await observerPrisma.$queryRaw<Array<{ blockedCount: number }>>`WITH RECURSIVE wait_chain(origin_pid, blocker_pid, depth) AS (
       SELECT activity.pid, blocker.pid, 1 FROM pg_stat_activity activity CROSS JOIN LATERAL unnest(pg_blocking_pids(activity.pid)) AS blocker(pid)
       WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid() AND activity.wait_event_type = 'Lock' AND activity.query ILIKE '%UPDATE%ShortVideoGenerationRun%'
       UNION ALL
       SELECT chain.origin_pid, next_blocker.pid, chain.depth + 1 FROM wait_chain chain CROSS JOIN LATERAL unnest(pg_blocking_pids(chain.blocker_pid)) AS next_blocker(pid) WHERE chain.depth < 8
     ) SELECT COUNT(DISTINCT origin_pid)::int AS "blockedCount" FROM wait_chain WHERE blocker_pid = ${blockerPid}`;
     if ((state?.blockedCount ?? 0) >= expectedCount) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await sleep(10);
   }
   throw new Error(`A2_SHORT_VIDEO_EXPECTED_${expectedCount}_BLOCKED_RUN_UPDATES`);
-}
-
-async function waitForSignal(signal: () => boolean, message: string) {
-  for (let attempt = 0; attempt < 10_000; attempt++) {
-    if (signal()) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
-  }
-  throw new Error(message);
 }
 
 describe("A2 Short Video dispatch generation overflow", () => {
@@ -154,12 +156,14 @@ describe("A2 Short Video dispatch generation overflow", () => {
       const blocker = await holdA2RunRowLock(run.id);
       let releaseProvider!: () => void;
       const providerGate = new Promise<void>(resolve => releaseProvider = resolve);
+      let signalProviderEntered!: () => void;
+      const providerEntered = new Promise<void>(resolve => signalProviderEntered = resolve);
       let providerDidEnter = false;
       let rearm: ReturnType<typeof rearmShortVideoGenerationRunById> | undefined;
       let worker: ReturnType<typeof processShortVideoGenerationRun> | undefined;
       try {
         worker = processShortVideoGenerationRun(run.id, {
-          providerForRun: async () => { providerDidEnter = true; await providerGate; throw new Error("A2_STOP_AFTER_SHORT_VIDEO_CLAIM"); },
+          providerForRun: async () => { providerDidEnter = true; signalProviderEntered(); await providerGate; throw new Error("A2_STOP_AFTER_SHORT_VIDEO_CLAIM"); },
           embeddingProviderForRun: async () => { throw new Error("A2_UNEXPECTED_EMBEDDING_RESOLUTION"); },
           ttsForRun: async () => { throw new Error("A2_UNEXPECTED_TTS_RESOLUTION"); },
           storage: {} as never,
@@ -170,7 +174,11 @@ describe("A2 Short Video dispatch generation overflow", () => {
         await waitForBlockedShortVideoUpdates(blocker.pid, 2);
         blocker.release();
         await blocker.done;
-        await waitForSignal(() => providerDidEnter, "A2_SHORT_VIDEO_CLAIM_DID_NOT_REACH_PROVIDER_RESOLVER");
+        const workerExitBeforeProvider = worker.then(
+          () => { throw new Error("A2_SHORT_VIDEO_WORKER_RETURNED_BEFORE_PROVIDER_RESOLVER"); },
+          error => { if (!providerDidEnter) throw error; },
+        );
+        await Promise.race([providerEntered, workerExitBeforeProvider]);
         const beforeRearm = await Promise.all([
           prisma.shortVideoGenerationRun.findUniqueOrThrow({ where: { id: run.id } }),
           prisma.job.findUniqueOrThrow({ where: { id: job.id } }),
@@ -344,3 +352,5 @@ describe("A2 Short Video dispatch generation overflow", () => {
     expect(await prisma.providerInvocation.count({ where: { workspaceId: run.workspaceId } })).toBe(providerInvocationsBefore);
   });
 });
+
+afterAll(() => Promise.all([prisma.$disconnect(), observerPrisma.$disconnect()]));

@@ -1,7 +1,7 @@
 /* Prisma rows are deliberately structurally typed at this orchestration boundary. */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { randomUUID } from "node:crypto";
-import { admitWorkspaceExpensiveOperation, Prisma, prisma } from "@ai-cognitive/db";
+import { admitWorkspaceExpensiveOperation, Prisma, prisma, type ExpensiveOperationRecoveryTarget } from "@ai-cognitive/db";
 import { buildBookContextForIntelligence, estimateAnalysisTokens, type EmbeddingProvider } from "@ai-cognitive/book-intelligence";
 import { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "@ai-cognitive/ingestion";
 import { logger } from "@ai-cognitive/shared";
@@ -455,8 +455,27 @@ export async function dispatchPendingPodcastGeneration(queue: { add(name: string
   });
 }
 
-export async function rearmPodcastGenerationRunById(runId: string, expectedDispatchGeneration: number, topic = PODCAST_GENERATION_TOPIC): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
-  try { return await prisma.$transaction(async tx => { const run = await tx.podcastGenerationRun.findUnique({ where: { id: runId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.$queryRaw<Array<{ id: string }>>`
+export async function rearmPodcastGenerationRunById(runId: string, expectedDispatchGeneration: number, topic = PODCAST_GENERATION_TOPIC, expectedTarget?: ExpensiveOperationRecoveryTarget): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
+  try {
+    return await prisma.$transaction(async tx => {
+      if (expectedTarget) {
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "PodcastGenerationRun" WHERE "id" = ${runId} FOR UPDATE`;
+        if (locked.length !== 1) return "NOT_ELIGIBLE";
+      }
+      const run = await tx.podcastGenerationRun.findUnique({ where: { id: runId }, include: { job: true } });
+      if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE";
+      const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now;
+      if (expectedTarget && (expectedTarget.jobType !== PODCAST_GENERATION_JOB || expectedTarget.workspaceId !== run.workspaceId || expectedTarget.jobId !== run.jobId || run.job.workspaceId !== run.workspaceId || run.job.type !== PODCAST_GENERATION_JOB || !(["QUEUED", "RUNNING"] as string[]).includes(run.job.status) || !(["QUEUED", "RUNNING"] as string[]).includes(run.status) || run.job.status !== run.status)) return "NOT_ELIGIBLE";
+      if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE";
+      if (expectedTarget && run.status === "RUNNING") {
+        const leaseAbsent = run.executionClaimToken === null && run.executionClaimedAt === null && run.executionLeaseUntil === null;
+        const leaseComplete = run.executionClaimToken !== null && run.executionClaimedAt !== null && run.executionLeaseUntil !== null;
+        if (!leaseAbsent && !leaseComplete) return "NOT_ELIGIBLE";
+      }
+      if (expectedTarget && run.status === "QUEUED" && (run.executionClaimToken || run.executionClaimedAt || run.executionLeaseUntil)) return "NOT_ELIGIBLE";
+      if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE";
+      if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit());
+      const changed = await tx.$queryRaw<Array<{ id: string }>>`
 UPDATE "PodcastGenerationRun"
 SET "dispatchGeneration" = "dispatchGeneration" + 1,
     "status" = 'QUEUED'::"PodcastGenerationStatus",
@@ -470,5 +489,15 @@ WHERE "id" = ${run.id}
   AND "dispatchGeneration" < ${MAX_PERSISTED_DISPATCH_GENERATION}
   AND "status" IN ('QUEUED'::"PodcastGenerationStatus", 'RUNNING'::"PodcastGenerationStatus", 'FAILED'::"PodcastGenerationStatus")
   AND NOT ("status" = 'RUNNING'::"PodcastGenerationStatus" AND "executionClaimToken" IS NOT NULL AND "executionLeaseUntil" > NOW())
-RETURNING "id"`; if (changed.length !== 1) return "RACE_LOST"; const current = await tx.podcastGenerationRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { podcastGenerationRunId: current.id, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
+RETURNING "id"`;
+      if (changed.length !== 1) return "RACE_LOST";
+      const current = await tx.podcastGenerationRun.findUniqueOrThrow({ where: { id: run.id } });
+      await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } });
+      await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { podcastGenerationRunId: current.id, dispatchGeneration: current.dispatchGeneration } } });
+      return "REARMED";
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED";
+    throw error;
+  }
 }

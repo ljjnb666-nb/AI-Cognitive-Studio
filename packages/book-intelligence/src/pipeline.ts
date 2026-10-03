@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { admitWorkspaceExpensiveOperation, Prisma, prisma } from "../../db/src/index.js";
+import { admitWorkspaceExpensiveOperation, Prisma, prisma, type ExpensiveOperationRecoveryTarget } from "../../db/src/index.js";
 import { logger } from "@ai-cognitive/shared";
 import {
   estimateAnalysisTokens,
@@ -37,6 +37,17 @@ export const BOOK_ANALYSIS_JOB = "book.analysis";
 export const BOOK_ANALYSIS_TOPIC = "book.analysis.requested";
 const contextLimit = 8_000;
 const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
+
+function bookExecutionAttemptPayload(sourceDocumentId: string, chunkSetId: string, routePlan?: BookAnalysisRoutePlan, routePlanHash?: string) {
+  return { sourceDocumentId, chunkSetId, ...(routePlan ? { routePlan, routePlanHash } : {}) };
+}
+
+async function nextBookRecoveryJobIdempotencyKey(tx: Prisma.TransactionClient, workspaceId: string, analysisIdentityHash: string): Promise<string> {
+  const prefix = `book:${analysisIdentityHash}:recovery:`;
+  const jobs = await tx.job.findMany({ where: { workspaceId, idempotencyKey: { startsWith: prefix } }, select: { idempotencyKey: true } });
+  const ordinal = Math.max(0, ...jobs.map(job => Number((job.idempotencyKey ?? "").slice(prefix.length))).filter(Number.isSafeInteger));
+  return `${prefix}${ordinal + 1}`;
+}
 const stageOrder = ["CHUNK_ANALYSIS", "SECTION_ANALYSIS", "CHAPTER_ANALYSIS", "BOOK_SYNTHESIS", "MEMORY_FINALIZATION", "EMBEDDINGS", "FINALIZING", "COMPLETED"] as const;
 type DurableStage = typeof stageOrder[number];
 type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "afterEmbeddingGatewayPersist" | "beforeEmbeddingMaterialization" | "afterEmbeddingMaterialization" | "beforeEmbeddingStageAdvance" | "beforeFinalization" | "afterCurrentExtractionLock";
@@ -102,13 +113,27 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   if (existing) {
     if (existing.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION) throw new Error("BOOK_ANALYSIS_DISPATCH_GENERATION_EXHAUSTED");
     const requeued = await prisma.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${existing.id} FOR UPDATE`;
+      if (locked.length !== 1) return null;
+      const fresh = await tx.bookAnalysisRun.findUnique({ where: { id: existing.id }, include: { job: true } });
+      if (!fresh || fresh.status !== "FAILED" || fresh.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION) return null;
       await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
-      const updated = await tx.bookAnalysisRun.updateMany({ where: { id: existing.id, status: "FAILED", dispatchGeneration: { lt: MAX_PERSISTED_DISPATCH_GENERATION } }, data: { status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null, dispatchGeneration: { increment: 1 } } });
-      if (updated.count !== 1) return null;
-      const retryJob = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey: `book:${analysisIdentityHash}:retry:${existing.job.attemptCount + 1}`, correlationId: input.correlationId } });
-      const recovered = await tx.bookAnalysisRun.update({ where: { id: existing.id }, data: { jobId: retryJob.id } });
-      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: existing.id, payload: { analysisRunId: existing.id, queueJobId: retryJob.id, dispatchGeneration: recovered.dispatchGeneration } } });
-      return tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: existing.id }, include: { job: true } });
+      const retryJob = await tx.job.create({ data: {
+        workspaceId: input.workspaceId,
+        ...(requestedByUserId ? { userId: requestedByUserId } : {}),
+        type: BOOK_ANALYSIS_JOB,
+        payload: bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash) as never,
+        idempotencyKey: await nextBookRecoveryJobIdempotencyKey(tx, input.workspaceId, analysisIdentityHash),
+        correlationId: input.correlationId,
+      } });
+      const updated = await tx.bookAnalysisRun.updateMany({
+        where: { id: fresh.id, status: "FAILED", dispatchGeneration: fresh.dispatchGeneration },
+        data: { jobId: retryJob.id, status: "QUEUED", errorCode: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, completedAt: null, dispatchGeneration: { increment: 1 } },
+      });
+      if (updated.count !== 1) throw new Error("BOOK_ANALYSIS_RETRY_RACE_LOST");
+      const recovered = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: fresh.id } });
+      await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: fresh.id, payload: { analysisRunId: fresh.id, queueJobId: retryJob.id, dispatchGeneration: recovered.dispatchGeneration } } });
+      return tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: fresh.id }, include: { job: true } });
     });
     if (requeued) return { run: requeued, job: requeued.job };
     const concurrent = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { analysisIdentityHash }, include: { job: true } });
@@ -118,7 +143,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   try {
     return await prisma.$transaction(async (tx) => {
       await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
-      const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId: input.sourceDocumentId, chunkSetId: chunkSet.id }, idempotencyKey, correlationId: input.correlationId } });
+      const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash) as never, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider, model, modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash, ...(routePlan ? { routePlan: routePlan as never, routePlanHash } : {}) } });
       await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id, queueJobId: job.id, dispatchGeneration: run.dispatchGeneration } } });
       logger.info("book.analysis.requested", { ...logFields(run, input.correlationId), extractionId: current.extractionId, jobId: job.id, provider, model, ...(routePlanHash ? { routePlanHash } : {}) });
@@ -504,7 +529,11 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
   const recover = () => prisma.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "SourceDocument" WHERE "id" = ${sourceDocumentId} AND "workspaceId" = ${context.workspaceId} FOR UPDATE`;
     if (locked.length !== 1) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
-    const run = await tx.bookAnalysisRun.findFirst({ where: { sourceDocumentId, workspaceId: context.workspaceId }, orderBy: { createdAt: "desc" }, include: { job: true } });
+    const selected = await tx.bookAnalysisRun.findFirst({ where: { sourceDocumentId, workspaceId: context.workspaceId }, orderBy: { createdAt: "desc" }, select: { id: true } });
+    if (!selected) throw new Error("BOOK_ANALYSIS_NOT_REQUESTED");
+    const runLock = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${selected.id} FOR UPDATE`;
+    if (runLock.length !== 1) throw new Error("BOOK_ANALYSIS_NOT_REQUESTED");
+    const run = await tx.bookAnalysisRun.findUnique({ where: { id: selected.id }, include: { job: true } });
     if (!run) throw new Error("BOOK_ANALYSIS_NOT_REQUESTED");
     if (run.status === "SUCCEEDED") {
       const current = await tx.currentBookIntelligence.findUnique({ where: { sourceDocumentId_workspaceId: { sourceDocumentId, workspaceId: context.workspaceId } } });
@@ -523,13 +552,16 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
     const staleAfterMs = Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000);
     if (run.status !== "FAILED" && Date.now() - (run.startedAt?.getTime() ?? run.createdAt.getTime()) <= staleAfterMs) return { run, action: "RETRY_ANALYSIS" as const, repaired: false, created: false };
     if (run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION) throw new Error("BOOK_ANALYSIS_DISPATCH_GENERATION_EXHAUSTED");
-    // BullMQ attemptCount belongs to the individual durable Job and may remain
-    // zero after a provider-stage failure.  The source-document lock makes this
-    // run-scoped count an idempotent, collision-free recovery sequence.
-    const recoveryKeyPrefix = `book:${run.analysisIdentityHash}:recovery:`;
-    const recoveryJobs = await tx.job.findMany({ where: { workspaceId: context.workspaceId, idempotencyKey: { startsWith: recoveryKeyPrefix } }, select: { idempotencyKey: true } });
-    const recoveryOrdinal = Math.max(0, ...recoveryJobs.map(job => Number((job.idempotencyKey ?? "").slice(recoveryKeyPrefix.length))).filter(Number.isSafeInteger));
-    const retryJob = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: BOOK_ANALYSIS_JOB, payload: { sourceDocumentId, chunkSetId: run.chunkSetId }, idempotencyKey: `${recoveryKeyPrefix}${recoveryOrdinal + 1}` } });
+    // Recovery identity is run-scoped rather than BullMQ-attempt-scoped.  Both
+    // recovery entry points serialize on the run row before allocating the
+    // durable ordinal, while the Job payload preserves the exact attempt plan.
+    const retryJob = await tx.job.create({ data: {
+      workspaceId: context.workspaceId,
+      userId: context.userId,
+      type: BOOK_ANALYSIS_JOB,
+      payload: run.job.payload as never,
+      idempotencyKey: await nextBookRecoveryJobIdempotencyKey(tx, context.workspaceId, run.analysisIdentityHash),
+    } });
     const advanced = await tx.bookAnalysisRun.updateMany({ where: { id: run.id, dispatchGeneration: { lt: MAX_PERSISTED_DISPATCH_GENERATION } }, data: { jobId: retryJob.id, status: "QUEUED", analysisStage: "QUEUED", errorCode: null, startedAt: new Date(), completedAt: null, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null, dispatchGeneration: { increment: 1 } } });
     if (advanced.count !== 1) throw new Error("BOOK_ANALYSIS_DISPATCH_GENERATION_EXHAUSTED");
     const recovered = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } });
@@ -555,28 +587,103 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
   }
 }
 
-export type StaleBookAnalysisJobReconciliation = "STALE_RUN_FAILED" | "ORPHAN_JOB_FAILED" | "NOT_ELIGIBLE";
+export type StaleBookAnalysisJobReconciliation = "STALE_RUN_FAILED" | "SKIPPED_VALID_LEASE" | "AMBIGUOUS_SKIPPED" | "ALREADY_TERMINAL" | "LOST_RACE" | "NOT_STALE";
+
+export type StaleBookAnalysisSweepResult = {
+  discovered: number;
+  reconciled: number;
+  skipped_valid_lease: number;
+  ambiguous_skipped: number;
+  already_terminal: number;
+  lost_race: number;
+  not_stale: number;
+  errors: number;
+  provider_calls: 0;
+};
+
+class StaleBookAnalysisJobLostRace extends Error {}
 
 /**
- * Exact-job operator reconciliation for durable Book analysis records that can
- * no longer be consumed. It never touches a live lease and never creates a
- * retry; normal recovery may be requested only after this releases the stale
- * admission slot.
+ * Exact-job stale reconciliation. It takes the BookAnalysisRun row lock first,
+ * matching the durable-operation reconciler's lock order, then revalidates the
+ * Job/run identity and lease before conditional terminalization.
  */
 export async function reconcileStaleBookAnalysisJob(jobId: string, now = new Date()): Promise<StaleBookAnalysisJobReconciliation> {
-  return prisma.$transaction(async (tx) => {
-    const job = await tx.job.findUnique({ where: { id: jobId }, select: { id: true, type: true, status: true } });
-    if (!job || job.type !== BOOK_ANALYSIS_JOB || !["QUEUED", "RUNNING"].includes(job.status)) return "NOT_ELIGIBLE";
-    const run = await tx.bookAnalysisRun.findUnique({ where: { jobId: job.id }, select: { id: true, status: true, executionLeaseUntil: true } });
-    if (!run) {
-      await tx.job.update({ where: { id: job.id }, data: { status: "FAILED", error: { code: "BOOK_ANALYSIS_ORPHANED_JOB" }, completedAt: now } });
-      return "ORPHAN_JOB_FAILED";
-    }
-    if (run.status !== "RUNNING" || !run.executionLeaseUntil || run.executionLeaseUntil >= now) return "NOT_ELIGIBLE";
-    await tx.bookAnalysisRun.update({ where: { id: run.id }, data: { status: "FAILED", errorCode: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED", completedAt: now, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null } });
-    await tx.job.update({ where: { id: job.id }, data: { status: "FAILED", error: { code: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED" }, completedAt: now } });
-    return "STALE_RUN_FAILED";
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "jobId" = ${jobId} FOR UPDATE`;
+      if (locked.length !== 1) {
+        const orphan = await tx.job.findUnique({ where: { id: jobId }, select: { id: true, type: true, status: true } });
+        return orphan?.type === BOOK_ANALYSIS_JOB && ["QUEUED", "RUNNING"].includes(orphan.status) ? "AMBIGUOUS_SKIPPED" : "NOT_STALE";
+      }
+      const run = await tx.bookAnalysisRun.findUnique({ where: { jobId }, select: { id: true, jobId: true, workspaceId: true, dispatchGeneration: true, status: true, executionClaimToken: true, executionClaimedAt: true, executionLeaseUntil: true } });
+      const job = await tx.job.findUnique({ where: { id: jobId }, select: { id: true, workspaceId: true, type: true, status: true } });
+      if (!run || !job) return "AMBIGUOUS_SKIPPED";
+      if (job.type !== BOOK_ANALYSIS_JOB || run.jobId !== job.id || !job.workspaceId || run.workspaceId !== job.workspaceId) return "AMBIGUOUS_SKIPPED";
+      if (job.status === "SUCCEEDED" || job.status === "FAILED" || run.status === "SUCCEEDED" || run.status === "FAILED") return "ALREADY_TERMINAL";
+      if (!["QUEUED", "RUNNING"].includes(job.status) || !["QUEUED", "RUNNING"].includes(run.status)) return "AMBIGUOUS_SKIPPED";
+      if (job.status !== run.status) return "AMBIGUOUS_SKIPPED";
+      if (run.status !== "RUNNING") return "NOT_STALE";
+      if (run.executionLeaseUntil && run.executionLeaseUntil > now) return "SKIPPED_VALID_LEASE";
+      if (!run.executionClaimToken || !run.executionClaimedAt || !run.executionLeaseUntil) return "AMBIGUOUS_SKIPPED";
+
+      const terminalized = await tx.bookAnalysisRun.updateMany({
+        where: {
+          id: run.id,
+          jobId: job.id,
+          workspaceId: job.workspaceId,
+          status: "RUNNING",
+          dispatchGeneration: run.dispatchGeneration,
+          executionClaimToken: run.executionClaimToken,
+          executionClaimedAt: run.executionClaimedAt,
+          executionLeaseUntil: { lte: now },
+        },
+        data: { status: "FAILED", errorCode: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED", completedAt: now, executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null },
+      });
+      if (terminalized.count !== 1) return "LOST_RACE";
+      const jobTerminalized = await tx.job.updateMany({
+        where: { id: job.id, workspaceId: job.workspaceId, type: BOOK_ANALYSIS_JOB, status: "RUNNING" },
+        data: { status: "FAILED", error: { code: "BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED" }, completedAt: now },
+      });
+      if (jobTerminalized.count !== 1) throw new StaleBookAnalysisJobLostRace();
+      return "STALE_RUN_FAILED";
+    });
+  } catch (error) {
+    if (error instanceof StaleBookAnalysisJobLostRace) return "LOST_RACE";
+    throw error;
+  }
+}
+
+/** Bounded discovery of authoritative stale run identities; orphans stay in the ambiguity lane. */
+export async function reconcileStaleBookAnalysisJobs(limit = 25, now = new Date()): Promise<StaleBookAnalysisSweepResult> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError("BOOK_ANALYSIS_STALE_RECONCILIATION_LIMIT_INVALID");
+  const candidates = await prisma.bookAnalysisRun.findMany({
+    where: {
+      status: "RUNNING",
+      executionLeaseUntil: { lte: now },
+      job: { is: { type: BOOK_ANALYSIS_JOB, status: "RUNNING" } },
+    },
+    orderBy: [{ executionLeaseUntil: "asc" }, { id: "asc" }],
+    take: limit,
+    select: { jobId: true },
   });
+  const result: StaleBookAnalysisSweepResult = { discovered: candidates.length, reconciled: 0, skipped_valid_lease: 0, ambiguous_skipped: 0, already_terminal: 0, lost_race: 0, not_stale: 0, errors: 0, provider_calls: 0 };
+  for (const candidate of candidates) {
+    try {
+      const outcome = await reconcileStaleBookAnalysisJob(candidate.jobId, now);
+      if (outcome === "STALE_RUN_FAILED") result.reconciled += 1;
+      else if (outcome === "SKIPPED_VALID_LEASE") result.skipped_valid_lease += 1;
+      else if (outcome === "AMBIGUOUS_SKIPPED") result.ambiguous_skipped += 1;
+      else if (outcome === "ALREADY_TERMINAL") result.already_terminal += 1;
+      else if (outcome === "LOST_RACE") result.lost_race += 1;
+      else result.not_stale += 1;
+    } catch (error) {
+      result.errors += 1;
+      logger.warn("book.analysis.stale_reconciliation.failed", { jobId: candidate.jobId, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  logger.info("book.analysis.stale_reconciliation.completed", result);
+  return result;
 }
 
 async function runFinalizingStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
@@ -704,8 +811,28 @@ export async function dispatchPendingBookAnalysis(queue: { add(name: string, pay
 }
 
 /** Exact-target transport rearm; liveness discovery belongs to PR-A. */
-export async function rearmBookAnalysisRunById(analysisRunId: string, expectedDispatchGeneration: number, topic = BOOK_ANALYSIS_TOPIC): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
-  try { return await prisma.$transaction(async tx => { const run = await tx.bookAnalysisRun.findUnique({ where: { id: analysisRunId }, include: { job: true } }); if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE"; const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now; if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE"; if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit()); const changed = await tx.$queryRaw<Array<{ id: string }>>`
+export async function rearmBookAnalysisRunById(analysisRunId: string, expectedDispatchGeneration: number, topic = BOOK_ANALYSIS_TOPIC, expectedTarget?: ExpensiveOperationRecoveryTarget): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
+  try {
+    return await prisma.$transaction(async tx => {
+      // Every rearm takes the run row before the workspace capacity lock,
+      // matching failed-request retry and durable reconciliation. Read the
+      // current Job only after this lock so a competing retry cannot replace it.
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${analysisRunId} FOR UPDATE`;
+      if (locked.length !== 1) return "NOT_ELIGIBLE";
+      const run = await tx.bookAnalysisRun.findUnique({ where: { id: analysisRunId }, include: { job: true } });
+      if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE";
+      const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now;
+      if (expectedTarget && (expectedTarget.jobType !== BOOK_ANALYSIS_JOB || expectedTarget.workspaceId !== run.workspaceId || expectedTarget.jobId !== run.jobId || run.job.workspaceId !== run.workspaceId || run.job.type !== BOOK_ANALYSIS_JOB || !(["QUEUED", "RUNNING"] as string[]).includes(run.job.status) || !(["QUEUED", "RUNNING"] as string[]).includes(run.status) || run.job.status !== run.status)) return "NOT_ELIGIBLE";
+      if (run.status === "RUNNING" && run.executionLeaseUntil && run.executionLeaseUntil > now) return "NOT_ELIGIBLE";
+      if (expectedTarget && run.status === "RUNNING") {
+        const leaseAbsent = run.executionClaimToken === null && run.executionClaimedAt === null && run.executionLeaseUntil === null;
+        const leaseComplete = run.executionClaimToken !== null && run.executionClaimedAt !== null && run.executionLeaseUntil !== null;
+        if (!leaseAbsent && !leaseComplete) return "NOT_ELIGIBLE";
+      }
+      if (expectedTarget && run.status === "QUEUED" && (run.executionClaimToken || run.executionClaimedAt || run.executionLeaseUntil)) return "NOT_ELIGIBLE";
+      if (!(["QUEUED", "RUNNING", "FAILED"] as string[]).includes(run.status)) return "NOT_ELIGIBLE";
+      if (!(["QUEUED", "RUNNING"] as string[]).includes(run.job.status)) await admitWorkspaceExpensiveOperation(tx, run.workspaceId, workspaceOperationLimit());
+      const changed = await tx.$queryRaw<Array<{ id: string }>>`
 UPDATE "BookAnalysisRun"
 SET "dispatchGeneration" = "dispatchGeneration" + 1,
     "status" = 'QUEUED'::"AnalysisRunStatus",
@@ -719,9 +846,18 @@ WHERE "id" = ${run.id}
   AND "dispatchGeneration" < ${MAX_PERSISTED_DISPATCH_GENERATION}
   AND "status" IN ('QUEUED'::"AnalysisRunStatus", 'RUNNING'::"AnalysisRunStatus", 'FAILED'::"AnalysisRunStatus")
   AND NOT ("status" = 'RUNNING'::"AnalysisRunStatus" AND "executionClaimToken" IS NOT NULL AND "executionLeaseUntil" > NOW())
-RETURNING "id"`; if (changed.length !== 1) return "RACE_LOST"; const current = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } }); await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } }); await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { analysisRunId: current.id, queueJobId: current.jobId, dispatchGeneration: current.dispatchGeneration } } }); return "REARMED"; }); } catch (error) { if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED"; throw error; }
+RETURNING "id"`;
+      if (changed.length !== 1) return "RACE_LOST";
+      const current = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } });
+      await tx.job.update({ where: { id: current.jobId }, data: { status: "QUEUED", completedAt: null, error: Prisma.JsonNull, queueJobId: null } });
+      await tx.outboxEvent.create({ data: { topic, aggregateId: current.id, payload: { analysisRunId: current.id, queueJobId: current.jobId, dispatchGeneration: current.dispatchGeneration } } });
+      return "REARMED";
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED") return "CAPACITY_BLOCKED";
+    throw error;
+  }
 }
-
 export async function retrieveBookKnowledge(input: { workspaceId: string; sourceDocumentId: string; query: string; limit: number; embeddingProvider: EmbeddingProvider }) {
   const [current, extraction] = await Promise.all([
     prisma.currentBookIntelligence.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: input.sourceDocumentId, workspaceId: input.workspaceId } } }),

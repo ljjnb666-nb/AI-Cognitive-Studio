@@ -6,8 +6,43 @@ const password = "Phase9Password!1";
 const uniqueEmail = (label: string) => `phase9-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@ai-cognitive-studio.test`;
 let nextTestIp = 10;
 
+async function assertBookEvidenceLineage(workspaceId: string, sourceDocumentId: string) {
+  const current = await prisma.currentBookIntelligence.findFirstOrThrow({ where: { workspaceId, sourceDocumentId } });
+  const memory = await prisma.bookMemoryItem.findMany({ where: { analysisRunId: current.analysisRunId }, include: { evidence: { include: { sourceBlock: { include: { extraction: true } } } } } });
+  expect(memory.some(item => item.type === "QUOTE" && item.evidence.length > 0)).toBeTruthy();
+  for (const item of memory) {
+    expect(item).toMatchObject({ workspaceId, sourceDocumentId, extractionId: current.extractionId, analysisRunId: current.analysisRunId });
+    for (const evidence of item.evidence) {
+      expect(evidence).toMatchObject({ workspaceId, extractionId: current.extractionId, analysisRunId: current.analysisRunId });
+      expect(evidence.sourceBlock.extraction).toMatchObject({ workspaceId, sourceDocumentId, id: current.extractionId });
+      expect(evidence.startOffset).toBeGreaterThanOrEqual(0);
+      expect(evidence.endOffset).toBeGreaterThan(evidence.startOffset);
+      expect(evidence.endOffset).toBeLessThanOrEqual(evidence.sourceBlock.text.length);
+      if (item.type === "QUOTE") expect(evidence.sourceBlock.text.slice(evidence.startOffset, evidence.endOffset)).toBe(evidence.quoteText);
+    }
+  }
+}
+
+async function selectProductBook(page: import("@playwright/test").Page) {
+  await expect(page.getByRole("checkbox", { name: "phase9-book.pdf", exact: true })).toBeVisible();
+  // Clear every supported default, then select the product flow's named source.
+  for (const checkbox of await page.getByRole("checkbox").all()) await checkbox.uncheck();
+  await page.getByRole("checkbox", { name: "phase9-book.pdf", exact: true }).check();
+  await expect(page.getByRole("checkbox", { checked: true })).toHaveCount(1);
+}
+
 function routeForm(page: import("@playwright/test").Page, slot: string) {
   return page.locator("form").filter({ has: page.getByRole("heading", { name: new RegExp(`\\(${slot}\\)$`) }) });
+}
+
+// The Provider creation form is identified by its field contract (displayName + secret
+// inputs plus its own submit button), never by DOM order: StableBookRouteForm renders
+// an earlier <form> on the same page.
+function providerConnectionForm(page: import("@playwright/test").Page) {
+  return page.locator("form")
+    .filter({ has: page.locator('input[name="displayName"]') })
+    .filter({ has: page.locator('input[name="secret"]') })
+    .filter({ has: page.getByRole("button", { name: "保存 Provider" }) });
 }
 
 function testPdf(lines: string[]) {
@@ -39,7 +74,8 @@ async function signUp(page: import("@playwright/test").Page, email: string) {
 
 async function configureAllRoutes(page: import("@playwright/test").Page, displayName: string, secret: string) {
   await page.goto("/studio/settings/providers");
-  const connectionForm = page.locator("form").first();
+  const connectionForm = providerConnectionForm(page);
+  await expect(connectionForm).toHaveCount(1);
   await connectionForm.locator('input[name="displayName"]').fill(displayName);
   await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
   await connectionForm.locator('input[name="secret"]').fill(secret);
@@ -84,7 +120,8 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
 
   await page.goto("/studio/settings/providers");
   await expect(page.getByRole("heading", { name: "AI Providers" })).toBeVisible();
-  const connectionForm = page.locator("form").first();
+  const connectionForm = providerConnectionForm(page);
+  await expect(connectionForm).toHaveCount(1);
   await expect(connectionForm.locator('input[name="secret"]')).toBeVisible();
   await connectionForm.locator('input[name="displayName"]').fill("Phase 9 test provider");
   await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
@@ -98,7 +135,7 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   const createdConnection = createdBody.connections.find(connection => connection.displayName === "Phase 9 test provider");
   expect(createdConnection).toBeTruthy();
   await expect.poll(() => prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: createdConnection!.id, workspaceId } }, select: { workspaceId: true } })).toMatchObject({ workspaceId });
-  await expect(page.getByText("Phase 9 test provider", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Phase 9 test provider" })).toBeVisible();
   await expect(page.getByText(/API Key: 已配置/)).toBeVisible();
   const initialCredential = await prisma.providerCredentialVersion.findFirstOrThrow({ where: { workspaceId, connectionId: createdConnection!.id } });
   expect(initialCredential).toMatchObject({ workspaceId, connectionId: createdConnection!.id, credentialVersion: 1, status: "ACTIVE" });
@@ -175,8 +212,8 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   expect(revoke.body.readiness.book.state).toBe("INCOMPLETE");
 });
 
-test("unconfigured authenticated workspace ingests without paid Book work, then configures and explicitly retries", async ({ page }) => {
-  test.setTimeout(180_000);
+test("unconfigured workspace ingests without paid Book work, then automatically resumes after Provider configuration", async ({ page }) => {
+  test.setTimeout(360_000);
   const email = uniqueEmail("unconfigured");
   await signUp(page, email);
   const user = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
@@ -190,18 +227,25 @@ test("unconfigured authenticated workspace ingests without paid Book work, then 
   await expect(page.getByText("书籍解析完成。配置 AI Provider 后开始深度理解。")).toBeVisible();
   await expect(page.getByRole("link", { name: "配置 AI Provider" })).toBeVisible();
   expect(await prisma.bookAnalysisRun.count({ where: { workspaceId } })).toBe(0);
+  const waitingBootstrap = await prisma.bookAnalysisBootstrap.findFirstOrThrow({ where: { sourceDocumentId } });
+  expect(waitingBootstrap.status).toBe("WAITING_FOR_PROVIDER");
+  expect(waitingBootstrap.errorCode).toBe("AI_PROVIDER_CONFIGURATION_REQUIRED");
+  // WAITING_FOR_PROVIDER renders the automatic-resume copy without a manual recovery button.
+  await expect(page.getByRole("button", { name: "恢复深度理解" })).toHaveCount(0);
 
   const settingsPage = await page.context().newPage();
   await configureAllRoutes(settingsPage, "Recovery Gateway", "phase9-recovery-secret");
   await settingsPage.close();
-  const request = page.waitForResponse(response => response.url().includes(`/api/studio/processing/${sourceDocumentId}/recover`) && response.request().method() === "POST");
-  await page.getByRole("button", { name: "恢复深度理解" }).click();
-  expect((await request).ok()).toBeTruthy();
+  // The durable bootstrap is rearmed by the worker's waiting-bootstrap reconciler
+  // (60s cadence) once provider readiness resolves; no recovery POST is involved.
+  await expect.poll(() => prisma.bookAnalysisBootstrap.findFirst({ where: { sourceDocumentId }, select: { status: true } }).then(row => row?.status), { timeout: 180_000 }).toBe("SUCCEEDED");
+  await expect.poll(() => prisma.bookAnalysisRun.count({ where: { sourceDocumentId } }), { timeout: 30_000 }).toBe(1);
   await expect.poll(() => prisma.currentBookIntelligence.count({ where: { workspaceId } }), { timeout: 120_000 }).toBe(1);
+  await assertBookEvidenceLineage(workspaceId, sourceDocumentId);
 });
 
 test("a real failed Book analysis exposes an explicit browser retry without re-upload", async ({ page }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(360_000);
   const email = uniqueEmail("book-failure");
   await signUp(page, email);
   const user = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } }), workspaceId = user.memberships[0]!.workspaceId;
@@ -218,12 +262,42 @@ test("a real failed Book analysis exposes an explicit browser retry without re-u
   await expect.poll(async () => (await prisma.bookAnalysisRun.findFirst({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 120_000 }).toBe("FAILED");
   await expect(page.getByText("深度理解失败")).toBeVisible();
   await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
-  for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"]) await setRoute(page, slot, good.id, slot === "EMBEDDING" ? "phase9-embed" : "phase9-text");
-  const retry = page.waitForResponse(response => response.url().includes(`/api/studio/processing/${sourceDocumentId}/recover`) && response.request().method() === "POST");
+  const runA = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" } });
+  expect(runA.status).toBe("FAILED");
+  // Same-plan recovery keeps the same semantic run while allocating a fresh
+  // Job execution attempt (dispatchGeneration advances).
+  const samePlanRetry = page.waitForResponse(response => response.url().includes(`/api/studio/processing/${sourceDocumentId}/recover`) && response.request().method() === "POST");
   await page.getByRole("button", { name: "恢复深度理解" }).click();
-  const retryResponse = await retry, retryBody = await retryResponse.json();
-  expect(retryResponse.ok(), JSON.stringify(retryBody)).toBeTruthy();
-  await expect.poll(() => prisma.currentBookIntelligence.count({ where: { workspaceId } }), { timeout: 120_000 }).toBe(1);
+  expect((await samePlanRetry).ok()).toBeTruthy();
+  await expect.poll(() => prisma.bookAnalysisRun.count({ where: { sourceDocumentId } }), { timeout: 30_000 }).toBe(1);
+  const requeued = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: runA.id }, select: { dispatchGeneration: true } });
+  expect(requeued.dispatchGeneration).toBe(runA.dispatchGeneration + 1);
+  await expect.poll(() => prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: runA.id }, select: { status: true } }).then(row => row.status), { timeout: 120_000 }).toBe("FAILED");
+  const failedAttempt = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: runA.id }, select: { jobId: true } });
+  const failedAttemptJob = await prisma.job.findUniqueOrThrow({ where: { id: failedAttempt.jobId }, select: { id: true, idempotencyKey: true, payload: true } });
+  const failedAttemptPayload = failedAttemptJob.payload as { routePlan?: { routes?: Record<string, { connectionId?: string }> } };
+  expect(failedAttemptJob.idempotencyKey).toBe(`book:${runA.analysisIdentityHash}:recovery:1`);
+  expect(failedAttemptPayload.routePlan?.routes?.BOOK_CHUNK_ANALYSIS?.connectionId).toBe(failing);
+
+  // Built-in connection identity is intentionally excluded from the semantic
+  // routePlanHash. A second retry must therefore keep the same semantic run but
+  // create a fresh execution attempt whose Job payload pins the new connection.
+  for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"]) await setRoute(page, slot, good.id, slot === "EMBEDDING" ? "phase9-embed" : "phase9-text");
+  await page.reload();
+  await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
+  const switchedRetry = page.waitForResponse(response => response.url().includes(`/api/studio/processing/${sourceDocumentId}/recover`) && response.request().method() === "POST");
+  await page.getByRole("button", { name: "恢复深度理解" }).click();
+  expect((await switchedRetry).ok()).toBeTruthy();
+  await expect.poll(() => prisma.currentBookIntelligence.count({ where: { workspaceId, sourceDocumentId } }), { timeout: 120_000 }).toBe(1);
+
+  const recoveredRun = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: runA.id }, select: { id: true, jobId: true, status: true } });
+  expect(recoveredRun).toMatchObject({ id: runA.id, status: "SUCCEEDED" });
+  expect(recoveredRun.jobId).not.toBe(failedAttemptJob.id);
+  const recoveredJob = await prisma.job.findUniqueOrThrow({ where: { id: recoveredRun.jobId }, select: { idempotencyKey: true, payload: true } });
+  const recoveredPayload = recoveredJob.payload as { routePlan?: { routes?: Record<string, { connectionId?: string }> } };
+  expect(recoveredJob.idempotencyKey).toBe(`book:${runA.analysisIdentityHash}:recovery:2`);
+  expect(recoveredPayload.routePlan?.routes?.BOOK_CHUNK_ANALYSIS?.connectionId).toBe(good.id);
+  expect((await prisma.job.findUniqueOrThrow({ where: { id: failedAttemptJob.id }, select: { payload: true } })).payload).toEqual(failedAttemptJob.payload);
   expect(await prisma.ingestionRun.count({ where: { sourceDocumentId } })).toBe(1);
   expect(await prisma.bookAnalysisRun.count({ where: { sourceDocumentId } })).toBe(1);
 });
@@ -280,6 +354,7 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
     return response.status;
   }, { connectionId: connection.id });
   expect(disablePodcastTts).toBe(200);
+  await selectProductBook(page);
   await page.locator('input[name="title"]').fill("Phase 9 evidence podcast");
   await page.locator('input[name="duration"]').fill("1");
   const podcastResponse = page.waitForResponse(response => response.url().includes("/api/studio/generate") && response.request().method() === "POST");
@@ -308,17 +383,37 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
   const audioUrl = await audio.getAttribute("src");
   expect((await page.request.get(audioUrl!)).headers()["content-type"]).toContain("audio/");
 
+  // Prove the newer source resumes with its own evidence even though the product
+  // Podcast/Audio/Video flow deliberately keeps using phase9-book.pdf.
+  await expect.poll(() => prisma.currentBookIntelligence.count({ where: { workspaceId, sourceDocumentId: unsupportedSourceId } }), { timeout: 180_000 }).toBe(1);
+  await assertBookEvidenceLineage(workspaceId, unsupportedSourceId);
+  await assertBookEvidenceLineage(workspaceId, sourceDocumentId);
+
   const failingAudio = await createFailureConnection(page, "Audio failing gateway", "https://phase9-fail-audio.example.test/v1");
   const voiceConfiguration = { outputFormat: "wav", hostVoices: [{ ordinal: 1, providerVoiceId: "host-a", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }, { ordinal: 2, providerVoiceId: "host-b", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }] };
   await setRoute(page, "PODCAST_TTS", failingAudio, "phase9-speech", voiceConfiguration);
   await page.goto("/studio/podcasts/new");
+  await selectProductBook(page);
   await page.locator('input[name="title"]').fill("Phase 9 failed audio recovery");
   await page.locator('input[name="duration"]').fill("1");
   const failedPodcastResponse = page.waitForResponse(response => response.url().includes("/api/studio/generate") && response.request().method() === "POST");
   await page.getByRole("button", { name: "开始生成播客" }).click();
   const failedPodcastBody = await (await failedPodcastResponse).json() as { id: string };
   await expect.poll(async () => (await prisma.podcastGenerationRun.findFirst({ where: { episodeId: failedPodcastBody.id }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 120_000 }).toBe("SUCCEEDED");
+  const scriptRun = await prisma.podcastGenerationRun.findFirstOrThrow({ where: { episodeId: failedPodcastBody.id }, include: { sources: true } });
+  expect(scriptRun.sources).toHaveLength(1);
+  expect(scriptRun.sources[0]!.sourceDocumentId).toBe(sourceDocumentId);
+  const utterances = await prisma.podcastUtterance.findMany({ where: { podcastGenerationRunId: scriptRun.id, substantive: true }, include: { evidence: { include: { sourceBlock: { include: { extraction: true } } } } } });
+  expect(utterances.length).toBeGreaterThan(0);
+  for (const utterance of utterances) {
+    expect(utterance.evidence.length).toBeGreaterThan(0);
+    for (const evidence of utterance.evidence) {
+      expect(evidence).toMatchObject({ workspaceId, sourceDocumentId, extractionId: scriptRun.sources[0]!.extractionId, analysisRunId: scriptRun.sources[0]!.analysisRunId });
+      expect(evidence.sourceBlock.extraction).toMatchObject({ workspaceId, sourceDocumentId, id: evidence.extractionId });
+    }
+  }
   await expect.poll(async () => (await prisma.audioGenerationRun.findFirst({ where: { episodeId: failedPodcastBody.id }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 120_000 }).toBe("FAILED");
+  expect((await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: scriptRun.id } })).status).toBe("SUCCEEDED");
   await page.goto(`/studio/podcasts/${failedPodcastBody.id}`);
   await expect(page.getByText("音频生成失败")).toBeVisible();
   await expect(page.getByRole("button", { name: "重试音频生成" })).toBeVisible();
@@ -329,6 +424,7 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
   await expect.poll(() => prisma.currentPodcastAudio.count({ where: { workspaceId, episodeId: failedPodcastBody.id } }), { timeout: 120_000 }).toBe(1);
 
   await page.goto("/studio/videos/new");
+  await selectProductBook(page);
   await page.locator('input[name="title"]').fill("Phase 9 evidence video");
   await page.locator('input[name="duration"]').fill("15");
   const videoResponse = page.waitForResponse(response => response.url().includes("/api/studio/generate") && response.request().method() === "POST");
@@ -355,7 +451,7 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
   expect((await outsiderPage.request.get(audioUrl!)).status()).toBe(404);
   expect((await outsiderPage.request.get(videoUrl!)).status()).toBe(404);
   await outsiderContext.close();
-  expect(await prisma.currentBookIntelligence.count({ where: { workspaceId } })).toBe(1);
+  expect(await prisma.currentBookIntelligence.count({ where: { workspaceId } })).toBe(2);
   expect(await prisma.currentPodcastScript.count({ where: { workspaceId } })).toBe(2);
   expect(await prisma.currentPodcastAudio.count({ where: { workspaceId } })).toBe(2);
   expect(await prisma.currentShortVideo.count({ where: { workspaceId } })).toBe(1);

@@ -26,6 +26,19 @@ function verifiedPlan(raw: unknown, storedHash: string | null): BookAnalysisRout
     return plan;
   } catch { throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED"); }
 }
+
+function bookExecutionAttemptPlan(jobPayload: unknown, fallbackPlan: unknown, fallbackHash: string | null): { routePlan: unknown; routePlanHash: string | null } {
+  if (jobPayload && typeof jobPayload === "object" && !Array.isArray(jobPayload)) {
+    const payload = jobPayload as Record<string, unknown>;
+    const hasPlan = Object.prototype.hasOwnProperty.call(payload, "routePlan");
+    const hasHash = Object.prototype.hasOwnProperty.call(payload, "routePlanHash");
+    if (hasPlan || hasHash) {
+      if (!hasPlan || !hasHash || typeof payload.routePlanHash !== "string") throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
+      return { routePlan: payload.routePlan, routePlanHash: payload.routePlanHash };
+    }
+  }
+  return { routePlan: fallbackPlan, routePlanHash: fallbackHash };
+}
 function slot(stage: AnalysisRequest["stage"]): "BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS" { return stage === "CHUNK" ? "BOOK_CHUNK_ANALYSIS" : stage === "BOOK" ? "BOOK_SYNTHESIS" : "BOOK_REDUCTION_ANALYSIS"; }
 
 class GatewayAnalysisProvider implements AnalysisProvider {
@@ -66,10 +79,11 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
   const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: input => store.resolveWorkspaceRoute(input) }, { resolve: async () => undefined }, overrides.adapterResolver ?? createProviderAdapterResolver(new FetchProviderHttpTransport()), { authorize: (principal, request) => authorizer.authorizeExecution(principal, request.workspaceId), assertRouteUsable: snapshot => store.assertResolvedRouteUsable(snapshot.workspaceId, snapshot.connectionId, snapshot.credentialVersionId), assertBudget: () => undefined, validateEndpoint: overrides.validateEndpoint ?? (async snapshot => { if (!snapshot.endpoint) throw new Error("ROUTE_UNAVAILABLE"); await validateProviderEndpoint(snapshot.endpoint, { environment: source.NODE_ENV ?? "production", dns: { lookup: async hostname => (await import("node:dns/promises")).resolve4(hostname) } }); }), repository, rate: overrides.rate ?? new RedisRateLimiter(redis!), concurrency: overrides.concurrency ?? new RedisConcurrencyLimiter(redis!), circuit: overrides.circuit ?? new RedisCircuitBreaker(redis!) });
   let closePromise: Promise<void> | undefined;
   const runtime: BookGatewayRuntime = { gateway, repository, close: () => closePromise ??= redis ? redis.quit().then(() => undefined) : Promise.resolve(), createAnalysisProvider: async input => {
-    const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: input.analysisRunId }, select: { jobId: true, routePlan: true, routePlanHash: true, provider: true, model: true } });
+    const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: input.analysisRunId }, select: { jobId: true, routePlan: true, routePlanHash: true, provider: true, model: true, job: { select: { payload: true } } } });
     const slots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
-    if ((run.routePlan === null) !== (run.routePlanHash === null)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
-    const plan = run.routePlan ? verifiedPlan(run.routePlan, run.routePlanHash) : undefined;
+    const attemptPlan = bookExecutionAttemptPlan(run.job.payload, run.routePlan, run.routePlanHash);
+    if ((attemptPlan.routePlan === null) !== (attemptPlan.routePlanHash === null)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
+    const plan = attemptPlan.routePlan ? verifiedPlan(attemptPlan.routePlan, attemptPlan.routePlanHash) : undefined;
     if (plan && Object.values(plan.routes).some(entry => manifest.providers.find(provider => provider.providerKey === entry.providerKey)?.adapterVersion !== entry.adapterVersion)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
     const legacyRoute = async (routeSlot: typeof slots[number]): Promise<ResolvedRoute> => {
       const snapshot = await gateway.resolveSnapshot({ workspaceId: input.workspaceId, routeSlot, correlationId: input.analysisRunId, idempotencyKey: `book-analysis-legacy-preflight:${input.analysisRunId}:${routeSlot}`, inputHash: sha256(`${input.analysisRunId}:${routeSlot}`), capability: { family: "TEXT_GENERATION" } });
@@ -86,12 +100,13 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
     if (Object.values(routes).some(snapshot => snapshot.capability.structuredOutput !== "STRICT_JSON_SCHEMA" && snapshot.capability.structuredOutput !== "JSON_MODE")) throw new Error("BOOK_ANALYSIS_STRUCTURED_OUTPUT_UNSUPPORTED");
     return new GatewayAnalysisProvider(runtime, { workspaceId: input.workspaceId, userId: input.userId, analysisRunId: input.analysisRunId, executionKey: run.jobId, routes });
   }, createEmbeddingGatewayForRun: async input => {
-    const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: input.analysisRunId }, select: { routePlan: true, routePlanHash: true } });
+    const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: input.analysisRunId }, select: { routePlan: true, routePlanHash: true, job: { select: { payload: true } } } });
     // Legacy rows never recorded an embedding identity.  Assigning today's
     // workspace embedding route would silently change their semantic space.
-    if ((run.routePlan === null) !== (run.routePlanHash === null)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
-    if (!run.routePlan) throw new Error("BOOK_ANALYSIS_LEGACY_ROUTE_PLAN_UNAVAILABLE");
-    const plan = verifiedPlan(run.routePlan, run.routePlanHash), entry = plan.routes.EMBEDDING;
+    const attemptPlan = bookExecutionAttemptPlan(run.job.payload, run.routePlan, run.routePlanHash);
+    if ((attemptPlan.routePlan === null) !== (attemptPlan.routePlanHash === null)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
+    if (!attemptPlan.routePlan) throw new Error("BOOK_ANALYSIS_LEGACY_ROUTE_PLAN_UNAVAILABLE");
+    const plan = verifiedPlan(attemptPlan.routePlan, attemptPlan.routePlanHash), entry = plan.routes.EMBEDDING;
     if (manifest.providers.find(provider => provider.providerKey === entry.providerKey)?.adapterVersion !== entry.adapterVersion) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
     const declaredCapability = manifest.providers.find(provider => provider.providerKey === entry.providerKey)?.models.find(model => model.modelId === entry.modelId);
     if (!declaredCapability?.families.includes("EMBEDDING")) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
