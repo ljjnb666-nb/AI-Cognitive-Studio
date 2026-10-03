@@ -814,10 +814,11 @@ export async function dispatchPendingBookAnalysis(queue: { add(name: string, pay
 export async function rearmBookAnalysisRunById(analysisRunId: string, expectedDispatchGeneration: number, topic = BOOK_ANALYSIS_TOPIC, expectedTarget?: ExpensiveOperationRecoveryTarget): Promise<"REARMED" | "RACE_LOST" | "NOT_ELIGIBLE" | "CAPACITY_BLOCKED"> {
   try {
     return await prisma.$transaction(async tx => {
-      if (expectedTarget) {
-        const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${analysisRunId} FOR UPDATE`;
-        if (locked.length !== 1) return "NOT_ELIGIBLE";
-      }
+      // Every rearm takes the run row before the workspace capacity lock,
+      // matching failed-request retry and durable reconciliation. Read the
+      // current Job only after this lock so a competing retry cannot replace it.
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${analysisRunId} FOR UPDATE`;
+      if (locked.length !== 1) return "NOT_ELIGIBLE";
       const run = await tx.bookAnalysisRun.findUnique({ where: { id: analysisRunId }, include: { job: true } });
       if (!run || run.dispatchGeneration !== expectedDispatchGeneration || run.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION || run.status === "SUCCEEDED") return "NOT_ELIGIBLE";
       const now = (await tx.$queryRaw<Array<{ now: Date }>>`SELECT NOW() AS "now"`)[0]!.now;

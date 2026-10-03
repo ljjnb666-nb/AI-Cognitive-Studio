@@ -175,12 +175,13 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     const retried = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "p25", promptVersion: "p", provider: "fixture", model: "fixture-model", routePlan: secondPlan });
 
     expect(retried.run.id).toBe(requested.run.id);
+    expect(retried.run.dispatchGeneration).toBe(requested.run.dispatchGeneration + 1);
     expect(retried.job.id).not.toBe(requested.job.id);
     expect((retried.run.routePlan as { routes: Record<string, { connectionId: string }> }).routes.BOOK_CHUNK_ANALYSIS!.connectionId).toBe(firstConnection.id);
     expect(((retried.job.payload as { routePlan?: { routes?: Record<string, { connectionId?: string }> } }).routePlan?.routes?.BOOK_CHUNK_ANALYSIS?.connectionId)).toBe(secondConnection.id);
     expect(((requested.job.payload as { routePlan?: { routes?: Record<string, { connectionId?: string }> } }).routePlan?.routes?.BOOK_CHUNK_ANALYSIS?.connectionId)).toBe(firstConnection.id);
 
-    await expect(processBookAnalysisRun(retried.run.id, { analysisProviderForRun: input => r.createAnalysisProvider(input), embeddingGatewayForRun: input => r.createEmbeddingGatewayForRun(input) })).resolves.toMatchObject({ status: "SUCCEEDED", analysisStage: "COMPLETED" });
+    await expect(processBookAnalysisRun(retried.run.id, { analysisProviderForRun: input => r.createAnalysisProvider(input), embeddingGatewayForRun: input => r.createEmbeddingGatewayForRun(input) }, retried.run.dispatchGeneration)).resolves.toMatchObject({ status: "SUCCEEDED", analysisStage: "COMPLETED" });
     const snapshots = await prisma.providerExecutionSnapshot.findMany({ where: { workspaceId: f.workspaceId }, select: { connectionId: true } });
     expect(snapshots.length).toBeGreaterThan(0);
     expect(new Set(snapshots.map(snapshot => snapshot.connectionId))).toEqual(new Set([secondConnection.id]));

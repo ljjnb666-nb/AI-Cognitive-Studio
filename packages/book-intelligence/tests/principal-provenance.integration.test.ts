@@ -229,6 +229,12 @@ describe("BookAnalysis durable initiating principal", () => {
     expect(second.run.id).toBe(requested.run.id);
     expect(second.job.id).not.toBe(concurrent[0]!.job.id);
     expect(second.job.idempotencyKey).toBe(`book:${requested.run.analysisIdentityHash}:recovery:2`);
+    await prisma.bookAnalysisRun.update({ where: { id: requested.run.id }, data: { status: "FAILED", errorCode: "THIRD_FAILURE" } });
+    await prisma.job.update({ where: { id: second.job.id }, data: { status: "FAILED", error: { code: "THIRD_FAILURE" }, completedAt: new Date() } });
+    const third = await requestBookAnalysisForUser({ workspaceId: value.workspace.id, userId: value.owner.id }, value.input);
+    expect(third.run.id).toBe(requested.run.id);
+    expect(new Set([concurrent[0]!.job.id, second.job.id, third.job.id]).size).toBe(3);
+    expect(third.job.idempotencyKey).toBe(`book:${requested.run.analysisIdentityHash}:recovery:3`);
     expect(await prisma.job.findMany({
       where: { workspaceId: value.workspace.id, idempotencyKey: { startsWith: `book:${requested.run.analysisIdentityHash}:recovery:` } },
       select: { idempotencyKey: true },
@@ -236,6 +242,7 @@ describe("BookAnalysis durable initiating principal", () => {
     })).toEqual([
       { idempotencyKey: `book:${requested.run.analysisIdentityHash}:recovery:1` },
       { idempotencyKey: `book:${requested.run.analysisIdentityHash}:recovery:2` },
+      { idempotencyKey: `book:${requested.run.analysisIdentityHash}:recovery:3` },
     ]);
   });
 
