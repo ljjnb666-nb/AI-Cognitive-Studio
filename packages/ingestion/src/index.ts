@@ -31,14 +31,15 @@ const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").m
 const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
 
 /**
- * Builds the canonical SourceBlock.metadata payload (canonical-book-v1): the
- * block locator plus per-block provenance, strictly validated before any write.
- * Blocks without locator/provenance (legacy or non-locatable paths) keep raw
- * passthrough metadata. Additive parser fields ride along through
- * block.metadata and must satisfy the canonical schema or the write fails.
+ * Canonical v1 write gate for SourceBlock.metadata: strictly validated before
+ * any write. Provenance is REQUIRED for every block; PDF/EPUB blocks must carry
+ * a locator, TXT/Markdown may leave it null (the locator union does not cover
+ * them). Missing provenance fails closed — legacy tolerance exists only on the
+ * read path (tryParseCanonicalBlockMetadata). A canonical-book-v1 block that
+ * fails the v1 contract is a parser bug and must abort the ingestion, never be
+ * silently rewritten as legacy passthrough metadata.
  */
-function canonicalBlockMetadata(block: ParsedBlock) {
-  if (!block.locator && !block.provenance) return block.metadata ? JSON.parse(JSON.stringify(block.metadata)) : undefined;
+export function canonicalBlockMetadata(block: ParsedBlock) {
   return JSON.parse(JSON.stringify(parseCanonicalBlockMetadata({ ...block.metadata, locator: block.locator ?? null, provenance: block.provenance ?? undefined })));
 }
 

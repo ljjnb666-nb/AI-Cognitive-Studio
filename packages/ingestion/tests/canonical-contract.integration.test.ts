@@ -1,11 +1,14 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import {
+  buildSourceSpan,
   CANONICAL_SCHEMA_VERSION,
+  isUtf16Boundary,
   parseCanonicalBlockMetadata,
   parseExtractionQualityMetadata,
   sha256Utf8,
   tryParseCanonicalBlockMetadata,
+  validateSourceSpan,
 } from "@ai-cognitive/domain";
 import { deflateRawSync } from "node:zlib";
 import { createHash } from "node:crypto";
@@ -13,7 +16,8 @@ import { PassThrough } from "node:stream";
 import PDFDocument from "pdfkit";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { CANONICAL_BLOCK_SEPARATOR } from "../src/canonical-text.js";
-import { createIngestionService } from "../src/index.js";
+import { canonicalBlockMetadata, createIngestionService } from "../src/index.js";
+import { parseDocument } from "../src/document-parsers.js";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
@@ -38,6 +42,10 @@ class FakeStorageProvider implements StorageProvider {
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+
+// Local equivalent of the authoritative book-intelligence isSafeBoundary check:
+// an offset must land on a UTF-16 code-unit boundary, never inside a surrogate pair.
+const isSafeChunkBoundary = (text: string, offset: number): boolean => offset <= 0 || offset >= text.length || !(/[\uD800-\uDBFF]/.test(text[offset - 1]!) && /[\uDC00-\uDFFF]/.test(text[offset]!));
 
 type ZipEntry = { name: string; text: string };
 function epubBytes(entries: ZipEntry[]): Uint8Array {
@@ -173,7 +181,7 @@ describe("canonical contract persistence", () => {
     expect(extraction.qualityStatus).toBe("UNKNOWN");
   });
 
-  it("keeps citation compatibility: content hash, UTF-16 spans, and quote reconstruction", async () => {
+  it("keeps citation compatibility: content hash and authoritative UTF-16 source spans", async () => {
     const storage = new FakeStorageProvider();
     const { user, workspace } = await createWorkspaceFixture();
     const { document } = await ingest(storage, user, workspace, "text/plain", "book.txt", Buffer.from("\uFEFF第一段 🤖\r\n\r\nSecond paragraph\r", "utf8"));
@@ -183,11 +191,39 @@ describe("canonical contract persistence", () => {
 
     expect(extraction.textSha256).toBe(sha256(text));
     expect(blocks.every((block) => block.contentHash === sha256(block.text))).toBe(true);
-    for (const block of blocks) {
-      const quote = block.text.slice(0, 8);
-      const span = await prisma.sourceSpan.create({ data: { sourceBlockId: block.id, startOffset: 0, endOffset: 8, quoteText: quote, quoteHash: sha256Utf8(quote) } });
+
+    const chinese = blocks[0]!;
+    const ascii = blocks[1]!;
+    expect(chinese.text).toBe("第一段 🤖");
+    expect(ascii.text).toBe("Second paragraph");
+
+    // Spans are generated through the domain authority (buildSourceSpan), never
+    // through fixed offsets that String.slice would silently truncate: ASCII,
+    // CJK, and a full emoji surrogate pair must all round-trip.
+    const validCases = [
+      { block: ascii, startOffset: 0, endOffset: 6 },
+      { block: chinese, startOffset: 0, endOffset: 3 },
+      { block: chinese, startOffset: 4, endOffset: 6 },
+    ];
+    for (const { block, startOffset, endOffset } of validCases) {
+      const span = buildSourceSpan(block.text, startOffset, endOffset);
+      expect(span.endOffset).toBeLessThanOrEqual(block.text.length);
+      expect(isUtf16Boundary(block.text, span.startOffset)).toBe(true);
+      expect(isUtf16Boundary(block.text, span.endOffset)).toBe(true);
       expect(span.quoteText).toBe(block.text.slice(span.startOffset, span.endOffset));
+      expect(span.quoteHash).toBe(sha256Utf8(span.quoteText));
+      expect(validateSourceSpan(block.text, span.startOffset, span.endOffset, span.quoteText)).toBe(true);
+
+      const persisted = await prisma.sourceSpan.create({ data: { sourceBlockId: block.id, startOffset: span.startOffset, endOffset: span.endOffset, quoteText: span.quoteText, quoteHash: span.quoteHash } });
+      expect(validateSourceSpan(block.text, persisted.startOffset, persisted.endOffset, persisted.quoteText)).toBe(true);
+      expect(persisted.quoteHash).toBe(sha256Utf8(persisted.quoteText));
     }
+
+    // Out-of-bounds and mid-surrogate offsets must be rejected by the domain
+    // authority instead of being masked by String.slice truncation.
+    expect(() => buildSourceSpan(chinese.text, 0, 8)).toThrow(RangeError);
+    expect(() => buildSourceSpan(chinese.text, 0, 5)).toThrow(RangeError);
+    expect(validateSourceSpan(chinese.text, 0, 8, chinese.text.slice(0, 8))).toBe(false);
   });
 
   it("persists a mixed-parser extraction where provenance varies per block", async () => {
@@ -230,13 +266,15 @@ describe("canonical contract persistence", () => {
     const chunk = await prisma.documentChunk.create({
       data: { workspaceId: workspace.id, chunkSetId: chunkSet.id, extractionId: mixed.id, structureVersion: "structure-test", ordinal: 0, content, contentHash: sha256Utf8(content), characterCount: content.length, tokenEstimate: content.length },
     });
-    let chunkOffset = 0;
     for (const [ordinal, block] of mixedBlocks.entries()) {
-      await prisma.chunkSourceSpan.create({ data: { chunkId: chunk.id, sourceBlockId: block.id, extractionId: mixed.id, ordinal, startOffset: chunkOffset, endOffset: chunkOffset + block.text.length } });
-      chunkOffset += block.text.length + CANONICAL_BLOCK_SEPARATOR.length;
+      // ChunkSourceSpan offsets are SOURCE-BLOCK-LOCAL UTF-16 offsets (the
+      // authoritative chunkBlocks contract): a full-block span covers
+      // [0, block.text.length) and never accumulates chunk-global offsets.
+      await prisma.chunkSourceSpan.create({ data: { chunkId: chunk.id, sourceBlockId: block.id, extractionId: mixed.id, ordinal, startOffset: 0, endOffset: block.text.length } });
     }
-    for (const [ordinal, block] of mixedBlocks.entries()) {
-      await prisma.sourceSpan.create({ data: { sourceBlockId: block.id, startOffset: 0, endOffset: block.text.length, quoteText: block.text, quoteHash: sha256Utf8(block.text) } });
+    for (const block of mixedBlocks) {
+      const span = buildSourceSpan(block.text, 0, block.text.length);
+      await prisma.sourceSpan.create({ data: { sourceBlockId: block.id, startOffset: span.startOffset, endOffset: span.endOffset, quoteText: span.quoteText, quoteHash: span.quoteHash } });
     }
 
     const persistedBlocks = await prisma.sourceBlock.findMany({ where: { extractionId: mixed.id }, orderBy: { ordinal: "asc" }, include: { sourcePage: true } });
@@ -247,12 +285,24 @@ describe("canonical contract persistence", () => {
     expect(persistedBlocks[1]?.bbox).toBeNull();
     expect(persistedBlocks[0]?.bbox).toEqual({ x0: 0, y0: 0, x1: 100, y1: 20 });
 
+    // Reconstruction follows the authoritative production contract: order spans
+    // by ordinal, slice each SOURCE block locally, join with the canonical
+    // separator, and the result must equal the chunk content exactly.
     const spans = await prisma.chunkSourceSpan.findMany({ where: { chunkId: chunk.id }, orderBy: { ordinal: "asc" } });
-    for (const span of spans) {
+    const reconstructedPieces = spans.map((span) => {
       const block = persistedBlocks.find((candidate) => candidate.id === span.sourceBlockId);
       expect(block).toBeDefined();
-      expect(chunk.content.slice(span.startOffset, span.endOffset)).toBe(block!.text);
-    }
+      // Equivalent of the authoritative validateEvidence invariant: integer,
+      // bounded, UTF-16-safe block-local offsets.
+      expect(Number.isInteger(span.startOffset) && Number.isInteger(span.endOffset)).toBe(true);
+      expect(span.startOffset).toBeGreaterThanOrEqual(0);
+      expect(span.endOffset).toBeGreaterThan(span.startOffset);
+      expect(span.endOffset).toBeLessThanOrEqual(block!.text.length);
+      expect(isSafeChunkBoundary(block!.text, span.startOffset)).toBe(true);
+      expect(isSafeChunkBoundary(block!.text, span.endOffset)).toBe(true);
+      return block!.text.slice(span.startOffset, span.endOffset);
+    });
+    expect(reconstructedPieces.join(CANONICAL_BLOCK_SEPARATOR)).toBe(chunk.content);
     const sourceSpans = await prisma.sourceSpan.findMany({ where: { sourceBlock: { extractionId: mixed.id } } });
     for (const span of sourceSpans) {
       const block = persistedBlocks.find((candidate) => candidate.id === span.sourceBlockId)!;
@@ -292,5 +342,29 @@ describe("canonical contract persistence", () => {
     const stillCurrent = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
     expect(stillCurrent.extractionId).toBe(current.extractionId);
     expect(stillCurrent.extractionId).not.toBe(legacy.id);
+  });
+});
+
+describe("canonical v1 write gate", () => {
+  it("fails closed when a new canonical block has no provenance", () => {
+    expect(() => canonicalBlockMetadata({ kind: "PARAGRAPH", text: "orphan" })).toThrow();
+    expect(() => canonicalBlockMetadata({ kind: "PARAGRAPH", text: "orphan", locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null } })).toThrow();
+  });
+
+  it("keeps every production parser's output writable under the strict v1 gate", async () => {
+    const nativeProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "builtin-text", parserVersion: "text-parser-v1" };
+    const markdownProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-markdown", parserVersion: "markdown-parser-v1" };
+    const pdfProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" };
+    const epubProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v1" };
+
+    const txt = (await parseDocument(Buffer.from("Plain paragraph"), "text/plain")).pages[0]!.blocks[0]!;
+    const markdown = (await parseDocument(Buffer.from("# Title"), "text/markdown")).pages[0]!.blocks[0]!;
+    const pdf = (await parseDocument(await pdfFixture(["Hello PDF"]), "application/pdf")).pages[0]!.blocks[0]!;
+    const epub = (await parseDocument(epubFixture(), "application/epub+zip")).pages[0]!.blocks[0]!;
+
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(txt))).toEqual({ locator: null, provenance: nativeProvenance });
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(markdown))).toEqual({ locator: null, provenance: markdownProvenance });
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(pdf))).toEqual({ locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null }, provenance: pdfProvenance });
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(epub))).toEqual({ locator: { kind: "epub", spineIndex: 0, href: "OPS/b.xhtml", fragmentId: null, elementPath: null }, provenance: epubProvenance });
   });
 });
