@@ -17,7 +17,6 @@ import {
 } from "./helpers/cross-format/fixtures.js";
 import {
   evaluateCrossFormat,
-  verifyProvenanceAndReconstruction,
   type ParsedSide,
 } from "./helpers/cross-format/gate.js";
 import {
@@ -53,8 +52,8 @@ async function evaluateFixture(spec: FixtureSpec) {
       pdf: buildCrossFormatView(pdf.blocks).normalizedStream,
       epub: buildCrossFormatView(epub.blocks).normalizedStream,
     },
+    // result.provenance is the SINGLE provenance/reconstruction authority.
     result: evaluateCrossFormat(pdf, epub, { includeTables: spec.includeTables, pdfComplete: spec.pdfComplete, epubComplete: spec.epubComplete }),
-    provenance: verifyProvenanceAndReconstruction(pdf, epub, { includeTables: spec.includeTables }),
   };
 }
 
@@ -234,18 +233,18 @@ describe("diagnostic classifier", () => {
 
 describe("positive cross-format fixtures", () => {
   it("BASIC_REFLOWABLE: content PASS with page/spine boundaries cutting differently", async () => {
-    const { result, provenance } = await evaluateFixture({
+    const { result } = await evaluateFixture({
       id: "basic-reflowable",
       pdfPages: bookAPdfPages(),
       epubSpine: bookAEpubSpine(),
     });
     expect(result.content).toEqual({ status: "PASS" });
     expect(result.structure).toMatchObject({ status: "NOT_COMPARABLE", code: "CROSS_FORMAT_STRUCTURE_NOT_COMPARABLE" });
-    expect(provenance).toEqual({ status: "PASS" });
+    expect(result.provenance).toEqual({ status: "PASS" });
   });
 
   it("UNICODE: NBSP, accents, dashes and curly quotes compare PASS; provenance stays format-native", async () => {
-    const { result, provenance, pdf, epub } = await evaluateFixture({
+    const { result, pdf, epub } = await evaluateFixture({
       id: "unicode",
       pdfPages: [["R\u00e9sum\u00e9 of facts.", "Alpha\u00a0Beta spaced."], ["a\u2014b \u201cquoted\u201d — dash."]],
       epubSpine: [
@@ -254,7 +253,7 @@ describe("positive cross-format fixtures", () => {
       ],
     });
     expect(result.content).toEqual({ status: "PASS" });
-    expect(provenance).toEqual({ status: "PASS" });
+    expect(result.provenance).toEqual({ status: "PASS" });
     const pdfBlock = pdf.blocks[0]!;
     expect(pdfBlock.locator).toMatchObject({ kind: "pdf", physicalPageIndex: 0, printedPageLabel: null });
     expect(pdfBlock.provenance).toEqual({ sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" });
@@ -452,5 +451,150 @@ describe("format-native provenance preservation", () => {
       expect(locator.elementPath).toBeTruthy();
       expect(block.provenance).toEqual({ sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RF01-01: the main gate's provenance dimension is authoritative and
+// fail-closed — it must NEVER return PASS for malformed input.
+// ---------------------------------------------------------------------------
+
+describe("fail-closed provenance authority (RF01)", () => {
+  const validPdfBlock = () => ({
+    ordinal: 0,
+    kind: "PARAGRAPH",
+    text: "Body text.",
+    locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null },
+    provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" },
+  });
+  const validEpubBlock = () => ({
+    ordinal: 0,
+    kind: "PARAGRAPH",
+    text: "Body text.",
+    locator: { kind: "epub", spineIndex: 0, href: "OPS/a.xhtml", elementPath: "/html[1]/body[1]/p[1]" },
+    provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" },
+  });
+  const side = (blocks: ParsedSide["blocks"]): ParsedSide => ({
+    blocks,
+    textsByOrdinal: new Map(blocks.map((block) => [block.ordinal, block.text])),
+  });
+
+  const expectProvenanceFails = (result: ReturnType<typeof evaluateCrossFormat>) => {
+    expect(result.provenance.status).toBe("FAIL");
+    expect(result.provenance.code).toBe("CROSS_FORMAT_PROVENANCE_INVALID");
+  };
+
+  it("MAIN_GATE_PROVENANCE_NOT_HARDCODED: a clean pair passes through the same authoritative path", () => {
+    const result = evaluateCrossFormat(side([validPdfBlock()]), side([validEpubBlock()]));
+    expect(result.provenance).toEqual({ status: "PASS" });
+  });
+
+  it("MALFORMED_PDF_PROVENANCE_FAILS: missing or alien parser identity fails closed", () => {
+    const missing = evaluateCrossFormat(side([{ ...validPdfBlock(), provenance: undefined }]), side([validEpubBlock()]));
+    expectProvenanceFails(missing);
+    const alien = evaluateCrossFormat(
+      side([{ ...validPdfBlock(), provenance: { sourceMethod: "OCR", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" } }]),
+      side([validEpubBlock()]),
+    );
+    expectProvenanceFails(alien);
+  });
+
+  it("WRONG_LOCATOR_FAILS: wrong kind or missing physical page fails closed", () => {
+    const epubKind = evaluateCrossFormat(
+      side([{ ...validPdfBlock(), locator: { kind: "epub", spineIndex: 0, href: "OPS/a.xhtml" } }]),
+      side([validEpubBlock()]),
+    );
+    expectProvenanceFails(epubKind);
+    const missingPage = evaluateCrossFormat(
+      side([{ ...validPdfBlock(), locator: { kind: "pdf", printedPageLabel: null } }]),
+      side([validEpubBlock()]),
+    );
+    expectProvenanceFails(missingPage);
+    const noLocator = evaluateCrossFormat(side([{ ...validPdfBlock(), locator: undefined }]), side([validEpubBlock()]));
+    expectProvenanceFails(noLocator);
+  });
+
+  it("MALFORMED_EPUB_PROVENANCE_FAILS: missing or alien parser identity fails closed", () => {
+    const missing = evaluateCrossFormat(side([validPdfBlock()]), side([{ ...validEpubBlock(), provenance: undefined }]));
+    expectProvenanceFails(missing);
+    const alien = evaluateCrossFormat(
+      side([validPdfBlock()]),
+      side([{ ...validEpubBlock(), provenance: { sourceMethod: "NATIVE_TEXT", parserName: "builtin-epub", parserVersion: "epub-parser-v2" } }]),
+    );
+    expectProvenanceFails(alien);
+  });
+
+  it("WRONG_LOCATOR_FAILS on the EPUB side: pdf kind, missing spine, or missing locator fails closed", () => {
+    const pdfKind = evaluateCrossFormat(
+      side([validPdfBlock()]),
+      side([{ ...validEpubBlock(), locator: { kind: "pdf", physicalPageIndex: 0 } }]),
+    );
+    expectProvenanceFails(pdfKind);
+    const missingSpine = evaluateCrossFormat(
+      side([validPdfBlock()]),
+      side([{ ...validEpubBlock(), locator: { kind: "epub", href: "OPS/a.xhtml" } }]),
+    );
+    expectProvenanceFails(missingSpine);
+    const noLocator = evaluateCrossFormat(side([validPdfBlock()]), side([{ ...validEpubBlock(), locator: undefined }]));
+    expectProvenanceFails(noLocator);
+  });
+
+  it("UTF16_BOUNDARY_CHECK_INSIDE_VERIFIER + MID_SURROGATE_FRAGMENT_REJECTED: the verifier rejects hand-built mid-surrogate fragments", () => {
+    // "A😀B" code units: A=0, high=1, low=2, B=3.
+    const blocksByOrdinal = new Map([[0, { ordinal: 0, kind: "PARAGRAPH", text: "A😀B" } as ComparableBlock]]);
+    const endMidPair = verifySegmentReconstruction(
+      { normalizedText: "A", sourceFragments: [{ blockOrdinal: 0, startOffset: 0, endOffset: 2 }], blockKind: "PARAGRAPH" },
+      blocksByOrdinal,
+    );
+    expect(endMidPair).toBeTruthy();
+    const startMidPair = verifySegmentReconstruction(
+      { normalizedText: "B", sourceFragments: [{ blockOrdinal: 0, startOffset: 2, endOffset: 4 }], blockKind: "PARAGRAPH" },
+      blocksByOrdinal,
+    );
+    expect(startMidPair).toBeTruthy();
+    // A well-formed fragment over the same pair still reconstructs.
+    const wholePair = verifySegmentReconstruction(
+      { normalizedText: "😀", sourceFragments: [{ blockOrdinal: 0, startOffset: 1, endOffset: 3 }], blockKind: "PARAGRAPH" },
+      blocksByOrdinal,
+    );
+    expect(wholePair).toBeNull();
+  });
+
+  it("SEGMENT_RECONSTRUCTION: a lying normalizedText fails even with valid UTF-16 fragments", () => {
+    const blocksByOrdinal = new Map([[0, { ordinal: 0, kind: "PARAGRAPH", text: "Hello world" } as ComparableBlock]]);
+    const violation = verifySegmentReconstruction(
+      { normalizedText: "Hello fake world", sourceFragments: [{ blockOrdinal: 0, startOffset: 0, endOffset: 11 }], blockKind: "PARAGRAPH" },
+      blocksByOrdinal,
+    );
+    expect(violation).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RF01-03: BOM contract — leading BOM stripped, interior U+FEFF preserved.
+// ---------------------------------------------------------------------------
+
+describe("BOM normalization contract (RF01)", () => {
+  it("LEADING_BOM_REMOVED", () => {
+    expect(normalizeForComparison("\uFEFFABC")).toBe("ABC");
+    expect(buildComparisonSegment(0, "\uFEFFABC", "PARAGRAPH").normalizedText).toBe("ABC");
+  });
+
+  it("INTERIOR_FEFF_NOT_NORMALIZED_AS_WHITESPACE", () => {
+    expect(normalizeForComparison("A\uFEFFB")).toBe("A\uFEFFB");
+    expect(normalizeForComparison("A\uFEFFB")).not.toBe("A B");
+    const segment = buildComparisonSegment(0, "A\uFEFFB", "PARAGRAPH");
+    expect(segment.normalizedText).toBe("A\uFEFFB");
+    // Reconstruction stays exact with the preserved interior BOM.
+    expect(verifySegmentReconstruction(segment, new Map([[0, { ordinal: 0, kind: "PARAGRAPH", text: "A\uFEFFB" } as ComparableBlock]]))).toBeNull();
+  });
+
+  it("both normalization paths agree on FEFF-adjacent whitespace", () => {
+    // A BOM sitting at the trim boundary is stripped by BOTH paths (mirrors
+    // N6 + String#trim semantics); only interior BOMs are preserved.
+    expect(normalizeForComparison(" \uFEFFA")).toBe("A");
+    expect(buildComparisonSegment(0, " \uFEFFA", "PARAGRAPH").normalizedText).toBe("A");
+    expect(normalizeForComparison("A\uFEFF")).toBe("A");
+    expect(buildComparisonSegment(0, "A\uFEFF", "PARAGRAPH").normalizedText).toBe("A");
   });
 });

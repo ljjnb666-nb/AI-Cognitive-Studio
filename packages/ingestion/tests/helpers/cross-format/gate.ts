@@ -78,6 +78,10 @@ export function evaluateCrossFormat(
 
   const content = evaluateContent(pdfView.normalizedStream, epubView.normalizedStream, pdfView, epubView, options);
   const structure = evaluateStructure(pdfView, epubView);
+  // Authoritative, computed here — never a hardcoded PASS. The gate result's
+  // provenance dimension is the single source of truth for both provenance
+  // identity and fragment reconstruction validity.
+  const provenance = verifyProvenanceAndReconstruction(pdf, epub, { includeTables: options.includeTables });
   const features = {
     footnotes: pdfView.capabilities.footnotes || epubView.capabilities.footnotes
       ? notComparable("CROSS_FORMAT_STRUCTURE_NOT_COMPARABLE", "PDF production parser cannot classify footnotes; relocation equivalence is not provable")
@@ -93,7 +97,7 @@ export function evaluateCrossFormat(
       : notComparable("CROSS_FORMAT_STRUCTURE_NOT_COMPARABLE", "no table evidence on either side"),
   };
 
-  return { content, structure, provenance: { status: "PASS" }, features };
+  return { content, structure, provenance, features };
 }
 
 function evaluateContent(

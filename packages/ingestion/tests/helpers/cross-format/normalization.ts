@@ -26,6 +26,7 @@
  * matching — none may exist in this file.
  */
 
+import { isUtf16Boundary, validateSourceSpan } from "@ai-cognitive/domain";
 import type {
   ComparisonSegment,
   CrossFormatSemanticView,
@@ -42,6 +43,15 @@ export const COMPARABLE_LEXICAL_KINDS: ReadonlySet<string> = new Set([
   "CAPTION",
 ]);
 
+/**
+ * N4 comparison whitespace: every JavaScript \s member EXCEPT U+FEFF. BOM is
+ * stripped only at the comparison-source start (N6); an interior U+FEFF is
+ * lexical content and must never silently become an ASCII space. Both the
+ * whole-string and the grapheme-cluster paths must use exactly this class.
+ */
+const COMPARISON_WHITESPACE = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/g;
+const COMPARISON_WHITESPACE_CLUSTER = /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/u;
+
 /** Applies N1–N7 plus boundary trimming to one derived comparison slice. */
 export function normalizeForComparison(input: string): string {
   let normalized = input;
@@ -50,7 +60,7 @@ export function normalizeForComparison(input: string): string {
   normalized = normalized.normalize("NFC");
   normalized = normalized.replace(/\u00AD/g, "");
   normalized = normalized.replace(/\u00A0/g, " ");
-  normalized = normalized.replace(/\s+/g, " ");
+  normalized = normalized.replace(COMPARISON_WHITESPACE, " ");
   return normalized.trim();
 }
 
@@ -81,7 +91,7 @@ export function buildComparisonSegment(
       else pendingGapStart = pendingGapStart ?? start;
       continue;
     }
-    if (/\s+/u.test(raw)) {
+    if (COMPARISON_WHITESPACE_CLUSTER.test(raw)) {
       if (whitespaceRun === null) {
         whitespaceRun = { start: pendingGapStart ?? start, end };
         pendingGapStart = null;
@@ -100,11 +110,14 @@ export function buildComparisonSegment(
   }
 
   // Boundary trimming (N7): drop only leading/trailing whitespace pieces;
-  // interior single spaces are lexical content and must survive.
+  // interior single spaces are lexical content and must survive. A BOM at a
+  // trim boundary mirrors both N6 and String#trim semantics (which also
+  // strips boundary U+FEFF): boundary BOM removed, interior BOM preserved.
+  const isBoundaryDroppable = (text: string): boolean => text === " " || text === "\uFEFF";
   let first = 0;
   let last = pieces.length;
-  while (first < last && pieces[first]?.text === " ") first++;
-  while (last > first && pieces[last - 1]?.text === " ") last--;
+  while (first < last && isBoundaryDroppable(pieces[first]?.text ?? "")) first++;
+  while (last > first && isBoundaryDroppable(pieces[last - 1]?.text ?? "")) last--;
   const keptPieces = pieces.slice(first, last);
   const normalizedText = keptPieces.map((piece) => piece.text).join("");
   const fragments: SourceFragment[] = [];
@@ -157,10 +170,14 @@ export function buildCrossFormatView(
 }
 
 /**
- * Reconstruction invariant: the original slices of a segment's fragments,
- * concatenated in declared order and passed through the SAME normalization,
- * must rebuild the segment text exactly. Returns a failure description
- * instead of throwing so the gate can report CROSS_FORMAT_PROVENANCE_INVALID.
+ * Fail-closed reconstruction verifier. For every fragment it enforces, in
+ * order: the original block exists; offsets are integers inside the block;
+ * both offsets sit on UTF-16 boundaries (never mid-surrogate); the sliced
+ * quote validates as a citation span. Only after all of that does it prove
+ * the original slices reconstruct the segment text under the SAME
+ * normalization. Any violation is a CROSS_FORMAT_PROVENANCE_INVALID
+ * description — the verifier never assumes the builder produced sane
+ * fragments.
  */
 export function verifySegmentReconstruction(
   segment: ComparisonSegment,
@@ -170,6 +187,9 @@ export function verifySegmentReconstruction(
   for (const fragment of segment.sourceFragments) {
     const block = blocksByOrdinal.get(fragment.blockOrdinal);
     if (!block) return `fragment references unknown block ordinal ${fragment.blockOrdinal}`;
+    if (!Number.isInteger(fragment.startOffset) || !Number.isInteger(fragment.endOffset)) {
+      return `fragment range [${fragment.startOffset}, ${fragment.endOffset}) is not integer-valued`;
+    }
     if (
       fragment.startOffset < 0 ||
       fragment.endOffset > block.text.length ||
@@ -177,7 +197,17 @@ export function verifySegmentReconstruction(
     ) {
       return `fragment range [${fragment.startOffset}, ${fragment.endOffset}) escapes block ${fragment.blockOrdinal}`;
     }
-    slices.push(block.text.slice(fragment.startOffset, fragment.endOffset));
+    if (!isUtf16Boundary(block.text, fragment.startOffset)) {
+      return `fragment start ${fragment.startOffset} splits a surrogate pair in block ${fragment.blockOrdinal}`;
+    }
+    if (!isUtf16Boundary(block.text, fragment.endOffset)) {
+      return `fragment end ${fragment.endOffset} splits a surrogate pair in block ${fragment.blockOrdinal}`;
+    }
+    const quote = block.text.slice(fragment.startOffset, fragment.endOffset);
+    if (!validateSourceSpan(block.text, fragment.startOffset, fragment.endOffset, quote)) {
+      return `fragment [${fragment.startOffset}, ${fragment.endOffset}) of block ${fragment.blockOrdinal} fails the UTF-16 citation span contract`;
+    }
+    slices.push(quote);
   }
   const reconstructed = normalizeForComparison(slices.join(""));
   if (reconstructed !== segment.normalizedText) {
