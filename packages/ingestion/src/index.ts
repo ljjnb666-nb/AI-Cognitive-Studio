@@ -161,7 +161,12 @@ export function createIngestionService(storage: StorageProvider, options = { max
               normalizationVersion: CANONICAL_NORMALIZATION_VERSION,
               canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION,
               qualityStatus: "UNKNOWN",
-              qualityMetadata: UNASSESSED_EXTRACTION_QUALITY,
+              // Parser warnings are typed, evidence-backed observations only;
+              // they never move qualityStatus off UNKNOWN.
+              qualityMetadata: parsed.qualityWarnings?.length ? parseExtractionQualityMetadata({ warnings: parsed.qualityWarnings }) : UNASSESSED_EXTRACTION_QUALITY,
+              // Format-native metadata (EPUB package/navigation evidence);
+              // legacy rows and non-EPUB formats keep NULL.
+              formatMetadata: parsed.formatMetadata == null ? undefined : JSON.parse(JSON.stringify(parsed.formatMetadata)),
               textStorageKey: textKey,
               textSha256: sha256Utf8(text),
               characterCount: text.length,
@@ -291,6 +296,6 @@ function parserProvenance(mediaType: string): { name: string; version: string } 
   if (mediaType === "text/plain") return { name: "builtin-text", version: "text-parser-v1" };
   if (mediaType === "text/markdown") return { name: "builtin-markdown", version: "markdown-parser-v1" };
   if (mediaType === "application/pdf") return { name: "pdfjs-isolated", version: "pdf-isolation-v3" };
-  if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v1" };
+  if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v2" };
   return { name: "unsupported", version: "unsupported-v1" };
 }

@@ -112,6 +112,12 @@ export const EXTRACTION_QUALITY_WARNING_CODES = [
   "OCR_USED",
   "PARTIAL_EXTRACTION",
   "HEADER_FOOTER_CONTAMINATION",
+  // EPUB native ingestion (additive): navigation was declared but structurally
+  // unusable for non-security reasons, and a pre-paginated (fixed-layout)
+  // rendition was detected. Both are evidence-backed parser observations only;
+  // they never move qualityStatus off UNKNOWN.
+  "EPUB_NAVIGATION_DEGRADED",
+  "EPUB_FIXED_LAYOUT",
 ] as const;
 
 export type ExtractionQualityWarningCode = (typeof EXTRACTION_QUALITY_WARNING_CODES)[number];

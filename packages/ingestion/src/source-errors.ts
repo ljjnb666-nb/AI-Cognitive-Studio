@@ -12,6 +12,9 @@ export const SourceError = {
   STORAGE: "SOURCE_STORAGE_ERROR",
   PARSE: "SOURCE_PARSE_ERROR",
   CANONICAL_BLOCK_CONTRACT_INVALID: "SOURCE_CANONICAL_BLOCK_CONTRACT_INVALID",
+  // A pre-paginated (fixed-layout) EPUB with no usable textual evidence: an
+  // explicit, stable failure instead of SUCCEEDED + empty extraction.
+  EPUB_FIXED_LAYOUT_UNSUPPORTED: "SOURCE_EPUB_FIXED_LAYOUT_UNSUPPORTED",
 } as const;
 
 export type SourceErrorCode = (typeof SourceError)[keyof typeof SourceError];
@@ -25,6 +28,7 @@ export function sourceErrorForParserResult(result: string): SourceErrorCode {
     case "CORRUPTED": return SourceError.CORRUPTED;
     case "PARSE_TIMEOUT": return SourceError.PARSE_TIMEOUT;
     case "ARCHIVE_UNSAFE": return SourceError.ARCHIVE_UNSAFE;
+    case "EPUB_FIXED_LAYOUT_UNSUPPORTED": return SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED;
     default: return SourceError.PARSE;
   }
 }

@@ -172,10 +172,10 @@ describe("canonical contract persistence", () => {
     expect(pageCount).toBe(0);
     expect(blocks).toHaveLength(4);
     expect(blocks.map((block) => parseCanonicalBlockMetadata(block.metadata))).toEqual([
-      { locator: { kind: "epub", spineIndex: 0, href: "OPS/b.xhtml", fragmentId: null, elementPath: null }, provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v1" } },
-      { locator: { kind: "epub", spineIndex: 0, href: "OPS/b.xhtml", fragmentId: null, elementPath: null }, provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v1" } },
-      { locator: { kind: "epub", spineIndex: 1, href: "OPS/a.xhtml", fragmentId: null, elementPath: null }, provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v1" } },
-      { locator: { kind: "epub", spineIndex: 1, href: "OPS/a.xhtml", fragmentId: null, elementPath: null }, provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v1" } },
+      { locator: { kind: "epub", spineIndex: 0, href: "OPS/b.xhtml", fragmentId: null, elementPath: "/html[1]/body[1]/p[1]" }, provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" } },
+      { locator: { kind: "epub", spineIndex: 0, href: "OPS/b.xhtml", fragmentId: null, elementPath: "/html[1]/body[1]/li[1]" }, provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" } },
+      { headingLevel: 1, locator: { kind: "epub", spineIndex: 1, href: "OPS/a.xhtml", fragmentId: null, elementPath: "/html[1]/body[1]/h1[1]" }, provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" } },
+      { locator: { kind: "epub", spineIndex: 1, href: "OPS/a.xhtml", fragmentId: null, elementPath: "/html[1]/body[1]/p[1]" }, provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" } },
     ]);
     expect(extraction.canonicalSchemaVersion).toBe(CANONICAL_SCHEMA_VERSION);
     expect(extraction.qualityStatus).toBe("UNKNOWN");
@@ -347,7 +347,7 @@ describe("canonical contract persistence", () => {
 
 describe("canonical v1 write gate", () => {
   const pdfProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" };
-  const epubProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v1" };
+  const epubProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" };
   const textProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "builtin-text", parserVersion: "text-parser-v1" };
   const markdownProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-markdown", parserVersion: "markdown-parser-v1" };
   const pdfLocator = { kind: "pdf" as const, physicalPageIndex: 2, printedPageLabel: null };
@@ -387,6 +387,6 @@ describe("canonical v1 write gate", () => {
     expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(txt, "text/plain"))).toEqual({ locator: null, provenance: textProvenance });
     expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(markdown, "text/markdown"))).toEqual({ locator: null, provenance: markdownProvenance });
     expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(pdf, "application/pdf"))).toEqual({ locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null }, provenance: pdfProvenance });
-    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(epub, "application/epub+zip"))).toEqual({ locator: { kind: "epub", spineIndex: 0, href: "OPS/b.xhtml", fragmentId: null, elementPath: null }, provenance: epubProvenance });
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(epub, "application/epub+zip"))).toEqual({ locator: { kind: "epub", spineIndex: 0, href: "OPS/b.xhtml", fragmentId: null, elementPath: "/html[1]/body[1]/p[1]" }, provenance: epubProvenance });
   });
 });
