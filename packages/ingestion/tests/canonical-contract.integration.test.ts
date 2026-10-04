@@ -16,8 +16,8 @@ import { PassThrough } from "node:stream";
 import PDFDocument from "pdfkit";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { CANONICAL_BLOCK_SEPARATOR } from "../src/canonical-text.js";
-import { canonicalBlockMetadata, createIngestionService } from "../src/index.js";
-import { parseDocument } from "../src/document-parsers.js";
+import { canonicalBlockMetadata, createIngestionService, SourceError } from "../src/index.js";
+import { parseDocument, type ParsedBlock } from "../src/document-parsers.js";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
@@ -346,25 +346,47 @@ describe("canonical contract persistence", () => {
 });
 
 describe("canonical v1 write gate", () => {
+  const pdfProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" };
+  const epubProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v1" };
+  const textProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "builtin-text", parserVersion: "text-parser-v1" };
+  const markdownProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-markdown", parserVersion: "markdown-parser-v1" };
+  const pdfLocator = { kind: "pdf" as const, physicalPageIndex: 2, printedPageLabel: null };
+  const epubLocator = { kind: "epub" as const, spineIndex: 1, href: "OPS/b.xhtml", fragmentId: null, elementPath: null };
+
   it("fails closed when a new canonical block has no provenance", () => {
-    expect(() => canonicalBlockMetadata({ kind: "PARAGRAPH", text: "orphan" })).toThrow();
-    expect(() => canonicalBlockMetadata({ kind: "PARAGRAPH", text: "orphan", locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null } })).toThrow();
+    expect(() => canonicalBlockMetadata({ kind: "PARAGRAPH", text: "orphan" }, "text/plain")).toThrow(SourceError.CANONICAL_BLOCK_CONTRACT_INVALID);
+    expect(() => canonicalBlockMetadata({ kind: "PARAGRAPH", text: "orphan", locator: pdfLocator }, "application/pdf")).toThrow(SourceError.CANONICAL_BLOCK_CONTRACT_INVALID);
+  });
+
+  it.each([
+    ["a PDF block without a locator", "application/pdf", { kind: "PARAGRAPH", text: "x", provenance: pdfProvenance }],
+    ["a PDF block with an epub locator", "application/pdf", { kind: "PARAGRAPH", text: "x", provenance: pdfProvenance, locator: epubLocator }],
+    ["an EPUB block without a locator", "application/epub+zip", { kind: "PARAGRAPH", text: "x", provenance: epubProvenance }],
+    ["an EPUB block with a pdf locator", "application/epub+zip", { kind: "PARAGRAPH", text: "x", provenance: epubProvenance, locator: pdfLocator }],
+    ["a TXT block with a fabricated pdf locator", "text/plain", { kind: "PARAGRAPH", text: "x", provenance: textProvenance, locator: pdfLocator }],
+    ["a Markdown block with a fabricated epub locator", "text/markdown", { kind: "PARAGRAPH", text: "x", provenance: markdownProvenance, locator: epubLocator }],
+  ])("rejects %s by media type", (_name, mediaType, block) => {
+    expect(() => canonicalBlockMetadata(block as ParsedBlock, mediaType)).toThrow(SourceError.CANONICAL_BLOCK_CONTRACT_INVALID);
+  });
+
+  it.each([
+    ["a valid PDF block", "application/pdf", { kind: "PARAGRAPH", text: "x", provenance: pdfProvenance, locator: pdfLocator }, { locator: pdfLocator, provenance: pdfProvenance }],
+    ["a valid EPUB block", "application/epub+zip", { kind: "PARAGRAPH", text: "x", provenance: epubProvenance, locator: epubLocator }, { locator: epubLocator, provenance: epubProvenance }],
+    ["a valid TXT block with null locator", "text/plain", { kind: "PARAGRAPH", text: "x", provenance: textProvenance }, { locator: null, provenance: textProvenance }],
+    ["a valid Markdown block with null locator", "text/markdown", { kind: "PARAGRAPH", text: "x", provenance: markdownProvenance }, { locator: null, provenance: markdownProvenance }],
+  ])("accepts %s", (_name, mediaType, block, expected) => {
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(block as ParsedBlock, mediaType))).toEqual(expected);
   });
 
   it("keeps every production parser's output writable under the strict v1 gate", async () => {
-    const nativeProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "builtin-text", parserVersion: "text-parser-v1" };
-    const markdownProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-markdown", parserVersion: "markdown-parser-v1" };
-    const pdfProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" };
-    const epubProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v1" };
-
     const txt = (await parseDocument(Buffer.from("Plain paragraph"), "text/plain")).pages[0]!.blocks[0]!;
     const markdown = (await parseDocument(Buffer.from("# Title"), "text/markdown")).pages[0]!.blocks[0]!;
     const pdf = (await parseDocument(await pdfFixture(["Hello PDF"]), "application/pdf")).pages[0]!.blocks[0]!;
     const epub = (await parseDocument(epubFixture(), "application/epub+zip")).pages[0]!.blocks[0]!;
 
-    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(txt))).toEqual({ locator: null, provenance: nativeProvenance });
-    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(markdown))).toEqual({ locator: null, provenance: markdownProvenance });
-    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(pdf))).toEqual({ locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null }, provenance: pdfProvenance });
-    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(epub))).toEqual({ locator: { kind: "epub", spineIndex: 0, href: "OPS/b.xhtml", fragmentId: null, elementPath: null }, provenance: epubProvenance });
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(txt, "text/plain"))).toEqual({ locator: null, provenance: textProvenance });
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(markdown, "text/markdown"))).toEqual({ locator: null, provenance: markdownProvenance });
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(pdf, "application/pdf"))).toEqual({ locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null }, provenance: pdfProvenance });
+    expect(parseCanonicalBlockMetadata(canonicalBlockMetadata(epub, "application/epub+zip"))).toEqual({ locator: { kind: "epub", spineIndex: 0, href: "OPS/b.xhtml", fragmentId: null, elementPath: null }, provenance: epubProvenance });
   });
 });

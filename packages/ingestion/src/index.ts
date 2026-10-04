@@ -31,16 +31,26 @@ const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").m
 const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
 
 /**
- * Canonical v1 write gate for SourceBlock.metadata: strictly validated before
- * any write. Provenance is REQUIRED for every block; PDF/EPUB blocks must carry
- * a locator, TXT/Markdown may leave it null (the locator union does not cover
- * them). Missing provenance fails closed — legacy tolerance exists only on the
- * read path (tryParseCanonicalBlockMetadata). A canonical-book-v1 block that
- * fails the v1 contract is a parser bug and must abort the ingestion, never be
- * silently rewritten as legacy passthrough metadata.
+ * Canonical v1 write gate for SourceBlock.metadata, keyed on the authoritative
+ * SourceDocument.mediaType (never parserName): strictly validated before any
+ * write. Provenance is REQUIRED for every block. A PDF block must carry a
+ * kind="pdf" locator and an EPUB block a kind="epub" locator; TXT/Markdown
+ * must not fabricate one (locator stays null). Every violation fails closed
+ * with the stable SOURCE_CANONICAL_BLOCK_CONTRACT_INVALID code — Zod details
+ * never become durable business errors. Legacy tolerance exists only on the
+ * read path (tryParseCanonicalBlockMetadata): a canonical-book-v1 block that
+ * fails the v1 contract is a parser bug and must abort the ingestion.
  */
-export function canonicalBlockMetadata(block: ParsedBlock) {
-  return JSON.parse(JSON.stringify(parseCanonicalBlockMetadata({ ...block.metadata, locator: block.locator ?? null, provenance: block.provenance ?? undefined })));
+export function canonicalBlockMetadata(block: ParsedBlock, mediaType: string) {
+  const requiredLocatorKind = mediaType === "application/pdf" ? "pdf" : mediaType === "application/epub+zip" ? "epub" : mediaType === "text/plain" || mediaType === "text/markdown" ? null : undefined;
+  if (!block.provenance || requiredLocatorKind === undefined || (block.locator?.kind ?? null) !== requiredLocatorKind) throw new Error(SourceError.CANONICAL_BLOCK_CONTRACT_INVALID);
+  let canonical: ReturnType<typeof parseCanonicalBlockMetadata>;
+  try {
+    canonical = parseCanonicalBlockMetadata({ ...block.metadata, locator: block.locator ?? null, provenance: block.provenance });
+  } catch {
+    throw new Error(SourceError.CANONICAL_BLOCK_CONTRACT_INVALID);
+  }
+  return JSON.parse(JSON.stringify(canonical));
 }
 
 export function assertSafeUrl(value: string): URL {
@@ -171,7 +181,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
                   kind: block.kind,
                   text: block.text,
                   contentHash: sha256Utf8(block.text),
-                  metadata: canonicalBlockMetadata(block),
+                  metadata: canonicalBlockMetadata(block, run.sourceDocument.mediaType),
                   // A block either carries a real parser-produced bbox or none at
                   // all; a fake or unit-less guess must never be persisted.
                   bbox: block.bbox ? JSON.parse(JSON.stringify(parseSourceBlockBbox(block.bbox))) : undefined,
