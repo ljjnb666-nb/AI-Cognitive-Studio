@@ -17,8 +17,8 @@ export type ParsedBlock = { kind: SourceBlockKind; text: string; locator?: Canon
  * codes); PDF/TXT/Markdown keep them unset and an empty warning list.
  */
 export type Parsed = { parser: { name: string; version: string }; pages: Array<{ physicalPageIndex: number | null; blocks: ParsedBlock[] }>; qualityWarnings?: ExtractionQualityWarningCode[]; formatMetadata?: unknown };
-export type ParserLimits = { maxPdfPages: number; maxPdfOutputChars: number; pdfTimeoutMs: number; pdfMemoryMb: number; maxPdfIpcBytes: number; maxPdfStderrBytes: number; pdfChildEntry?: string; maxArchiveEntries: number; maxArchiveEntryBytes: number; maxArchiveTotalBytes: number; maxArchiveCompressionRatio: number; maxEpubXmlChars: number; maxEpubNavigationEntries: number };
-export const DEFAULT_PARSER_LIMITS: ParserLimits = { maxPdfPages: 2000, maxPdfOutputChars: 20_000_000, pdfTimeoutMs: 30_000, pdfMemoryMb: 128, maxPdfIpcBytes: 24_000_000, maxPdfStderrBytes: 32_000, maxArchiveEntries: 10_000, maxArchiveEntryBytes: 25_000_000, maxArchiveTotalBytes: 100_000_000, maxArchiveCompressionRatio: 100, maxEpubXmlChars: 8_000_000, maxEpubNavigationEntries: 20_000 };
+export type ParserLimits = { maxPdfPages: number; maxPdfOutputChars: number; pdfTimeoutMs: number; pdfMemoryMb: number; maxPdfIpcBytes: number; maxPdfStderrBytes: number; pdfChildEntry?: string; maxArchiveEntries: number; maxArchiveEntryBytes: number; maxArchiveTotalBytes: number; maxArchiveCompressionRatio: number; maxEpubXmlChars: number; maxEpubNavigationEntries: number; maxEpubDomNodes: number };
+export const DEFAULT_PARSER_LIMITS: ParserLimits = { maxPdfPages: 2000, maxPdfOutputChars: 20_000_000, pdfTimeoutMs: 30_000, pdfMemoryMb: 128, maxPdfIpcBytes: 24_000_000, maxPdfStderrBytes: 32_000, maxArchiveEntries: 10_000, maxArchiveEntryBytes: 25_000_000, maxArchiveTotalBytes: 100_000_000, maxArchiveCompressionRatio: 100, maxEpubXmlChars: 8_000_000, maxEpubNavigationEntries: 20_000, maxEpubDomNodes: 400_000 };
 
 const parsers = {
   text: { name: "builtin-text", version: "text-parser-v1", sourceMethod: "NATIVE_TEXT" },

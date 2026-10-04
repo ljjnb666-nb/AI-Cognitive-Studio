@@ -393,12 +393,177 @@ describe("epub-parser-v2 invariants and limits", () => {
     expect(parseEpubExtractionMetadata(parsed.formatMetadata).navigationSource).toBe("NONE");
   });
 
-  it("never inflates non-required archive resources (images/fonts/media stay untouched)", async () => {
+  it("never inflates non-required archive resources and flags the unsupported spine item", async () => {
     // Pseudo-random bytes: poor compression (passes the archive ratio limit)
     // and invalid UTF-8, so if the parser ever read this entry it would fail.
     const bomb = String.fromCharCode(...Array.from({ length: 8192 }, (_, index) => ((index * 31 + 17) % 251) + 1));
     const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="big" href="media/big.bin" media-type="application/octet-stream"/>', spine: '<itemref idref="c1"/><itemref idref="big"/>' });
     const parsed = await parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }, { name: "OEBPS/media/big.bin", text: bomb }] }), "application/epub+zip");
     expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
+    expect(parsed.qualityWarnings).toContain("PARTIAL_EXTRACTION");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RF01-01: entity preprocessing must not change XML grammar
+// ---------------------------------------------------------------------------
+
+describe("RF01 entity grammar preservation", () => {
+  const parse = async (body: string) => parseDocument(book({ opf: epub3Opf(), files: [...basicFiles.slice(0, 1), { name: "OEBPS/text/ch1.xhtml", text: contentDocument(body) }] }), "application/epub+zip");
+
+  it("keeps XML predefined entities grammar-owned: amp round-trips as text", async () => {
+    const parsed = await parse("<p>A &amp; B &lt; C &gt; D &apos;E&apos;</p>");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["A & B < C > D 'E'"]);
+    expect(parsed.qualityWarnings).toEqual([]);
+  });
+
+  it("never re-interprets escaped markup as a DOM image", async () => {
+    const parsed = await parse('<p>&lt;img src=&quot;https://evil.test/x.png&quot;/&gt;</p>');
+    expect(blocksOf(parsed)).toHaveLength(1);
+    expect(blocksOf(parsed)[0]).toMatchObject({ kind: "PARAGRAPH", text: '<img src="https://evil.test/x.png"/>' });
+    expect(parsed.qualityWarnings).toEqual([]);
+  });
+
+  it("keeps &quot; inside attribute values as attribute text", async () => {
+    const parsed = await parse('<p title="say &quot;hi&quot; now">body text</p>');
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["body text"]);
+  });
+
+  it("still decodes XML-unknown HTML named entities via numeric references", async () => {
+    const parsed = await parse("<p>Caf&eacute; &mdash; A&nbsp;B</p>");
+    expect(blocksOf(parsed)[0]?.text).toBe("Café — A B");
+  });
+
+  it("rejects unknown entities and malformed recovery instead of silently succeeding", async () => {
+    await expect(parse("<p>&mysteryentity;</p>")).rejects.toThrow(SourceError.CORRUPTED);
+    await expect(parse("<p>unclosed")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RF01-02: post-DOM resource-reference security gate
+// ---------------------------------------------------------------------------
+
+describe("RF01 post-DOM resource gate", () => {
+  const parse = async (body: string, extraNamespace = "") => {
+    const doc = '<?xml version="1.0"?><html ' + XHTML_NS + extraNamespace + '><body>' + body + "</body></html>";
+    return parseDocument(book({ opf: epub3Opf(), files: [...basicFiles.slice(0, 1), { name: "OEBPS/text/ch1.xhtml", text: doc }] }), "application/epub+zip");
+  };
+
+  it("rejects direct and whitespace-padded external references", async () => {
+    await expect(parse('<img src="https://evil.test/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    await expect(parse('<img src=" https://evil.test/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    await expect(parse('<a href=" https://evil.test/x">link</a>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+
+  it("rejects entity-obfuscated external references that the decoded DOM reveals", async () => {
+    await expect(parse('<img src="&#x68;ttps://evil.test/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    await expect(parse('<img src="&#104;ttps://evil.test/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+
+  it("rejects protocol-relative, absolute, drive, backslash, and root-escaping references", async () => {
+    await expect(parse('<img src="//evil.test/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    await expect(parse('<img src="/abs/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    await expect(parse('<img src="..\\escape.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    await expect(parse('<img src="C:\\x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    await expect(parse('<img src="../../../../escape.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+
+  it("allows safe fragments and legal parent-relative archive paths", async () => {
+    const parsed = await parse('<p>See <a href="#anchor">note</a></p><figure><img src="../images/a.png" alt="Chart"/></figure>');
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["See note", "Chart"]);
+    expect(parsed.qualityWarnings).toEqual([]);
+  });
+
+  it("validates SVG xlink:href against the same contract", async () => {
+    const xlinkNs = ' xmlns:xlink="http://www.w3.org/1999/xlink"';
+    await expect(parse('<svg><image xlink:href="https://evil.test/x.png"/></svg>', xlinkNs)).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    const safe = await parse('<svg><title>Diagram</title><image xlink:href="../images/diagram.png"/></svg>', xlinkNs);
+    expect(blocksOf(safe).map((block) => block.text)).toEqual(["Diagram"]);
+  });
+
+  it("keeps noteref internal targets safe", async () => {
+    const parsed = await parse('<p>Body<a epub:type="noteref" href="#fn-1">1</a></p>');
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Body1"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RF01-03: true namespace-aware XML
+// ---------------------------------------------------------------------------
+
+describe("RF01 namespace-prefixed documents", () => {
+  const prefixedContainer = '<?xml version="1.0"?><c:container xmlns:c="urn:oasis:names:tc:opendocument:xmlns:container"><c:rootfiles><c:rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></c:rootfiles></c:container>';
+  const prefixedOpf = '<?xml version="1.0"?><opf:package xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0" unique-identifier="pub-id"><opf:metadata><dc:identifier id="pub-id">urn:uuid:prefixed</dc:identifier><dc:title>Prefixed Book</dc:title><dc:language>en</dc:language></opf:metadata><opf:manifest><opf:item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><opf:item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/></opf:manifest><opf:spine><opf:itemref idref="c1"/></opf:spine></opf:package>';
+  const prefixedNav = '<?xml version="1.0"?><xhtml:html xmlns:xhtml="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><xhtml:body><xhtml:nav epub:type="toc"><xhtml:ol><xhtml:li><xhtml:a href="text/ch1.xhtml">Prefixed Chapter</xhtml:a><xhtml:ol><xhtml:li><xhtml:a href="text/ch1.xhtml#s1">Prefixed Section</xhtml:a></xhtml:li></xhtml:ol></xhtml:li></xhtml:ol></xhtml:nav></xhtml:body></xhtml:html>';
+  const prefixedXhtml = '<?xml version="1.0"?><xhtml:html xmlns:xhtml="http://www.w3.org/1999/xhtml"><xhtml:body><xhtml:h1 id="px">Prefixed Head</xhtml:h1><xhtml:p>Prefixed para</xhtml:p><xhtml:table><xhtml:tr><xhtml:td>A</xhtml:td><xhtml:td>1</xhtml:td></xhtml:tr></xhtml:table></xhtml:body></xhtml:html>';
+
+  const prefixedBook = (contentXhtml: string) => zip([
+    { name: "mimetype", text: "application/epub+zip" },
+    { name: "META-INF/container.xml", text: prefixedContainer },
+    { name: "OEBPS/content.opf", text: prefixedOpf },
+    { name: "OEBPS/nav.xhtml", text: prefixedNav },
+    { name: "OEBPS/text/ch1.xhtml", text: contentXhtml },
+  ]);
+
+  it("parses prefixed container/OPF/nav/XHTML with default-namespace-equivalent output", async () => {
+    const parsed = await parseDocument(prefixedBook(prefixedXhtml), "application/epub+zip");
+    const metadata = parseEpubExtractionMetadata(parsed.formatMetadata);
+    expect(metadata.navigationSource).toBe("EPUB3_NAV");
+    expect(metadata.navigation).toEqual([
+      { ordinal: 0, depth: 0, label: "Prefixed Chapter", href: "OEBPS/text/ch1.xhtml", fragmentId: null },
+      { ordinal: 1, depth: 1, label: "Prefixed Section", href: "OEBPS/text/ch1.xhtml", fragmentId: "s1" },
+    ]);
+    expect(metadata.dcTitle).toBe("Prefixed Book");
+    expect(metadata.epubVersion).toBe("3.0");
+    expect(blocksOf(parsed).map((block) => [block.kind, block.text, epubLocatorOf(block)?.elementPath])).toEqual([
+      ["HEADING", "Prefixed Head", "/html[1]/body[1]/h1[1]"],
+      ["PARAGRAPH", "Prefixed para", "/html[1]/body[1]/p[1]"],
+      ["TABLE", "A\t1", "/html[1]/body[1]/table[1]"],
+    ]);
+    expect(blocksOf(parsed)[0]?.metadata?.headingLevel).toBe(1);
+    expect(epubLocatorOf(blocksOf(parsed)[0]!)?.fragmentId).toBe("px");
+  });
+
+  it("parses a prefixed EPUB2 NCX via the spine toc attribute", async () => {
+    const prefixedNcxOpf = '<?xml version="1.0"?><opf:package xmlns:opf="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="pub-id"><opf:metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">x</dc:identifier></opf:metadata><opf:manifest><opf:item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><opf:item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/></opf:manifest><opf:spine toc="ncx"><opf:itemref idref="c1"/></opf:spine></opf:package>';
+    const prefixedNcx = '<?xml version="1.0"?><ncx:ncx xmlns:ncx="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><ncx:navMap><ncx:navPoint id="n1"><ncx:navLabel><ncx:text>NCX Prefixed</ncx:text></ncx:navLabel><ncx:content src="text/ch1.xhtml"/><ncx:navPoint id="n2"><ncx:navLabel><ncx:text>Nested</ncx:text></ncx:navLabel><ncx:content src="text/ch1.xhtml#s1"/></ncx:navPoint></ncx:navPoint></ncx:navMap></ncx:ncx>';
+    const parsed = await parseDocument(zip([
+      { name: "mimetype", text: "application/epub+zip" },
+      { name: "META-INF/container.xml", text: prefixedContainer },
+      { name: "OEBPS/content.opf", text: prefixedNcxOpf },
+      { name: "OEBPS/toc.ncx", text: prefixedNcx },
+      { name: "OEBPS/text/ch1.xhtml", text: prefixedXhtml },
+    ]), "application/epub+zip");
+    const metadata = parseEpubExtractionMetadata(parsed.formatMetadata);
+    expect(metadata.navigationSource).toBe("EPUB2_NCX");
+    expect(metadata.epubVersion).toBe("2.0");
+    expect(metadata.navigation).toEqual([
+      { ordinal: 0, depth: 0, label: "NCX Prefixed", href: "OEBPS/text/ch1.xhtml", fragmentId: null },
+      { ordinal: 1, depth: 1, label: "Nested", href: "OEBPS/text/ch1.xhtml", fragmentId: "s1" },
+    ]);
+  });
+
+  it("rejects external references inside prefixed documents", async () => {
+    const evilXhtml = prefixedXhtml.replace("<xhtml:p>Prefixed para</xhtml:p>", '<xhtml:p><xhtml:a href="https://evil.test/x">bad</xhtml:a></xhtml:p>');
+    await expect(parseDocument(prefixedBook(evilXhtml), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RF01-05: unsupported content failure model
+// ---------------------------------------------------------------------------
+
+describe("RF01 unsupported spine content", () => {
+  it("fails a reflowable book with no usable textual evidence on SOURCE_EPUB_NO_USABLE_TEXT", async () => {
+    const opf = opfDocument({ manifest: '<item id="img" href="media/cover.png" media-type="image/png"/>', spine: '<itemref idref="img"/>' });
+    await expect(parseDocument(book({ opf, files: [{ name: "OEBPS/media/cover.png", text: "PNGDATA" }] }), "application/epub+zip")).rejects.toThrow(SourceError.EPUB_NO_USABLE_TEXT);
+  });
+
+  it("counts unsupported media-type spine items as unusable text without inflation", async () => {
+    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="f1" href="media/font.woff" media-type="application/font-woff"/><item id="a1" href="media/audio.mp3" media-type="audio/mpeg"/>', spine: '<itemref idref="f1"/><itemref idref="c1"/><itemref idref="a1"/>' });
+    const parsed = await parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }, { name: "OEBPS/media/font.woff", text: "WWOFFDATA" }, { name: "OEBPS/media/audio.mp3", text: "MP3DATA" }] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
+    expect(parsed.qualityWarnings).toEqual(["PARTIAL_EXTRACTION"]);
   });
 });

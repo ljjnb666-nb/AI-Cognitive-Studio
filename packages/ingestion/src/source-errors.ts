@@ -15,6 +15,14 @@ export const SourceError = {
   // A pre-paginated (fixed-layout) EPUB with no usable textual evidence: an
   // explicit, stable failure instead of SUCCEEDED + empty extraction.
   EPUB_FIXED_LAYOUT_UNSUPPORTED: "SOURCE_EPUB_FIXED_LAYOUT_UNSUPPORTED",
+  // A reflowable EPUB whose spine yields no usable textual evidence at all
+  // (e.g. image-only pages): a deterministic unsupported-content state, not an
+  // OCR fallback case.
+  EPUB_NO_USABLE_TEXT: "SOURCE_EPUB_NO_USABLE_TEXT",
+  // Internal parser contract violation: the parser produced (or failed to
+  // produce) format metadata in violation of the persistence contract. Never
+  // surfaced as Zod details; classified FAILED, not REJECTED.
+  FORMAT_METADATA_CONTRACT_INVALID: "SOURCE_FORMAT_METADATA_CONTRACT_INVALID",
 } as const;
 
 export type SourceErrorCode = (typeof SourceError)[keyof typeof SourceError];
@@ -29,6 +37,8 @@ export function sourceErrorForParserResult(result: string): SourceErrorCode {
     case "PARSE_TIMEOUT": return SourceError.PARSE_TIMEOUT;
     case "ARCHIVE_UNSAFE": return SourceError.ARCHIVE_UNSAFE;
     case "EPUB_FIXED_LAYOUT_UNSUPPORTED": return SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED;
+    case "EPUB_NO_USABLE_TEXT": return SourceError.EPUB_NO_USABLE_TEXT;
+    case "FORMAT_METADATA_CONTRACT_INVALID": return SourceError.FORMAT_METADATA_CONTRACT_INVALID;
     default: return SourceError.PARSE;
   }
 }
