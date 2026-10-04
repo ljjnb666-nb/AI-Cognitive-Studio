@@ -124,6 +124,16 @@ enum ExtractionStatus {
   OCR_REQUIRED
 }
 
+/// Durable extraction quality state. Historical extractions keep NULL;
+/// never backfill.
+enum ExtractionQualityStatus {
+  UNKNOWN
+  ACCEPTED
+  DEGRADED
+  REQUIRES_FALLBACK
+  REJECTED
+}
+
 enum OutboxStatus {
   PENDING
   PROCESSING
@@ -1061,6 +1071,9 @@ model IngestionRun {
   workspaceId           String
   jobId                 String                 @unique
   status                IngestionStatus        @default(QUEUED)
+  /// Planned/initial parser provenance written before any parser runs (upload
+  /// completion). NOT the parser authority: the durable authority is
+  /// DocumentExtraction plus per-block SourceBlock provenance metadata.
   parserVersion         String
   normalizationVersion  String
   errorCode             String?
@@ -1084,6 +1097,16 @@ model DocumentExtraction {
   parserName             String
   parserVersion          String
   normalizationVersion   String
+  /// NULL for extractions created before the canonical contract
+  /// (canonical-book-v1); never backfilled.
+  canonicalSchemaVersion String?
+  /// Quality contract semantics: NULL = legacy extraction without the
+  /// canonical quality contract; UNKNOWN = canonical-book-v1 extraction not
+  /// yet assessed by a production quality gate (parser success is never
+  /// acceptance); ACCEPTED/DEGRADED/REQUIRES_FALLBACK/REJECTED are reserved
+  /// for that future gate. Never backfilled.
+  qualityStatus          ExtractionQualityStatus?
+  qualityMetadata        Json?
   textStorageKey         String?
   textSha256             String?
   characterCount         Int?

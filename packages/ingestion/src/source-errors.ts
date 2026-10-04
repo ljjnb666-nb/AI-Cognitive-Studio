@@ -11,6 +11,7 @@ export const SourceError = {
   PARSE_TIMEOUT: "SOURCE_PARSE_TIMEOUT",
   STORAGE: "SOURCE_STORAGE_ERROR",
   PARSE: "SOURCE_PARSE_ERROR",
+  CANONICAL_BLOCK_CONTRACT_INVALID: "SOURCE_CANONICAL_BLOCK_CONTRACT_INVALID",
 } as const;
 
 export type SourceErrorCode = (typeof SourceError)[keyof typeof SourceError];

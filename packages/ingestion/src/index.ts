@@ -1,18 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { prisma, JobStatus } from "@ai-cognitive/db";
-import { sha256Utf8 } from "@ai-cognitive/domain";
+import { CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
 import { logger } from "@ai-cognitive/shared";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION } from "./canonical-text.js";
 import { inspectObjectStream } from "./object-inspection.js";
-import { parseDocument } from "./document-parsers.js";
+import { parseDocument, type ParsedBlock } from "./document-parsers.js";
 import { SourceError } from "./source-errors.js";
 import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
 import { dispatchPendingOutbox } from "./outbox-dispatcher.js";
 export { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "./outbox-dispatcher.js";
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
-export { parseDocument, DEFAULT_PARSER_LIMITS } from "./document-parsers.js";
+export { parseDocument, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
 
 export type TrustedRequestContext = { userId: string; workspaceId: string };
 export const INGESTION_QUEUE = "source.ingestion";
@@ -20,6 +20,38 @@ export const INGESTION_TOPIC = "source.ingestion.requested";
 export const INGESTION_JOB = "source.ingest";
 export const BOOK_ANALYSIS_BOOTSTRAP_TOPIC = "book.analysis.bootstrap.requested";
 const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").map((character) => character.charCodeAt(0) < 32 ? "_" : character).join("").slice(0, 180) || "source";
+
+/**
+ * Quality recorded for a normal successful parse. Parser success is never
+ * equated with quality acceptance: a canonical-book-v1 extraction starts at
+ * UNKNOWN with an empty (evidence-free) warning list, and only a future
+ * production quality gate may move it to ACCEPTED/DEGRADED/REQUIRES_FALLBACK/
+ * REJECTED.
+ */
+const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
+
+/**
+ * Canonical v1 write gate for SourceBlock.metadata, keyed on the authoritative
+ * SourceDocument.mediaType (never parserName): strictly validated before any
+ * write. Provenance is REQUIRED for every block. A PDF block must carry a
+ * kind="pdf" locator and an EPUB block a kind="epub" locator; TXT/Markdown
+ * must not fabricate one (locator stays null). Every violation fails closed
+ * with the stable SOURCE_CANONICAL_BLOCK_CONTRACT_INVALID code — Zod details
+ * never become durable business errors. Legacy tolerance exists only on the
+ * read path (tryParseCanonicalBlockMetadata): a canonical-book-v1 block that
+ * fails the v1 contract is a parser bug and must abort the ingestion.
+ */
+export function canonicalBlockMetadata(block: ParsedBlock, mediaType: string) {
+  const requiredLocatorKind = mediaType === "application/pdf" ? "pdf" : mediaType === "application/epub+zip" ? "epub" : mediaType === "text/plain" || mediaType === "text/markdown" ? null : undefined;
+  if (!block.provenance || requiredLocatorKind === undefined || (block.locator?.kind ?? null) !== requiredLocatorKind) throw new Error(SourceError.CANONICAL_BLOCK_CONTRACT_INVALID);
+  let canonical: ReturnType<typeof parseCanonicalBlockMetadata>;
+  try {
+    canonical = parseCanonicalBlockMetadata({ ...block.metadata, locator: block.locator ?? null, provenance: block.provenance });
+  } catch {
+    throw new Error(SourceError.CANONICAL_BLOCK_CONTRACT_INVALID);
+  }
+  return JSON.parse(JSON.stringify(canonical));
+}
 
 export function assertSafeUrl(value: string): URL {
   const url = new URL(value); const host = url.hostname.toLowerCase();
@@ -127,6 +159,9 @@ export function createIngestionService(storage: StorageProvider, options = { max
               parserName: parsed.parser.name,
               parserVersion: parsed.parser.version,
               normalizationVersion: CANONICAL_NORMALIZATION_VERSION,
+              canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION,
+              qualityStatus: "UNKNOWN",
+              qualityMetadata: UNASSESSED_EXTRACTION_QUALITY,
               textStorageKey: textKey,
               textSha256: sha256Utf8(text),
               characterCount: text.length,
@@ -146,7 +181,10 @@ export function createIngestionService(storage: StorageProvider, options = { max
                   kind: block.kind,
                   text: block.text,
                   contentHash: sha256Utf8(block.text),
-                  metadata: block.metadata ? JSON.parse(JSON.stringify(block.metadata)) : undefined,
+                  metadata: canonicalBlockMetadata(block, run.sourceDocument.mediaType),
+                  // A block either carries a real parser-produced bbox or none at
+                  // all; a fake or unit-less guess must never be persisted.
+                  bbox: block.bbox ? JSON.parse(JSON.stringify(parseSourceBlockBbox(block.bbox))) : undefined,
                 },
               });
             }
@@ -240,6 +278,15 @@ export async function dispatchPendingIngestion(queue: IngestionQueue, options: I
   }
   return events.length; */
 }
+/**
+ * Planned parser provenance, recorded when the upload completes — BEFORE any
+ * parser has run. This is also why recovery runs inherit the previous value.
+ * It is NOT the parser authority for what actually executed: the durable
+ * authority is DocumentExtraction (parserName/parserVersion plus
+ * canonicalSchemaVersion) and the per-block SourceBlock provenance metadata.
+ * New code must never branch on IngestionRun.parserVersion to decide which
+ * parser produced an extraction.
+ */
 function parserProvenance(mediaType: string): { name: string; version: string } {
   if (mediaType === "text/plain") return { name: "builtin-text", version: "text-parser-v1" };
   if (mediaType === "text/markdown") return { name: "builtin-markdown", version: "markdown-parser-v1" };
