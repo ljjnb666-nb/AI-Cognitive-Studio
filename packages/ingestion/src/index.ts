@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { prisma, JobStatus } from "@ai-cognitive/db";
-import { CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
+import { CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
+import type { EpubExtractionMetadata } from "@ai-cognitive/domain";
 import { logger } from "@ai-cognitive/shared";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION } from "./canonical-text.js";
@@ -51,6 +52,27 @@ export function canonicalBlockMetadata(block: ParsedBlock, mediaType: string) {
     throw new Error(SourceError.CANONICAL_BLOCK_CONTRACT_INVALID);
   }
   return JSON.parse(JSON.stringify(canonical));
+}
+
+/**
+ * Canonical persistence gate for DocumentExtraction.formatMetadata, keyed on
+ * the authoritative SourceDocument.mediaType (RF01-04). An EPUB extraction
+ * MUST carry schema-valid EpubExtractionMetadata; PDF/TXT/Markdown MUST NOT
+ * carry any. Violations are internal parser contract bugs: they fail closed
+ * with the stable SOURCE_FORMAT_METADATA_CONTRACT_INVALID code (never Zod
+ * details), are classified FAILED (not REJECTED), and must abort the write.
+ */
+export function canonicalFormatMetadata(mediaType: string, formatMetadata: unknown): EpubExtractionMetadata | undefined {
+  if (mediaType === "application/epub+zip") {
+    if (formatMetadata == null) throw new Error(SourceError.FORMAT_METADATA_CONTRACT_INVALID);
+    try {
+      return JSON.parse(JSON.stringify(parseEpubExtractionMetadata(formatMetadata)));
+    } catch {
+      throw new Error(SourceError.FORMAT_METADATA_CONTRACT_INVALID);
+    }
+  }
+  if (formatMetadata != null) throw new Error(SourceError.FORMAT_METADATA_CONTRACT_INVALID);
+  return undefined;
 }
 
 export function assertSafeUrl(value: string): URL {
@@ -161,7 +183,14 @@ export function createIngestionService(storage: StorageProvider, options = { max
               normalizationVersion: CANONICAL_NORMALIZATION_VERSION,
               canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION,
               qualityStatus: "UNKNOWN",
-              qualityMetadata: UNASSESSED_EXTRACTION_QUALITY,
+              // Parser warnings are typed, evidence-backed observations only;
+              // they never move qualityStatus off UNKNOWN.
+              qualityMetadata: parsed.qualityWarnings?.length ? parseExtractionQualityMetadata({ warnings: parsed.qualityWarnings }) : UNASSESSED_EXTRACTION_QUALITY,
+              // Format-native metadata (EPUB package/navigation evidence),
+              // gated by canonicalFormatMetadata: EPUB requires schema-valid
+              // metadata, non-EPUB formats must stay NULL. A violation is an
+              // internal parser contract bug and aborts the write (FAILED).
+              formatMetadata: canonicalFormatMetadata(run.sourceDocument.mediaType, parsed.formatMetadata),
               textStorageKey: textKey,
               textSha256: sha256Utf8(text),
               characterCount: text.length,
@@ -218,7 +247,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
           await tx.ingestionRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", completedAt: new Date() } });
           await tx.job.update({ where: { id: run.jobId }, data: { status: JobStatus.SUCCEEDED, progress: 100, completedAt: new Date() } });
         });
-      } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "UNEXPECTED_ERROR"; const status = code === SourceError.OCR_REQUIRED ? "OCR_REQUIRED" : code === SourceError.PASSWORD_REQUIRED ? "PASSWORD_REQUIRED" : [SourceError.TYPE_MISMATCH, SourceError.UNSUPPORTED_TYPE, SourceError.TOO_LARGE, SourceError.ARCHIVE_UNSAFE, SourceError.CORRUPTED].includes(code as never) ? "REJECTED" : "FAILED"; await prisma.$transaction([prisma.ingestionRun.update({ where: { id: run.id }, data: { status, errorCode: code, completedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.FAILED, error: { code }, completedAt: new Date() } })]); logger.error("ingestion.failed", { ingestionRunId: run.id, code }); throw error; }
+      } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "UNEXPECTED_ERROR"; const status = code === SourceError.OCR_REQUIRED ? "OCR_REQUIRED" : code === SourceError.PASSWORD_REQUIRED ? "PASSWORD_REQUIRED" : [SourceError.TYPE_MISMATCH, SourceError.UNSUPPORTED_TYPE, SourceError.TOO_LARGE, SourceError.ARCHIVE_UNSAFE, SourceError.CORRUPTED, SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED, SourceError.EPUB_NO_USABLE_TEXT].includes(code as never) ? "REJECTED" : "FAILED"; await prisma.$transaction([prisma.ingestionRun.update({ where: { id: run.id }, data: { status, errorCode: code, completedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.FAILED, error: { code }, completedAt: new Date() } })]); logger.error("ingestion.failed", { ingestionRunId: run.id, code }); throw error; }
     },
     async recoverIngestionForUser(context: TrustedRequestContext, sourceDocumentId: string, completion: { outboxTopic?: string } = {}) {
       const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { userId: true } });
@@ -291,6 +320,6 @@ function parserProvenance(mediaType: string): { name: string; version: string } 
   if (mediaType === "text/plain") return { name: "builtin-text", version: "text-parser-v1" };
   if (mediaType === "text/markdown") return { name: "builtin-markdown", version: "markdown-parser-v1" };
   if (mediaType === "application/pdf") return { name: "pdfjs-isolated", version: "pdf-isolation-v3" };
-  if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v1" };
+  if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v2" };
   return { name: "unsupported", version: "unsupported-v1" };
 }

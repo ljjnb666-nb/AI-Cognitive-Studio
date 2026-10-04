@@ -1107,6 +1107,10 @@ model DocumentExtraction {
   /// for that future gate. Never backfilled.
   qualityStatus          ExtractionQualityStatus?
   qualityMetadata        Json?
+  /// Format-native extraction metadata (canonical-book-v1, additive). NULL =
+  /// legacy rows and non-EPUB formats (PDF/TXT/Markdown); EPUB extractions
+  /// persist the validated EpubExtractionMetadata contract. Never backfilled.
+  formatMetadata         Json?
   textStorageKey         String?
   textSha256             String?
   characterCount         Int?

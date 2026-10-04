@@ -24,3 +24,45 @@ describe("phase 2 evaluation harness", () => {
   expect(() => embeddingIdentityWithHash({ ...base, dimensions: 0 })).toThrow("EMBEDDING_IDENTITY_INVALID");
  });
 });
+
+describe("EPUB heading evidence in structure inference", () => {
+ // EPUB v2 blocks carry no markdown "#" prefix: metadata.headingLevel written
+ // by the ingestion parser is the only heading evidence available, and the
+ // structure builder must use it exactly as it does for other formats.
+ const epubHeading = (ordinal: number, text: string, headingLevel: number) => ({ id: `epub-${ordinal}`, ordinal, kind: "HEADING" as const, text, metadata: { headingLevel } });
+ const epubBlocks = [
+  epubHeading(0, "Chapter One", 1),
+  { id: "epub-1", ordinal: 1, kind: "PARAGRAPH" as const, text: "First paragraph body." },
+  epubHeading(2, "Section One", 2),
+  { id: "epub-3", ordinal: 3, kind: "PARAGRAPH" as const, text: "Section body with 中文." },
+  epubHeading(4, "Subsection", 3),
+  { id: "epub-5", ordinal: 5, kind: "PARAGRAPH" as const, text: "Deep body." },
+ ];
+
+ it("derives the chapter tree from EPUB headingLevel metadata alone", () => {
+  const structure = buildStructure(epubBlocks);
+  expect(structure.slice(1).map((node) => [node.kind, node.effectiveDepth, node.title, node.parentOrdinal])).toEqual([
+   ["CHAPTER", 1, "Chapter One", 0],
+   ["SECTION", 2, "Section One", 1],
+   ["SUBSECTION", 3, "Subsection", 2],
+  ]);
+  expect(structure.slice(1).map((node) => [node.startBlockOrdinal, node.endBlockOrdinal])).toEqual([[0, 5], [2, 5], [4, 5]]);
+ });
+
+ it("chunks EPUB heading-rich blocks with UTF-16-safe, validated evidence spans", () => {
+  const chunks = chunkBlocks(epubBlocks, { targetSize: 60, hardMax: 80 });
+  expect(chunks.length).toBeGreaterThan(1);
+  for (const chunk of chunks) {
+   expect(chunk.characterCount).toBeLessThanOrEqual(80);
+   for (const span of chunk.sourceSpans) {
+    const block = epubBlocks.find((candidate) => candidate.id === span.sourceBlockId)!;
+    expect(validateEvidence(block, span)).toBe(true);
+   }
+  }
+ });
+
+ it("ignores out-of-range EPUB headingLevel metadata instead of crashing", () => {
+  const malformed = [{ id: "x", ordinal: 0, kind: "HEADING" as const, text: "No markdown marker", metadata: { headingLevel: 99 } }];
+  expect(buildStructure(malformed).at(-1)?.kind).toBe("SECTION");
+ });
+});

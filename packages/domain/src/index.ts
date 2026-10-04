@@ -16,6 +16,18 @@ export {
   type SourceBlockBbox,
 } from "./source-locator.js";
 export {
+  epubExtractionMetadataSchema,
+  epubNavigationEntrySchema,
+  EPUB_NAVIGATION_SOURCES,
+  EPUB_RENDITION_LAYOUTS,
+  parseEpubExtractionMetadata,
+  tryParseEpubExtractionMetadata,
+  type EpubExtractionMetadata,
+  type EpubNavigationEntry,
+  type EpubNavigationSource,
+  type EpubRenditionLayout,
+} from "./epub-extraction-metadata.js";
+export {
   blockExtractionProvenanceSchema,
   canonicalBlockMetadataSchema,
   CANONICAL_SCHEMA_VERSION,
