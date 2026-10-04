@@ -91,6 +91,19 @@ export const mineruAdapter: ParserAdapter = {
           // not asserted. Facts only: pages stay null, envelope count recorded.
           pages: [{ pageIndex: 0, printedPageLabel: null, blocks }],
           readingOrderAvailable: true,
+          // MinerU's CLI exposes no OCR toggle or engine fields — its pipeline
+          // OCRs image-only pages by design. Unknowns stay null (spec #6).
+          ocr: {
+            ocrModeRequested: false,
+            ocrEnabled: null,
+            engine: null,
+            model: null,
+            modelRevision: null,
+            language: null,
+            pagesOcrProcessed: null,
+            pagesRequiringOcr: null,
+            pagesOcrSucceeded: null,
+          },
         };
         if (envelopePages !== null) warnings.push(`MINERU_ENVELOPE_TOTAL_PAGES: ${envelopePages}`);
       } else {

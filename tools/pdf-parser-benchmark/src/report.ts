@@ -2,12 +2,14 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OUTPUTS_ROOT } from "./filesystem-guard.js";
 import { parseBenchmarkResult, type BenchmarkResult, type NormalizedOutput } from "./schema.js";
+import { parseQualityReport, type QualityReport } from "./quality/schema.js";
 
 export type AggregateReport = {
   markdown: string;
   results: BenchmarkResult[];
   /** Run directories whose evidence exists but could not be trusted as a result. */
   skipped: Array<{ path: string; reason: string }>;
+  quality: QualityReport[];
 };
 
 type RunEntry = {
@@ -28,6 +30,7 @@ type RunEntry = {
 export async function buildAggregateReport(): Promise<AggregateReport> {
   const results: BenchmarkResult[] = [];
   const entries: RunEntry[] = [];
+  const quality: QualityReport[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
 
   const fixtureDirs = await readdir(OUTPUTS_ROOT, { withFileTypes: true }).catch(() => []);
@@ -57,6 +60,16 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
           entries.push({ parserKey: parserDir.name, runId: runDir.name, runDir: runPath, result });
         } catch (error) {
           skipped.push({ path: resultPath, reason: `SCHEMA_INVALID_RESULT: ${error instanceof Error ? error.message : String(error)}` });
+          continue;
+        }
+        // quality sidecar is additive evidence: an invalid quality.json is reported, never fatal
+        const qualityRaw = await readFile(join(runPath, "quality.json"), "utf8").catch(() => null);
+        if (qualityRaw !== null) {
+          try {
+            quality.push(parseQualityReport(JSON.parse(qualityRaw)));
+          } catch (error) {
+            skipped.push({ path: join(runPath, "quality.json"), reason: `INVALID_QUALITY_SIDECAR: ${error instanceof Error ? error.message : String(error)}` });
+          }
         }
       }
     }
@@ -114,8 +127,8 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
 
   lines.push("## Capability matrix (observed across ALL persisted runs per parser)");
   lines.push("");
-  lines.push("| parser | page | bbox | heading | table | figure | equation | list | rule | reading-order | confidence | printed-label |");
-  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+  lines.push("| parser | page | bbox | heading | table | figure | equation | list | rule | reading-order | confidence | printed-label | ocr |");
+  lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
   const byParser = new Map<string, RunEntry[]>();
   for (const entry of entries) {
     const list = byParser.get(entry.parserKey) ?? [];
@@ -129,9 +142,17 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
     let readingOrder = false;
     let confidence = false;
     let printedLabel = false;
+    let ocrEnabledSeen = false;
+    let ocrRequestedSeen = false;
+    let ocrFieldSeen = false;
     for (const entry of group) {
       const normalized = await readRunNormalized(entry.runDir);
       if (!normalized) continue;
+      if (normalized.ocr !== undefined) {
+        ocrFieldSeen = true;
+        if (normalized.ocr.ocrEnabled === true) ocrEnabledSeen = true;
+        if (normalized.ocr.ocrModeRequested) ocrRequestedSeen = true;
+      }
       for (const pageEntry of normalized.pages) {
         if (Number.isInteger(pageEntry.pageIndex)) page = true;
         if (pageEntry.printedPageLabel !== null) printedLabel = true;
@@ -144,8 +165,17 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
       readingOrder = readingOrder || normalized.readingOrderAvailable || group.some((g) => g.result.evidence.readingOrder);
     }
     const has = (kind: string) => (kinds.has(kind) ? "true" : "false");
+    const ocrCell = !ocrFieldSeen
+      ? "not-recorded"
+      : ocrEnabledSeen
+        ? "enabled (upstream-reported)"
+        : ocrRequestedSeen
+          ? "mode-requested; upstream-report=null"
+          : byParser.has(`${key}-ocr`)
+            ? "native mode; OCR is a separate mode row"
+            : "OCR_UNSUPPORTED (observed ocrEnabled=false)";
     lines.push(
-      `| ${key} | ${page} | ${bbox} | ${has("heading")} | ${has("table")} | ${has("figure")} | ${has("equation")} | ${has("list_item")} | ${has("rule")} | ${readingOrder} | ${confidence} | ${printedLabel} |`,
+      `| ${key} | ${page} | ${bbox} | ${has("heading")} | ${has("table")} | ${has("figure")} | ${has("equation")} | ${has("list_item")} | ${has("rule")} | ${readingOrder} | ${confidence} | ${printedLabel} | ${ocrCell} |`,
     );
   }
   lines.push("");
@@ -166,7 +196,69 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
     lines.push("");
   }
 
-  return { markdown: lines.join("\n"), results, skipped };
+  appendQualitySections(lines, quality);
+
+  return { markdown: lines.join("\n"), results, skipped, quality };
+}
+
+const pct = (value: number | null | undefined): string =>
+  value === null || value === undefined ? "n/a" : `${(value * 100).toFixed(1)}%`;
+const num = (value: number | null | undefined): string => (value === null || value === undefined ? "n/a" : String(value));
+
+/**
+ * Quality sections (Phase 2B spec #17): native-text modes and OCR-enabled
+ * modes are reported in SEPARATE tables (distinct parserKey suffixes), never
+ * mixed. Facts only — no total score, no winner.
+ */
+function appendQualitySections(lines: string[], quality: QualityReport[]): void {
+  const evaluated = quality.filter((q) => q.status === "EVALUATED");
+  const nonEvaluated = quality.filter((q) => q.status !== "EVALUATED");
+  const isOcrKey = (key: string) => key.endsWith("-ocr");
+
+  for (const [label, group, filter] of [
+    ["Quality — native-text modes", evaluated.filter((q) => !isOcrKey(q.parserKey)), (q: QualityReport) => !isOcrKey(q.parserKey)],
+    ["Quality — OCR-enabled modes", evaluated.filter((q) => isOcrKey(q.parserKey)), (q: QualityReport) => isOcrKey(q.parserKey)],
+  ] as const) {
+    lines.push(`## ${label}`);
+    lines.push("");
+    const rows = evaluated.filter(filter);
+    if (rows.length === 0) {
+      lines.push("_no evaluated runs in this mode group._");
+      lines.push("");
+      continue;
+    }
+    lines.push("| fixture | parser | run | text recall | trigram recall | edit dist | dup ratio | unexpected | order pairs | interleave | pages acc | bbox valid | table cells struct | flattened | formula struct | OCR recall | noise ratio |");
+    lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const q of rows) {
+      const order = q.readingOrder;
+      const orderPairs = order && order.orderedPairAccuracy !== null ? `${pct(order.orderedPairAccuracy)} (${order.correctPairs}/${order.comparablePairs})` : "n/a";
+      const interleave = order ? (order.interleavingDetected === null ? "n/a" : String(order.interleavingDetected)) : "n/a";
+      const pages = q.pages;
+      const bboxCell = pages
+        ? pages.bboxSupported && pages.bboxBlocks !== null && pages.bboxBlocks > 0
+          ? pct(pages.bboxWithinPageBounds === null ? null : pages.bboxWithinPageBounds / pages.bboxBlocks)
+          : "unsupported"
+        : "n/a";
+      const table = q.table;
+      const tableCells = table ? `${table.cellTextsRecoveredStructural}/${table.cellTextsExpected}` : "n/a";
+      const flattened = table ? (table.flattenedToText === null ? "n/a" : String(table.flattenedToText)) : "n/a";
+      const formula = q.formula ? `${q.formula.detectedStructural}/${q.formula.formulasExpected}` : "n/a";
+      const ocrRecall = q.ocr?.required ? pct(q.ocr.charRecall) : "n/a";
+      lines.push(
+        `| ${q.fixtureId} | ${q.parserKey} | ${q.runId} | ${pct(q.text?.charRecall)} | ${pct(q.text?.trigramRecall)} | ${num(q.text?.editDistance)} | ${pct(q.text?.duplicateRatio)} | ${pct(q.text?.unexpectedRatio)} | ${orderPairs} | ${interleave} | ${pct(pages?.pageIndexAccuracy ?? null)} | ${bboxCell} | ${tableCells} | ${flattened} | ${formula} | ${ocrRecall} | ${pct(q.contamination?.noiseCharRatio ?? null)} |`,
+      );
+    }
+    lines.push("");
+  }
+
+  if (nonEvaluated.length > 0) {
+    lines.push("## Quality sidecar statuses (non-evaluated)");
+    lines.push("");
+    for (const q of nonEvaluated) {
+      lines.push(`- ${q.fixtureId} / ${q.parserKey} / ${q.runId}: ${q.status}${q.error ? ` (${q.error})` : ""}`);
+    }
+    lines.push("");
+  }
 }
 
 async function readRunNormalized(runDir: string): Promise<NormalizedOutput | null> {

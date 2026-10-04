@@ -60,6 +60,19 @@ export const pdfjsAdapter: ParserAdapter = {
             })),
           })),
           readingOrderAvailable: false,
+          // The production pdfjs baseline performs no OCR — recorded as a fact,
+          // never wrapped with an external OCR engine (spec #6).
+          ocr: {
+            ocrModeRequested: false,
+            ocrEnabled: false,
+            engine: null,
+            model: null,
+            modelRevision: null,
+            language: null,
+            pagesOcrProcessed: null,
+            pagesRequiringOcr: null,
+            pagesOcrSucceeded: null,
+          },
         };
       } else {
         warnings.push(`PARSER_ERROR: ${parsed.error ?? "unknown"}`);

@@ -250,6 +250,46 @@ export async function runParser(
     childFailed = true;
   }
 
+  // Quality evaluation (Phase 2B spec #15/#16): additive run-scoped sidecar.
+  // A quality failure is recorded as QUALITY_EVALUATION_FAILED and never
+  // overwrites or corrupts the parser execution evidence above.
+  try {
+    const { runQualityEvaluation } = await import("./quality/index.js");
+    const quality = await runQualityEvaluation({
+      runId,
+      fixtureId,
+      parserKey,
+      parserMode: mode,
+      normalized,
+      ocrMetadata: normalized?.ocr ?? null,
+    });
+    await writeJsonFileAtomic(join(outDir, "quality.json"), quality);
+    if (quality.status === "QUALITY_EVALUATION_FAILED" || quality.status === "SKIPPED_GROUND_TRUTH_INVALID") {
+      warnings.push(`${quality.status}: ${quality.error ?? "unknown"}`);
+    }
+  } catch (qualityError) {
+    const message = qualityError instanceof Error ? qualityError.message : String(qualityError);
+    warnings.push(`QUALITY_EVALUATION_FAILED: ${message}`);
+    await writeJsonFileAtomic(join(outDir, "quality.json"), {
+      evaluatorVersion: "pdf-quality-eval-v2",
+      runId,
+      fixtureId,
+      parserKey,
+      parserMode: mode,
+      status: "QUALITY_EVALUATION_FAILED",
+      error: message,
+      evaluatedAt: new Date().toISOString(),
+      text: null,
+      readingOrder: null,
+      structure: null,
+      pages: null,
+      table: null,
+      formula: null,
+      ocr: null,
+      contamination: null,
+    }).catch(() => undefined);
+  }
+
   // Temp cleanup (#34): success, failure and timeout paths must all clean up.
   let tempClean = true;
   try {

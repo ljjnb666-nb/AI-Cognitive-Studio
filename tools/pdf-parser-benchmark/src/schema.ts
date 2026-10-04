@@ -78,11 +78,29 @@ export const NormalizedPage = z.object({
   blocks: z.array(NormalizedBlock),
 });
 
+/**
+ * OCR provenance (Phase 2B spec #6). Facts only: fields upstream does not
+ * expose stay null — never guessed. ocrModeRequested is the benchmark's own
+ * declared intent for the mode; ocrEnabled is what upstream reports.
+ */
+export const OcrProvenanceSchema = z.object({
+  ocrModeRequested: z.boolean(),
+  ocrEnabled: z.boolean().nullable(),
+  engine: z.string().nullable(),
+  model: z.string().nullable(),
+  modelRevision: z.string().nullable(),
+  language: z.string().nullable(),
+  pagesOcrProcessed: z.number().int().nonnegative().nullable(),
+  pagesRequiringOcr: z.number().int().nonnegative().nullable(),
+  pagesOcrSucceeded: z.number().int().nonnegative().nullable(),
+});
+
 export const NormalizedOutput = z.object({
   parser: ParserDescriptor,
   fixtureId: z.string().min(1),
   pages: z.array(NormalizedPage).max(5_000),
   readingOrderAvailable: z.boolean(),
+  ocr: OcrProvenanceSchema.optional(),
 });
 
 export const BenchmarkResult = z.object({
@@ -106,6 +124,7 @@ export const BenchmarkResult = z.object({
 });
 export type BenchmarkResult = z.infer<typeof BenchmarkResult>;
 export type NormalizedOutput = z.infer<typeof NormalizedOutput>;
+export type OcrProvenance = z.infer<typeof OcrProvenanceSchema>;
 
 /** Structural capability inventory (#37) — facts only, no scoring. */
 export type CapabilityMatrixRow = {

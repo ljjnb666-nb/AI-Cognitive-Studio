@@ -91,6 +91,10 @@ async function setupModels(): Promise<void> {
   const doclingRun = await runParser("docling", "local", warmup.entry.id, { cold: true, pageCapOverride: null });
   record.docling = { status: doclingRun.status, warnings: doclingRun.warnings, warmCacheBytes: await dirBytes(join(CACHE_ROOT, "huggingface")) };
 
+  console.log("== preload docling ocr mode (untimed OCR model download) ==");
+  const doclingOcrRun = await runParser("docling", "ocr", warmup.entry.id, { cold: true, pageCapOverride: null });
+  record.doclingOcr = { status: doclingOcrRun.status, warnings: doclingOcrRun.warnings, warmCacheBytes: await dirBytes(join(CACHE_ROOT, "huggingface")) };
+
   console.log("== preload mineru flash (untimed model download) ==");
   const serverUp = await mineruServer("start");
   record.mineruServerStartExit = serverUp;
@@ -112,18 +116,27 @@ const RUN_MATRIX: Array<{ parser: ParserId; mode: string }> = [
   { parser: "pdfjs", mode: "default" },
   { parser: "liteparse", mode: "default" },
   { parser: "docling", mode: "local" },
+  { parser: "docling", mode: "ocr" },
   { parser: "mineru", mode: "flash" },
   { parser: "mineru", mode: "basic" },
 ];
 
 async function runAll(): Promise<void> {
   const fixtures = arg("--fixtures")?.split(",") ?? SMOKES.map((entry) => entry.fixture);
+  const matrixFilter = arg("--parsers");
+  const matrix = matrixFilter
+    ? RUN_MATRIX.filter((entry) => matrixFilter.split(",").includes(`${entry.parser}${entry.parser === "mineru" ? `-${entry.mode}` : entry.mode === "default" || entry.mode === "local" ? "" : `-${entry.mode}`}`) || matrixFilter.split(",").includes(entry.parser))
+    : RUN_MATRIX;
+  const liteparseOcrRequested = matrix.some((entry) => entry.parser === "liteparse" && entry.mode === "ocr");
   const summary: Array<Record<string, unknown>> = [];
-  let mineruServerNeeded = RUN_MATRIX.some((entry) => entry.parser === "mineru");
+  let mineruServerNeeded = matrix.some((entry) => entry.parser === "mineru");
   let mineruServerUp = false;
 
   for (const fixture of fixtures) {
-    for (const entry of RUN_MATRIX) {
+    for (const entry of matrix) {
+      // liteparse ocr mode only makes sense once per fixture (deterministic output);
+      // cold+warm both run to expose variance like every other mode.
+      if (entry.parser === "liteparse" && entry.mode === "ocr" && !liteparseOcrRequested) continue;
       for (const cold of [true, false]) {
         if (entry.parser === "mineru" && mineruServerNeeded && !mineruServerUp) {
           const exit = await mineruServer("start");
@@ -132,7 +145,7 @@ async function runAll(): Promise<void> {
         const outcome = await runParser(entry.parser, entry.mode, fixture, { cold });
         summary.push({
           fixture,
-          parser: `${entry.parser}${entry.parser === "mineru" ? `-${entry.mode}` : ""}`,
+          parser: `${entry.parser}${entry.parser === "mineru" || entry.mode === "ocr" ? `-${entry.mode}` : ""}`,
           runId: outcome.result?.run.id ?? null,
           runDir: outcome.outputDir,
           cold,
@@ -203,6 +216,13 @@ async function main(): Promise<void> {
     case "run-all":
       await runAll();
       break;
+    case "evidence-pack": {
+      const { writeEvidencePack } = await import("./evidence.js");
+      const pack = await writeEvidencePack();
+      console.log(`EVIDENCE_PACK_WRITTEN: ${pack.dir}`);
+      for (const file of pack.files) console.log(`  ${file}`);
+      break;
+    }
     case "report": {
       const { buildAggregateReport } = await import("./report.js");
       const report = await buildAggregateReport();
@@ -211,7 +231,7 @@ async function main(): Promise<void> {
       break;
     }
     default:
-      console.log("commands: preflight | setup-dirs | setup-models | mineru-server --action <status|start|stop> | run --parser <id> --fixture <id> [--mode m] | run-all | report");
+      console.log("commands: preflight | setup-dirs | setup-models | mineru-server --action <status|start|stop> | run --parser <id> --fixture <id> [--mode m] | run-all [--fixtures f1,f2] [--parsers pdfjs,liteparse,docling,docling-ocr,mineru-flash,mineru-basic] | report | evidence-pack");
   }
 }
 

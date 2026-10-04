@@ -19,8 +19,8 @@ export const doclingAdapter: ParserAdapter = {
   minRamAvailableGb: 2.5,
   defaultTimeoutMs: DEFAULT_TIMEOUT,
   defaultPageCap: 50,
-  modes: ["local"],
-  parserKey: () => "docling",
+  modes: ["local", "ocr"],
+  parserKey: (mode) => (mode === "ocr" ? "docling-ocr" : "docling"),
 
   async run(context: AdapterRunContext): Promise<AdapterRunOutput> {
     const resultPath = join(context.tempDir, "docling-result.json");
@@ -28,11 +28,12 @@ export const doclingAdapter: ParserAdapter = {
     const cap = context.pageCapOverride === undefined ? 50 : context.pageCapOverride;
     const pageCapArg = cap === null || cap === 0 ? "all" : String(cap);
     if (pageCapArg !== "all") context.warnings.push(`PAGE_SUBSET: first ${pageCapArg} pages only`);
+    const ocrPolicy = context.mode === "ocr" ? "ocr" : "native";
 
     const outcome = await context.runner.run(
       {
         programId: "docling_python",
-        argv: [doclingRunnerPath(), context.fixture.path, resultPath, markdownPath, pageCapArg],
+        argv: [doclingRunnerPath(), context.fixture.path, resultPath, markdownPath, pageCapArg, ocrPolicy],
         cwd: context.tempDir,
         env: {
           HF_HOME: join(CACHE_ROOT, "huggingface"),
@@ -56,13 +57,15 @@ export const doclingAdapter: ParserAdapter = {
         ok: boolean;
         error?: string;
         doclingVersion?: string;
+        ocrRequested?: boolean;
         doOcr?: boolean | null;
         ocrBackend?: string | null;
+        ocrLanguage?: string | null;
         pages?: Array<Record<string, unknown>>;
       };
       if (parsed.ok && parsed.pages) {
         context.warnings.push(
-          `DOCLING_META: version=${parsed.doclingVersion} do_ocr=${parsed.doOcr} ocr_backend=${parsed.ocrBackend ?? "UNKNOWN"}`,
+          `DOCLING_META: version=${parsed.doclingVersion} ocr_requested=${parsed.ocrRequested} do_ocr=${parsed.doOcr} ocr_backend=${parsed.ocrBackend ?? "UNKNOWN"} lang=${parsed.ocrLanguage ?? "UNKNOWN"}`,
         );
         candidate = {
           parser: {
@@ -76,6 +79,17 @@ export const doclingAdapter: ParserAdapter = {
           fixtureId: context.fixture.entry.id,
           pages: parsed.pages,
           readingOrderAvailable: true,
+          ocr: {
+            ocrModeRequested: parsed.ocrRequested ?? context.mode === "ocr",
+            ocrEnabled: parsed.doOcr ?? null,
+            engine: parsed.ocrBackend ?? null,
+            model: null,
+            modelRevision: null,
+            language: parsed.ocrLanguage ?? null,
+            pagesOcrProcessed: null,
+            pagesRequiringOcr: null,
+            pagesOcrSucceeded: null,
+          },
         };
       } else {
         warnings.push(`PARSER_ERROR: ${parsed.error ?? "unknown"}`);

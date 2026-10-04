@@ -12,15 +12,17 @@ export const liteparseAdapter: ParserAdapter = {
   minRamAvailableGb: 1.0,
   defaultTimeoutMs: 180_000,
   defaultPageCap: null,
-  modes: ["default"],
-  parserKey: () => "liteparse",
+  modes: ["default", "ocr"],
+  parserKey: (mode) => (mode === "ocr" ? "liteparse-ocr" : "liteparse"),
 
   async run(context: AdapterRunContext): Promise<AdapterRunOutput> {
     const resultPath = join(context.tempDir, "liteparse-result.json");
+    const childArgs = [liteparseChildPath(), context.fixture.path, resultPath];
+    if (context.mode === "ocr") childArgs.push("--ocr");
     const outcome = await context.runner.run(
       {
         programId: "node",
-        argv: [liteparseChildPath(), context.fixture.path, resultPath],
+        argv: childArgs,
         cwd: context.tempDir,
         env: { TMP: context.tempDir, TEMP: context.tempDir },
       },
@@ -36,12 +38,13 @@ export const liteparseAdapter: ParserAdapter = {
         error?: string;
         totalPages?: number;
         needsOcrPageIndexes?: number[];
+        ocr?: Record<string, unknown>;
         selfRssMb?: number;
         pages?: Array<{ pageIndex: number; printedPageLabel: string | null; blocks: Array<Record<string, unknown>> }>;
       };
       if (parsed.ok && parsed.pages) {
         if ((parsed.needsOcrPageIndexes?.length ?? 0) > 0) {
-          warnings.push(`OCR_NEEDED_ON_PAGES: ${parsed.needsOcrPageIndexes!.join(",")} (OCR_NOT_TESTED)`);
+          warnings.push(`OCR_NEEDED_ON_PAGES: ${parsed.needsOcrPageIndexes!.join(",")}${context.mode === "ocr" ? "" : " (OCR_NOT_TESTED)"}`);
         }
         if (typeof parsed.selfRssMb === "number") {
           outcome.peakRssMb = Math.max(outcome.peakRssMb ?? 0, parsed.selfRssMb);
@@ -51,6 +54,17 @@ export const liteparseAdapter: ParserAdapter = {
           fixtureId: context.fixture.entry.id,
           pages: parsed.pages,
           readingOrderAvailable: true,
+          ocr: parsed.ocr ?? {
+            ocrModeRequested: context.mode === "ocr",
+            ocrEnabled: false,
+            engine: null,
+            model: null,
+            modelRevision: null,
+            language: null,
+            pagesOcrProcessed: null,
+            pagesRequiringOcr: null,
+            pagesOcrSucceeded: null,
+          },
         };
       } else {
         warnings.push(`PARSER_ERROR: ${parsed.error ?? "unknown"}`);

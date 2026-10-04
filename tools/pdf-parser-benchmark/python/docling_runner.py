@@ -5,7 +5,11 @@ serializes a page-structured result JSON for the harness. This script only
 reads its input and writes to the paths the harness passes; model downloads
 are directed to the D: cache by harness-provided environment (HF_HOME etc.).
 
-Usage: docling_runner.py <input.pdf> <result.json> <markdown-out.md> <page-cap|all>
+Usage: docling_runner.py <input.pdf> <result.json> <markdown-out.md> <page-cap|all> [native|ocr]
+
+The optional 5th argument selects the OCR policy explicitly: "native" forces
+do_ocr=False, "ocr" forces do_ocr=True with the configured default backend.
+The effective values are reported in the payload (facts, never guesses).
 """
 from __future__ import annotations
 
@@ -46,27 +50,47 @@ def text_for_item(item, doc) -> str:
 
 def main() -> int:
     input_pdf, result_path, markdown_path, page_cap = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    ocr_policy = sys.argv[5] if len(sys.argv) > 5 else "native"
+    if ocr_policy not in ("native", "ocr"):
+        raise ValueError(f"invalid ocr policy: {ocr_policy}")
 
-    from docling.document_converter import DocumentConverter
+    from docling.document_converter import DocumentConverter, PdfFormatOption, InputFormat
+    # docling 2.129: pipeline options live under docling.datamodel (the
+    # datapipeline module no longer exists; NativePdfPipelineOptions has no
+    # OCR fields). Default do_ocr is True — explicit construction is what
+    # keeps native/OCR mode separation honest.
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
 
     version = importlib.metadata.version("docling")
-    converter = DocumentConverter()
-    do_ocr = None
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.do_ocr = ocr_policy == "ocr"
+    do_ocr = bool(pipeline_options.do_ocr)
     ocr_backend = None
+    ocr_language = None
     try:
-        opts = converter.pipeline.pipeline_options  # type: ignore[attr-defined]
-        do_ocr = bool(getattr(opts, "do_ocr", None))
-        backend = getattr(opts, "ocr_options", None)
-        ocr_backend = type(getattr(backend, "kind", backend)).__name__ if backend is not None else None
-    except Exception:  # noqa: BLE001 - defaults introspection is best-effort
+        backend = getattr(pipeline_options, "ocr_options", None)
+        if backend is not None:
+            kind = getattr(backend, "kind", backend)
+            ocr_backend = str(kind.value) if hasattr(kind, "value") else type(kind).__name__
+            lang = getattr(backend, "lang", None)
+            if isinstance(lang, (list, tuple)):
+                ocr_language = ",".join(str(item) for item in lang)
+            elif lang is not None:
+                ocr_language = str(lang)
+    except Exception:  # noqa: BLE001 - options introspection is best-effort
         pass
+    converter = DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
+    )
 
     cap = None if page_cap == "all" else int(page_cap)
     convert_result = None
     ranged = False
     try:
         if cap is not None:
-            convert_result = converter.convert(Path(input_pdf), page_range=(0, cap))
+            # docling page ranges are 1-based: start must be >= 1 (a 0 start
+            # raises a pydantic ValidationError, not a TypeError).
+            convert_result = converter.convert(Path(input_pdf), page_range=(1, max(cap, 1)))
             ranged = True
         else:
             convert_result = converter.convert(Path(input_pdf))
@@ -106,8 +130,10 @@ def main() -> int:
     payload = {
         "ok": True,
         "doclingVersion": version,
+        "ocrRequested": ocr_policy == "ocr",
         "doOcr": do_ocr,
         "ocrBackend": ocr_backend,
+        "ocrLanguage": ocr_language,
         "pageRangeApplied": ranged,
         "pages": [{"pageIndex": index, "printedPageLabel": None, "blocks": blocks} for index, blocks in sorted(pages.items())],
     }
