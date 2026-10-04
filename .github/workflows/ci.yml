@@ -5,9 +5,80 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel a PR's in-flight run when a newer push lands, so an old SHA never
+# keeps burning runner time. Main pushes are never auto-cancelled: every
+# main commit keeps its full validation.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_ENV: test
+  DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio?schema=public
+  DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+  REDIS_URL: redis://localhost:6379
+  S3_ENDPOINT: http://127.0.0.1:9000
+  S3_PUBLIC_ENDPOINT: http://localhost:9000
+  S3_REGION: us-east-1
+  S3_BUCKET: ai-cognitive-studio-dev
+  S3_ACCESS_KEY: local-development-only
+  S3_SECRET_KEY: local-development-only
+  S3_FORCE_PATH_STYLE: "true"
+  BETTER_AUTH_SECRET: phase7-ci-secret-must-be-at-least-32-characters
+  BETTER_AUTH_URL: http://localhost:3001
+  BETTER_AUTH_TRUSTED_ORIGINS: http://localhost:3001
+
 jobs:
-  validate:
+  # ---------------------------------------------------------------------------
+  # Domain 1 — static: lint, typecheck, build. No infrastructure services.
+  # (Verified: every web route is server-rendered on demand, so `next build`
+  # never opens a database connection during page-data collection.)
+  # ---------------------------------------------------------------------------
+  static:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The release gates record and verify the PR head, not GitHub's
+          # ephemeral pull-request merge ref.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact-head checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "expected=${EXPECTED_SHA}"
+          echo "actual=${actual}"
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "::error::Checked-out HEAD ${actual} does not match expected exact head ${EXPECTED_SHA}"
+            exit 1
+          fi
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build
+
+  # ---------------------------------------------------------------------------
+  # Domain 2 — core-tests: unit, integration, provider gates, Phases 1-5.
+  # Real PostgreSQL 17 + Redis 7 + MinIO + FFmpeg. No browser.
+  # ---------------------------------------------------------------------------
+  core-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:17-alpine
@@ -31,27 +102,23 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-    env:
-      NODE_ENV: test
-      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio?schema=public
-      DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
-      REDIS_URL: redis://localhost:6379
-      S3_ENDPOINT: http://127.0.0.1:9000
-      S3_PUBLIC_ENDPOINT: http://localhost:9000
-      S3_REGION: us-east-1
-      S3_BUCKET: ai-cognitive-studio-dev
-      S3_ACCESS_KEY: local-development-only
-      S3_SECRET_KEY: local-development-only
-      S3_FORCE_PATH_STYLE: "true"
-      BETTER_AUTH_SECRET: phase7-ci-secret-must-be-at-least-32-characters
-      BETTER_AUTH_URL: http://localhost:3001
-      BETTER_AUTH_TRUSTED_ORIGINS: http://localhost:3001
     steps:
       - uses: actions/checkout@v4
         with:
           # The release gates record and verify the PR head, not GitHub's
           # ephemeral pull-request merge ref.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact-head checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "expected=${EXPECTED_SHA}"
+          echo "actual=${actual}"
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "::error::Checked-out HEAD ${actual} does not match expected exact head ${EXPECTED_SHA}"
+            exit 1
+          fi
       - uses: pnpm/action-setup@v4
         with:
           version: 10.30.3
@@ -73,10 +140,6 @@ jobs:
         run: pnpm --filter @ai-cognitive/db prisma migrate deploy
         env:
           DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
-      - name: Lint
-        run: pnpm lint
-      - name: Typecheck
-        run: pnpm typecheck
       - name: Install FFmpeg, FFprobe, and Redis CLI for media and Phase 6 processing
         run: sudo apt-get update && sudo apt-get install -y ffmpeg redis-tools
       - name: Unit tests
@@ -113,6 +176,77 @@ jobs:
         run: pnpm test:phase4:e2e
       - name: Phase 5 short video generation
         run: pnpm test:phase5:e2e
+
+  # ---------------------------------------------------------------------------
+  # Domain 3 — product-acceptance: Phases 6, 7, 9-14 browser release gates.
+  # Real PostgreSQL 17 + Redis 7 + MinIO + FFmpeg + Playwright Chromium.
+  # ---------------------------------------------------------------------------
+  product-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: ai_cognitive_studio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d ai_cognitive_studio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The release gates record and verify the PR head, not GitHub's
+          # ephemeral pull-request merge ref.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact-head checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "expected=${EXPECTED_SHA}"
+          echo "actual=${actual}"
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "::error::Checked-out HEAD ${actual} does not match expected exact head ${EXPECTED_SHA}"
+            exit 1
+          fi
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Start MinIO
+        run: docker compose up -d minio
+      - name: Initialize private MinIO bucket
+        run: docker compose run --rm minio-init
+      - name: Create isolated test database
+        run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Apply test migration
+        run: pnpm --filter @ai-cognitive/db prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      - name: Install FFmpeg, FFprobe, and Redis CLI for media and Phase 6 processing
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg redis-tools
       - name: Install Playwright browser
         run: pnpm --filter @ai-cognitive/web exec playwright install --with-deps chromium
       - name: Phase 6 browser product acceptance
@@ -147,6 +281,84 @@ jobs:
         run: pnpm test:phase14:release
         env:
           POSTGRES_HOST_PORT: "5432"
+      - name: Upload Phase 14 visual evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase14-visual-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: output/playwright/*.png
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Domain 4 — quality-performance: Phases 15-16 release gates.
+  # Real PostgreSQL 17 + Redis 7 + MinIO + FFmpeg (phase15:release re-runs the
+  # phase 3/4 media pipeline and a full build internally). No browser.
+  # ---------------------------------------------------------------------------
+  quality-performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: ai_cognitive_studio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d ai_cognitive_studio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The release gates record and verify the PR head, not GitHub's
+          # ephemeral pull-request merge ref.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact-head checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "expected=${EXPECTED_SHA}"
+          echo "actual=${actual}"
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "::error::Checked-out HEAD ${actual} does not match expected exact head ${EXPECTED_SHA}"
+            exit 1
+          fi
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Start MinIO
+        run: docker compose up -d minio
+      - name: Initialize private MinIO bucket
+        run: docker compose run --rm minio-init
+      - name: Create isolated test database
+        run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Apply test migration
+        run: pnpm --filter @ai-cognitive/db prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      - name: Install FFmpeg, FFprobe, and Redis CLI for media and Phase 6 processing
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg redis-tools
       - name: Phase 15 Podcast Content Quality release gate (deterministic and no external AI calls)
         run: pnpm test:phase15:release
         env:
@@ -161,10 +373,95 @@ jobs:
         run: pnpm test:phase16:release
         env:
           PHASE16_ARTIFACT_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Upload Phase 16 performance and cost evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase16-performance-cost-${{ github.event.pull_request.head.sha || github.sha }}
+          path: output/phase16
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Domain 5 — stability-beta: Phases 17, 18.1, Beta Provider UX, root E2E.
+  # Real PostgreSQL 17 + Redis 7 + MinIO + FFmpeg + Playwright Chromium.
+  # ---------------------------------------------------------------------------
+  stability-beta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: ai_cognitive_studio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d ai_cognitive_studio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The release gates record and verify the PR head, not GitHub's
+          # ephemeral pull-request merge ref.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact-head checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "expected=${EXPECTED_SHA}"
+          echo "actual=${actual}"
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "::error::Checked-out HEAD ${actual} does not match expected exact head ${EXPECTED_SHA}"
+            exit 1
+          fi
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Start MinIO
+        run: docker compose up -d minio
+      - name: Initialize private MinIO bucket
+        run: docker compose run --rm minio-init
+      - name: Create isolated test database
+        run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Apply test migration
+        run: pnpm --filter @ai-cognitive/db prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      - name: Install FFmpeg, FFprobe, and Redis CLI for media and Phase 6 processing
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg redis-tools
+      - name: Install Playwright browser
+        run: pnpm --filter @ai-cognitive/web exec playwright install --with-deps chromium
       - name: Phase 17 Closed Beta core release gate
         run: pnpm test:phase17:release
         env:
           PHASE17_ARTIFACT_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Upload Phase 17 closed beta evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase17-closed-beta-${{ github.event.pull_request.head.sha || github.sha }}
+          path: output/phase17
+          if-no-files-found: error
       - name: Phase 18.1 source processing repair release gate
         run: pnpm test:phase18-1:release
         env:
@@ -183,29 +480,46 @@ jobs:
           name: phase18-production-hardening-${{ github.event.pull_request.head.sha || github.sha }}
           path: output/phase18
           if-no-files-found: error
-      - name: Upload Phase 17 closed beta evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase17-closed-beta-${{ github.event.pull_request.head.sha || github.sha }}
-          path: output/phase17
-          if-no-files-found: error
-      - name: Upload Phase 16 performance and cost evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase16-performance-cost-${{ github.event.pull_request.head.sha || github.sha }}
-          path: output/phase16
-          if-no-files-found: error
-      - name: Upload Phase 14 visual evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase14-visual-evidence-${{ github.event.pull_request.head.sha || github.sha }}
-          path: output/playwright/*.png
-          if-no-files-found: error
       - name: Beta Provider UX real-flow release gate (no external AI calls)
         run: pnpm test:beta-repair:provider-ux:release
         env:
           POSTGRES_HOST_PORT: "5432"
       - name: End-to-end tests
         run: pnpm test:e2e
-      - name: Build
-        run: pnpm build
+
+  # ---------------------------------------------------------------------------
+  # Final aggregator gate. Keeps the historical `validate` check name required
+  # by branch protection, but no longer runs tests itself. Fail-closed: any
+  # upstream domain that is not "success" (failed, cancelled or skipped)
+  # fails this check.
+  # ---------------------------------------------------------------------------
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [static, core-tests, product-acceptance, quality-performance, stability-beta]
+    if: always()
+    steps:
+      - name: Verify all validation domains succeeded
+        env:
+          STATIC_RESULT: ${{ needs.static.result }}
+          CORE_TESTS_RESULT: ${{ needs.core-tests.result }}
+          PRODUCT_ACCEPTANCE_RESULT: ${{ needs.product-acceptance.result }}
+          QUALITY_PERFORMANCE_RESULT: ${{ needs.quality-performance.result }}
+          STABILITY_BETA_RESULT: ${{ needs.stability-beta.result }}
+        run: |
+          echo "static:              ${STATIC_RESULT}"
+          echo "core-tests:          ${CORE_TESTS_RESULT}"
+          echo "product-acceptance:  ${PRODUCT_ACCEPTANCE_RESULT}"
+          echo "quality-performance: ${QUALITY_PERFORMANCE_RESULT}"
+          echo "stability-beta:      ${STABILITY_BETA_RESULT}"
+          failed=0
+          for result in "${STATIC_RESULT}" "${CORE_TESTS_RESULT}" "${PRODUCT_ACCEPTANCE_RESULT}" "${QUALITY_PERFORMANCE_RESULT}" "${STABILITY_BETA_RESULT}"; do
+            if [ "${result}" != "success" ]; then
+              failed=1
+            fi
+          done
+          if [ "${failed}" -ne 0 ]; then
+            echo "::error::One or more validation domains did not succeed (failed, cancelled, or skipped)."
+            exit 1
+          fi
+          echo "All validation domains succeeded."
