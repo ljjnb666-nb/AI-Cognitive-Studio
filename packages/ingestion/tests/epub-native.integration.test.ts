@@ -353,4 +353,32 @@ describe("EPUB unsupported content failure model", () => {
     const stillCurrent = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
     expect(stillCurrent.extractionId).toBe(current.extractionId);
   });
+
+  it("rejects a missing unsupported spine item as corrupted while the prior current survives", async () => {
+    const storage = new FakeStorageProvider();
+    const { user, workspace } = await createWorkspaceFixture();
+    const { process, document } = await ingestEpub(storage, user, workspace, "good.epub", () => epub3Fixture());
+    await process();
+    const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
+
+    // RF02-01: a referenced-but-missing spine item is fatal even when its
+    // media type is unsupported binary — never a silent skip, never
+    // SOURCE_EPUB_NO_USABLE_TEXT.
+    const entries = [
+      { name: "mimetype", text: "application/epub+zip" },
+      { name: "META-INF/container.xml", text: '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>' },
+      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier></metadata><manifest><item id="img" href="media/missing.png" media-type="image/png"/></manifest><spine><itemref idref="img"/></spine></package>' },
+    ];
+    storage.objects.set(document.storageKey, epubBytes(entries));
+    const service = createIngestionService(storage);
+    const retryRun = await createFixtureRun(user, workspace, document.id, "epub-parser-v2");
+    runIds.push(retryRun.id);
+    await expect(service.processIngestionRun(retryRun.id)).rejects.toThrow(SourceError.CORRUPTED);
+    const rejected = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: retryRun.id } });
+    expect(rejected.status).toBe("REJECTED");
+    expect(rejected.errorCode).toBe(SourceError.CORRUPTED);
+
+    const stillCurrent = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
+    expect(stillCurrent.extractionId).toBe(current.extractionId);
+  });
 });

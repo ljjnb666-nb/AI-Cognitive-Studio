@@ -88,18 +88,21 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
   opf.spineIds.forEach((id, spineIndex) => {
     const item = opf.manifest.get(id);
     if (!item) throw new Error(SourceError.CORRUPTED);
+    // RF02-01: EVERY spine reference must exist — resolution and archive
+    // presence are checked BEFORE media-type classification, so a missing
+    // item is always fatal/corrupted regardless of its declared media type.
+    const resource = resolveArchiveHref(opf.path, item.href);
+    if (!byName.has(resource.path)) throw new Error(SourceError.CORRUPTED);
     const mediaType = item.mediaType ?? "";
     // Reading order is spine order; only processable content documents are
-    // parsed. Images, fonts, CSS and media are never decoded, and a declared
-    // non-content spine item is never a failure on its own. A manifest item
-    // without a declared media-type is spec-violating but seen in legacy
-    // books: attempt content parsing (v1 parity) instead of skipping it.
+    // parsed. Unsupported media items are counted and skipped WITHOUT
+    // inflating or decoding their entries. A manifest item without a
+    // declared media-type is spec-violating but seen in legacy books:
+    // attempt content parsing (v1 parity) instead of skipping it.
     if (mediaType && !CONTENT_MEDIA_TYPES.has(mediaType) && mediaType !== SVG_MEDIA_TYPE) {
       unsupportedSpineItems += 1;
       return;
     }
-    const resource = resolveArchiveHref(opf.path, item.href);
-    if (!byName.has(resource.path)) throw new Error(SourceError.CORRUPTED);
     const document = parseXmlResource(entryText(byName, resource.path, limits), limits, resource.path);
     const root = document.documentElement;
     if (!root) throw new Error(SourceError.CORRUPTED);
@@ -522,7 +525,12 @@ function assertDomResourceReferences(document: XmlDocument, basePath: string, li
   }
 }
 
-/** Bounded pre-order element collection; deterministic document order. */
+/**
+ * Bounded pre-order (document-order) element collection. The explicit stack
+ * keeps the maxEpubDomNodes bound (no unbounded recursion); children are
+ * pushed in REVERSE order so the LIFO pops yield true first-to-last sibling
+ * order: root, a, b, c for <root><a/><b/><c/></root>.
+ */
 function iterXmlElements(root: XmlElement, limits: ParserLimits): XmlElement[] {
   const found: XmlElement[] = [];
   const stack: XmlNode[] = [root];
@@ -532,7 +540,11 @@ function iterXmlElements(root: XmlElement, limits: ParserLimits): XmlElement[] {
     if (node.nodeType !== 1) continue;
     const element = node as XmlElement;
     found.push(element);
-    for (const child of Array.from(element.childNodes)) stack.push(child);
+    const children = element.childNodes;
+    for (let index = children.length - 1; index >= 0; index--) {
+      const child = children.item(index);
+      if (child) stack.push(child);
+    }
   }
   return found;
 }
@@ -592,13 +604,58 @@ const HTML_NAMED_ENTITIES: Record<string, string> = Object.fromEntries(
 
 function decodeHtmlNamedEntities(xml: string): string {
   if (!xml.includes("&")) return xml;
-  return xml.replace(/&([a-zA-Z][a-zA-Z0-9]*);/g, (match, name: string) => HTML_NAMED_ENTITIES[name] ?? match);
+  // Lexical-context safety (RF02-02): entity rewriting must never mutate the
+  // source inside CDATA sections (required) or comments and processing
+  // instructions (preferred) — those bytes belong to the XML parser verbatim.
+  let result = "";
+  let cursor = 0;
+  const regions: Array<{ opener: string; closer: string }> = [
+    { opener: "<![CDATA[", closer: "]]>" },
+    { opener: "<!--", closer: "-->" },
+    { opener: "<?", closer: "?>" },
+  ];
+  while (cursor < xml.length) {
+    let next = -1;
+    let region: { opener: string; closer: string } | null = null;
+    for (const candidate of regions) {
+      const at = xml.indexOf(candidate.opener, cursor);
+      if (at >= 0 && (next < 0 || at < next)) { next = at; region = candidate; }
+    }
+    if (!region || next < 0) {
+      result += rewriteHtmlNamedEntities(xml.slice(cursor));
+      break;
+    }
+    result += rewriteHtmlNamedEntities(xml.slice(cursor, next));
+    const close = xml.indexOf(region.closer, next + region.opener.length);
+    if (close < 0) {
+      // Unterminated lexical region: kept verbatim; the strict parser gate
+      // rejects the document rather than repairing it.
+      result += xml.slice(next);
+      cursor = xml.length;
+      break;
+    }
+    const end = close + region.closer.length;
+    result += xml.slice(next, end);
+    cursor = end;
+  }
+  return result;
 }
 
-/** DTD constructs are rejected before the parser ever sees them (defense in depth alongside the post-DOM gate). */
+function rewriteHtmlNamedEntities(segment: string): string {
+  if (!segment.includes("&")) return segment;
+  return segment.replace(/&([a-zA-Z][a-zA-Z0-9]*);/g, (match, name: string) => HTML_NAMED_ENTITIES[name] ?? match);
+}
+
+/**
+ * Raw pre-parse DTD/XXE defense (RF02-02): DOCTYPE/ENTITY/ATTLIST/NOTATION
+ * and SYSTEM/PUBLIC constructs are rejected before the parser ever sees them.
+ * Resource-reference rejection deliberately does NOT happen here — a plain
+ * regex cannot tell an attribute from body text ("The attribute
+ * href=\"https://...\" is external."); the authoritative decoded-attribute
+ * gate is assertDomResourceReferences.
+ */
 function safeXmlText(xml: string): string {
   if (/<!DOCTYPE|<!ENTITY|<!ATTLIST|<!NOTATION/i.test(xml) || /<![^>[]*\b(?:SYSTEM|PUBLIC)\b/i.test(xml)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  if (/\b(?:src|href|xlink:href)\s*=\s*["'](?:https?:|file:)/i.test(xml)) throw new Error(SourceError.ARCHIVE_UNSAFE);
   return xml;
 }
 
