@@ -1,18 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { prisma, JobStatus } from "@ai-cognitive/db";
-import { sha256Utf8 } from "@ai-cognitive/domain";
+import { CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
 import { logger } from "@ai-cognitive/shared";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION } from "./canonical-text.js";
 import { inspectObjectStream } from "./object-inspection.js";
-import { parseDocument } from "./document-parsers.js";
+import { parseDocument, type ParsedBlock } from "./document-parsers.js";
 import { SourceError } from "./source-errors.js";
 import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
 import { dispatchPendingOutbox } from "./outbox-dispatcher.js";
 export { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "./outbox-dispatcher.js";
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
-export { parseDocument, DEFAULT_PARSER_LIMITS } from "./document-parsers.js";
+export { parseDocument, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
 
 export type TrustedRequestContext = { userId: string; workspaceId: string };
 export const INGESTION_QUEUE = "source.ingestion";
@@ -20,6 +20,27 @@ export const INGESTION_TOPIC = "source.ingestion.requested";
 export const INGESTION_JOB = "source.ingest";
 export const BOOK_ANALYSIS_BOOTSTRAP_TOPIC = "book.analysis.bootstrap.requested";
 const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").map((character) => character.charCodeAt(0) < 32 ? "_" : character).join("").slice(0, 180) || "source";
+
+/**
+ * Quality recorded for a normal successful parse. Parser success is never
+ * equated with quality acceptance: a canonical-book-v1 extraction starts at
+ * UNKNOWN with an empty (evidence-free) warning list, and only a future
+ * production quality gate may move it to ACCEPTED/DEGRADED/REQUIRES_FALLBACK/
+ * REJECTED.
+ */
+const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
+
+/**
+ * Builds the canonical SourceBlock.metadata payload (canonical-book-v1): the
+ * block locator plus per-block provenance, strictly validated before any write.
+ * Blocks without locator/provenance (legacy or non-locatable paths) keep raw
+ * passthrough metadata. Additive parser fields ride along through
+ * block.metadata and must satisfy the canonical schema or the write fails.
+ */
+function canonicalBlockMetadata(block: ParsedBlock) {
+  if (!block.locator && !block.provenance) return block.metadata ? JSON.parse(JSON.stringify(block.metadata)) : undefined;
+  return JSON.parse(JSON.stringify(parseCanonicalBlockMetadata({ ...block.metadata, locator: block.locator ?? null, provenance: block.provenance ?? undefined })));
+}
 
 export function assertSafeUrl(value: string): URL {
   const url = new URL(value); const host = url.hostname.toLowerCase();
@@ -127,6 +148,9 @@ export function createIngestionService(storage: StorageProvider, options = { max
               parserName: parsed.parser.name,
               parserVersion: parsed.parser.version,
               normalizationVersion: CANONICAL_NORMALIZATION_VERSION,
+              canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION,
+              qualityStatus: "UNKNOWN",
+              qualityMetadata: UNASSESSED_EXTRACTION_QUALITY,
               textStorageKey: textKey,
               textSha256: sha256Utf8(text),
               characterCount: text.length,
@@ -146,7 +170,10 @@ export function createIngestionService(storage: StorageProvider, options = { max
                   kind: block.kind,
                   text: block.text,
                   contentHash: sha256Utf8(block.text),
-                  metadata: block.metadata ? JSON.parse(JSON.stringify(block.metadata)) : undefined,
+                  metadata: canonicalBlockMetadata(block),
+                  // A block either carries a real parser-produced bbox or none at
+                  // all; a fake or unit-less guess must never be persisted.
+                  bbox: block.bbox ? JSON.parse(JSON.stringify(parseSourceBlockBbox(block.bbox))) : undefined,
                 },
               });
             }
@@ -240,6 +267,15 @@ export async function dispatchPendingIngestion(queue: IngestionQueue, options: I
   }
   return events.length; */
 }
+/**
+ * Planned parser provenance, recorded when the upload completes — BEFORE any
+ * parser has run. This is also why recovery runs inherit the previous value.
+ * It is NOT the parser authority for what actually executed: the durable
+ * authority is DocumentExtraction (parserName/parserVersion plus
+ * canonicalSchemaVersion) and the per-block SourceBlock provenance metadata.
+ * New code must never branch on IngestionRun.parserVersion to decide which
+ * parser produced an extraction.
+ */
 function parserProvenance(mediaType: string): { name: string; version: string } {
   if (mediaType === "text/plain") return { name: "builtin-text", version: "text-parser-v1" };
   if (mediaType === "text/markdown") return { name: "builtin-markdown", version: "markdown-parser-v1" };

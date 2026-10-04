@@ -5,21 +5,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
+import type { BlockExtractionProvenance, CanonicalSourceLocator, SourceBlockBbox } from "@ai-cognitive/domain";
 import { normalizeCanonicalText, splitCanonicalBlock } from "./canonical-text.js";
 import { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 
 export type SourceBlockKind = "HEADING" | "PARAGRAPH" | "LIST_ITEM" | "QUOTE" | "TABLE" | "IMAGE" | "CAPTION" | "FOOTNOTE" | "CODE" | "EQUATION" | "UNKNOWN";
-export type ParsedBlock = { kind: SourceBlockKind; text: string; metadata?: Record<string, unknown> };
+export type ParsedBlock = { kind: SourceBlockKind; text: string; locator?: CanonicalSourceLocator; provenance?: BlockExtractionProvenance; bbox?: SourceBlockBbox; metadata?: Record<string, unknown> };
 export type Parsed = { parser: { name: string; version: string }; pages: Array<{ physicalPageIndex: number | null; blocks: ParsedBlock[] }> };
 export type ParserLimits = { maxPdfPages: number; maxPdfOutputChars: number; pdfTimeoutMs: number; pdfMemoryMb: number; maxPdfIpcBytes: number; maxPdfStderrBytes: number; pdfChildEntry?: string; maxArchiveEntries: number; maxArchiveEntryBytes: number; maxArchiveTotalBytes: number; maxArchiveCompressionRatio: number };
 export const DEFAULT_PARSER_LIMITS: ParserLimits = { maxPdfPages: 2000, maxPdfOutputChars: 20_000_000, pdfTimeoutMs: 30_000, pdfMemoryMb: 128, maxPdfIpcBytes: 24_000_000, maxPdfStderrBytes: 32_000, maxArchiveEntries: 10_000, maxArchiveEntryBytes: 25_000_000, maxArchiveTotalBytes: 100_000_000, maxArchiveCompressionRatio: 100 };
 
-const parsers = { text: { name: "builtin-text", version: "text-parser-v1" }, markdown: { name: "builtin-markdown", version: "markdown-parser-v1" }, pdf: { name: "pdfjs-isolated", version: "pdf-isolation-v3" }, epub: { name: "builtin-epub", version: "epub-parser-v1" } };
+const parsers = {
+  text: { name: "builtin-text", version: "text-parser-v1", sourceMethod: "NATIVE_TEXT" },
+  markdown: { name: "builtin-markdown", version: "markdown-parser-v1", sourceMethod: "STRUCTURED_MARKUP" },
+  pdf: { name: "pdfjs-isolated", version: "pdf-isolation-v3", sourceMethod: "NATIVE_TEXT" },
+  epub: { name: "builtin-epub", version: "epub-parser-v1", sourceMethod: "STRUCTURED_MARKUP" },
+} as const;
+export type ParserDescriptor = (typeof parsers)[keyof typeof parsers];
+
+/**
+ * Block-level provenance for a parser run. Extracted as the single authority so
+ * the extraction-level columns and every produced block stay consistent.
+ */
+export function blockProvenance(parser: ParserDescriptor): BlockExtractionProvenance {
+  return { sourceMethod: parser.sourceMethod, parserName: parser.name, parserVersion: parser.version };
+}
 
 export async function parseDocument(bytes: Uint8Array, mediaType: string, limits: Partial<ParserLimits> = {}): Promise<Parsed> {
   const effective = { ...DEFAULT_PARSER_LIMITS, ...limits };
   if (mediaType === "text/plain") return blocksFromText(decodeUtf8Text(bytes), "PARAGRAPH", parsers.text);
-  if (mediaType === "text/markdown") return { parser: parsers.markdown, pages: [{ physicalPageIndex: null, blocks: markdownBlocks(decodeUtf8Text(bytes)) }] };
+  if (mediaType === "text/markdown") return { parser: parsers.markdown, pages: [{ physicalPageIndex: null, blocks: markdownBlocks(decodeUtf8Text(bytes), parsers.markdown) }] };
   if (mediaType === "application/pdf") return parsePdf(bytes, effective);
   if (mediaType === "application/epub+zip") return parseEpub(bytes, effective);
   throw new Error(SourceError.UNSUPPORTED_TYPE);
@@ -27,8 +42,10 @@ export async function parseDocument(bytes: Uint8Array, mediaType: string, limits
 
 function decodeUtf8Text(bytes: Uint8Array): string { if (bytes.includes(0)) throw new Error(SourceError.TYPE_MISMATCH); try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new Error(SourceError.CORRUPTED); } }
 function splitText(text: string): string[] { return normalizeCanonicalText(text, { stripDocumentBom: true }).split(/\n[ \t]*\n+/).flatMap((part) => splitCanonicalBlock(normalizeCanonicalText(part))).filter(Boolean); }
-function blocksFromText(text: string, kind: SourceBlockKind, parser: Parsed["parser"]): Parsed { return { parser, pages: [{ physicalPageIndex: null, blocks: splitText(text).map((text) => ({ kind, text })) }] }; }
-function markdownBlocks(text: string): ParsedBlock[] { return splitText(text).map((text) => ({ kind: /^#{1,6}\s/.test(text) ? "HEADING" : /^[-*+]\s/.test(text) ? "LIST_ITEM" : /^>\s/.test(text) ? "QUOTE" : /^```/.test(text) ? "CODE" : "PARAGRAPH", text })); }
+// Plain-text formats have no locatable pages in the canonical union; they record
+// provenance only and never fabricate a locator.
+function blocksFromText(text: string, kind: SourceBlockKind, parser: ParserDescriptor): Parsed { return { parser, pages: [{ physicalPageIndex: null, blocks: splitText(text).map((text) => ({ kind, text, provenance: blockProvenance(parser) })) }] }; }
+function markdownBlocks(text: string, parser: ParserDescriptor): ParsedBlock[] { return splitText(text).map((text) => ({ kind: /^#{1,6}\s/.test(text) ? "HEADING" : /^[-*+]\s/.test(text) ? "LIST_ITEM" : /^>\s/.test(text) ? "QUOTE" : /^```/.test(text) ? "CODE" : "PARAGRAPH", text, provenance: blockProvenance(parser) })); }
 
 /**
  * Runs PDF.js in a dedicated Node process with a V8 heap limit; the worker never parses untrusted PDFs.
@@ -39,7 +56,10 @@ async function parsePdf(bytes: Uint8Array, limits: ParserLimits): Promise<Parsed
   try {
     await mkdir(dir); await writeFile(input, bytes);
     const child = await runPdfChild(input, limits); if (child.error) throw new Error(child.error);
-    const pages = child.pages.map(({ physicalPageIndex, text }) => ({ physicalPageIndex, blocks: splitText(text).map((value) => ({ kind: "PARAGRAPH" as const, text: value })) }));
+    const provenance = blockProvenance(parsers.pdf);
+    // pdfjs text extraction has no geometry here: no bbox and no confidence may
+    // be fabricated, and the printed page label is unknown.
+    const pages = child.pages.map(({ physicalPageIndex, text }) => ({ physicalPageIndex, blocks: splitText(text).map((value) => ({ kind: "PARAGRAPH" as const, text: value, locator: { kind: "pdf", physicalPageIndex, printedPageLabel: null } satisfies CanonicalSourceLocator, provenance })) }));
     if (!pages.some((page) => page.blocks.length)) throw new Error(SourceError.OCR_REQUIRED);
     return { parser: parsers.pdf, pages };
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -68,7 +88,8 @@ function parseEpub(bytes: Uint8Array, limits: ParserLimits): Parsed {
   for (const match of opf.matchAll(/<item\b([^>]*)>/gi)) { const attributes = match[1] ?? ""; const id = attr(attributes, /\bid\s*=\s*["']([^"']+)["']/i); const href = attr(attributes, /\bhref\s*=\s*["']([^"']+)["']/i); if (id && href) manifest.set(id, resolvePath(opfPath, href)); }
   const spineIds = [...opf.matchAll(/<itemref\b[^>]*\bidref\s*=\s*["']([^"']+)["'][^>]*>/gi)].map((m) => m[1]).filter((id): id is string => typeof id === "string"); if (!spineIds.length) throw new Error(SourceError.CORRUPTED);
   const blocks: ParsedBlock[] = [];
-  spineIds.forEach((id, spineIndex) => { const href = manifest.get(id); if (!href || !isSafePath(href)) throw new Error(SourceError.CORRUPTED); const xhtml = safeXml(entryText(byName, href, limits)); if (/\b(?:src|href)\s*=\s*["'](?:https?:|file:)/i.test(xhtml)) throw new Error(SourceError.ARCHIVE_UNSAFE); blocks.push(...xhtmlBlocks(xhtml, { spineIndex, href })); });
+  const provenance = blockProvenance(parsers.epub);
+  spineIds.forEach((id, spineIndex) => { const href = manifest.get(id); if (!href || !isSafePath(href)) throw new Error(SourceError.CORRUPTED); const xhtml = safeXml(entryText(byName, href, limits)); if (/\b(?:src|href)\s*=\s*["'](?:https?:|file:)/i.test(xhtml)) throw new Error(SourceError.ARCHIVE_UNSAFE); const locator: CanonicalSourceLocator = { kind: "epub", spineIndex, href, fragmentId: null, elementPath: null }; blocks.push(...xhtmlBlocks(xhtml, locator, provenance)); });
   return { parser: parsers.epub, pages: [{ physicalPageIndex: null, blocks }] };
 }
 function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
@@ -85,6 +106,6 @@ function isSafePath(path: string): boolean { return !!path && !/^(?:[\\/]|[a-zA-
 function resolvePath(base: string, href: string): string { if (/^[a-z]+:/i.test(href)) return href; const parts = base.split("/"); parts.pop(); for (const part of href.split("/")) { if (!part || part === ".") continue; if (part === "..") return "../invalid"; parts.push(part); } return parts.join("/"); }
 function safeXml(xml: string): string { if (/<!DOCTYPE|<!ENTITY|\bSYSTEM\b|\bPUBLIC\b/i.test(xml)) throw new Error(SourceError.ARCHIVE_UNSAFE); return xml; }
 function attr(value: string, expression: RegExp): string | null { return expression.exec(value)?.[1] ?? null; }
-function xhtmlBlocks(xhtml: string, metadata: Record<string, unknown>): ParsedBlock[] { const safe = xhtml.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "").replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, ""); const blocks: ParsedBlock[] = []; for (const match of safe.matchAll(/<(h[1-6]|p|li|blockquote|pre|code)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi)) { const tag = match[1] ?? ""; const body = match[2] ?? ""; const text = normalizeCanonicalText(body.replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")); const kind: SourceBlockKind = /^h/i.test(tag) ? "HEADING" : /^li$/i.test(tag) ? "LIST_ITEM" : /^blockquote$/i.test(tag) ? "QUOTE" : /^(pre|code)$/i.test(tag) ? "CODE" : "PARAGRAPH"; for (const chunk of splitCanonicalBlock(text)) if (chunk) blocks.push({ kind, text: chunk, metadata }); } return blocks; }
+function xhtmlBlocks(xhtml: string, locator: CanonicalSourceLocator, provenance: BlockExtractionProvenance): ParsedBlock[] { const safe = xhtml.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "").replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, ""); const blocks: ParsedBlock[] = []; for (const match of safe.matchAll(/<(h[1-6]|p|li|blockquote|pre|code)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi)) { const tag = match[1] ?? ""; const body = match[2] ?? ""; const text = normalizeCanonicalText(body.replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")); const kind: SourceBlockKind = /^h/i.test(tag) ? "HEADING" : /^li$/i.test(tag) ? "LIST_ITEM" : /^blockquote$/i.test(tag) ? "QUOTE" : /^(pre|code)$/i.test(tag) ? "CODE" : "PARAGRAPH"; for (const chunk of splitCanonicalBlock(text)) if (chunk) blocks.push({ kind, text: chunk, locator, provenance }); } return blocks; }
 
 export const parserResultToSourceError = sourceErrorForParserResult;
