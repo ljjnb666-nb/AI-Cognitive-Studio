@@ -23,6 +23,25 @@ export const SourceError = {
   // produce) format metadata in violation of the persistence contract. Never
   // surfaced as Zod details; classified FAILED, not REJECTED.
   FORMAT_METADATA_CONTRACT_INVALID: "SOURCE_FORMAT_METADATA_CONTRACT_INVALID",
+  // PDF extraction quality gate (04B-2): the gate rejected the extraction —
+  // the content cannot safely produce a canonical document (e.g. every page
+  // is genuinely empty). Deterministic content-truth REJECTED.
+  QUALITY_REJECTED: "SOURCE_QUALITY_REJECTED",
+  // Publication hard gate (04B-2): a PDF reached persistence without an
+  // ACCEPTED/DEGRADED quality decision. Unreachable by construction; a
+  // violation is an internal routing/pipeline contract bug.
+  QUALITY_GATE_BLOCKED: "SOURCE_QUALITY_GATE_BLOCKED",
+  // Routing replay fence (04B-2): a persisted immutable routing plan conflicts
+  // with runtime-derived inspection, or is structurally invalid. Internal
+  // contract break — fail closed, never patch persisted history.
+  ROUTING_PLAN_CONFLICT: "SOURCE_ROUTING_PLAN_CONFLICT",
+  ROUTING_PLAN_CONTRACT_INVALID: "SOURCE_ROUTING_PLAN_CONTRACT_INVALID",
+  // RF01 P1-04: an executor reported SUCCEEDED but its output canonicalizes to
+  // zero usable blocks (empty / whitespace-only / BOM-only). The page attempt
+  // records this stable failure and the durable attempt budget governs retry;
+  // it is never accepted as usable fallback content. PAGE-level code — the run
+  // itself ends through the ordinary REQUIRES_FALLBACK / OCR_REQUIRED path.
+  OCR_NO_USABLE_TEXT: "SOURCE_OCR_NO_USABLE_TEXT",
 } as const;
 
 export type SourceErrorCode = (typeof SourceError)[keyof typeof SourceError];
@@ -39,6 +58,11 @@ export function sourceErrorForParserResult(result: string): SourceErrorCode {
     case "EPUB_FIXED_LAYOUT_UNSUPPORTED": return SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED;
     case "EPUB_NO_USABLE_TEXT": return SourceError.EPUB_NO_USABLE_TEXT;
     case "FORMAT_METADATA_CONTRACT_INVALID": return SourceError.FORMAT_METADATA_CONTRACT_INVALID;
+    case "QUALITY_REJECTED": return SourceError.QUALITY_REJECTED;
+    case "QUALITY_GATE_BLOCKED": return SourceError.QUALITY_GATE_BLOCKED;
+    case "ROUTING_PLAN_CONFLICT": return SourceError.ROUTING_PLAN_CONFLICT;
+    case "ROUTING_PLAN_CONTRACT_INVALID": return SourceError.ROUTING_PLAN_CONTRACT_INVALID;
+    case "OCR_NO_USABLE_TEXT": return SourceError.OCR_NO_USABLE_TEXT;
     default: return SourceError.PARSE;
   }
 }

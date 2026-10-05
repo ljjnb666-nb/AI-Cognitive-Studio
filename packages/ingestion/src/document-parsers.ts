@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { BlockExtractionProvenance, CanonicalSourceLocator, ExtractionQualityWarningCode, SourceBlockBbox } from "@ai-cognitive/domain";
 import { normalizeCanonicalText, splitCanonicalBlock } from "./canonical-text.js";
 import { parseEpub } from "./epub-parser.js";
+import { inspectPdfPage, planPdfRouting, type PdfPageEvidence, type PdfPageInspection, type PdfRoutingPlan } from "./pdf-routing.js";
 import { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 
 export type SourceBlockKind = "HEADING" | "PARAGRAPH" | "LIST_ITEM" | "QUOTE" | "TABLE" | "IMAGE" | "CAPTION" | "FOOTNOTE" | "CODE" | "EQUATION" | "UNKNOWN";
@@ -54,24 +55,64 @@ function markdownBlocks(text: string, parser: ParserDescriptor): ParsedBlock[] {
 
 /**
  * Runs PDF.js in a dedicated Node process with a V8 heap limit; the worker never parses untrusted PDFs.
+ *
+ * 04B-2: the child also emits per-page content evidence (image/vector/
+ * annotation operators), so page routing is decided per physical page instead
+ * of inferring "blank" from extracted text length. Native text pages are
+ * extracted here; OCR_REQUIRED pages are handled by the run pipeline
+ * (pdf-run.ts) through the PdfOcrExecutor seam. parseDocument keeps the
+ * legacy all-or-nothing contract: any unresolved OCR page throws
+ * SOURCE_OCR_REQUIRED (previously only thrown when every page was textless).
  */
-async function parsePdf(bytes: Uint8Array, limits: ParserLimits): Promise<Parsed> {
+export type NativePdfExtraction = {
+  parser: ParserDescriptor;
+  pageCount: number;
+  inspections: PdfPageInspection[];
+  routingPlan: PdfRoutingPlan;
+  /** Every physical page in order; blocks only for NATIVE_TEXT-routed pages. */
+  pages: Array<{ physicalPageIndex: number; inspection: PdfPageInspection; blocks: ParsedBlock[] }>;
+};
+
+export async function extractNativePdf(bytes: Uint8Array, limits: ParserLimits): Promise<NativePdfExtraction> {
   if (!Buffer.from(bytes.subarray(0, 8)).toString("ascii").startsWith("%PDF-")) throw new Error(SourceError.CORRUPTED);
   const dir = join(tmpdir(), `ai-cognitive-pdf-${randomUUID()}`); const input = join(dir, "source.pdf");
   try {
     await mkdir(dir); await writeFile(input, bytes);
     const child = await runPdfChild(input, limits); if (child.error) throw new Error(child.error);
+    const records = child.pages.sort((left, right) => left.physicalPageIndex - right.physicalPageIndex);
+    // Determinism guard: the child must report every physical page exactly once.
+    if (records.length !== child.pageCount || records.some((record, index) => record.physicalPageIndex !== index)) throw new Error(SourceError.PARSE);
     const provenance = blockProvenance(parsers.pdf);
     // pdfjs text extraction has no geometry here: no bbox and no confidence may
     // be fabricated, and the printed page label is unknown.
-    const pages = child.pages.map(({ physicalPageIndex, text }) => ({ physicalPageIndex, blocks: splitText(text).map((value) => ({ kind: "PARAGRAPH" as const, text: value, locator: { kind: "pdf", physicalPageIndex, printedPageLabel: null } satisfies CanonicalSourceLocator, provenance })) }));
-    if (!pages.some((page) => page.blocks.length)) throw new Error(SourceError.OCR_REQUIRED);
-    return { parser: parsers.pdf, pages };
+    const pages = records.map((record) => {
+      const inspection = inspectPdfPage({ physicalPageIndex: record.physicalPageIndex, text: record.text, nativeBlockCount: pdfTextToBlocks(record.text, record.physicalPageIndex, provenance).length, evidence: record.evidence });
+      // Only TEXT-classified pages carry blocks (RF01 P1-05): a page whose raw
+      // text canonicalizes to zero usable blocks — or routes to OCR — is
+      // represented with zero blocks and can never count as usable content.
+      return { physicalPageIndex: record.physicalPageIndex, inspection, blocks: inspection.contentEvidence === "TEXT" ? pdfTextToBlocks(record.text, record.physicalPageIndex, provenance) : [] };
+    });
+    return { parser: parsers.pdf, pageCount: child.pageCount, inspections: pages.map((page) => page.inspection), routingPlan: planPdfRouting({ parser: parsers.pdf, inspections: pages.map((page) => page.inspection) }), pages };
   } finally { await rm(dir, { recursive: true, force: true }); }
+}
+
+/**
+ * Converts raw PDF.js page text into canonical PARAGRAPH blocks with the given
+ * provenance and a physical-page pdf locator (printedPageLabel stays null —
+ * it is never synthesized).
+ */
+export function pdfTextToBlocks(text: string, physicalPageIndex: number, provenance: BlockExtractionProvenance): ParsedBlock[] {
+  return splitText(text).map((value) => ({ kind: "PARAGRAPH" as const, text: value, locator: { kind: "pdf", physicalPageIndex, printedPageLabel: null } satisfies CanonicalSourceLocator, provenance }));
+}
+
+async function parsePdf(bytes: Uint8Array, limits: ParserLimits): Promise<Parsed> {
+  const native = await extractNativePdf(bytes, limits);
+  if (native.routingPlan.pages.some((page) => page.route === "OCR_REQUIRED")) throw new Error(SourceError.OCR_REQUIRED);
+  return { parser: native.parser, pages: native.pages.map((page) => ({ physicalPageIndex: page.physicalPageIndex, blocks: page.blocks })) };
 }
 function pdfFailure(stderr: string): string { if (/password|encrypted/i.test(stderr)) return SourceError.PASSWORD_REQUIRED; if (/syntax error|damaged|xref|trailer/i.test(stderr)) return SourceError.CORRUPTED; return SourceError.PARSE; }
 export function pdfChildArgs(input: string, limits: ParserLimits): string[] { return [`--max-old-space-size=${limits.pdfMemoryMb}`, limits.pdfChildEntry ?? fileURLToPath(new URL("./pdf-parser-child.mjs", import.meta.url)), input, String(limits.maxPdfPages), String(limits.maxPdfOutputChars)]; }
-async function runPdfChild(input: string, limits: ParserLimits): Promise<{ pages: Array<{ physicalPageIndex: number; text: string }>; error?: string }> { return new Promise((resolve, reject) => { const child = spawn(process.execPath, pdfChildArgs(input, limits), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }); let stdout = "", stderr = "", stdoutBytes = 0, stderrBytes = 0, settled = false, parentStop: string | null = null; const finish = (fn: () => void) => { if (!settled) { settled = true; clearTimeout(timer); fn(); } }; const stop = (error: string) => { parentStop = error; child.kill(); finish(() => reject(new Error(error))); }; const timer = setTimeout(() => stop(SourceError.PARSE_TIMEOUT), limits.pdfTimeoutMs); child.stdout.on("data", (data: Buffer) => { stdoutBytes += data.length; if (stdoutBytes > limits.maxPdfIpcBytes) stop(SourceError.TOO_LARGE); else stdout += data.toString("utf8"); }); child.stderr.on("data", (data: Buffer) => { stderrBytes += data.length; if (stderrBytes > limits.maxPdfStderrBytes) stop(SourceError.PARSE); else stderr += data.toString("utf8"); }); child.on("error", () => finish(() => reject(new Error(SourceError.PARSE)))); child.on("close", (code, signal) => finish(() => { if (parentStop || signal || code !== 0 && !stdout.includes('"type":"error"')) return reject(new Error(SourceError.PARSE)); try { const records = stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); const failure = records.find((record) => record.type === "error"); if (failure?.code) return resolve({ pages: [], error: failure.code }); const meta = records.find((record) => record.type === "meta"), complete = records.at(-1)?.type === "done"; if (!meta || !complete) return reject(new Error(SourceError.PARSE)); resolve({ pages: records.filter((record) => record.type === "page") }); } catch { reject(new Error(pdfFailure(stderr))); } })); }); }
+async function runPdfChild(input: string, limits: ParserLimits): Promise<{ pageCount: number; pages: Array<{ physicalPageIndex: number; text: string; evidence: PdfPageEvidence }>; error?: string }> { return new Promise((resolve, reject) => { const child = spawn(process.execPath, pdfChildArgs(input, limits), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }); let stdout = "", stderr = "", stdoutBytes = 0, stderrBytes = 0, settled = false, parentStop: string | null = null; const finish = (fn: () => void) => { if (!settled) { settled = true; clearTimeout(timer); fn(); } }; const stop = (error: string) => { parentStop = error; child.kill(); finish(() => reject(new Error(error))); }; const timer = setTimeout(() => stop(SourceError.PARSE_TIMEOUT), limits.pdfTimeoutMs); child.stdout.on("data", (data: Buffer) => { stdoutBytes += data.length; if (stdoutBytes > limits.maxPdfIpcBytes) stop(SourceError.TOO_LARGE); else stdout += data.toString("utf8"); }); child.stderr.on("data", (data: Buffer) => { stderrBytes += data.length; if (stderrBytes > limits.maxPdfStderrBytes) stop(SourceError.PARSE); else stderr += data.toString("utf8"); }); child.on("error", () => finish(() => reject(new Error(SourceError.PARSE)))); child.on("close", (code, signal) => finish(() => { if (parentStop || signal || code !== 0 && !stdout.includes('"type":"error"')) return reject(new Error(SourceError.PARSE)); try { const records = stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); const failure = records.find((record) => record.type === "error"); if (failure?.code) return resolve({ pageCount: 0, pages: [], error: failure.code }); const meta = records.find((record) => record.type === "meta"), complete = records.at(-1)?.type === "done"; if (!meta || !complete) return reject(new Error(SourceError.PARSE)); resolve({ pageCount: Number(meta.pages), pages: records.filter((record) => record.type === "page").map(({ physicalPageIndex, text, evidence }) => ({ physicalPageIndex, text, evidence })) }); } catch { reject(new Error(pdfFailure(stderr))); } })); }); }
 export async function runNative(command: string, args: string[], timeoutMs: number, maxStderr: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }); let stdout = "", stderr = "", timedOut = false;

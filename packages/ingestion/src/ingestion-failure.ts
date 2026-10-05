@@ -27,6 +27,11 @@ const terminalCodes = new Set<string>([
   SourceError.PARSE_TIMEOUT,
   SourceError.CANONICAL_BLOCK_CONTRACT_INVALID,
   SourceError.FORMAT_METADATA_CONTRACT_INVALID,
+  // PDF routing/quality contract failures (04B-2): deterministic, never retryable
+  SourceError.QUALITY_REJECTED,
+  SourceError.QUALITY_GATE_BLOCKED,
+  SourceError.ROUTING_PLAN_CONFLICT,
+  SourceError.ROUTING_PLAN_CONTRACT_INVALID,
 ]);
 
 export function classifyIngestionFailure(code: string): IngestionFailureClass {
@@ -39,6 +44,6 @@ export function classifyIngestionFailure(code: string): IngestionFailureClass {
 export function ingestionStatusForTerminalFailure(code: string): IngestionTerminalStatus {
   if (code === SourceError.OCR_REQUIRED) return "OCR_REQUIRED";
   if (code === SourceError.PASSWORD_REQUIRED) return "PASSWORD_REQUIRED";
-  if ([SourceError.TYPE_MISMATCH, SourceError.UNSUPPORTED_TYPE, SourceError.TOO_LARGE, SourceError.ARCHIVE_UNSAFE, SourceError.CORRUPTED, SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED, SourceError.EPUB_NO_USABLE_TEXT].includes(code as never)) return "REJECTED";
+  if ([SourceError.TYPE_MISMATCH, SourceError.UNSUPPORTED_TYPE, SourceError.TOO_LARGE, SourceError.ARCHIVE_UNSAFE, SourceError.CORRUPTED, SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED, SourceError.EPUB_NO_USABLE_TEXT, SourceError.QUALITY_REJECTED].includes(code as never)) return "REJECTED";
   return "FAILED";
 }
