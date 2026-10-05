@@ -147,10 +147,20 @@ describe("canonical extraction persistence", () => {
     runIds.push(failedRun.id);
     storage.objects.delete(document.storageKey);
 
+    // BOOK-INGESTION-04B-1: a transient infrastructure failure is retryable — the
+    // run returns to QUEUED (bounded by the durable attempt guard) instead of
+    // failing terminally, and the prior current pointer stays untouched either way.
     await expect(service.processIngestionRun(failedRun.id)).rejects.toThrow("OBJECT_NOT_FOUND");
+    await expect(prisma.ingestionRun.findUniqueOrThrow({ where: { id: failedRun.id } })).resolves.toMatchObject({ status: "QUEUED", errorCode: "OBJECT_NOT_FOUND" });
+
+    // Once the durable attempt budget is exhausted the same failure is terminal:
+    // the max-th execution still claims (guard is attemptCount < max BEFORE the
+    // increment), and its failure transitions the run to FAILED.
+    await prisma.job.update({ where: { id: job.id }, data: { attemptCount: 2 } });
+    await expect(service.processIngestionRun(failedRun.id)).rejects.toThrow("OBJECT_NOT_FOUND");
+    await expect(prisma.ingestionRun.findUniqueOrThrow({ where: { id: failedRun.id } })).resolves.toMatchObject({ status: "FAILED", errorCode: "OBJECT_NOT_FOUND" });
 
     const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
     expect(current.extractionId).toBe(previous.id);
-    await expect(prisma.ingestionRun.findUniqueOrThrow({ where: { id: failedRun.id } })).resolves.toMatchObject({ status: "FAILED" });
   });
 });

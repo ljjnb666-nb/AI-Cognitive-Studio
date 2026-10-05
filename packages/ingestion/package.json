@@ -1,1 +1,35 @@
-{"name":"@ai-cognitive/ingestion","version":"0.1.0","private":true,"type":"module","exports":{".":"./src/index.ts"},"scripts":{"lint":"eslint src","typecheck":"tsc --noEmit","build":"tsc --noEmit","test:unit":"vitest run tests/object-inspection.test.ts tests/canonical-text.test.ts tests/document-parsers.test.ts tests/epub-native.test.ts tests/cross-format-consistency.test.ts","test:integration":"vitest run --config vitest.integration.config.ts"},"dependencies":{"@ai-cognitive/db":"workspace:*","@ai-cognitive/domain":"workspace:*","@ai-cognitive/shared":"workspace:*","@ai-cognitive/storage":"workspace:*","@xmldom/xmldom":"0.9.12","bullmq":"^5.61.0","pdfjs-dist":"^6.2.108"},"devDependencies":{"@eslint/js":"^9.39.1","@types/node":"^24.10.1","@types/pdfkit":"^0.17.6","eslint":"^9.39.1","pdfkit":"^0.19.1","typescript":"^5.9.3","typescript-eslint":"^8.46.4","vitest":"^4.0.8"}}
+{
+  "name": "@ai-cognitive/ingestion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit",
+    "test:unit": "vitest run tests/object-inspection.test.ts tests/canonical-text.test.ts tests/document-parsers.test.ts tests/epub-native.test.ts tests/cross-format-consistency.test.ts tests/ingestion-failure.test.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@ai-cognitive/db": "workspace:*",
+    "@ai-cognitive/domain": "workspace:*",
+    "@ai-cognitive/shared": "workspace:*",
+    "@ai-cognitive/storage": "workspace:*",
+    "@xmldom/xmldom": "0.9.12",
+    "bullmq": "^5.61.0",
+    "pdfjs-dist": "^6.2.108"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.1",
+    "@types/pdfkit": "^0.17.6",
+    "eslint": "^9.39.1",
+    "pdfkit": "^0.19.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^4.0.8"
+  }
+}
