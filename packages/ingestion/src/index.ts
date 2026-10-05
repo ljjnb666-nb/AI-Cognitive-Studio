@@ -8,10 +8,10 @@ import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION } from "./ca
 import { inspectObjectStream } from "./object-inspection.js";
 import { parseDocument, type Parsed, type ParsedBlock, DEFAULT_PARSER_LIMITS } from "./document-parsers.js";
 import { SourceError } from "./source-errors.js";
-import { claimIngestionRun, completeRunSuccess, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_RENEW_INTERVAL_MS, transitionRunToRetryable, transitionRunToTerminal } from "./ingestion-run-claim.js";
+import { claimIngestionRun, completeRunSuccess, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_RENEW_INTERVAL_MS, terminalizeRunWithRoutingOutcome, transitionRunToRetryable, transitionRunToTerminal, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
 import { writeRoutingOutcome } from "./ocr-durability.js";
 import { classifyIngestionFailure, ingestionStatusForTerminalFailure } from "./ingestion-failure.js";
-import { runPdfExtraction, writeRoutingOutcomeValidated, type PdfRunExtraction } from "./pdf-run.js";
+import { runPdfExtraction, type PdfRunExtraction } from "./pdf-run.js";
 import { PDF_EXTRACTION_PARSER, pdfRoutingOutcome, type PdfOcrExecutor } from "./pdf-routing.js";
 import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
 import { dispatchPendingOutbox } from "./outbox-dispatcher.js";
@@ -20,8 +20,8 @@ export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export { parseDocument, extractNativePdf, pdfTextToBlocks, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
 export { PDF_EXTRACTION_PARSER, PDF_INSPECTOR_VERSION, PDF_QUALITY_REASON_CODES, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, PDF_ROUTING_REASON_CODES, assertRoutingPlanReplay, evaluatePdfExtractionQuality, inspectPdfPage, parseRoutingPlan, pdfRoutingOutcome, planPdfRouting, type PdfContentEvidence, type PdfExtractionQualityDecision, type PdfExtractionQualityStatus, type PdfOcrExecutor, type PdfOcrExecutorDescriptor, type PdfOcrPageRequest, type PdfOcrPageResult, type PdfPageEvidence, type PdfPageInspection, type PdfPageQualityDecision, type PdfPageRoute, type PdfPageExtractionOutcome, type PdfQualityReasonCode, type PdfRoutingOutcome, type PdfRoutingPlan, type PdfRoutingPlanPage, type PdfRoutingReasonCode } from "./pdf-routing.js";
-export { runPdfExtraction, writeRoutingOutcomeValidated, type PdfRunExtraction, type PdfRunExtractionInput } from "./pdf-run.js";
-export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
+export { runPdfExtraction, type PdfRunExtraction, type PdfRunExtractionInput } from "./pdf-run.js";
+export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun, terminalizeRunWithRoutingOutcome, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
 export { classifyIngestionFailure, ingestionStatusForTerminalFailure, type IngestionFailureClass } from "./ingestion-failure.js";
 export { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerStatus, OCR_HOST_LEASE_TTL_MS, OCR_PAGE_LEASE_TTL_MS, OCR_PAGE_MAX_ATTEMPTS, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, writeRoutingOutcome, writeRoutingPlan } from "./ocr-durability.js";
 export { INGESTION_RECONCILIATION_BATCH_SIZE, reconcileIngestionDeliveries, type IngestionDeliveryState, type IngestionReconciliationQueuePort, type IngestionReconciliationResult } from "./ingestion-reconciliation.js";
@@ -184,6 +184,10 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
       const claim = await claimIngestionRun(runId, options.processMaxAttempts);
       if (!claim) return;
       let ownershipLost = false;
+      // RF01 P1-03: set when the fenced terminalizeRunWithRoutingOutcome
+      // transaction already committed the non-publish outcome + terminal state
+      // under live ownership — the catch block must not re-terminalize.
+      let nonPublishTerminalized = false;
       const heartbeat = setInterval(() => {
         void renewIngestionRunClaim(runId, claim.token).then((renewed) => { if (!renewed) ownershipLost = true; }).catch(() => { ownershipLost = true; });
       }, RUN_RENEW_INTERVAL_MS);
@@ -202,6 +206,7 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
             sourceDocumentId: run.sourceDocumentId,
             persistedRoutingPlan: run.routingPlan,
             persistedRoutingGeneration: run.routingGeneration,
+            runExecutionToken: claim.token,
             pdfBytes: bytes,
             limits,
             storage,
@@ -209,12 +214,16 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
             ownershipLost: () => ownershipLost,
           });
           if (extraction.kind !== "PUBLISH") {
-            // No partial publication: persist the terminal routing outcome as
-            // durable evidence, then finish with the existing terminal
-            // semantics (OCR_REQUIRED / REJECTED). Ownership loss writes nothing.
-            if (ownershipLost) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
-            await writeRoutingOutcomeValidated(run.id, extraction.routingGeneration, pdfRoutingOutcome(extraction.decision, false));
-            throw new Error(extraction.kind === "OCR_REQUIRED" ? SourceError.OCR_REQUIRED : SourceError.QUALITY_REJECTED);
+            // No partial publication. RF01 P1-03: the routing outcome and the
+            // run/Job terminal transition are committed by ONE transaction
+            // that first verifies live claim ownership in PostgreSQL — a
+            // superseded owner (stale in-memory ownershipLost or not) changes
+            // ZERO durable state. Ownership loss writes nothing.
+            const errorCode = extraction.kind === "OCR_REQUIRED" ? SourceError.OCR_REQUIRED : SourceError.QUALITY_REJECTED;
+            const status: IngestionTerminalStatus = extraction.kind === "OCR_REQUIRED" ? "OCR_REQUIRED" : "REJECTED";
+            if (!await terminalizeRunWithRoutingOutcome(run.id, claim.token, status, errorCode, extraction.routingGeneration, pdfRoutingOutcome(extraction.decision, false))) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
+            nonPublishTerminalized = true;
+            throw new Error(errorCode);
           }
           parsed = extraction.parsed;
           pdfRouting = extraction;
@@ -329,6 +338,9 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
         });
       } catch (error) {
         const code = (error instanceof Error ? error.message.split(":")[0] : undefined) ?? "UNEXPECTED_ERROR";
+        // The non-publish outcome + terminal state were already committed by
+        // the fenced transaction above; propagate the content error as-is.
+        if (nonPublishTerminalized) throw error;
         // Ownership loss writes NOTHING: the new owner (or the reconciler) owns
         // the outcome, and a stale worker must never mutate newer durable state.
         if (code === INGESTION_EXECUTION_OWNERSHIP_LOST || ownershipLost) throw error;

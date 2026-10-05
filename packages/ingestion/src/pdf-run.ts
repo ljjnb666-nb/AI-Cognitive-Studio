@@ -1,14 +1,14 @@
 import { prisma } from "@ai-cognitive/db";
 import { sha256Utf8 } from "@ai-cognitive/domain";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import { extractNativePdf, pdfTextToBlocks, type Parsed, type ParserLimits } from "./document-parsers.js";
+import { extractNativePdf, pdfTextToBlocks, type Parsed, type ParsedBlock, type ParserLimits } from "./document-parsers.js";
 import { INGESTION_EXECUTION_OWNERSHIP_LOST } from "./ingestion-run-claim.js";
-import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, failOcrPageAttempt, writeRoutingPlan, writeRoutingOutcome } from "./ocr-durability.js";
-import { PDF_EXTRACTION_PARSER, PDF_ROUTING_GENERATION, assertRoutingPlanReplay, evaluatePdfExtractionQuality, parseRoutingPlan, type PdfExtractionQualityDecision, type PdfOcrExecutor, type PdfOcrPageResult, type PdfPageExtractionOutcome, type PdfRoutingOutcome, type PdfRoutingPlan } from "./pdf-routing.js";
+import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, failOcrPageAttempt, writeRoutingPlan } from "./ocr-durability.js";
+import { PDF_EXTRACTION_PARSER, PDF_ROUTING_GENERATION, assertRoutingPlanReplay, evaluatePdfExtractionQuality, parseRoutingPlan, type PdfExtractionQualityDecision, type PdfOcrExecutor, type PdfOcrPageResult, type PdfPageExtractionOutcome, type PdfRoutingPlan } from "./pdf-routing.js";
 import { SourceError } from "./source-errors.js";
 
 /**
- * PDF run extraction pipeline (BOOK-INGESTION-04B-2).
+ * PDF run extraction pipeline (BOOK-INGESTION-04B-2, hardened in RF01).
  *
  * Orchestrates one execution claim over the durable routing primitives:
  * native inspection → write-once routing plan (or replay-validated reuse) →
@@ -16,6 +16,15 @@ import { SourceError } from "./source-errors.js";
  * page-level canonical result → deterministic quality decision. It NEVER
  * publishes by itself: the ingestion service owns the publication transaction.
  *
+ * Durability invariants (RF01):
+ *  - P1-01 a SUCCEEDED OcrPageAttempt is authoritative: its immutable artifact
+ *    is reused on resume and a null claim is re-checked against a concurrent
+ *    completion before any page may be called unresolved.
+ *  - P1-02 page claims carry the caller's run-execution token, so the
+ *    authoritative run owner can reclaim a superseded execution's live page
+ *    claim; page token fencing itself is unchanged.
+ *  - P1-04 executor success means nothing by itself: output must canonicalize
+ *    to at least one usable block before the checkpoint may succeed.
  * Production default in 04B-2 has no OCR executor: OCR-required pages then end
  * in the existing OCR_REQUIRED terminal semantics with the durable routing
  * intent persisted. The real MinerU executor (04B-3) plugs in unchanged.
@@ -29,6 +38,8 @@ export type PdfRunExtractionInput = {
   persistedRoutingPlan: unknown;
   /** Persisted IngestionRun.routingGeneration (null on first execution). */
   persistedRoutingGeneration: number | null;
+  /** The caller's live IngestionRun execution claim token (P1-02 authority). */
+  runExecutionToken: string;
   pdfBytes: Uint8Array;
   limits: ParserLimits;
   storage: StorageProvider;
@@ -86,39 +97,63 @@ export async function runPdfExtraction(input: PdfRunExtractionInput): Promise<Pd
     }
   }
 
-  const decision = evaluatePdfExtractionQuality(plan, outcomes);
-  if (decision.status === "REQUIRES_FALLBACK") return { kind: "OCR_REQUIRED", routingPlan: plan, routingGeneration: generation, decision };
-  if (decision.status === "REJECTED") return { kind: "REJECTED", routingPlan: plan, routingGeneration: generation, decision };
-
   // Merged page-level canonical result: physical identity is preserved for
   // every page; native pages keep pdfjs provenance, OCR pages carry the
   // authoritative per-attempt executor provenance recorded on the checkpoint.
-  const pages = plan.pages.map((page) => {
+  const pages: Array<{ physicalPageIndex: number; blocks: ParsedBlock[] }> = plan.pages.map((page) => {
     const ocr = ocrPageContent.get(page.physicalPageIndex);
-    if (ocr) return { physicalPageIndex: page.physicalPageIndex, blocks: pdfTextToBlocks(ocr.text, page.physicalPageIndex, { sourceMethod: "OCR", parserName: ocr.parserName, parserVersion: ocr.parserVersion }) };
+    // Persist exactly the validated usable blocks (RF01 P1-04): the gate's
+    // usability counts and the stored blocks can never diverge.
+    if (ocr) return { physicalPageIndex: page.physicalPageIndex, blocks: usableOcrBlocks(ocr.text, page.physicalPageIndex, ocr.parserName, ocr.parserVersion) };
     return { physicalPageIndex: page.physicalPageIndex, blocks: native.pages[page.physicalPageIndex]!.blocks };
   });
+  // The gate counts usability only from the exact block arrays that would be
+  // persisted — an outcome label can never manufacture usable content (RF01).
+  const usableBlockCounts = new Map(pages.map((page) => [page.physicalPageIndex, page.blocks.length]));
+  const decision = evaluatePdfExtractionQuality(plan, outcomes, usableBlockCounts);
+  if (decision.status === "REQUIRES_FALLBACK") return { kind: "OCR_REQUIRED", routingPlan: plan, routingGeneration: generation, decision };
+  if (decision.status === "REJECTED") return { kind: "REJECTED", routingPlan: plan, routingGeneration: generation, decision };
+
   const parsed: Parsed = { parser: { ...PDF_EXTRACTION_PARSER }, pages, qualityWarnings: [...decision.qualityWarnings] };
   return { kind: "PUBLISH", parsed, routingPlan: plan, routingGeneration: generation, decision };
 }
 
 /**
+ * Usable OCR output blocks: the canonical publication block path, filtered to
+ * blocks with non-whitespace content. RF01 P1-04: "", whitespace-only and
+ * BOM-only outputs canonicalize to zero usable blocks and are never accepted
+ * as fallback content.
+ */
+function usableOcrBlocks(text: string, physicalPageIndex: number, parserName: string, parserVersion: string): ParsedBlock[] {
+  return pdfTextToBlocks(text, physicalPageIndex, { sourceMethod: "OCR", parserName, parserVersion }).filter((block) => block.text.trim().length > 0);
+}
+
+/**
  * Executes one OCR page through the SAME durable attempt state machine 04B-3
- * will use: claim → execute → complete (immutable content-addressed artifact)
- * or fail (transient requeue within the durable attempt budget / terminal).
- * The durable OcrPageAttempt row — never in-memory state — decides whether a
- * page is resolved: the merged result is read back from the authoritative
- * artifact recorded there and verified against its committed hash.
+ * will use. Order of authority (RF01 P1-01):
+ *  1. A SUCCEEDED checkpoint is resolved WITHOUT any executor call — its
+ *     immutable artifact is loaded and hash-verified (durable resume).
+ *  2. Otherwise claim (with run-execution takeover authority, P1-02) and
+ *     execute. Executor "SUCCEEDED" is accepted only when the output
+ *     canonicalizes to at least one usable block (P1-04); anything else is a
+ *     stable page failure retried through the durable attempt budget.
+ *  3. A null claim is never "unresolved" by inference: the checkpoint is
+ *     re-read first, because a superseded owner may have completed it
+ *     concurrently.
  */
 async function executeOcrPage(input: PdfRunExtractionInput, generation: number, physicalPageIndex: number): Promise<{ text: string; parserName: string; parserVersion: string } | null> {
   const executor = input.executor!;
   const key = { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, ingestionRunId: input.runId, physicalPageIndex, routingGeneration: generation };
+  const resumed = await loadAuthoritativeOcrPage(input, physicalPageIndex, generation);
+  if (resumed) return resumed;
   for (;;) {
     if (input.ownershipLost()) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
-    const claim = await claimOcrPageAttempt({ ...key, parserName: executor.descriptor.name, parserVersion: executor.descriptor.version, parserMode: executor.descriptor.parserMode ?? null, modelRevision: executor.descriptor.modelRevision ?? null });
-    // null = attempt budget exhausted, terminal failure, or requeued for later:
-    // the durable row owns retry authority, never a second in-memory counter.
-    if (!claim) return null;
+    const claim = await claimOcrPageAttempt({ ...key, parserName: executor.descriptor.name, parserVersion: executor.descriptor.version, parserMode: executor.descriptor.parserMode ?? null, modelRevision: executor.descriptor.modelRevision ?? null, runExecutionToken: input.runExecutionToken });
+    if (!claim) {
+      // The claim may have lost a race against a concurrent completion under a
+      // superseded execution; the durable checkpoint — not the null — decides.
+      return await loadAuthoritativeOcrPage(input, physicalPageIndex, generation);
+    }
     const startedAt = Date.now();
     let result: PdfOcrPageResult;
     try {
@@ -127,6 +162,13 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
       result = { status: "FAILED", errorCode: SourceError.PARSE, kind: "transient" };
     }
     if (result.status === "SUCCEEDED") {
+      // P1-04: validate through the SAME canonical block path used for
+      // publication. Zero usable blocks → stable page failure; the existing
+      // durable attempt authority decides any retry (no second counter).
+      if (usableOcrBlocks(result.text, physicalPageIndex, executor.descriptor.name, executor.descriptor.version).length < 1) {
+        if (!await failOcrPageAttempt({ ...key, claimToken: claim.claimToken, errorCode: SourceError.OCR_NO_USABLE_TEXT, kind: "transient" })) return null;
+        continue;
+      }
       const textSha256 = sha256Utf8(result.text);
       // Immutable content-addressed page artifact: identical text maps to the
       // identical key; there is no mutable per-page object anywhere.
@@ -140,28 +182,18 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
   }
 }
 
-async function loadAuthoritativeOcrPage(input: PdfRunExtractionInput, physicalPageIndex: number, generation: number): Promise<{ text: string; parserName: string; parserVersion: string }> {
-  const row = await prisma.ocrPageAttempt.findUniqueOrThrow({ where: { ingestionRunId_physicalPageIndex_routingGeneration: { ingestionRunId: input.runId, physicalPageIndex, routingGeneration: generation } } });
-  if (row.status !== "SUCCEEDED" || !row.authoritativeArtifactKey || !row.textSha256 || !row.parserName || !row.parserVersion) throw new Error(SourceError.PARSE);
+/**
+ * Loads a page's authoritative result from the durable checkpoint: only a
+ * SUCCEEDED row with parser identity, a hash-verified immutable artifact, and
+ * usable canonical text (P1-04, re-validated on resume) resolves a page. Any
+ * other durable state returns null — the page stays unresolved.
+ */
+async function loadAuthoritativeOcrPage(input: PdfRunExtractionInput, physicalPageIndex: number, generation: number): Promise<{ text: string; parserName: string; parserVersion: string } | null> {
+  const row = await prisma.ocrPageAttempt.findUnique({ where: { ingestionRunId_physicalPageIndex_routingGeneration: { ingestionRunId: input.runId, physicalPageIndex, routingGeneration: generation } } });
+  if (!row || row.status !== "SUCCEEDED" || !row.authoritativeArtifactKey || !row.textSha256 || !row.parserName || !row.parserVersion) return null;
   const bytes = await input.storage.getObjectBytes(row.authoritativeArtifactKey);
   const text = new TextDecoder().decode(bytes);
   if (sha256Utf8(text) !== row.textSha256) throw new Error(SourceError.STORAGE);
+  if (usableOcrBlocks(text, physicalPageIndex, row.parserName, row.parserVersion).length < 1) return null;
   return { text, parserName: row.parserName, parserVersion: row.parserVersion };
-}
-
-/**
- * One-way routing outcome write with equality-validated reuse: if the outcome
- * slot is already filled (deterministic content from an equivalent decision),
- * replaying is a no-op; any DIFFERENT persisted outcome is a contract break.
- */
-export async function writeRoutingOutcomeValidated(runId: string, routingGeneration: number, outcome: PdfRoutingOutcome): Promise<void> {
-  if (await writeRoutingOutcome(runId, routingGeneration, outcome)) return;
-  const row = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runId }, select: { routingOutcome: true } });
-  if (JSON.stringify(sortKeys(row.routingOutcome)) !== JSON.stringify(sortKeys(outcome))) throw new Error(SourceError.ROUTING_PLAN_CONFLICT);
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([key, entry]) => [key, sortKeys(entry)]));
-  return value;
 }

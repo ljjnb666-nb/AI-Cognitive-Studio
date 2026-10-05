@@ -5,7 +5,7 @@ import PDFDocument from "pdfkit";
 import { prisma } from "@ai-cognitive/db";
 import { CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseExtractionQualityMetadata } from "@ai-cognitive/domain";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import { createIngestionService, DEFAULT_PARSER_LIMITS, extractNativePdf, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, planPdfRouting } from "../src/index.js";
+import { createIngestionService, DEFAULT_PARSER_LIMITS, evaluatePdfExtractionQuality, extractNativePdf, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, pdfRoutingOutcome, planPdfRouting, terminalizeRunWithRoutingOutcome } from "../src/index.js";
 import { claimIngestionRun, lockRunForPublication, renewIngestionRunClaim, transitionRunToTerminal } from "../src/ingestion-run-claim.js";
 import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, writeRoutingOutcome, writeRoutingPlan } from "../src/ocr-durability.js";
 import { FakePdfOcrExecutor, fakeOcrTerminalFailure, fakeOcrText, fakeOcrTransientFailure } from "./helpers/pdf/fake-ocr-executor.js";
@@ -33,6 +33,15 @@ class FakeStorageProvider implements StorageProvider {
   async copyObject(sourceKey: string, targetKey: string) { this.objects.set(targetKey, await this.getObjectBytes(sourceKey)); }
   async deleteObject(key: string) { this.objects.delete(key); }
   async objectExists(key: string) { return this.objects.has(key); }
+}
+
+/** Fault seam: simulates a crash after OCR success but before canonical-text publication. */
+class TextKeyFailingStorage extends FakeStorageProvider {
+  failTextKeys = true;
+  async putObject(input: { key: string; body: Uint8Array; contentType: string }) {
+    if (this.failTextKeys && input.key.includes("/text/")) throw new Error("STORAGE_PUT_FAILED");
+    await super.putObject(input);
+  }
 }
 
 /** 1x1 PNG: raster content without any text (scanned-page analog). */
@@ -372,3 +381,154 @@ describe("stale owner fencing across PDF routing (real PostgreSQL)", () => {
     expect(extraction.canonicalSchemaVersion).toBe(CANONICAL_SCHEMA_VERSION);
   });
 });
+
+// ---------------------------------------------------------------------------
+// RF01 repairs: durable resume, live-page reclaim, fenced non-publish outcome,
+// zero-usable-text OCR rejection.
+// ---------------------------------------------------------------------------
+
+describe("RF01 durable OCR resume (real PostgreSQL)", () => {
+  it("OCR_SUCCESS_RESUMED: a SUCCEEDED page checkpoint is reused on retry without any executor call", async () => {
+    const bytes = await mixedPdf();
+    const storage = new TextKeyFailingStorage();
+    const { workspace, document, run } = await createPdfRunFixture(bytes, storage);
+    // Execution 1: OCR page succeeds durably, then the run crashes before the
+    // canonical text artifact (and thus before any publication).
+    const firstExecutor = new FakePdfOcrExecutor().script(1, [fakeOcrText("resumable scan text")]);
+    await expect(serviceWith(storage, firstExecutor).processIngestionRun(run.id)).rejects.toThrow("STORAGE_PUT_FAILED");
+    expect(await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({ status: "QUEUED" });
+    const checkpoint = await attemptRow(workspace.id, run.id, 1);
+    expect(checkpoint).toMatchObject({ status: "SUCCEEDED", attemptCount: 1 });
+    expect(await prisma.documentExtraction.count({ where: { sourceDocumentId: document.id } })).toBe(0);
+    expect(await prisma.currentDocumentExtraction.count({ where: { workspaceId: workspace.id } })).toBe(0);
+
+    // Execution 2 (retry/reclaim): the checkpoint is authoritative — no remote
+    // OCR work, no attempt budget burn, publication completes from the artifact.
+    storage.failTextKeys = false;
+    const resumedExecutor = new FakePdfOcrExecutor();
+    await serviceWith(storage, resumedExecutor).processIngestionRun(run.id);
+
+    expect(resumedExecutor.calls).toEqual([]);
+    const resumed = await attemptRow(workspace.id, run.id, 1);
+    expect(resumed.status).toBe("SUCCEEDED");
+    expect(resumed.attemptCount).toBe(1);
+    expect(resumed.claimToken).toBe(checkpoint.claimToken);
+    const succeeded = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(succeeded.status).toBe("SUCCEEDED");
+    expect(succeeded.routingOutcome).toMatchObject({ outcome: "PUBLISHED", qualityStatus: "DEGRADED" });
+    expect(healthyArtifactReadable(storage, resumed.authoritativeArtifactKey)).toBe(true);    const extraction = await prisma.documentExtraction.findUniqueOrThrow({ where: { ingestionRunId: run.id } });
+    expect(extraction.qualityStatus).toBe("DEGRADED");
+    const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: extraction.id }, orderBy: { ordinal: "asc" } });
+    expect(blocks[1]?.text).toBe("resumable scan text");
+    expect(parseCanonicalBlockMetadata(blocks[1]?.metadata).provenance).toMatchObject({ sourceMethod: "OCR", parserName: "fake-ocr", parserVersion: "fake-ocr-v1" });
+    expect(await prisma.bookAnalysisBootstrap.count({ where: { ingestionRunId: run.id } })).toBe(1);
+    const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
+    expect(current.extractionId).toBe(extraction.id);
+  });
+});
+
+describe("RF01 live page attempt after run reclaim (real PostgreSQL)", () => {
+  it("LIVE_PAGE_RECLAIM: B (authoritative run owner) reclaims A's still-live page claim; A's late completion fails", async () => {
+    const bytes = await mixedPdf();
+    const storage = new FakeStorageProvider();
+    const { workspace, document, run } = await createPdfRunFixture(bytes, storage);
+    // A claims the run, prepares routing state, and claims the page (live lease).
+    const claimA = (await claimIngestionRun(run.id, 3))!;
+    const native = await extractNativePdf(bytes, DEFAULT_PARSER_LIMITS);
+    expect(await writeRoutingPlan(run.id, PDF_ROUTING_GENERATION, native.routingPlan)).toBe(true);
+    await createOcrPageIntents({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, routingGeneration: PDF_ROUTING_GENERATION, pages: [{ physicalPageIndex: 1 }] });
+    const attemptA = (await claimOcrPageAttempt({ ...attemptKey(workspace.id, run.id, 1), sourceDocumentId: document.id, parserName: "stale-executor", parserVersion: "stale-v1" }))!;
+    expect((await attemptRow(workspace.id, run.id, 1)).leaseUntil?.getTime()).toBeGreaterThan(Date.now());
+
+    // ONLY the run lease expires; the page lease is untouched and still live.
+    await prisma.$executeRaw`UPDATE "IngestionRun" SET "executionLeaseUntil" = NOW() - INTERVAL '1 second' WHERE "id" = ${run.id}`;
+    // Without run-execution authority the live claim is untouchable...
+    expect(await claimOcrPageAttempt({ ...attemptKey(workspace.id, run.id, 1), sourceDocumentId: document.id, parserName: "unauthorized", parserVersion: "x" })).toBeNull();
+    // ...but B reclaims the run through normal claim authority and takes over.
+    const executor = new FakePdfOcrExecutor().script(1, [fakeOcrText("B reclaimed scan text")]);
+    await serviceWith(storage, executor).processIngestionRun(run.id);
+
+    const succeeded = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(succeeded.status).toBe("SUCCEEDED");
+    const attempt = await attemptRow(workspace.id, run.id, 1);
+    expect(attempt).toMatchObject({ status: "SUCCEEDED", attemptCount: 2, parserName: "fake-ocr" });
+    expect(attempt.textSha256).toBe(sha256("B reclaimed scan text"));
+    // A's superseded page claim can never complete afterward.
+    expect(await completeOcrPageAttempt({ ...attemptKey(workspace.id, run.id, 1), claimToken: attemptA.claimToken, authoritativeArtifactKey: "stale/attempt", textSha256: "stale", durationMs: 1 })).toBe(false);
+    const extraction = await prisma.documentExtraction.findUniqueOrThrow({ where: { ingestionRunId: run.id } });
+    expect(await prisma.documentExtraction.count({ where: { sourceDocumentId: document.id } })).toBe(1);
+    expect(await prisma.bookAnalysisBootstrap.count({ where: { ingestionRunId: run.id } })).toBe(1);
+    const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
+    expect(current.extractionId).toBe(extraction.id);
+    const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: extraction.id }, orderBy: { ordinal: "asc" } });
+    expect(blocks[1]?.text).toBe("B reclaimed scan text");
+  });
+});
+
+describe("RF01 fenced non-publish routing outcome (real PostgreSQL)", () => {
+  it("STALE_OUTCOME_FENCED: a superseded owner changes zero durable state; only B's claim writes the outcome", async () => {
+    const bytes = await mixedPdf();
+    const storage = new FakeStorageProvider();
+    const { workspace, document, run } = await createPdfRunFixture(bytes, storage);
+    // A claims the run and prepares routing state like the production pipeline.
+    const claimA = (await claimIngestionRun(run.id, 3))!;
+    const native = await extractNativePdf(bytes, DEFAULT_PARSER_LIMITS);
+    expect(await writeRoutingPlan(run.id, PDF_ROUTING_GENERATION, native.routingPlan)).toBe(true);
+    await createOcrPageIntents({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, routingGeneration: PDF_ROUTING_GENERATION, pages: [{ physicalPageIndex: 1 }] });
+    const outcomes = new Map(native.routingPlan.pages.map((page) => [page.physicalPageIndex, page.route === "OCR_REQUIRED" ? "UNRESOLVED_FALLBACK" as const : "NATIVE_TEXT" as const]));
+    const decision = evaluatePdfExtractionQuality(native.routingPlan, outcomes, new Map(native.routingPlan.pages.map((page) => [page.physicalPageIndex, page.route === "OCR_REQUIRED" ? 0 : 2])));
+    const outcome = pdfRoutingOutcome(decision, false);
+
+    // A's run lease expires before A terminalizes; A has not observed the
+    // heartbeat loss and attempts the non-publish path anyway.
+    await prisma.$executeRaw`UPDATE "IngestionRun" SET "executionLeaseUntil" = NOW() - INTERVAL '1 second' WHERE "id" = ${run.id}`;
+    expect(await terminalizeRunWithRoutingOutcome(run.id, claimA.token, "OCR_REQUIRED", "SOURCE_OCR_REQUIRED", PDF_ROUTING_GENERATION, outcome)).toBe(false);
+    const afterA = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(afterA.routingOutcome).toBeNull();
+    expect(afterA.status).toBe("RUNNING");
+    expect(afterA.errorCode).toBeNull();
+
+    // B reclaims through the production path and owns the terminal state.
+    await expect(serviceWith(storage).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_REQUIRED");
+    const afterB = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(afterB.status).toBe("OCR_REQUIRED");
+    expect(afterB.errorCode).toBe("SOURCE_OCR_REQUIRED");
+    // No conflict caused by A: the slot was still null, so B wrote it.
+    expect(afterB.routingOutcome).toEqual(outcome);
+    expect(await prisma.documentExtraction.count({ where: { sourceDocumentId: document.id } })).toBe(0);
+    void workspace;
+  });
+});
+
+describe("RF01 zero-usable-text OCR results (real PostgreSQL)", () => {
+  it.each([
+    ["empty text", ""],
+    ["whitespace-only text", "   \n\t"],
+    ["BOM-only text", "\uFEFF"],
+  ])("blocks %s OCR success from publishing and exhausts the durable attempt budget", async (_name, ocrText) => {
+    const bytes = await mixedPdf();
+    const storage = new FakeStorageProvider();
+    const { workspace, document, run } = await createPdfRunFixture(bytes, storage);
+    const executor = new FakePdfOcrExecutor().script(1, [fakeOcrText(ocrText)]);
+    await expect(serviceWith(storage, executor).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_REQUIRED");
+
+    const failed = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(failed.status).toBe("OCR_REQUIRED");
+    expect(failed.errorCode).toBe("SOURCE_OCR_REQUIRED");
+    // Every attempt went through the durable authority (no second counter);
+    // the page is FAILED with the stable no-usable-text code, never accepted.
+    expect(await attemptRow(workspace.id, run.id, 1)).toMatchObject({ status: "FAILED", attemptCount: 3, errorCode: "SOURCE_OCR_NO_USABLE_TEXT" });
+    expect(executor.calls).toHaveLength(3);
+    expect(await prisma.documentExtraction.count({ where: { sourceDocumentId: document.id } })).toBe(0);
+    expect(await prisma.currentDocumentExtraction.count({ where: { workspaceId: workspace.id } })).toBe(0);
+    expect(await prisma.bookAnalysisBootstrap.count({ where: { ingestionRunId: run.id } })).toBe(0);
+    // Routing plan immutable; native pages never reclassified.
+    expect(failed.routingPlan).toMatchObject({ pages: [{ physicalPageIndex: 0, route: "NATIVE_TEXT" }, { physicalPageIndex: 1, route: "OCR_REQUIRED" }, { physicalPageIndex: 2, route: "NATIVE_TEXT" }] });
+    expect(failed.routingOutcome).toMatchObject({ outcome: "REQUIRES_FALLBACK", unresolvedPhysicalPageIndexes: [1] });
+  });
+});
+
+/** Verifies an artifact reference resolves inside the given provider. */
+function healthyArtifactReadable(storage: FakeStorageProvider, key: string | null): boolean {
+  return key !== null && storage.objects.has(key);
+}

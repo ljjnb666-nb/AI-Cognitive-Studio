@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { prisma, Prisma } from "@ai-cognitive/db";
+import { writeRoutingOutcome } from "./ocr-durability.js";
+import { SourceError } from "./source-errors.js";
 
 /**
  * Durable execution authority for IngestionRun (BOOK-INGESTION-04B-1).
@@ -100,6 +102,49 @@ export async function transitionRunToTerminal(runId: string, token: string, stat
   if (!terminalStatuses.has(status)) throw new Error(`INVALID_INGESTION_TERMINAL_STATUS:${status}`);
   try {
     return await prisma.$transaction(async (tx) => {
+      const changed = await tx.$executeRaw`UPDATE "IngestionRun" SET "status" = ${status}::"IngestionStatus", "errorCode" = ${errorCode}, "completedAt" = NOW(), "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${runId} ${liveLeasePredicate(token)}`;
+      if (changed !== 1) throw claimLost;
+      const jobs = await tx.$queryRaw<Array<{ id: string }>>`UPDATE "Job" SET "status" = 'FAILED', "error" = ${JSON.stringify({ code: errorCode })}::jsonb, "completedAt" = NOW(), "updatedAt" = NOW() WHERE "id" = (SELECT "jobId" FROM "IngestionRun" WHERE "id" = ${runId}) AND "status" = 'RUNNING' RETURNING "id"`;
+      if (jobs.length !== 1) throw claimLost;
+      return true;
+    });
+  } catch (error) {
+    if (error === claimLost) return false;
+    throw error;
+  }
+}
+
+/** Key-order-independent JSON comparison for routing-slot reuse validation. */
+function stableRoutingJson(value: unknown): string {
+  const walk = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(walk);
+    if (input && typeof input === "object") return Object.fromEntries(Object.entries(input as Record<string, unknown>).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([key, entry]) => [key, walk(entry)]));
+    return input;
+  };
+  return JSON.stringify(walk(value));
+}
+
+/**
+ * RF01 P1-03: the non-publish routing outcome and the terminal run transition
+ * are owned by the SAME authoritative run claim, in ONE PostgreSQL
+ * transaction: lock/verify the run (RUNNING + token + live lease), write the
+ * routing outcome only if null (or validate an already-identical one), then
+ * transition run + Job terminal. A superseded owner's write changes ZERO
+ * durable state — the in-memory ownershipLost flag is never the authority.
+ * Reuses the 04B-1 writeRoutingOutcome primitive for the slot itself.
+ */
+export async function terminalizeRunWithRoutingOutcome(runId: string, token: string, status: IngestionTerminalStatus, errorCode: string, routingGeneration: number, outcome: unknown): Promise<boolean> {
+  if (!terminalStatuses.has(status)) throw new Error(`INVALID_INGESTION_TERMINAL_STATUS:${status}`);
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const locked = await tx.$queryRaw<Array<{ routingOutcome: unknown }>>`SELECT "routingOutcome" FROM "IngestionRun" WHERE "id" = ${runId} ${liveLeasePredicate(token)} FOR UPDATE`;
+      if (locked.length !== 1) throw claimLost;
+      const existing = locked[0]!.routingOutcome;
+      if (existing == null) {
+        if (!await writeRoutingOutcome(runId, routingGeneration, outcome, tx)) throw new Error(SourceError.ROUTING_PLAN_CONFLICT);
+      } else if (stableRoutingJson(existing) !== stableRoutingJson(outcome)) {
+        throw new Error(SourceError.ROUTING_PLAN_CONFLICT);
+      }
       const changed = await tx.$executeRaw`UPDATE "IngestionRun" SET "status" = ${status}::"IngestionStatus", "errorCode" = ${errorCode}, "completedAt" = NOW(), "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${runId} ${liveLeasePredicate(token)}`;
       if (changed !== 1) throw claimLost;
       const jobs = await tx.$queryRaw<Array<{ id: string }>>`UPDATE "Job" SET "status" = 'FAILED', "error" = ${JSON.stringify({ code: errorCode })}::jsonb, "completedAt" = NOW(), "updatedAt" = NOW() WHERE "id" = (SELECT "jobId" FROM "IngestionRun" WHERE "id" = ${runId}) AND "status" = 'RUNNING' RETURNING "id"`;

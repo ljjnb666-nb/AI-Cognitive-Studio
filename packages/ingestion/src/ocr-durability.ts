@@ -65,11 +65,21 @@ export type OcrPageClaim = { claimToken: string; attemptCount: number };
  * Claims one page checkpoint for execution: PENDING (or expired RUNNING) ->
  * RUNNING(token), attemptCount + 1. Budget-guarded in PostgreSQL; the
  * workspace lineage in the predicate makes cross-tenant claims fail closed.
+ *
+ * RF01 P1-02: a caller that holds the CURRENT IngestionRun execution claim may
+ * additionally take over a RUNNING page whose lease is still live. The takeover
+ * branch is authorized by the run row itself (same statement, same snapshot):
+ * it matches only while the caller's token is the run's live executionClaimToken,
+ * which by construction means the live page lease belongs to a superseded run
+ * execution — a live owner can never reach this branch for its own claim (it
+ * holds the only live run token). Page token fencing for completion/failure is
+ * unchanged; no migration, no second authority.
  */
-export async function claimOcrPageAttempt(input: { workspaceId: string; sourceDocumentId: string; ingestionRunId: string; physicalPageIndex: number; routingGeneration: number; parserName: string; parserVersion: string; parserMode?: string | null; modelRevision?: string | null; maxAttempts?: number; leaseMs?: number }): Promise<OcrPageClaim | null> {
+export async function claimOcrPageAttempt(input: { workspaceId: string; sourceDocumentId: string; ingestionRunId: string; physicalPageIndex: number; routingGeneration: number; parserName: string; parserVersion: string; parserMode?: string | null; modelRevision?: string | null; maxAttempts?: number; leaseMs?: number; runExecutionToken?: string | null }): Promise<OcrPageClaim | null> {
   const maxAttempts = input.maxAttempts ?? OCR_PAGE_MAX_ATTEMPTS;
   const leaseMs = input.leaseMs ?? OCR_PAGE_LEASE_TTL_MS;
   const claimToken = randomUUID();
+  const takeoverToken = input.runExecutionToken ?? null;
   const rows = await prisma.$queryRaw<Array<{ attemptCount: number }>>`
     UPDATE "OcrPageAttempt" SET
       "status" = 'RUNNING', "claimToken" = ${claimToken}, "claimedAt" = NOW(), "leaseUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond'),
@@ -82,6 +92,17 @@ export async function claimOcrPageAttempt(input: { workspaceId: string; sourceDo
       AND (
         ("status" = 'PENDING' AND ("nextAttemptAt" IS NULL OR "nextAttemptAt" <= NOW()))
         OR ("status" = 'RUNNING' AND ("leaseUntil" IS NULL OR "leaseUntil" < NOW()))
+        OR (
+          "status" = 'RUNNING' AND "leaseUntil" IS NOT NULL AND "leaseUntil" >= NOW()
+          AND ${takeoverToken}::text IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM "IngestionRun" run
+            WHERE run."id" = "OcrPageAttempt"."ingestionRunId"
+              AND run."executionClaimToken" = ${takeoverToken}
+              AND run."status" = 'RUNNING'
+              AND run."executionLeaseUntil" > NOW()
+          )
+        )
       )
     RETURNING "attemptCount"`;
   return rows.length === 1 ? { claimToken, attemptCount: Number(rows[0]!.attemptCount) } : null;

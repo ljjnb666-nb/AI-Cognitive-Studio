@@ -36,6 +36,12 @@ export const SourceError = {
   // contract break — fail closed, never patch persisted history.
   ROUTING_PLAN_CONFLICT: "SOURCE_ROUTING_PLAN_CONFLICT",
   ROUTING_PLAN_CONTRACT_INVALID: "SOURCE_ROUTING_PLAN_CONTRACT_INVALID",
+  // RF01 P1-04: an executor reported SUCCEEDED but its output canonicalizes to
+  // zero usable blocks (empty / whitespace-only / BOM-only). The page attempt
+  // records this stable failure and the durable attempt budget governs retry;
+  // it is never accepted as usable fallback content. PAGE-level code — the run
+  // itself ends through the ordinary REQUIRES_FALLBACK / OCR_REQUIRED path.
+  OCR_NO_USABLE_TEXT: "SOURCE_OCR_NO_USABLE_TEXT",
 } as const;
 
 export type SourceErrorCode = (typeof SourceError)[keyof typeof SourceError];
@@ -56,6 +62,7 @@ export function sourceErrorForParserResult(result: string): SourceErrorCode {
     case "QUALITY_GATE_BLOCKED": return SourceError.QUALITY_GATE_BLOCKED;
     case "ROUTING_PLAN_CONFLICT": return SourceError.ROUTING_PLAN_CONFLICT;
     case "ROUTING_PLAN_CONTRACT_INVALID": return SourceError.ROUTING_PLAN_CONTRACT_INVALID;
+    case "OCR_NO_USABLE_TEXT": return SourceError.OCR_NO_USABLE_TEXT;
     default: return SourceError.PARSE;
   }
 }

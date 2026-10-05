@@ -87,6 +87,22 @@ describe("PDF page inspection policy", () => {
     expect(page.route).toBe("OCR_REQUIRED");
     expect(page.reasonCodes).toEqual(["INSUFFICIENT_NATIVE_TEXT", "VECTOR_CONTENT_WITHOUT_TEXT"]);
   });
+
+  it("RF01: raw text signal that canonicalizes to zero blocks never authorizes usable native text", () => {
+    const canonicalZero = inspect({ evidence: evidence({ rawTextLength: 5, significantTextLength: 5 }), nativeBlockCount: 0 });
+    expect(canonicalZero.hasTextEvidence).toBe(false);
+    expect(canonicalZero.contentEvidence).toBe("EMPTY");
+    expect(canonicalZero.route).toBe("NATIVE_TEXT");
+    expect(canonicalZero.reasonCodes).toEqual(["INSUFFICIENT_NATIVE_TEXT", "EMPTY_PAGE"]);
+    // With non-text evidence present the page still requires OCR instead.
+    const withVector = inspect({ evidence: evidence({ rawTextLength: 5, significantTextLength: 5, vectorPathCount: 1 }), nativeBlockCount: 0 });
+    expect(withVector.contentEvidence).toBe("NON_TEXT_CONTENT");
+    expect(withVector.route).toBe("OCR_REQUIRED");
+    expect(withVector.reasonCodes).toEqual(["INSUFFICIENT_NATIVE_TEXT", "VECTOR_CONTENT_WITHOUT_TEXT"]);
+    // Usable canonical content keeps full text authority.
+    const usable = inspect({ text: "alpha", nativeBlockCount: 2, evidence: evidence({ rawTextLength: 5, significantTextLength: 5 }) });
+    expect(usable).toMatchObject({ contentEvidence: "TEXT", route: "NATIVE_TEXT", hasTextEvidence: true, reasonCodes: ["NATIVE_TEXT_PRESENT"] });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -149,9 +165,10 @@ describe("PDF extraction quality gate", () => {
   const plan = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" }, inspections: sharedInspections });
 
   const outcomes = (values: Record<number, PdfPageExtractionOutcome>) => new Map(Object.entries(values).map(([key, value]) => [Number(key), value]));
+  const blockCounts = (values: Record<number, number>) => new Map(Object.entries(values).map(([key, value]) => [Number(key), value]));
 
   it("accepts complete native documents (empty pages retained, never UNKNOWN)", () => {
-    const decision = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 1: "OCR_FALLBACK", 2: "NATIVE_TEXT" }));
+    const decision = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 1: "OCR_FALLBACK", 2: "NATIVE_TEXT" }), blockCounts({ 0: 1, 1: 2, 2: 1 }));
     expect(decision.status).toBe("DEGRADED");
     expect(decision.reasonCodes).toEqual(["OCR_FALLBACK_USED"]);
     expect(decision.qualityWarnings).toEqual(["OCR_USED"]);
@@ -159,16 +176,27 @@ describe("PDF extraction quality gate", () => {
   });
 
   it("degrades with an explicit OCR_USED warning when fallback content is merged", () => {
-    const decision = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 1: "OCR_FALLBACK", 2: "NATIVE_TEXT" }));
+    const decision = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 1: "OCR_FALLBACK", 2: "NATIVE_TEXT" }), blockCounts({ 0: 1, 1: 1, 2: 1 }));
     expect(decision.status).toBe("DEGRADED");
     expect(decision.qualityWarnings).toEqual(["OCR_USED"]);
   });
 
   it("requires fallback while any non-empty page lacks an authoritative result", () => {
-    const decision = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 2: "NATIVE_TEXT" }));
+    const decision = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 2: "NATIVE_TEXT" }), blockCounts({ 0: 1, 2: 1 }));
     expect(decision.status).toBe("REQUIRES_FALLBACK");
     expect(decision.reasonCodes).toEqual(["UNRESOLVED_FALLBACK_PAGE"]);
     expect(decision.pageDecisions.find((page) => page.physicalPageIndex === 1)?.outcome).toBe("UNRESOLVED_FALLBACK");
+  });
+
+  it("RF01: an outcome label never manufactures usability — labeled pages with zero usable blocks fail closed", () => {
+    const labeledNative = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 1: "OCR_FALLBACK", 2: "NATIVE_TEXT" }), blockCounts({ 0: 1, 1: 0, 2: 1 }));
+    expect(labeledNative.status).toBe("REQUIRES_FALLBACK");
+    expect(labeledNative.pageDecisions.find((page) => page.physicalPageIndex === 1)?.outcome).toBe("UNRESOLVED_FALLBACK");
+    const labeledOcr = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 1: "OCR_FALLBACK", 2: "NATIVE_TEXT" }), blockCounts({ 0: 1, 1: 3, 2: 0 }));
+    expect(labeledOcr.status).toBe("REQUIRES_FALLBACK");
+    expect(labeledOcr.pageDecisions.find((page) => page.physicalPageIndex === 2)?.outcome).toBe("UNRESOLVED_FALLBACK");
+    const missingCount = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 1: "OCR_FALLBACK", 2: "NATIVE_TEXT" }), blockCounts({ 0: 1, 1: 1 }));
+    expect(missingCount.status).toBe("REQUIRES_FALLBACK");
   });
 
   it("rejects documents with no usable content at all", () => {
@@ -176,16 +204,16 @@ describe("PDF extraction quality gate", () => {
       parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" },
       inspections: [inspect({ physicalPageIndex: 0 }), inspect({ physicalPageIndex: 1 })],
     });
-    const decision = evaluatePdfExtractionQuality(allEmpty, outcomes({ 0: "EMPTY", 1: "EMPTY" }));
+    const decision = evaluatePdfExtractionQuality(allEmpty, outcomes({ 0: "EMPTY", 1: "EMPTY" }), blockCounts({ 0: 0, 1: 0 }));
     expect(decision.status).toBe("REJECTED");
     expect(decision.reasonCodes).toEqual(["NO_USABLE_CONTENT"]);
   });
 
   it("summarizes unresolved pages in the routing outcome", () => {
-    const decision = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 2: "NATIVE_TEXT" }));
+    const decision = evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 2: "NATIVE_TEXT" }), blockCounts({ 0: 1, 2: 1 }));
     const fallback = pdfRoutingOutcome(decision, false);
     expect(fallback).toEqual({ schemaVersion: PDF_ROUTING_OUTCOME_SCHEMA_VERSION, outcome: "REQUIRES_FALLBACK", qualityStatus: "REQUIRES_FALLBACK", unresolvedPhysicalPageIndexes: [1] });
-    const published = pdfRoutingOutcome(evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 1: "OCR_FALLBACK", 2: "NATIVE_TEXT" })), true);
+    const published = pdfRoutingOutcome(evaluatePdfExtractionQuality(plan, outcomes({ 0: "NATIVE_TEXT", 1: "OCR_FALLBACK", 2: "NATIVE_TEXT" }), blockCounts({ 0: 1, 1: 1, 2: 1 })), true);
     expect(published).toEqual({ schemaVersion: PDF_ROUTING_OUTCOME_SCHEMA_VERSION, outcome: "PUBLISHED", qualityStatus: "DEGRADED", unresolvedPhysicalPageIndexes: [] });
   });
 });

@@ -57,7 +57,13 @@ export type PdfPageEvidence = {
   imageCount: number;
   /** constructPath occurrence count (args-shape-agnostic on purpose). */
   vectorPathCount: number;
-  /** Annotation dictionary count for the page (appearance-bearing or not). */
+  /**
+   * Annotation dictionary count for the page. CONSERVATIVE LIMITATION (RF01
+   * P2): pdfjs does not expose appearance-stream presence deterministically
+   * across annotation subtypes, so every annotation dictionary counts as
+   * content evidence. This can only over-require OCR, never silently drop a
+   * meaningful annotation-only page — the 04B-0 invariant is preserved.
+   */
   annotationCount: number;
 };
 
@@ -94,9 +100,16 @@ export type PdfRoutingPlan = {
  * automatically empty: image/vector/annotation evidence makes it
  * NON_TEXT_CONTENT (OCR_REQUIRED), while a page with no evidence at all is an
  * explicit EMPTY page that stays on the native route.
+ *
+ * Native text authority (RF01 P1-05): raw child text alone never authorizes
+ * the TEXT classification. A page is trustworthy native text only when the
+ * canonical block path used for publication actually produced usable blocks
+ * (nativeBlockCount > 0) — raw signal that canonicalizes to zero blocks is
+ * recorded as INSUFFICIENT_NATIVE_TEXT and can never count as usable content.
  */
 export function inspectPdfPage(input: { physicalPageIndex: number; text: string; nativeBlockCount: number; evidence: PdfPageEvidence }): PdfPageInspection {
-  const hasTextEvidence = input.evidence.significantTextLength > 0;
+  const hasRawTextSignal = input.evidence.significantTextLength > 0;
+  const hasTextEvidence = hasRawTextSignal && input.nativeBlockCount > 0;
   const hasImageEvidence = input.evidence.imageCount > 0;
   const hasVectorEvidence = input.evidence.vectorPathCount > 0;
   const hasAnnotationEvidence = input.evidence.annotationCount > 0;
@@ -104,7 +117,6 @@ export function inspectPdfPage(input: { physicalPageIndex: number; text: string;
   const route: PdfPageRoute = contentEvidence === "NON_TEXT_CONTENT" ? "OCR_REQUIRED" : "NATIVE_TEXT";
   const reasonCodes: PdfRoutingReasonCode[] = [];
   if (hasTextEvidence) reasonCodes.push("NATIVE_TEXT_PRESENT");
-  // Whitespace-only text is not text evidence; record why it was insufficient.
   if (!hasTextEvidence && input.evidence.rawTextLength > 0) reasonCodes.push("INSUFFICIENT_NATIVE_TEXT");
   if (hasImageEvidence && !hasTextEvidence) reasonCodes.push("IMAGE_CONTENT_WITHOUT_TEXT");
   if (hasVectorEvidence && !hasTextEvidence) reasonCodes.push("VECTOR_CONTENT_WITHOUT_TEXT");
@@ -217,14 +229,21 @@ export type PdfExtractionQualityDecision = {
  *  - REQUIRES_FALLBACK: a non-empty page still lacks an authoritative result.
  *  - DEGRADED: complete and publishable, but OCR fallback content was used.
  *  - ACCEPTED: every non-empty page carries authoritative native content.
+ *
+ * RF01 hardening: an outcome label alone never manufactures usability. The
+ * caller must pass the authoritative usable canonical block count per page
+ * (derived from the exact block arrays that would be persisted); a page
+ * labeled NATIVE_TEXT/OCR_FALLBACK with zero such blocks fails closed to
+ * UNRESOLVED_FALLBACK. No successful PDF publication may contain a required
+ * non-empty page with zero authoritative usable content.
  */
-export function evaluatePdfExtractionQuality(plan: PdfRoutingPlan, outcomes: Map<number, PdfPageExtractionOutcome>): PdfExtractionQualityDecision {
-  const pageDecisions: PdfPageQualityDecision[] = plan.pages.map((page) => ({
-    physicalPageIndex: page.physicalPageIndex,
-    route: page.route,
-    outcome: outcomes.get(page.physicalPageIndex) ?? "UNRESOLVED_FALLBACK",
-    reasonCodes: [...page.reasonCodes],
-  }));
+export function evaluatePdfExtractionQuality(plan: PdfRoutingPlan, outcomes: Map<number, PdfPageExtractionOutcome>, usableBlockCounts: Map<number, number>): PdfExtractionQualityDecision {
+  const pageDecisions: PdfPageQualityDecision[] = plan.pages.map((page) => {
+    const labeled = outcomes.get(page.physicalPageIndex) ?? "UNRESOLVED_FALLBACK";
+    const usableBlocks = usableBlockCounts.get(page.physicalPageIndex) ?? 0;
+    const outcome: PdfPageExtractionOutcome = (labeled === "NATIVE_TEXT" || labeled === "OCR_FALLBACK") && usableBlocks < 1 ? "UNRESOLVED_FALLBACK" : labeled;
+    return { physicalPageIndex: page.physicalPageIndex, route: page.route, outcome, reasonCodes: [...page.reasonCodes] };
+  });
   const unresolved = pageDecisions.filter((page) => page.outcome === "UNRESOLVED_FALLBACK");
   const ocrUsed = pageDecisions.some((page) => page.outcome === "OCR_FALLBACK");
   const hasUsableContent = pageDecisions.some((page) => page.outcome === "NATIVE_TEXT" || page.outcome === "OCR_FALLBACK");

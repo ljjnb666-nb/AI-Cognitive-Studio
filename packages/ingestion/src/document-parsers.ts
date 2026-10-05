@@ -87,7 +87,10 @@ export async function extractNativePdf(bytes: Uint8Array, limits: ParserLimits):
     // be fabricated, and the printed page label is unknown.
     const pages = records.map((record) => {
       const inspection = inspectPdfPage({ physicalPageIndex: record.physicalPageIndex, text: record.text, nativeBlockCount: pdfTextToBlocks(record.text, record.physicalPageIndex, provenance).length, evidence: record.evidence });
-      return { physicalPageIndex: record.physicalPageIndex, inspection, blocks: inspection.route === "NATIVE_TEXT" ? pdfTextToBlocks(record.text, record.physicalPageIndex, provenance) : [] };
+      // Only TEXT-classified pages carry blocks (RF01 P1-05): a page whose raw
+      // text canonicalizes to zero usable blocks — or routes to OCR — is
+      // represented with zero blocks and can never count as usable content.
+      return { physicalPageIndex: record.physicalPageIndex, inspection, blocks: inspection.contentEvidence === "TEXT" ? pdfTextToBlocks(record.text, record.physicalPageIndex, provenance) : [] };
     });
     return { parser: parsers.pdf, pageCount: child.pageCount, inspections: pages.map((page) => page.inspection), routingPlan: planPdfRouting({ parser: parsers.pdf, inspections: pages.map((page) => page.inspection) }), pages };
   } finally { await rm(dir, { recursive: true, force: true }); }
