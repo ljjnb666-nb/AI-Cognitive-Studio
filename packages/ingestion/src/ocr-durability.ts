@@ -187,16 +187,20 @@ export async function listReconcilableOcrServerInstances(hostId: string): Promis
 
 // ---------------------------------------------------------------------------
 // Routing durability columns: write-once plan, one-way terminal outcome.
+// 04B-2 executes PDF routing through these primitives — the optional
+// transaction-client parameters exist so the publication path can write the
+// routing outcome inside the SAME fenced transaction as the extraction (same
+// table, same columns, same authority; never a parallel one).
 // ---------------------------------------------------------------------------
 
 /** Write-once: the routing plan can never be mutated once persisted. */
-export async function writeRoutingPlan(runId: string, routingGeneration: number, plan: unknown): Promise<boolean> {
-  const changed = await prisma.$executeRaw`UPDATE "IngestionRun" SET "routingGeneration" = ${routingGeneration}, "routingPlan" = ${JSON.stringify(plan)}::jsonb WHERE "id" = ${runId} AND "routingPlan" IS NULL`;
+export async function writeRoutingPlan(runId: string, routingGeneration: number, plan: unknown, tx: Prisma.TransactionClient = prisma): Promise<boolean> {
+  const changed = await tx.$executeRaw`UPDATE "IngestionRun" SET "routingGeneration" = ${routingGeneration}, "routingPlan" = ${JSON.stringify(plan)}::jsonb WHERE "id" = ${runId} AND "routingPlan" IS NULL`;
   return changed === 1;
 }
 
 /** One-way: a null routingOutcome may be filled exactly once, for the plan's own generation. */
-export async function writeRoutingOutcome(runId: string, routingGeneration: number, outcome: unknown): Promise<boolean> {
-  const changed = await prisma.$executeRaw`UPDATE "IngestionRun" SET "routingOutcome" = ${JSON.stringify(outcome)}::jsonb WHERE "id" = ${runId} AND "routingGeneration" = ${routingGeneration} AND "routingOutcome" IS NULL AND "routingPlan" IS NOT NULL`;
+export async function writeRoutingOutcome(runId: string, routingGeneration: number, outcome: unknown, tx: Prisma.TransactionClient = prisma): Promise<boolean> {
+  const changed = await tx.$executeRaw`UPDATE "IngestionRun" SET "routingOutcome" = ${JSON.stringify(outcome)}::jsonb WHERE "id" = ${runId} AND "routingGeneration" = ${routingGeneration} AND "routingOutcome" IS NULL AND "routingPlan" IS NOT NULL`;
   return changed === 1;
 }

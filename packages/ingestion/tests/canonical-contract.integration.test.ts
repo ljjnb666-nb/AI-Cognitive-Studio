@@ -153,9 +153,11 @@ describe("canonical contract persistence", () => {
     expect(blocks[0]?.sourcePageId).toBe(pages[0]?.id);
     expect(blocks[1]?.sourcePageId).toBe(pages[1]?.id);
     expect(extraction.canonicalSchemaVersion).toBe(CANONICAL_SCHEMA_VERSION);
-    // Parser success is not quality acceptance: a fresh canonical-v1
-    // extraction is unassessed until a production quality gate exists.
-    expect(extraction.qualityStatus).toBe("UNKNOWN");
+    // BOOK-INGESTION-04B-2: PDF publication is quality-authoritative. The
+    // routing pipeline's deterministic decision is persisted verbatim — a
+    // fully native document is ACCEPTED, never UNKNOWN.
+    expect(extraction.parserVersion).toBe("pdf-router-v1");
+    expect(extraction.qualityStatus).toBe("ACCEPTED");
     expect(parseExtractionQualityMetadata(extraction.qualityMetadata)).toEqual({ warnings: [] });
   });
 

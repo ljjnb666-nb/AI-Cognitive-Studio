@@ -6,16 +6,21 @@ import { logger } from "@ai-cognitive/shared";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION } from "./canonical-text.js";
 import { inspectObjectStream } from "./object-inspection.js";
-import { parseDocument, type ParsedBlock } from "./document-parsers.js";
+import { parseDocument, type Parsed, type ParsedBlock, DEFAULT_PARSER_LIMITS } from "./document-parsers.js";
 import { SourceError } from "./source-errors.js";
 import { claimIngestionRun, completeRunSuccess, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_RENEW_INTERVAL_MS, transitionRunToRetryable, transitionRunToTerminal } from "./ingestion-run-claim.js";
+import { writeRoutingOutcome } from "./ocr-durability.js";
 import { classifyIngestionFailure, ingestionStatusForTerminalFailure } from "./ingestion-failure.js";
+import { runPdfExtraction, writeRoutingOutcomeValidated, type PdfRunExtraction } from "./pdf-run.js";
+import { PDF_EXTRACTION_PARSER, pdfRoutingOutcome, type PdfOcrExecutor } from "./pdf-routing.js";
 import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
 import { dispatchPendingOutbox } from "./outbox-dispatcher.js";
 export { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "./outbox-dispatcher.js";
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
-export { parseDocument, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
+export { parseDocument, extractNativePdf, pdfTextToBlocks, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
+export { PDF_EXTRACTION_PARSER, PDF_INSPECTOR_VERSION, PDF_QUALITY_REASON_CODES, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, PDF_ROUTING_REASON_CODES, assertRoutingPlanReplay, evaluatePdfExtractionQuality, inspectPdfPage, parseRoutingPlan, pdfRoutingOutcome, planPdfRouting, type PdfContentEvidence, type PdfExtractionQualityDecision, type PdfExtractionQualityStatus, type PdfOcrExecutor, type PdfOcrExecutorDescriptor, type PdfOcrPageRequest, type PdfOcrPageResult, type PdfPageEvidence, type PdfPageInspection, type PdfPageQualityDecision, type PdfPageRoute, type PdfPageExtractionOutcome, type PdfQualityReasonCode, type PdfRoutingOutcome, type PdfRoutingPlan, type PdfRoutingPlanPage, type PdfRoutingReasonCode } from "./pdf-routing.js";
+export { runPdfExtraction, writeRoutingOutcomeValidated, type PdfRunExtraction, type PdfRunExtractionInput } from "./pdf-run.js";
 export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
 export { classifyIngestionFailure, ingestionStatusForTerminalFailure, type IngestionFailureClass } from "./ingestion-failure.js";
 export { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerStatus, OCR_HOST_LEASE_TTL_MS, OCR_PAGE_LEASE_TTL_MS, OCR_PAGE_MAX_ATTEMPTS, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, writeRoutingOutcome, writeRoutingPlan } from "./ocr-durability.js";
@@ -29,13 +34,17 @@ export const BOOK_ANALYSIS_BOOTSTRAP_TOPIC = "book.analysis.bootstrap.requested"
 const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").map((character) => character.charCodeAt(0) < 32 ? "_" : character).join("").slice(0, 180) || "source";
 
 /**
- * Quality recorded for a normal successful parse. Parser success is never
- * equated with quality acceptance: a canonical-book-v1 extraction starts at
- * UNKNOWN with an empty (evidence-free) warning list, and only a future
- * production quality gate may move it to ACCEPTED/DEGRADED/REQUIRES_FALLBACK/
- * REJECTED.
+ * Quality recorded for a non-PDF successful parse (and the defensive fallback
+ * for PDFs, which can no longer produce it). Parser success is never equated
+ * with quality acceptance: a canonical-book-v1 extraction starts at UNKNOWN
+ * with an empty (evidence-free) warning list. PDF extractions are
+ * quality-authoritative since 04B-2: the routing pipeline's deterministic
+ * quality decision (ACCEPTED/DEGRADED) is persisted verbatim.
  */
 const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
+
+/** Service options; pdfOcrExecutor is a test seam until 04B-2's production cutover (none in 04B-2). */
+export type IngestionServiceOptions = { maxUploadBytes: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor };
 
 /**
  * Canonical v1 write gate for SourceBlock.metadata, keyed on the authoritative
@@ -94,7 +103,7 @@ export function sniffMediaType(bytes: Uint8Array, declared: string, filename: st
   if (declared === "text/plain" || /\.(txt|text)$/.test(lower)) return "text/plain";
   throw new Error(SourceError.TYPE_MISMATCH);
 }
-export function createIngestionService(storage: StorageProvider, options = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3 }) {
+export function createIngestionService(storage: StorageProvider, options: IngestionServiceOptions = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3 }) {
   async function assertMembership(context: TrustedRequestContext) { const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context } }); if (!member) throw new Error("WORKSPACE_ACCESS_DENIED"); }
   return {
     async createUploadIntent(context: TrustedRequestContext, input: { filename: string; mediaType: string; sizeBytes: number }) {
@@ -180,7 +189,38 @@ export function createIngestionService(storage: StorageProvider, options = { max
       }, RUN_RENEW_INTERVAL_MS);
       try {
         const bytes = await storage.getObjectBytes(run.sourceDocument.storageKey);
-        const parsed = await parseDocument(bytes, run.sourceDocument.mediaType, { maxPdfPages: options.maxPdfPages });
+        const limits = { ...DEFAULT_PARSER_LIMITS, maxPdfPages: options.maxPdfPages };
+        // PDFs run the 04B-2 routing pipeline: inspect → write-once routing
+        // plan → native extraction + OCR executor seam → merged page-level
+        // result → deterministic quality decision. Other formats parse directly.
+        let parsed: Parsed;
+        let pdfRouting: Extract<PdfRunExtraction, { kind: "PUBLISH" }> | null = null;
+        if (run.sourceDocument.mediaType === "application/pdf") {
+          const extraction = await runPdfExtraction({
+            runId: run.id,
+            workspaceId: run.workspaceId,
+            sourceDocumentId: run.sourceDocumentId,
+            persistedRoutingPlan: run.routingPlan,
+            persistedRoutingGeneration: run.routingGeneration,
+            pdfBytes: bytes,
+            limits,
+            storage,
+            executor: options.pdfOcrExecutor,
+            ownershipLost: () => ownershipLost,
+          });
+          if (extraction.kind !== "PUBLISH") {
+            // No partial publication: persist the terminal routing outcome as
+            // durable evidence, then finish with the existing terminal
+            // semantics (OCR_REQUIRED / REJECTED). Ownership loss writes nothing.
+            if (ownershipLost) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
+            await writeRoutingOutcomeValidated(run.id, extraction.routingGeneration, pdfRoutingOutcome(extraction.decision, false));
+            throw new Error(extraction.kind === "OCR_REQUIRED" ? SourceError.OCR_REQUIRED : SourceError.QUALITY_REJECTED);
+          }
+          parsed = extraction.parsed;
+          pdfRouting = extraction;
+        } else {
+          parsed = await parseDocument(bytes, run.sourceDocument.mediaType, limits);
+        }
         const canonicalBlocks = parsed.pages.flatMap((page) => page.blocks);
         const text = canonicalBlocks.map((block) => block.text).join(CANONICAL_BLOCK_SEPARATOR);
         if (ownershipLost) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
@@ -199,19 +239,29 @@ export function createIngestionService(storage: StorageProvider, options = { max
           // assert live claim ownership BEFORE any extraction data is written.
           // The row lock holds the run against reclaim until this transaction ends.
           if (ownershipLost || !(await lockRunForPublication(tx, run.id, claim.token))) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
+          // Publication hard gate (04B-2): a PDF may persist an extraction only
+          // with a quality decision, and only an ACCEPTED/DEGRADED decision may
+          // publish. The pipeline never returns forbidden decisions — reaching
+          // here with one is an internal contract bug and must abort the write.
+          if (pdfRouting && (pdfRouting.decision.status === "REQUIRES_FALLBACK" || pdfRouting.decision.status === "REJECTED")) throw new Error(SourceError.QUALITY_GATE_BLOCKED);
           const extraction = await tx.documentExtraction.create({
             data: {
               ingestionRunId: run.id,
               sourceDocumentId: run.sourceDocumentId,
               workspaceId: run.workspaceId,
               status: "SUCCEEDED",
-              parserName: parsed.parser.name,
-              parserVersion: parsed.parser.version,
+              // PDF extractions are router-pipeline products since 04B-2; the
+              // native engine identity stays on every native block's provenance.
+              parserName: pdfRouting ? PDF_EXTRACTION_PARSER.name : parsed.parser.name,
+              parserVersion: pdfRouting ? PDF_EXTRACTION_PARSER.version : parsed.parser.version,
               normalizationVersion: CANONICAL_NORMALIZATION_VERSION,
               canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION,
-              qualityStatus: "UNKNOWN",
-              // Parser warnings are typed, evidence-backed observations only;
-              // they never move qualityStatus off UNKNOWN.
+              // PDF: the deterministic quality gate's decision, verbatim —
+              // successful PDF publication is never UNKNOWN anymore. Other
+              // formats remain unassessed (UNKNOWN).
+              qualityStatus: pdfRouting ? pdfRouting.decision.status : "UNKNOWN",
+              // Quality warnings are typed, evidence-backed observations only
+              // (for routed PDFs: OCR_USED when fallback content was merged).
               qualityMetadata: parsed.qualityWarnings?.length ? parseExtractionQualityMetadata({ warnings: parsed.qualityWarnings }) : UNASSESSED_EXTRACTION_QUALITY,
               // Format-native metadata (EPUB package/navigation evidence),
               // gated by canonicalFormatMetadata: EPUB requires schema-valid
@@ -271,6 +321,10 @@ export function createIngestionService(storage: StorageProvider, options = { max
               payload: { bootstrapId: bootstrap.id, dispatchGeneration: bootstrap.dispatchGeneration },
             },
           });
+          // One-way routing outcome, written inside the same fenced transaction
+          // as the publication it describes. Already-written outcomes are only
+          // tolerable when byte-equivalent (deterministic decision).
+          if (pdfRouting && !await writeRoutingOutcome(run.id, pdfRouting.routingGeneration, pdfRoutingOutcome(pdfRouting.decision, true), tx)) throw new Error(SourceError.ROUTING_PLAN_CONFLICT);
           await completeRunSuccess(tx, run.id, claim.token);
         });
       } catch (error) {
@@ -365,7 +419,10 @@ export async function dispatchPendingIngestion(queue: IngestionQueue, options: I
 function parserProvenance(mediaType: string): { name: string; version: string } {
   if (mediaType === "text/plain") return { name: "builtin-text", version: "text-parser-v1" };
   if (mediaType === "text/markdown") return { name: "builtin-markdown", version: "markdown-parser-v1" };
-  if (mediaType === "application/pdf") return { name: "pdfjs-isolated", version: "pdf-isolation-v3" };
+  // PDF runs are routed/quality-gated since 04B-2: the planned pipeline
+  // identity is the router version; the native engine (pdfjs-isolated) remains
+  // the per-block provenance authority inside routing plan and extraction.
+  if (mediaType === "application/pdf") return { name: "pdfjs-isolated", version: "pdf-router-v1" };
   if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v2" };
   return { name: "unsupported", version: "unsupported-v1" };
 }
