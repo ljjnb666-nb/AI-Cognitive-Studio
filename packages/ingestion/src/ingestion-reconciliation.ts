@@ -25,10 +25,17 @@ const LIVE_STATES = new Set(["waiting", "delayed", "active"]);
 
 export type IngestionReconciliationResult = { queuedRepairCount: number; expiredRetryableCount: number; expiredTerminalCount: number };
 
-export async function reconcileIngestionDeliveries(options: { queue: IngestionReconciliationQueuePort; maxAttempts: number; batchSize?: number }): Promise<IngestionReconciliationResult> {
+export async function reconcileIngestionDeliveries(options: { queue: IngestionReconciliationQueuePort; maxAttempts: number; batchSize?: number; /** Internal targeted-reconciliation seam (tests only; never user input). Undefined = global production discovery, unchanged. */ candidateRunIds?: string[] }): Promise<IngestionReconciliationResult> {
   const result: IngestionReconciliationResult = { queuedRepairCount: 0, expiredRetryableCount: 0, expiredTerminalCount: 0 };
   const runs = await prisma.ingestionRun.findMany({
-    where: { OR: [{ status: "QUEUED" }, { status: "RUNNING", OR: [{ executionLeaseUntil: null }, { executionLeaseUntil: { lt: new Date() } }] }] },
+    where: {
+      AND: [
+        { OR: [{ status: "QUEUED" }, { status: "RUNNING", OR: [{ executionLeaseUntil: null }, { executionLeaseUntil: { lt: new Date() } }] }] },
+        // Restricted discovery only: the production worker never supplies this,
+        // so global reconciliation semantics are byte-identical to before.
+        ...(options.candidateRunIds ? [{ id: { in: options.candidateRunIds } }] : []),
+      ],
+    },
     orderBy: { createdAt: "asc" },
     take: options.batchSize ?? INGESTION_RECONCILIATION_BATCH_SIZE,
     select: { id: true, status: true, job: { select: { attemptCount: true } } },
