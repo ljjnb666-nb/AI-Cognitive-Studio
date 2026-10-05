@@ -16,7 +16,7 @@ export { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDisp
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export { parseDocument, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
-export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExpiredIngestionRun, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
+export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
 export { classifyIngestionFailure, ingestionStatusForTerminalFailure, type IngestionFailureClass } from "./ingestion-failure.js";
 export { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerStatus, OCR_HOST_LEASE_TTL_MS, OCR_PAGE_LEASE_TTL_MS, OCR_PAGE_MAX_ATTEMPTS, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, writeRoutingOutcome, writeRoutingPlan } from "./ocr-durability.js";
 export { INGESTION_RECONCILIATION_BATCH_SIZE, reconcileIngestionDeliveries, type IngestionDeliveryState, type IngestionReconciliationQueuePort, type IngestionReconciliationResult } from "./ingestion-reconciliation.js";
@@ -184,7 +184,14 @@ export function createIngestionService(storage: StorageProvider, options = { max
         const canonicalBlocks = parsed.pages.flatMap((page) => page.blocks);
         const text = canonicalBlocks.map((block) => block.text).join(CANONICAL_BLOCK_SEPARATOR);
         if (ownershipLost) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
-        const textKey = `workspaces/${run.sourceDocument.source.workspaceId}/extractions/${run.id}/text.txt`;
+        // Immutable content-addressed artifact: the key is derived from the bytes
+        // themselves, so two execution claims producing different text write
+        // different objects and a stale owner's late PUT can only create an
+        // unreferenced orphan — it can never change the bytes referenced by the
+        // authoritative DocumentExtraction.textStorageKey. Identical text maps to
+        // the identical key, which is safe because the bytes are identical.
+        const textSha256 = sha256Utf8(text);
+        const textKey = `workspaces/${run.sourceDocument.source.workspaceId}/extractions/${run.id}/text/${textSha256}.txt`;
         await storage.putObject({ key: textKey, body: Buffer.from(text, "utf8"), contentType: "text/plain; charset=utf-8" });
 
         await prisma.$transaction(async (tx) => {
@@ -212,7 +219,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
               // internal parser contract bug and aborts the write (FAILED).
               formatMetadata: canonicalFormatMetadata(run.sourceDocument.mediaType, parsed.formatMetadata),
               textStorageKey: textKey,
-              textSha256: sha256Utf8(text),
+              textSha256,
               characterCount: text.length,
             },
           });

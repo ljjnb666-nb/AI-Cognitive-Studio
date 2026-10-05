@@ -161,6 +161,35 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
     expect(validateOcrServerInstanceContract({ status: "STOPPED", pid: null, serverId: null, transports: null })).toEqual([]);
   });
 
+  it("RF01-05: ORPHANED keeps stoppedAt null; only STOPPED records the verified exit", async () => {
+    const { workspace, document, run } = await createRunFixture();
+    const hostClaimToken = `hostclaim-${crypto.randomUUID()}`;
+    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: "host-orph", hostClaimToken, runExecutionToken: "run-orph", mineruHome: "home-orph" });
+    await recordOcrServerEndpoint({ hostClaimToken, endpoint: { pid: 222, serverId: "server-orph", transports: [{ type: "tcp", base_url: "http://127.0.0.1:15999" }] } });
+    expect(await markOcrServerStatus(hostClaimToken, "ORPHANED", "authority-lost")).toBe(true);
+    let row = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken } });
+    expect(row.status).toBe("ORPHANED");
+    expect(row.stoppedAt).toBeNull();
+    expect(row.terminationReason).toBe("authority-lost");
+    expect(await markOcrServerStatus(hostClaimToken, "STOPPED", "reconciler-verified-exit")).toBe(true);
+    row = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken } });
+    expect(row.status).toBe("STOPPED");
+    expect(row.stoppedAt).not.toBeNull();
+  });
+
+  it("RF01-06: duplicate hostClaimToken returns null; other DB errors keep their real class", async () => {
+    const { workspace, document, run } = await createRunFixture();
+    const hostClaimToken = `hostclaim-${crypto.randomUUID()}`;
+    const input = { workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: "host-dup", hostClaimToken, runExecutionToken: "run-dup", mineruHome: "home-dup" };
+    expect(await createOcrServerInstance(input)).not.toBeNull();
+    // Duplicate: explicit unique-conflict only -> null.
+    expect(await createOcrServerInstance(input)).toBeNull();
+    // Cross-tenant lineage violation must NOT be swallowed as a duplicate.
+    const stranger = await prisma.workspace.create({ data: { name: `stranger-${crypto.randomUUID()}` } });
+    workspaceIds.push(stranger.id);
+    await expect(createOcrServerInstance({ ...input, hostClaimToken: `hostclaim-${crypto.randomUUID()}`, workspaceId: stranger.id })).rejects.toThrow();
+  });
+
   it("SERVER_OLD_INSTANCE_SURVIVES_NEW_HOST_CLAIM: reclaiming the host lease never overwrites prior instance evidence", async () => {
     const { workspace, document, run } = await createRunFixture();
     const hostId = `host-${crypto.randomUUID()}`;

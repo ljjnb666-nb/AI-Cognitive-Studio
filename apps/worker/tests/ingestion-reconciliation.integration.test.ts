@@ -163,6 +163,37 @@ describe("source-ingestion delivery reconciliation (real PostgreSQL + real Redis
     expect(await port.getJobState(run.id)).toBeNull();
   });
 
+  it("RF01-04 CASE A: a QUEUED run at the durable max terminalizes FAILED with INGESTION_ATTEMPTS_EXHAUSTED", async () => {
+    const run = await createRunFixture("QUEUED", 3);
+    const result = await reconcileIngestionDeliveries({ queue: port, maxAttempts: 3 });
+    expect(result.expiredTerminalCount).toBeGreaterThanOrEqual(1);
+    const row = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(row.status).toBe("FAILED");
+    expect(row.errorCode).toBe("INGESTION_ATTEMPTS_EXHAUSTED");
+    expect(row.completedAt).not.toBeNull();
+    const job = await prisma.job.findUniqueOrThrow({ where: { id: run.jobId } });
+    expect(job.status).toBe("FAILED");
+    expect((job.error as { code?: string } | null)?.code).toBe("INGESTION_ATTEMPTS_EXHAUSTED");
+    expect(await port.getJobState(run.id)).toBeNull();
+  });
+
+  it("RF01-04 CASE B: exhausted rows do not starve the oldest reconciliation window (batchSize=1)", async () => {
+    const exhausted = await createRunFixture("QUEUED", 3);
+    const repairable = await createRunFixture("QUEUED", 1);
+    // Hermetic ordering: park every other QUEUED/expired-RUNNING row left by
+    // earlier tests so this test's two fixtures are the only sweep candidates.
+    await prisma.ingestionRun.updateMany({ where: { status: { in: ["QUEUED", "RUNNING"] }, id: { notIn: [exhausted.id, repairable.id] } }, data: { status: "FAILED" } });
+    // Sweep 1: the oldest row is the exhausted one; batchSize=1 must terminalize it.
+    const sweep1 = await reconcileIngestionDeliveries({ queue: port, maxAttempts: 3, batchSize: 1 });
+    expect(sweep1.expiredTerminalCount).toBe(1);
+    expect((await prisma.ingestionRun.findUniqueOrThrow({ where: { id: exhausted.id } })).status).toBe("FAILED");
+    // Sweep 2: with the exhausted row gone, the next-oldest repairable row gets its delivery.
+    const sweep2 = await reconcileIngestionDeliveries({ queue: port, maxAttempts: 3, batchSize: 1 });
+    expect(sweep2.queuedRepairCount).toBe(1);
+    expect(await port.getJobState(repairable.id)).toBe("waiting");
+    await port.remove(repairable.id);
+  });
+
   it("a live lease is never reconciled", async () => {
     const run = await createRunFixture("RUNNING", 0, false);
     await reconcileIngestionDeliveries({ queue: port, maxAttempts: 3 });

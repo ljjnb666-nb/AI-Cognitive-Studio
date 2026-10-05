@@ -140,3 +140,25 @@ export async function terminalizeExpiredIngestionRun(runId: string, errorCode = 
     throw error;
   }
 }
+
+/**
+ * QUEUED runs whose durable attempt budget is exhausted are terminal: no live
+ * execution claim exists, so the run (still QUEUED, claim-free) and its QUEUED
+ * Job with attemptCount >= maxAttempts CAS to FAILED atomically. A QUEUED run
+ * with budget left never matches; the expired-RUNNING helper must not be used
+ * for this state because its predicate requires status = RUNNING.
+ */
+export async function terminalizeExhaustedQueuedIngestionRun(runId: string, maxAttempts: number, errorCode = INGESTION_ATTEMPTS_EXHAUSTED): Promise<boolean> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const changed = await tx.$executeRaw`UPDATE "IngestionRun" SET "status" = 'FAILED', "errorCode" = ${errorCode}, "completedAt" = NOW() WHERE "id" = ${runId} AND "status" = 'QUEUED' AND "executionClaimToken" IS NULL`;
+      if (changed !== 1) throw claimLost;
+      const jobs = await tx.$queryRaw<Array<{ id: string }>>`UPDATE "Job" SET "status" = 'FAILED', "error" = ${JSON.stringify({ code: errorCode })}::jsonb, "completedAt" = NOW(), "updatedAt" = NOW() WHERE "id" = (SELECT "jobId" FROM "IngestionRun" WHERE "id" = ${runId}) AND "status" = 'QUEUED' AND "attemptCount" >= ${maxAttempts} RETURNING "id"`;
+      if (jobs.length !== 1) throw claimLost;
+      return true;
+    });
+  } catch (error) {
+    if (error === claimLost) return false;
+    throw error;
+  }
+}

@@ -1,5 +1,5 @@
 import { prisma } from "@ai-cognitive/db";
-import { INGESTION_ATTEMPTS_EXHAUSTED, terminalizeExpiredIngestionRun } from "./ingestion-run-claim.js";
+import { INGESTION_ATTEMPTS_EXHAUSTED, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun } from "./ingestion-run-claim.js";
 
 /**
  * Source-ingestion delivery reconciliation (BOOK-INGESTION-04B-1).
@@ -37,9 +37,10 @@ export async function reconcileIngestionDeliveries(options: { queue: IngestionRe
     const attemptCount = run.job.attemptCount;
     if (run.status === "QUEUED") {
       if (attemptCount >= options.maxAttempts) {
-        // A QUEUED run must never exist beyond the durable budget; if legacy or
-        // partial state produced one, terminalize instead of delivering forever.
-        if (await terminalizeExpiredIngestionRun(run.id, INGESTION_ATTEMPTS_EXHAUSTED)) result.expiredTerminalCount += 1;
+        // A QUEUED run beyond the durable budget is terminal: no live claim can
+        // exist, so it CAS-terminalizes here instead of occupying the oldest
+        // reconciliation window forever.
+        if (await terminalizeExhaustedQueuedIngestionRun(run.id, options.maxAttempts, INGESTION_ATTEMPTS_EXHAUSTED)) result.expiredTerminalCount += 1;
         continue;
       }
       const state = await options.queue.getJobState(run.id);

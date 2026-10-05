@@ -201,12 +201,23 @@ describe("ingestion run claim (real PostgreSQL)", () => {
     expect(succeeded.status).toBe("SUCCEEDED");
     const extractions = await prisma.documentExtraction.findMany({ where: { ingestionRunId: run.id } });
     expect(extractions).toHaveLength(1);
+    // RF01-01: the published key is content-addressed, never the mutable text.txt form.
+    expect(extractions[0]!.textStorageKey).toMatch(/\/text\/[0-9a-f]{64}\.txt$/);
+    expect(extractions[0]!.textStorageKey!.endsWith("/text.txt")).toBe(false);
     const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId } } });
     expect(current.extractionId).toBe(extractions[0]!.id);
     const bootstraps = await prisma.bookAnalysisBootstrap.findMany({ where: { ingestionRunId: run.id } });
     expect(bootstraps).toHaveLength(1);
     const bootstrapEvents = await prisma.outboxEvent.count({ where: { topic: "book.analysis.bootstrap.requested", aggregateId: bootstraps[0]!.id } });
     expect(bootstrapEvents).toBe(1);
+
+    // RF01-02 storage ownership regression: A returns late and writes the text
+    // artifact its stale claim prepared (different bytes than B's). The write is
+    // content-addressed, so it lands on a different immutable key and can never
+    // change the bytes B's published extraction references.
+    const staleText = "worker A stale payload";
+    const staleKey = `workspaces/${run.workspaceId}/extractions/${run.id}/text/${sha256(staleText)}.txt`;
+    await storage.putObject({ key: staleKey, body: Buffer.from(staleText, "utf8"), contentType: "text/plain; charset=utf-8" });
 
     // Worker A returns late and attempts every durable write it still holds a token for.
     await prisma.$transaction(async (tx) => {
@@ -224,6 +235,13 @@ describe("ingestion run claim (real PostgreSQL)", () => {
     expect((await prisma.bookAnalysisBootstrap.findMany({ where: { ingestionRunId: run.id } })).length).toBe(1);
     const jobRow = await prisma.job.findUniqueOrThrow({ where: { id: run.jobId } });
     expect(jobRow.status).toBe("SUCCEEDED");
+
+    // The authoritative extraction still references B's exact immutable artifact;
+    // A's late write left only an unreferenced orphan object.
+    const published = await prisma.documentExtraction.findUniqueOrThrow({ where: { ingestionRunId: run.id } });
+    expect(published.textStorageKey).toBe(`workspaces/${run.workspaceId}/extractions/${run.id}/text/${published.textSha256}.txt`);
+    expect(published.textStorageKey).not.toBe(staleKey);
+    expect(Buffer.from(await storage.getObjectBytes(published.textStorageKey!)).toString("utf8")).toBe("worker B payload");
   });
 
   it("terminalizeExpiredIngestionRun: CASE 3 CAS only fires on still-expired RUNNING with the stable lease-expired code", async () => {

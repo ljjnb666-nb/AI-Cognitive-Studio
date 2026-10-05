@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { prisma } from "@ai-cognitive/db";
+import { prisma, Prisma } from "@ai-cognitive/db";
 
 /**
  * Durable OCR ownership/checkpoint primitives (BOOK-INGESTION-04B-1).
@@ -137,9 +137,12 @@ export async function createOcrServerInstance(input: { workspaceId: string; sour
       select: { id: true },
     });
     return row.id;
-  } catch {
-    // hostClaimToken is unique: a duplicate claim must not fabricate a second instance identity.
-    return null;
+  } catch (error) {
+    // Only an explicit hostClaimToken unique-conflict maps to "already exists";
+    // every other database failure (outage, FK/tenant-lineage violation) must
+    // surface with its real class instead of masquerading as a duplicate.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002" && (error.meta as { target?: string[] } | undefined)?.target?.includes("hostClaimToken")) return null;
+    throw error;
   }
 }
 
@@ -156,7 +159,7 @@ export async function recordOcrServerEndpoint(input: { hostClaimToken: string; e
 export async function markOcrServerStatus(hostClaimToken: string, status: "STOPPING" | "STOPPED" | "ORPHANED", terminationReason?: string): Promise<boolean> {
   const changed = await prisma.ocrServerInstance.updateMany({
     where: { hostClaimToken, status: { not: "STOPPED" } },
-    data: { status, ...(status === "STOPPED" || status === "ORPHANED" ? { stoppedAt: new Date() } : {}), lastObservedAt: new Date(), ...(terminationReason ? { terminationReason } : {}) },
+    data: { status, ...(status === "STOPPED" ? { stoppedAt: new Date() } : {}), lastObservedAt: new Date(), ...(terminationReason ? { terminationReason } : {}) },
   });
   return changed.count === 1;
 }
