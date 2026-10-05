@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const environmentSchema = z.object({
+export const environmentSchema = z.object({
   DATABASE_URL: z.url(),
   REDIS_URL: z.url(),
   S3_ENDPOINT: z.url().default("http://localhost:9000"),
@@ -14,6 +14,12 @@ const environmentSchema = z.object({
   SOURCE_UPLOAD_COMPLETION_LEASE_MS: z.coerce.number().int().positive().default(900000),
   SOURCE_OUTBOX_LEASE_MS: z.coerce.number().int().positive().default(60000),
   SOURCE_OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  // Single authority for bounded same-run ingestion execution retries. It feeds
+  // BOTH the source-ingestion BullMQ queue attempts AND the PostgreSQL
+  // Job.attemptCount claim guard. OUTBOX DISPATCH ATTEMPTS
+  // (SOURCE_OUTBOX_MAX_ATTEMPTS) govern OutboxEvent -> BullMQ enqueue delivery
+  // and are unrelated to ingestion PROCESSING attempts.
+  SOURCE_INGESTION_PROCESS_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
   WORKER_INGESTION_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(1),
   WORKER_BOOK_ANALYSIS_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(1),
   WORKER_PODCAST_GENERATION_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(1),

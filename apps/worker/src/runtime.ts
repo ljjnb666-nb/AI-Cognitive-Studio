@@ -7,7 +7,8 @@ import { createBookAnalysisWorker, createBookAnalysisQueue, dispatchBookAnalysis
 import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPodcastGenerationWithQueue } from "./podcast-generation.js";
 import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudioGenerationWithQueue } from "./audio-generation.js";
 import { createShortVideoGenerationWorker, createShortVideoGenerationQueue, dispatchShortVideoGenerationWithQueue, type ShortVideoRuntimeAdapter } from "./short-video-generation.js";
-import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue } from "./source-ingestion.js";
+import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue, INGESTION_JOB } from "./source-ingestion.js";
+import { reconcileIngestionDeliveries, type IngestionReconciliationQueuePort } from "@ai-cognitive/ingestion";
 import { createBookAnalysisBootstrapWorker, createBookAnalysisBootstrapQueue, dispatchBookAnalysisBootstrapWithQueue, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "./book-analysis-bootstrap.js";
 import { createHealthCheckWorker } from "./worker.js";
 import { createBookProductionGatewayRuntime, createPodcastAudioProductionGatewayRuntime, createPodcastProductionGatewayRuntime, createShortVideoProductionGatewayRuntime, type BookGatewayRuntime, type BookProductionGatewayRuntimeOverrides, type PodcastAudioGatewayRuntime, type PodcastGatewayRuntime, type ShortVideoGatewayRuntime } from "./provider-gateway-runtime.js";
@@ -113,8 +114,23 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   // This bounded domain sweep has its own dispatch guard and error boundary;
   // the PR #46 durable-operation sweep is scheduled independently below.
   const reconcileBookAnalysisStale = dispatch("book-analysis-stale-reconciliation", () => reconcileStaleBookAnalysisJobs(25), 60_000);
+  // Durable ingestion delivery reconciliation: PostgreSQL first, BullMQ second.
+  // Redis state loss may delay a delivery; it can never exceed the durable
+  // attempt guard or strand an expired RUNNING run.
+  const ingestionReconciliationQueue: IngestionReconciliationQueuePort = {
+    getJobState: async (jobId) => {
+      const job = await ingestionQueue.getJob(jobId);
+      if (!job) return null;
+      const state = await job.getState();
+      return state === "waiting" || state === "delayed" || state === "active" || state === "completed" || state === "failed" ? state : null;
+    },
+    remove: async (jobId) => { await ingestionQueue.remove(jobId); },
+    add: async (jobId) => { await ingestionQueue.add(INGESTION_JOB, { ingestionRunId: jobId }, { jobId }); },
+  };
+  const reconcileIngestionDeliveriesSweep = dispatch("source-ingestion-reconciliation", () => reconcileIngestionDeliveries({ queue: ingestionReconciliationQueue, maxAttempts: environment.SOURCE_INGESTION_PROCESS_MAX_ATTEMPTS }), 60_000);
   const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); }];
   initial.push(reconcileBookAnalysisStale);
+  initial.push(reconcileIngestionDeliveriesSweep);
   if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (podcastQueue) initial.push(dispatch("podcast-generation", () => dispatchPodcastGenerationWithQueue(podcastQueue, { ...(options.outboxTopics?.podcastGeneration ? { topic: options.outboxTopics.podcastGeneration } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (audioQueue) initial.push(dispatch("podcast-audio", () => dispatchPodcastAudioGenerationWithQueue(audioQueue, { ...(options.outboxTopics?.podcastAudio ? { topic: options.outboxTopics.podcastAudio } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));

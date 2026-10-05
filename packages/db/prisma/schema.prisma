@@ -118,6 +118,26 @@ enum IngestionStatus {
   PASSWORD_REQUIRED
 }
 
+/// Durable OCR page checkpoint state (BOOK-INGESTION-04B-1; consumed by 04B-2+).
+/// One checkpoint row per (run, physical page, routing generation).
+enum OcrPageAttemptStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+/// Durable detached MinerU server instance identity. STARTING is persistable
+/// BEFORE process launch, so endpoint identity fields stay nullable; the
+/// service layer (not Prisma) enforces endpoint presence for RUNNING/STOPPING.
+enum OcrServerInstanceStatus {
+  STARTING
+  RUNNING
+  STOPPING
+  STOPPED
+  ORPHANED
+}
+
 enum ExtractionStatus {
   SUCCEEDED
   FAILED
@@ -1077,6 +1097,18 @@ model IngestionRun {
   parserVersion         String
   normalizationVersion  String
   errorCode             String?
+  /// Execution claim fence (BOOK-INGESTION-04B-1). PostgreSQL is the sole
+  /// execution authority; BullMQ only schedules deliveries. A run may execute
+  /// work only while status = RUNNING, executionClaimToken matches the live
+  /// owner and executionLeaseUntil > NOW().
+  executionClaimToken   String?
+  executionClaimedAt    DateTime?
+  executionLeaseUntil   DateTime?
+  /// Routing durability (write-once plan, one-way terminal outcome). No
+  /// routing behavior until BOOK-INGESTION-04B-2; historical rows keep NULL.
+  routingGeneration     Int?
+  routingPlan           Json?
+  routingOutcome        Json?
   createdAt             DateTime               @default(now())
   startedAt             DateTime?
   completedAt           DateTime?
@@ -1084,8 +1116,92 @@ model IngestionRun {
   job                   Job                    @relation(fields: [jobId], references: [id], onDelete: Restrict)
   extraction            DocumentExtraction?
   bookAnalysisBootstrap BookAnalysisBootstrap?
+  ocrPageAttempts       OcrPageAttempt[]
+  ocrServerInstances    OcrServerInstance[]
 
   @@unique([id, sourceDocumentId, workspaceId])
+  @@index([executionLeaseUntil])
+}
+
+/// Current per-host OCR machine-capacity authority (fenced lease). Deliberately
+/// NOT server identity/history: detached server instances live in
+/// OcrServerInstance so stale-owner evidence survives lease reclaims.
+model OcrHostLease {
+  hostId       String    @id
+  /// NULL = the slot is free (released); a live owner always has a token.
+  claimToken   String?
+  claimedAt    DateTime?
+  leaseUntil   DateTime?
+  hostMetadata Json?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([leaseUntil])
+}
+
+/// Authoritative PAGE CHECKPOINT row for OCR execution — one row per
+/// (ingestion run, physical page, routing generation); attemptCount counts
+/// execution attempts on the row. Raw per-execution history belongs to
+/// immutable artifacts/logs, not extra rows. Workspace/source lineage columns
+/// exist so every relation and write predicate fails closed across tenant
+/// boundaries.
+model OcrPageAttempt {
+  id                       String               @id @default(cuid())
+  workspaceId              String
+  sourceDocumentId         String
+  ingestionRunId           String
+  physicalPageIndex        Int
+  routingGeneration        Int
+  status                   OcrPageAttemptStatus @default(PENDING)
+  claimToken               String?
+  claimedAt                DateTime?
+  leaseUntil               DateTime?
+  attemptCount             Int                  @default(0)
+  nextAttemptAt            DateTime?
+  parserName               String?
+  parserVersion            String?
+  parserMode               String?
+  modelRevision            String?
+  errorCode                String?
+  durationMs               Int?
+  authoritativeArtifactKey String?
+  textSha256               String?
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
+  ingestionRun             IngestionRun         @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@unique([ingestionRunId, physicalPageIndex, routingGeneration])
+  @@index([ingestionRunId, routingGeneration])
+  @@index([status, nextAttemptAt])
+  @@index([workspaceId])
+}
+
+/// Durable identity/history for detached MinerU server instances. One row
+/// forever belongs to ONE hostClaimToken; reclaiming the mutable OcrHostLease
+/// never overwrites or erases a prior owner's instance evidence.
+model OcrServerInstance {
+  id                String                  @id @default(cuid())
+  workspaceId       String
+  sourceDocumentId  String
+  ingestionRunId    String
+  hostId            String
+  hostClaimToken    String                  @unique
+  runExecutionToken String
+  mineruHome        String
+  pid               Int?
+  serverId          String?
+  transports        Json?
+  status            OcrServerInstanceStatus @default(STARTING)
+  startedAt         DateTime?
+  stoppedAt         DateTime?
+  lastObservedAt    DateTime?
+  terminationReason String?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  ingestionRun      IngestionRun            @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@index([hostId, status])
+  @@index([workspaceId])
 }
 
 model DocumentExtraction {

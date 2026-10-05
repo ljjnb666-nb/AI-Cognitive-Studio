@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { prisma, JobStatus } from "@ai-cognitive/db";
+import { prisma } from "@ai-cognitive/db";
 import { CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
 import type { EpubExtractionMetadata } from "@ai-cognitive/domain";
 import { logger } from "@ai-cognitive/shared";
@@ -8,12 +8,18 @@ import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION } from "./ca
 import { inspectObjectStream } from "./object-inspection.js";
 import { parseDocument, type ParsedBlock } from "./document-parsers.js";
 import { SourceError } from "./source-errors.js";
+import { claimIngestionRun, completeRunSuccess, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_RENEW_INTERVAL_MS, transitionRunToRetryable, transitionRunToTerminal } from "./ingestion-run-claim.js";
+import { classifyIngestionFailure, ingestionStatusForTerminalFailure } from "./ingestion-failure.js";
 import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
 import { dispatchPendingOutbox } from "./outbox-dispatcher.js";
 export { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "./outbox-dispatcher.js";
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export { parseDocument, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
+export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
+export { classifyIngestionFailure, ingestionStatusForTerminalFailure, type IngestionFailureClass } from "./ingestion-failure.js";
+export { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerStatus, OCR_HOST_LEASE_TTL_MS, OCR_PAGE_LEASE_TTL_MS, OCR_PAGE_MAX_ATTEMPTS, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, writeRoutingOutcome, writeRoutingPlan } from "./ocr-durability.js";
+export { INGESTION_RECONCILIATION_BATCH_SIZE, reconcileIngestionDeliveries, type IngestionDeliveryState, type IngestionReconciliationQueuePort, type IngestionReconciliationResult } from "./ingestion-reconciliation.js";
 
 export type TrustedRequestContext = { userId: string; workspaceId: string };
 export const INGESTION_QUEUE = "source.ingestion";
@@ -88,7 +94,7 @@ export function sniffMediaType(bytes: Uint8Array, declared: string, filename: st
   if (declared === "text/plain" || /\.(txt|text)$/.test(lower)) return "text/plain";
   throw new Error(SourceError.TYPE_MISMATCH);
 }
-export function createIngestionService(storage: StorageProvider, options = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000 }) {
+export function createIngestionService(storage: StorageProvider, options = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3 }) {
   async function assertMembership(context: TrustedRequestContext) { const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context } }); if (!member) throw new Error("WORKSPACE_ACCESS_DENIED"); }
   return {
     async createUploadIntent(context: TrustedRequestContext, input: { filename: string; mediaType: string; sizeBytes: number }) {
@@ -161,17 +167,38 @@ export function createIngestionService(storage: StorageProvider, options = { max
       }
     },
     async processIngestionRun(runId: string) {
-      const run = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runId }, include: { sourceDocument: { include: { source: true } }, job: true } }); if (["SUCCEEDED", "REJECTED", "OCR_REQUIRED", "PASSWORD_REQUIRED"].includes(run.status)) return;
-      await prisma.$transaction([prisma.ingestionRun.update({ where: { id: runId }, data: { status: "RUNNING", startedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.RUNNING, startedAt: new Date(), attemptCount: { increment: 1 } } })]);
+      const run = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runId }, include: { sourceDocument: { include: { source: true } }, job: true } });
+      if (["SUCCEEDED", "REJECTED", "OCR_REQUIRED", "PASSWORD_REQUIRED"].includes(run.status)) return;
+      // Durable execution claim: run + Job transition atomically, attempt-guarded
+      // in PostgreSQL. FAILED is terminal and never claimable; QUEUED and
+      // expired-RUNNING (with budget left) are the only claimable states.
+      const claim = await claimIngestionRun(runId, options.processMaxAttempts);
+      if (!claim) return;
+      let ownershipLost = false;
+      const heartbeat = setInterval(() => {
+        void renewIngestionRunClaim(runId, claim.token).then((renewed) => { if (!renewed) ownershipLost = true; }).catch(() => { ownershipLost = true; });
+      }, RUN_RENEW_INTERVAL_MS);
       try {
         const bytes = await storage.getObjectBytes(run.sourceDocument.storageKey);
         const parsed = await parseDocument(bytes, run.sourceDocument.mediaType, { maxPdfPages: options.maxPdfPages });
         const canonicalBlocks = parsed.pages.flatMap((page) => page.blocks);
         const text = canonicalBlocks.map((block) => block.text).join(CANONICAL_BLOCK_SEPARATOR);
-        const textKey = `workspaces/${run.sourceDocument.source.workspaceId}/extractions/${run.id}/text.txt`;
+        if (ownershipLost) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
+        // Immutable content-addressed artifact: the key is derived from the bytes
+        // themselves, so two execution claims producing different text write
+        // different objects and a stale owner's late PUT can only create an
+        // unreferenced orphan — it can never change the bytes referenced by the
+        // authoritative DocumentExtraction.textStorageKey. Identical text maps to
+        // the identical key, which is safe because the bytes are identical.
+        const textSha256 = sha256Utf8(text);
+        const textKey = `workspaces/${run.sourceDocument.source.workspaceId}/extractions/${run.id}/text/${textSha256}.txt`;
         await storage.putObject({ key: textKey, body: Buffer.from(text, "utf8"), contentType: "text/plain; charset=utf-8" });
 
         await prisma.$transaction(async (tx) => {
+          // Final-publication ownership fence: lock the authoritative run row and
+          // assert live claim ownership BEFORE any extraction data is written.
+          // The row lock holds the run against reclaim until this transaction ends.
+          if (ownershipLost || !(await lockRunForPublication(tx, run.id, claim.token))) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
           const extraction = await tx.documentExtraction.create({
             data: {
               ingestionRunId: run.id,
@@ -192,7 +219,7 @@ export function createIngestionService(storage: StorageProvider, options = { max
               // internal parser contract bug and aborts the write (FAILED).
               formatMetadata: canonicalFormatMetadata(run.sourceDocument.mediaType, parsed.formatMetadata),
               textStorageKey: textKey,
-              textSha256: sha256Utf8(text),
+              textSha256,
               characterCount: text.length,
             },
           });
@@ -244,10 +271,29 @@ export function createIngestionService(storage: StorageProvider, options = { max
               payload: { bootstrapId: bootstrap.id, dispatchGeneration: bootstrap.dispatchGeneration },
             },
           });
-          await tx.ingestionRun.update({ where: { id: run.id }, data: { status: "SUCCEEDED", completedAt: new Date() } });
-          await tx.job.update({ where: { id: run.jobId }, data: { status: JobStatus.SUCCEEDED, progress: 100, completedAt: new Date() } });
+          await completeRunSuccess(tx, run.id, claim.token);
         });
-      } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "UNEXPECTED_ERROR"; const status = code === SourceError.OCR_REQUIRED ? "OCR_REQUIRED" : code === SourceError.PASSWORD_REQUIRED ? "PASSWORD_REQUIRED" : [SourceError.TYPE_MISMATCH, SourceError.UNSUPPORTED_TYPE, SourceError.TOO_LARGE, SourceError.ARCHIVE_UNSAFE, SourceError.CORRUPTED, SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED, SourceError.EPUB_NO_USABLE_TEXT].includes(code as never) ? "REJECTED" : "FAILED"; await prisma.$transaction([prisma.ingestionRun.update({ where: { id: run.id }, data: { status, errorCode: code, completedAt: new Date() } }), prisma.job.update({ where: { id: run.jobId }, data: { status: JobStatus.FAILED, error: { code }, completedAt: new Date() } })]); logger.error("ingestion.failed", { ingestionRunId: run.id, code }); throw error; }
+      } catch (error) {
+        const code = (error instanceof Error ? error.message.split(":")[0] : undefined) ?? "UNEXPECTED_ERROR";
+        // Ownership loss writes NOTHING: the new owner (or the reconciler) owns
+        // the outcome, and a stale worker must never mutate newer durable state.
+        if (code === INGESTION_EXECUTION_OWNERSHIP_LOST || ownershipLost) throw error;
+        const failureClass = classifyIngestionFailure(code);
+        if (failureClass === "RETRYABLE_RUN" && claim.attemptCount < options.processMaxAttempts) {
+          // QUEUED is the retryable durable state; BullMQ's configured attempt
+          // policy schedules the next execution, which re-claims the run.
+          await transitionRunToRetryable(run.id, claim.token, code);
+          logger.warn("ingestion.retry_scheduled", { ingestionRunId: run.id, code, attemptCount: claim.attemptCount });
+          throw error;
+        }
+        const status = failureClass === "TERMINAL_RUN" ? ingestionStatusForTerminalFailure(code) : "FAILED";
+        // Fenced terminal write: requires live ownership; a lost race writes nothing.
+        await transitionRunToTerminal(run.id, claim.token, status, code);
+        logger.error("ingestion.failed", { ingestionRunId: run.id, code, status });
+        throw error;
+      } finally {
+        clearInterval(heartbeat);
+      }
     },
     async recoverIngestionForUser(context: TrustedRequestContext, sourceDocumentId: string, completion: { outboxTopic?: string } = {}) {
       const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { userId: true } });
