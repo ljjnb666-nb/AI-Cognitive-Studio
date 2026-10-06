@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, open, lstat, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { logger } from "@ai-cognitive/shared";
-import { OCR_HOST_LEASE_TTL_MS, acquireOcrHostLease, createOcrServerInstance, markOcrServerOrphaned, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease } from "../ocr-durability.js";
+import { OCR_HOST_LEASE_TTL_MS, acquireOcrHostLease, createOcrServerInstance, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease } from "../ocr-durability.js";
 import type { PdfOcrExecutor, PdfOcrExecutorDescriptor, PdfOcrPageRequest, PdfOcrPageResult } from "../pdf-routing.js";
 import { SourceError } from "../source-errors.js";
 import { MINERU_EXECUTOR_NAME, buildMineruParseArgs, judgeMineruParseExit, mineruFailureForOutcome } from "./mineru-commands.js";
@@ -123,6 +123,10 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
     let claimDir: string | null = null;
     let session: MineruServerSession | null = null;
     let serverStarted = false;
+    let inputDir: string | null = null;
+    let outputDir: string | null = null;
+    /** RF02 P1-05: explicit tree-termination evidence from a failed start (null = no session/start evidence). */
+    let startTreeProof: boolean | null = null;
     let stopDisposition = "NOT_STARTED";
     try {
       // 2. Application-generated per-claim temp tree (no user-controlled path
@@ -130,8 +134,8 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
       await mkdir(claimRoot, { recursive: true });
       claimDir = await mkdtemp(join(claimRoot, "claim-"));
       const homeDir = join(claimDir, "home");
-      const inputDir = join(claimDir, "input");
-      const outputDir = join(claimDir, "output");
+      inputDir = join(claimDir, "input");
+      outputDir = join(claimDir, "output");
       const inputPdfPath = join(inputDir, "input.pdf");
       const outputMarkdownPath = join(outputDir, "result.md");
       await mkdir(homeDir, { recursive: true });
@@ -166,6 +170,9 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
       session = await createMineruServerSession({ executable: config.executable, executableArgs: config.executableArgs, homeDir, childEnvBase, startTimeoutMs: config.serverStartTimeoutMs, stopTimeoutMs: config.serverStopTimeoutMs, maxOutputBytes: Math.min(config.maxOutputBytes, 1_048_576), abortSignal: signal, ...(config.processImagePattern ? { processImagePattern: config.processImagePattern } : {}) });
       const startFailure = await session.start();
       if (startFailure) {
+        // RF02 P1-05: remember the EXPLICIT tree-termination evidence so the
+        // finally block can prove "nothing survived" instead of guessing.
+        startTreeProof = startFailure.treeTerminationConfirmed === true;
         const mapped = startFailure.kind === "EXECUTABLE_NOT_FOUND"
           ? failure(SourceError.OCR_MINERU_NOT_FOUND, "terminal")
           : startFailure.kind === "START_TIMEOUT"
@@ -173,7 +180,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
             : startFailure.kind === "ABORTED"
               ? failure(leaseLost ? SourceError.OCR_HOST_LEASE_LOST : SourceError.OCR_PROCESS_FAILED, "transient")
               : failure(SourceError.OCR_PROCESS_FAILED, "transient");
-        logger.warn("mineru.ocr.server_start_failed", { ...logContext, kind: startFailure.kind, failureCode: mapped.status === "FAILED" ? mapped.errorCode : SourceError.OCR_PROCESS_FAILED });
+        logger.warn("mineru.ocr.server_start_failed", { ...logContext, kind: startFailure.kind, failureCode: mapped.status === "FAILED" ? mapped.errorCode : SourceError.OCR_PROCESS_FAILED, ...(startFailure.kind === "START_FAILED" ? { stderrTail: startFailure.stderrTail.slice(-300) } : {}) });
         return recordCall(request, mapped, startedAt);
       }
       serverStarted = true;
@@ -207,25 +214,44 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
       return recordCall(request, failure(stable, "transient"), startedAt);
     } finally {
       // 6. Bounded cleanup of everything this claim owned, in every outcome,
-      // through the CLOSED server state machine (RF01 P1-07).
+      // through the CLOSED server state machine (RF01 P1-07, RF02 P1-04/P1-05).
       clearInterval(heartbeat);
+      let serverTerminated = false;
       if (session) {
         if (serverStarted) await markOcrServerStopping(lease.claimToken).catch(() => false);
         const disposition = await session.stop();
         stopDisposition = disposition.kind;
         if (serverStarted && session.endpoint) {
-          const terminated = disposition.kind === "STOPPED" || disposition.kind === "ALREADY_EXITED" || disposition.kind === "KILLED_BY_RECORDED_IDENTITY";
-          if (terminated) await markOcrServerStopped(lease.claimToken, disposition.kind).catch(() => undefined);
-          else await markOcrServerOrphaned(lease.claimToken, disposition.reason).catch(() => undefined);
-        } else if (!serverStarted && disposition.kind === "ALREADY_EXITED") {
-          // Startup never produced a usable server AND left no live endpoint
-          // evidence: the proven never-started cleanup state.
-          await markOcrServerStopped(lease.claimToken, "START_FAILED_NO_ENDPOINT").catch(() => undefined);
-        } else {
-          await markOcrServerOrphaned(lease.claimToken, `START_FAILED_${disposition.kind}`).catch(() => undefined);
+          serverTerminated = disposition.kind === "STOPPED" || disposition.kind === "ALREADY_EXITED" || disposition.kind === "KILLED_BY_RECORDED_IDENTITY";
+          if (serverTerminated) await markOcrServerStopped(lease.claimToken, disposition.kind).catch(() => undefined);
+          else await markOcrServerOrphaned(lease.claimToken, disposition.kind === "ORPHAN_SUSPECT" ? disposition.reason : "STOP_IDENTITY_UNAVAILABLE").catch(() => undefined);
+        } else if (!serverStarted) {
+          // RF02 P1-05 state-machine boundary: STARTING -> STOPPED ONLY with
+          // explicit proof that no owned process survived (the spawn never
+          // happened, or the owned tree termination was confirmed). A missing
+          // endpoint alone is NEVER that proof -> ORPHANED, evidence preserved.
+          if (startTreeProof === true) {
+            serverTerminated = true;
+            await markOcrServerStartNeverStarted(lease.claimToken).catch(() => undefined);
+          } else {
+            await markOcrServerOrphaned(lease.claimToken, "START_IDENTITY_UNAVAILABLE").catch(() => undefined);
+          }
         }
       }
-      if (claimDir) await rm(claimDir, { recursive: true, force: true }).catch(() => undefined);
+      // RF02 P1-04 cleanup contract: the claim temp tree may only be removed
+      // when the server is PROVEN terminated. Otherwise the claim HOME (the
+      // doclib.endpoint.json identity evidence the crash reconciler needs)
+      // is preserved and only the bulky, non-identity input/output data is
+      // removed — OcrServerInstance.mineruHome keeps resolving to real,
+      // usable recovery evidence.
+      if (claimDir) {
+        if (serverTerminated) {
+          await rm(claimDir, { recursive: true, force: true }).catch(() => undefined);
+        } else if (inputDir && outputDir) {
+          await rm(inputDir, { recursive: true, force: true }).catch(() => undefined);
+          await rm(outputDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
       // Token-fenced: a stale token can never release a newer owner's lease.
       if (leaseLost) {
         logger.warn("mineru.ocr.host_lease_lost", { ...logContext, failureCode: SourceError.OCR_HOST_LEASE_LOST });

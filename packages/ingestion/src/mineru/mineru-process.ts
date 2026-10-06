@@ -27,8 +27,15 @@ export type BoundedSpawnResult = {
   timedOut: boolean;
   aborted: boolean;
   outputOverflow: boolean;
-  /** Honest termination disposition for timeout/abort paths: true only when the process (tree) termination was observed to complete. */
-  terminateConfirmed: boolean;
+  /** The directly spawned child process emitted `exit` after termination was initiated. Evidence about the DIRECT child only. */
+  directChildExitObserved: boolean;
+  /**
+   * The OWNED tree-termination operation completed successfully AND the direct
+   * child exited afterwards. This claims the taskkill reported success for the
+   * recorded tree — it is NOT kernel-level proof that every detached
+   * descendant died (RF02 P2: never assert more than the evidence proves).
+   */
+  treeTerminationConfirmed: boolean;
   stdout: string;
   stderr: string;
   spawnErrorCode?: string;
@@ -46,6 +53,12 @@ export type BoundedSpawnOptions = {
    * caller receives its disposition anyway (default 5000ms; never infinite).
    */
   terminationGraceMs?: number;
+  /**
+   * Test-only seam for the owned tree-termination operation. Defaults to the
+   * real taskkill/kill-by-recorded-pid implementation; injecting a failing
+   * termination lets tests prove the disposition never overclaims.
+   */
+  terminateProcessTree?: (pid: number) => Promise<boolean>;
 };
 
 /** Captures a stream under a byte cap; resolves true if the cap was exceeded. */
@@ -75,15 +88,16 @@ export async function spawnBounded(executable: string, args: string[], options: 
     try {
       child = spawn(executable, args, { env: options.env, ...(options.cwd ? { cwd: options.cwd } : {}), windowsHide: options.windowsHide ?? true, stdio: ["ignore", "pipe", "pipe"] });
     } catch {
-      resolve({ code: null, signal: null, timedOut: false, aborted: false, outputOverflow: false, terminateConfirmed: false, stdout: "", stderr: "", spawnErrorCode: "CHILD_SPAWN_ERROR" });
+      resolve({ code: null, signal: null, timedOut: false, aborted: false, outputOverflow: false, directChildExitObserved: false, treeTerminationConfirmed: false, stdout: "", stderr: "", spawnErrorCode: "CHILD_SPAWN_ERROR" });
       return;
     }
-    const state: BoundedSpawnResult = { code: null, signal: null, timedOut: false, aborted: false, outputOverflow: false, terminateConfirmed: false, stdout: "", stderr: "" };
+    const terminateProcessTree = options.terminateProcessTree ?? terminateTreeByPid;
+    const state: BoundedSpawnResult = { code: null, signal: null, timedOut: false, aborted: false, outputOverflow: false, directChildExitObserved: false, treeTerminationConfirmed: false, stdout: "", stderr: "" };
     let settled = false;
     let exitObserved = false;
     let terminationInitiated = false;
-    const stdout = captureStream(child.stdout!, options.maxOutputBytes, () => { state.outputOverflow = true; initiateTermination(); });
-    const stderr = captureStream(child.stderr!, options.maxOutputBytes, () => { state.outputOverflow = true; initiateTermination(); });
+    const stdout = captureStream(child.stdout!, options.maxOutputBytes, () => { state.outputOverflow = true; runTermination(); });
+    const stderr = captureStream(child.stderr!, options.maxOutputBytes, () => { state.outputOverflow = true; runTermination(); });
     const finish = () => {
       if (settled) return;
       settled = true;
@@ -99,31 +113,39 @@ export async function spawnBounded(executable: string, args: string[], options: 
         resolve(state);
       });
     };
-    // RF01 P1-04: the deadline initiates termination, grants a bounded grace
-    // window, escalates once, and then ALWAYS resolves the caller — the
-    // directly spawned pid belongs to this invocation, so its disposition is
-    // reported honestly (terminateConfirmed=false ⇒ a tree may have survived).
+    // RF01 P1-04/RF02 P2: the deadline initiates OWNED tree termination
+    // (awaited), grants a bounded grace window, escalates once, and then
+    // ALWAYS resolves the caller. treeTerminationConfirmed requires BOTH the
+    // owned termination operation to report success AND the direct child to
+    // have exited afterwards — never more than the evidence proves.
     const graceMs = options.terminationGraceMs ?? 5_000;
     let graceTimer: NodeJS.Timeout | undefined;
     const deadlineTimer = setTimeout(() => {
       state.timedOut = true;
-      initiateTermination();
+      runTermination();
       graceTimer = setTimeout(() => {
         if (exitObserved) return;
         // Escalation for the directly spawned tree, then the bounded disposition.
-        initiateTermination();
+        runTermination();
         setTimeout(finish, Math.min(graceMs, 2_000));
       }, graceMs);
     }, options.timeoutMs);
-    const initiateTermination = () => {
+    let terminationPromise: Promise<void> | null = null;
+    let ownedTerminationSucceeded = false;
+    const initiateTermination = async (): Promise<void> => {
       if (exitObserved || settled) return;
       terminationInitiated = true;
-      terminateTree(child.pid);
+      const pid = child.pid;
+      if (!pid) return;
+      ownedTerminationSucceeded = await terminateProcessTree(pid).catch(() => false);
+    };
+    const runTermination = (): void => {
+      terminationPromise ??= initiateTermination();
     };
     const onAbort = () => {
       if (settled || state.timedOut) return;
       state.aborted = true;
-      initiateTermination();
+      runTermination();
       // Abort never waits unbounded either: bounded disposition below.
       graceTimer ??= setTimeout(() => { if (!exitObserved) finish(); }, graceMs);
     };
@@ -134,11 +156,23 @@ export async function spawnBounded(executable: string, args: string[], options: 
     });
     child.on("exit", (code, signal) => {
       exitObserved = true;
+      state.directChildExitObserved = terminationInitiated;
       state.code = code;
       state.signal = signal;
-      if (terminationInitiated) state.terminateConfirmed = true;
       clearTimeout(graceTimer);
-      finish();
+      // The tree-termination verdict needs the OWNED termination operation's
+      // awaited result, in EITHER completion order (taskkill usually completes
+      // before the killed child's exit event surfaces). Wait BOUNDED — the
+      // grace escalation always resolves the caller anyway.
+      const verdict = () => {
+        state.treeTerminationConfirmed = terminationInitiated && ownedTerminationSucceeded;
+        finish();
+      };
+      if (terminationPromise) {
+        void Promise.race([terminationPromise, sleep(3_000)]).then(verdict);
+      } else {
+        verdict();
+      }
     });
     // `close` may never fire when a surviving detached descendant holds the
     // stdio pipes; the exit event above already resolved us with the honest
@@ -150,18 +184,27 @@ export async function spawnBounded(executable: string, args: string[], options: 
 /**
  * Terminates a process TREE by recorded pid (Windows: taskkill /T /F; the
  * MinerU CLI wrapper parents python worker children). Argv-only — no shell.
- * Fire-and-forget: spawnBounded's bounded escalation always also resolves.
+ * RF02 P2: the operation is OWNED — the taskkill/kill exit status is awaited
+ * and reported, so a failed termination is observable and can never be
+ * presented as a confirmed tree termination.
  */
-function terminateTree(pid: number | undefined): void {
-  if (!pid || platform() !== "win32") {
-    if (pid) {
-      try { process.kill(pid); } catch { /* already gone */ }
-    }
-    return;
+async function terminateTreeByPid(pid: number | undefined): Promise<boolean> {
+  if (!pid) return false;
+  if (platform() !== "win32") {
+    try { process.kill(pid); return true; } catch { return false; }
   }
-  try {
-    spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-  } catch { /* already gone */ }
+  return await new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+    } catch {
+      resolve(false);
+      return;
+    }
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } }, 10_000);
+    child.on("error", () => { clearTimeout(timer); resolve(false); });
+    child.on("close", (code) => { clearTimeout(timer); resolve(code === 0); });
+  });
 }
 
 /** Allocates a free loopback TCP port. Allocation is NOT ownership: the consumer pins it via env and treats bind failure as a bounded start failure. */
@@ -307,3 +350,24 @@ export const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     const timer = setTimeout(finish, ms);
     signal?.addEventListener("abort", finish, { once: true });
   });
+
+/**
+ * THE single liveness authority for recorded-pid cleanup decisions (RF02
+ * P1-03), shared by the claim-scoped server session AND the crash reconciler:
+ * a process is "proven gone" only after the required number of CONSECUTIVE
+ * negative observations, separated by a small bounded delay. A single empty
+ * tasklist/ps result is explicitly NOT proof. The probe is injectable for
+ * tests (flaky-probe teeth) and defaults to the real recordedProcessAlive.
+ */
+export async function confirmedRecordedProcessGone(pid: number, options: { expectedImagePattern?: RegExp; observations?: number; delayMs?: number; signal?: AbortSignal; probe?: (pid: number, pattern?: RegExp) => Promise<boolean> } = {}): Promise<boolean> {
+  const required = options.observations ?? 2;
+  const probe = options.probe ?? recordedProcessAlive;
+  const pattern = options.expectedImagePattern;
+  let negatives = 0;
+  for (;;) {
+    if (await probe(pid, pattern)) return false;
+    negatives += 1;
+    if (negatives >= required) return true;
+    await sleep(options.delayMs ?? 150, options.signal);
+  }
+}

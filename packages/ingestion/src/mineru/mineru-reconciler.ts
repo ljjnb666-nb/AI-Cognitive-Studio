@@ -1,13 +1,14 @@
 import { spawn } from "node:child_process";
 import { prisma } from "@ai-cognitive/db";
 import { logger } from "@ai-cognitive/shared";
-import { markOcrServerOrphaned, markOcrServerStopped, listReconcilableOcrServerInstances } from "../ocr-durability.js";
+import { markOcrServerOrphaned, markOcrServerStoppedProcessGone, listReconcilableOcrServerInstances } from "../ocr-durability.js";
 import { buildMineruServerArgs } from "./mineru-commands.js";
-import { processCreationTime, recordedProcessAlive, sleep, spawnBounded } from "./mineru-process.js";
+import { confirmedRecordedProcessGone, processCreationTime, sleep, spawnBounded } from "./mineru-process.js";
 import { processPrecedesEndpointEvidence, readMineruEndpointFile } from "./mineru-server.js";
 
 /**
- * SAME-HOST OCR server reconciler (BOOK-INGESTION-04B-3 RF01 P1-06).
+ * SAME-HOST OCR server reconciler (BOOK-INGESTION-04B-3, RF01 P1-06, RF02
+ * P1-01/P1-02/P1-03).
  *
  * A hard worker/process crash skips every finally block: an OcrServerInstance
  * row can stay STARTING/RUNNING while the real MinerU server survives, its
@@ -16,17 +17,24 @@ import { processPrecedesEndpointEvidence, readMineruEndpointFile } from "./miner
  * CONFIGURED host (never cross-host) and never performs process cleanup it
  * cannot prove:
  *
+ *  - discovery: only STARTING/RUNNING/STOPPING rows, batched IN THE DATABASE
+ *    (orderBy + take). ORPHANED is a terminal, manual-intervention state and
+ *    is deliberately excluded so old orphan rows can never starve newer
+ *    actionable rows (RF02 P1-01).
  *  - ownership: a row whose host lease still holds its claimToken (live OR a
  *    run execution that is still live) is left alone — its owner is mid-flight.
- *  - a lapsed row with NO endpoint file is resolved ORPHANED (nothing
- *    provable to clean).
- *  - a lapsed row whose endpoint process is proven DEAD resolves STOPPED.
- *  - a lapsed row with a live endpoint process is cleaned ONLY under the
- *    necessary live-identity evidence of RF01 P1-05 (pid+serverId from the
- *    claim's own endpoint file, image class, and a creation time that
- *    PREDATES the endpoint file the server itself wrote): graceful stop
- *    first, guarded kill second, ORPHANED whenever identity is unprovable —
- *    a same-image recycled pid is NEVER killed.
+ *  - durable-identity fence (RF02 P1-02): the endpoint FILE is untrusted
+ *    external-process output. For RUNNING/STOPPING rows a graceful stop or
+ *    kill requires the DB row's persisted pid/serverId to be present AND equal
+ *    to the endpoint file's. STARTING rows without a recorded DB identity are
+ *    never process-actioned on endpoint-file-only evidence.
+ *  - liveness (RF02 P1-03): a server is "proven gone" only via the SHARED
+ *    confirmedRecordedProcessGone helper (two consecutive negative probes) —
+ *    the same rule the live session uses; a single empty tasklist result
+ *    resolves ORPHANED, never STOPPED.
+ *  - live-identity: cleanup only under the necessary RF01 P1-05 evidence
+ *    (image class + a creation time that PREDATES the endpoint file the
+ *    server itself wrote), graceful stop first, guarded kill second.
  *
  * No process-name sweeps, no port-only ownership, no kill-all-python, ever.
  */
@@ -38,16 +46,15 @@ export type OcrServerReconcilerInput = {
   executable: string;
   executableArgs: string[];
   stopTimeoutMs: number;
-  /** Upper bound on rows examined per sweep (bounded work per tick). */
+  /** Upper bound on rows examined per sweep (enforced inside the DB query). */
   batchSize?: number;
   processImagePattern?: RegExp;
 };
 
 export async function reconcileOcrServerInstances(input: OcrServerReconcilerInput): Promise<OcrServerReconciliationResult> {
-  const rows = await listReconcilableOcrServerInstances(input.hostId);
-  const result: OcrServerReconciliationResult = { examined: 0, stopped: 0, orphaned: 0, skipped: 0 };
-  for (const row of rows.slice(0, input.batchSize ?? 20)) {
-    result.examined += 1;
+  const rows = await listReconcilableOcrServerInstances(input.hostId, input.batchSize ?? 20);
+  const result: OcrServerReconciliationResult = { examined: rows.length, stopped: 0, orphaned: 0, skipped: 0 };
+  for (const row of rows) {
     try {
       const disposition = await reconcileRow(row, input);
       if (disposition === "skipped") result.skipped += 1;
@@ -62,7 +69,7 @@ export async function reconcileOcrServerInstances(input: OcrServerReconcilerInpu
   return result;
 }
 
-async function reconcileRow(row: { id: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; status: string }, input: OcrServerReconcilerInput): Promise<"skipped" | "stopped" | "orphaned"> {
+async function reconcileRow(row: { id: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; pid: number | null; serverId: string | null; status: string }, input: OcrServerReconcilerInput): Promise<"skipped" | "stopped" | "orphaned"> {
   // Ownership evidence 1: the host lease still belongs to this claim.
   const lease = await prisma.ocrHostLease.findUnique({ where: { hostId: input.hostId }, select: { claimToken: true, leaseUntil: true } });
   const leaseHeldByThisClaim = lease?.claimToken === row.hostClaimToken;
@@ -76,36 +83,50 @@ async function reconcileRow(row: { id: string; hostClaimToken: string; runExecut
 
   const imagePattern = input.processImagePattern ?? /python/i;
   const endpoint = await readMineruEndpointFile(row.mineruHome);
-  if (endpoint === null) {
-    await markOcrServerOrphaned(row.hostClaimToken, "RECONCILER_NO_ENDPOINT_EVIDENCE");
+
+  // RF02 P1-02 durable-identity fence: the endpoint file is UNTRUSTED
+  // external-process output. Any process action (graceful stop OR kill)
+  // requires the DURABLE DB identity to exist and to EQUAL the file's.
+  // STARTING rows legitimately lack DB identity — endpoint-file-only
+  // evidence is never promoted into authoritative identity.
+  const dbIdentityPresent = row.pid !== null && row.serverId !== null;
+  const identitiesAgree = dbIdentityPresent && endpoint !== null && endpoint.pid === row.pid && endpoint.serverId === row.serverId;
+  if (!identitiesAgree) {
+    // A live same-image process that the DB cannot vouch for is NEVER
+    // stopped or killed; the row becomes terminal ORPHANED evidence and the
+    // claim home keeps its forensic state.
+    await markOcrServerOrphaned(row.hostClaimToken, dbIdentityPresent ? "RECONCILER_DB_IDENTITY_MISMATCH" : "RECONCILER_START_IDENTITY_UNPROVEN");
     return "orphaned";
   }
-  if (!(await recordedProcessAlive(endpoint.pid, imagePattern))) {
-    await markOcrServerStopped(row.hostClaimToken, "RECONCILER_PROCESS_GONE");
+
+  // Proven gone: the SHARED conservative rule (two consecutive negatives).
+  if (await confirmedRecordedProcessGone(row.pid!, { expectedImagePattern: imagePattern })) {
+    await markOcrServerStoppedProcessGone(row.hostClaimToken, "RECONCILER_PROCESS_GONE");
     return "stopped";
   }
+
   // Live process: cleanup ONLY under the necessary cross-restart identity
   // evidence (creation time predates the endpoint file the server wrote).
-  if (!(await processPrecedesEndpointEvidence(endpoint, row.mineruHome, imagePattern))) {
+  if (!(await processPrecedesEndpointEvidence(endpoint!, row.mineruHome, imagePattern))) {
     await markOcrServerOrphaned(row.hostClaimToken, "RECONCILER_IDENTITY_UNPROVABLE");
     return "orphaned";
   }
   const stopEnv: NodeJS.ProcessEnv = { ...process.env, MINERU_HOME: row.mineruHome };
   const stopResult = await spawnBounded(input.executable, [...input.executableArgs, ...buildMineruServerArgs("stop")], { env: stopEnv, cwd: row.mineruHome, timeoutMs: input.stopTimeoutMs, maxOutputBytes: 1_048_576 });
   if (stopResult.spawnErrorCode !== "ENOENT") {
-    if (await awaitEndpointProcessExit(endpoint, row.mineruHome, imagePattern, 10_000)) {
-      await markOcrServerStopped(row.hostClaimToken, "RECONCILER_GRACEFUL_STOP");
+    if (await awaitEndpointProcessExit(endpoint!, row.mineruHome, imagePattern, 10_000)) {
+      await markOcrServerStoppedProcessGone(row.hostClaimToken, "RECONCILER_GRACEFUL_STOP");
       return "stopped";
     }
   }
   // Re-prove identity IMMEDIATELY before the force kill (RF01 P1-05).
-  if (!(await processPrecedesEndpointEvidence(endpoint, row.mineruHome, imagePattern))) {
+  if (!(await processPrecedesEndpointEvidence(endpoint!, row.mineruHome, imagePattern))) {
     await markOcrServerOrphaned(row.hostClaimToken, "RECONCILER_IDENTITY_UNPROVABLE");
     return "orphaned";
   }
-  const killed = await killByRecordedIdentity(endpoint.pid);
-  if (killed && await awaitEndpointProcessExit(endpoint, row.mineruHome, imagePattern, 10_000)) {
-    await markOcrServerStopped(row.hostClaimToken, "RECONCILER_FORCED_STOP");
+  const killed = await killByRecordedIdentity(row.pid!);
+  if (killed && await awaitEndpointProcessExit(endpoint!, row.mineruHome, imagePattern, 10_000)) {
+    await markOcrServerStoppedProcessGone(row.hostClaimToken, "RECONCILER_FORCED_STOP");
     return "stopped";
   }
   await markOcrServerOrphaned(row.hostClaimToken, killed ? "RECONCILER_KILL_UNCONFIRMED" : "RECONCILER_KILL_REFUSED");
@@ -115,7 +136,7 @@ async function reconcileRow(row: { id: string; hostClaimToken: string; runExecut
 async function awaitEndpointProcessExit(endpoint: { pid: number }, mineruHome: string, imagePattern: RegExp, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (!(await recordedProcessAlive(endpoint.pid, imagePattern))) return true;
+    if (await confirmedRecordedProcessGone(endpoint.pid, { expectedImagePattern: imagePattern, delayMs: 250 })) return true;
     // A live pid created after the endpoint file is a recycled pid — the
     // recorded server is gone either way.
     const creation = await processCreationTime(endpoint.pid);

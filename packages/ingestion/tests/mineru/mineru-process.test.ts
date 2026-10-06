@@ -45,9 +45,40 @@ describe("spawnBounded hard deadline (RF01 P1-04)", () => {
     });
     const elapsed = Date.now() - started;
     expect(result.timedOut).toBe(true);
-    expect(result.terminateConfirmed).toBe(true);
+    expect(result.treeTerminationConfirmed).toBe(true);
     // deadline + grace + bounded escalation — never an infinite wait.
     expect(elapsed).toBeLessThan(400 + 700 + 2_500);
+  }, 20_000);
+
+  it("treeTerminationConfirmed is NEVER true when the owned tree-termination operation fails (RF02 P2)", async () => {
+    // The owned termination seam FAILS (simulates taskkill refusing/failing
+    // while a descendant survives): the disposition must not claim tree
+    // termination, no matter what the direct child does.
+    const result = await spawnBounded(process.execPath, ["-e", "setInterval(() => {}, 1000);"], {
+      env: process.env,
+      timeoutMs: 300,
+      terminationGraceMs: 300,
+      maxOutputBytes: 65_536,
+      terminateProcessTree: async () => false,
+    });
+    expect(result.timedOut).toBe(true);
+    expect(result.treeTerminationConfirmed).toBe(false);
+    expect(result.directChildExitObserved).toBe(false);
+    expect(result.code).toBeNull();
+  }, 20_000);
+
+  it("treeTerminationConfirmed is true only with owned-termination success AND direct child exit (RF02 P2)", async () => {
+    const result = await spawnBounded(process.execPath, ["-e", "setInterval(() => {}, 1000);"], {
+      env: process.env,
+      timeoutMs: 300,
+      terminationGraceMs: 1_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(result.timedOut).toBe(true);
+    // The REAL owned termination (taskkill /T /F) reported success and the
+    // direct child exited: the confirmed disposition is honest here.
+    expect(result.treeTerminationConfirmed).toBe(true);
+    expect(result.directChildExitObserved).toBe(true);
   }, 20_000);
 
   it("returns bounded when a surviving detached descendant holds the stdio pipes (close would never fire)", async () => {
@@ -79,7 +110,7 @@ describe("spawnBounded hard deadline (RF01 P1-04)", () => {
     // The child itself exited on its own BEFORE termination: our kill did
     // nothing, and the disposition must NOT claim a confirmed termination.
     expect(result.code).toBe(0);
-    expect(result.terminateConfirmed).toBe(false);
+    expect(result.treeTerminationConfirmed).toBe(false);
     expect(existsSync(pidFile)).toBe(true);
     spawnedPids.push(Number(readFileSync(pidFile, "utf8")));
   }, 20_000);

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -11,6 +11,7 @@ import type { Environment } from "@ai-cognitive/shared/server";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { createIngestionService, createMineruPdfOcrExecutor, PDF_ROUTING_GENERATION, resolveMineruExecutorConfig } from "../../src/index.js";
 import { acquireOcrHostLease, releaseOcrHostLease } from "../../src/ocr-durability.js";
+import { recordedProcessAlive } from "../../src/mineru/mineru-process.js";
 import type { MineruExecutorConfig } from "../../src/mineru/mineru-config.js";
 
 /**
@@ -131,6 +132,15 @@ async function waitForServerInstance(runId: string, status: "STARTING" | "RUNNIN
 }
 
 afterEach(async () => {
+  // Env knobs FIRST: a later cleanup failure must never leak fake modes into
+  // the next test (they would silently change its teardown behavior).
+  delete process.env.MINERU_FAKE_MODE;
+  delete process.env.MINERU_FAKE_TEXT;
+  delete process.env.MINERU_FAKE_DELAY_MS;
+  delete process.env.MINERU_FAKE_OVERSIZE_BYTES;
+  delete process.env.MINERU_FAKE_STOP_MODE;
+  delete process.env.MINERU_FAKE_STOP_LOG;
+  delete process.env.MINERU_FAKE_SERVER_START_MODE;
   if (runIds.length) {
     const bootstraps = await prisma.bookAnalysisBootstrap.findMany({ where: { ingestionRunId: { in: runIds } }, select: { id: true } });
     if (bootstraps.length) await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: bootstraps.map((bootstrap) => bootstrap.id) } } });
@@ -154,12 +164,18 @@ afterEach(async () => {
   workspaceIds.length = 0;
   userIds.length = 0;
   runIds.length = 0;
-  for (const root of tempRoots) rmSync(root, { recursive: true, force: true });
+  // Bounded retry: a just-killed dummy can hold its home CWD for a moment.
+  for (const root of tempRoots) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        rmSync(root, { recursive: true, force: true });
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+  }
   tempRoots.length = 0;
-  delete process.env.MINERU_FAKE_MODE;
-  delete process.env.MINERU_FAKE_TEXT;
-  delete process.env.MINERU_FAKE_DELAY_MS;
-  delete process.env.MINERU_FAKE_OVERSIZE_BYTES;
 });
 
 afterAll(async () => { await prisma.$disconnect(); });
@@ -358,6 +374,98 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
       expect(servers.length).toBeGreaterThanOrEqual(1);
       expect(servers.every((server) => server.status === "STOPPED")).toBe(true);
       expect((await prisma.ocrHostLease.findUniqueOrThrow({ where: { hostId: servers[0]!.hostId } })).claimToken).toBeNull();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("ORPHAN_SUSPECT_PRESERVES_EVIDENCE: when teardown cannot prove identity, the claim home survives for the reconciler and only bulky IO is removed (RF02 P1-04)", { timeout: 60_000 }, async () => {
+    const bytes = await mixedPdf();
+    const storage = new FakeStorageProvider();
+    const { workspace, run } = await createPdfRunFixture(bytes, storage);
+    process.env.MINERU_FAKE_MODE = "delay";
+    process.env.MINERU_FAKE_DELAY_MS = "500";
+    // The graceful stop is neutered so teardown falls through to the guarded
+    // kill, where the TAMPERED endpoint file forces an identity mismatch.
+    process.env.MINERU_FAKE_STOP_MODE = "noop";
+    const config = fakeMineruConfig();
+    const handle = createMineruPdfOcrExecutor(config);
+    // A live same-image substitute the tampered endpoint will lure with.
+    const { spawn } = await import("node:child_process");
+    const substitute = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { detached: true, stdio: "ignore", windowsHide: true });
+    substitute.unref();
+    let originalPid: number | undefined;
+    try {
+      const execution = serviceWith(storage, handle.executor).processIngestionRun(run.id);
+      const serverRow = await waitForServerInstance(run.id, "RUNNING");
+      // Capture the ORIGINAL dummy's identity, then TAMPER the claim's
+      // endpoint file: untrusted output now disagrees with the identity the
+      // session recorded at start.
+      const endpointPath = join(serverRow.mineruHome, "doclib.endpoint.json");
+      originalPid = (JSON.parse(readFileSync(endpointPath, "utf8")) as { pid: number }).pid;
+      writeFileSync(endpointPath, JSON.stringify({ version: 2, pid: substitute.pid, server_id: "tampered-identity", transports: [{ type: "tcp", base_url: "http://127.0.0.1:1" }] }));
+      await execution;
+
+      const row = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: serverRow.hostClaimToken } });
+      expect(row.status).toBe("ORPHANED");
+      // The claim HOME (identity evidence) is preserved and readable...
+      const preserved = JSON.parse(readFileSync(endpointPath, "utf8"));
+      expect(preserved.server_id).toBe("tampered-identity");
+      expect(row.mineruHome).toBe(serverRow.mineruHome);
+      // ...while the bulky input/output data is gone.
+      expect(existsSync(join(serverRow.mineruHome, "..", "input"))).toBe(false);
+      expect(existsSync(join(serverRow.mineruHome, "..", "output"))).toBe(false);
+      // The substitute was never killed by the mismatched cleanup.
+      expect(await recordedProcessAlive(substitute.pid!, /node|python/i)).toBe(true);
+    } finally {
+      try { spawn("taskkill", ["/PID", String(substitute.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }); } catch { /* gone */ }
+      try { spawn("taskkill", ["/PID", String(originalPid!), "/T", "/F"], { stdio: "ignore", windowsHide: true }); } catch { /* gone */ }
+      // Wait until the original dummy released its home CWD so the suite's
+      // temp-root cleanup cannot hit EPERM.
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && (await recordedProcessAlive(originalPid!, /node|python/i))) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      await handle.close();
+    }
+  });
+
+  it("START_FAILURE_WITHOUT_ENDPOINT: an unproven start failure resolves ORPHANED (never STOPPED) and preserves the recovery home (RF02 P1-05)", async () => {
+    const bytes = await mixedPdf();
+    const storage = new FakeStorageProvider();
+    const { workspace, run } = await createPdfRunFixture(bytes, storage);
+    // The start wrapper exits 0 WITHOUT ever writing an endpoint: identity
+    // availability is unproven, not "already exited".
+    process.env.MINERU_FAKE_SERVER_START_MODE = "no_endpoint";
+    const handle = createMineruPdfOcrExecutor(fakeMineruConfig({ serverStartTimeoutMs: 1_500 }));
+    try {
+      await expect(serviceWith(storage, handle.executor).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_REQUIRED");
+      const row = await prisma.ocrServerInstance.findFirstOrThrow({ where: { ingestionRunId: run.id } });
+      expect(row.status).toBe("ORPHANED");
+      expect(row.terminationReason).toBe("START_IDENTITY_UNAVAILABLE");
+      // The durable budget exhausted through stable transient failures.
+      expect(await attemptRow(workspace.id, run.id, 1)).toMatchObject({ status: "FAILED", attemptCount: 3, errorCode: "SOURCE_OCR_PROCESS_FAILED" });
+      expect(await prisma.documentExtraction.count({ where: { ingestionRunId: run.id } })).toBe(0);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("START_NEVER_STARTED_PROOF: a spawn that never happened converges STARTING -> STOPPED through the explicit proof API (RF02 P1-05)", async () => {
+    const bytes = await mixedPdf();
+    const storage = new FakeStorageProvider();
+    const { workspace, run } = await createPdfRunFixture(bytes, storage);
+    // The EXECUTABLE itself is missing: the spawn fails with ENOENT —
+    // NOTHING was ever spawned, the strongest possible never-started proof.
+    const config = fakeMineruConfig();
+    config.executable = join(config.homeRoot, "definitely-missing-mineru.exe");
+    const handle = createMineruPdfOcrExecutor(config);
+    try {
+      await expect(serviceWith(storage, handle.executor).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_REQUIRED");
+      const row = await prisma.ocrServerInstance.findFirstOrThrow({ where: { ingestionRunId: run.id } });
+      expect(row.status).toBe("STOPPED");
+      expect(row.terminationReason).toBe("NEVER_STARTED_NO_ENDPOINT_IDENTITY");
+      expect(await attemptRow(workspace.id, run.id, 1)).toMatchObject({ status: "FAILED", attemptCount: 1, errorCode: "SOURCE_OCR_MINERU_NOT_FOUND" });
     } finally {
       await handle.close();
     }

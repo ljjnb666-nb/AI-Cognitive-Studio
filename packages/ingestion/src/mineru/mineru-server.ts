@@ -1,6 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { forceKillRecordedPid, probeFreeTcpPort, processCreationTime, recordedProcessAlive, sleep, spawnBounded, type BoundedSpawnOptions } from "./mineru-process.js";
+import { confirmedRecordedProcessGone, forceKillRecordedPid, probeFreeTcpPort, processCreationTime, recordedProcessAlive, sleep, spawnBounded, type BoundedSpawnOptions } from "./mineru-process.js";
 import { buildMineruServerArgs, parseMineruEndpoint, type MineruEndpoint } from "./mineru-commands.js";
 
 /**
@@ -27,16 +27,25 @@ import { buildMineruServerArgs, parseMineruEndpoint, type MineruEndpoint } from 
  */
 
 export type MineruServerStartFailure =
-  | { kind: "EXECUTABLE_NOT_FOUND" }
-  | { kind: "START_TIMEOUT" }
-  | { kind: "START_FAILED"; stderrTail: string }
-  | { kind: "ABORTED" };
+  | { kind: "EXECUTABLE_NOT_FOUND"; treeTerminationConfirmed: true; directChildExitObserved: true }
+  | { kind: "START_TIMEOUT"; treeTerminationConfirmed: boolean; directChildExitObserved: boolean }
+  | { kind: "START_FAILED"; stderrTail: string; treeTerminationConfirmed: boolean; directChildExitObserved: boolean }
+  | { kind: "ABORTED"; treeTerminationConfirmed: boolean; directChildExitObserved: boolean };
 
 export type MineruServerStopDisposition =
   | { kind: "STOPPED" }
   | { kind: "ALREADY_EXITED" }
   | { kind: "KILLED_BY_RECORDED_IDENTITY" }
-  | { kind: "ORPHAN_SUSPECT"; reason: string };
+  | { kind: "ORPHAN_SUSPECT"; reason: string }
+  /**
+   * RF02 P1-05: no endpoint identity existed, which is NOT proof the server
+   * is gone — it may still be starting, the endpoint write may have been
+   * delayed/lost, or a detached server may have survived its wrapper. The
+   * caller must treat the claim home as live recovery evidence (never delete
+   * it) and resolve the durable row ORPHANED unless it holds separate,
+   * explicit process-tree proof that nothing survived.
+   */
+  | { kind: "NO_ENDPOINT_UNPROVEN" };
 
 const ENDPOINT_FILE = "doclib.endpoint.json";
 const ENDPOINT_POLL_MS = 250;
@@ -66,20 +75,6 @@ export type MineruServerSession = {
   stop(): Promise<MineruServerStopDisposition>;
 };
 
-/**
- * A single negative liveness probe is NOT enough to declare a recorded server
- * gone (the probe is an external tasklist/ps invocation that can return empty
- * under load): two consecutive negative observations are required. Safety over
- * aggressive cleanup — the cost of a second probe is milliseconds.
- */
-async function confirmedNotAlive(pid: number, imagePattern: RegExp | undefined, signal?: AbortSignal): Promise<boolean> {
-  for (let observations = 0; observations < 2; observations++) {
-    if (await recordedProcessAlive(pid, imagePattern ?? /python/i)) return false;
-    if (observations === 0) await sleep(150, signal);
-  }
-  return true;
-}
-
 export async function readMineruEndpointFile(homeDir: string): Promise<MineruEndpoint | null> {
   try {
     return parseMineruEndpoint(await readFile(join(homeDir, ENDPOINT_FILE), "utf8"));
@@ -106,8 +101,10 @@ export async function createMineruServerSession(input: MineruServerSessionInput)
       return endpointCreationTime;
     },
     async start(): Promise<MineruServerStartFailure | null> {
-      if (stopped) return { kind: "ABORTED" };
-      if (input.abortSignal?.aborted) return { kind: "ABORTED" };
+      // Nothing was ever spawned on these paths: the tree proof is trivially
+      // complete (EXECUTABLE_NOT_FOUND-grade evidence).
+      if (stopped) return { kind: "ABORTED", treeTerminationConfirmed: true, directChildExitObserved: true };
+      if (input.abortSignal?.aborted) return { kind: "ABORTED", treeTerminationConfirmed: true, directChildExitObserved: true };
       const port = await probeFreeTcpPort();
       const spawnOptions: BoundedSpawnOptions = {
         env: { ...input.childEnvBase, MINERU_DOCLIB_TCP_PORT: String(port) },
@@ -117,21 +114,25 @@ export async function createMineruServerSession(input: MineruServerSessionInput)
         ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
       };
       const startResult = await spawnBounded(input.executable, [...input.executableArgs, ...buildMineruServerArgs("start")], spawnOptions);
-      if (startResult.spawnErrorCode === "ENOENT") return { kind: "EXECUTABLE_NOT_FOUND" };
-      if (input.abortSignal?.aborted && startResult.code === null) return { kind: "ABORTED" };
+      // RF02 P1-05/P2: start failures carry the EXPLICIT process-tree
+      // evidence from the owned start-wrapper termination, so the caller can
+      // prove "nothing survived" instead of guessing from a missing endpoint.
+      const evidence = { treeTerminationConfirmed: startResult.treeTerminationConfirmed, directChildExitObserved: startResult.directChildExitObserved };
+      if (startResult.spawnErrorCode === "ENOENT") return { kind: "EXECUTABLE_NOT_FOUND", treeTerminationConfirmed: true, directChildExitObserved: true };
+      if (input.abortSignal?.aborted && startResult.code === null) return { kind: "ABORTED", ...evidence };
       // Readiness evidence is the validated endpoint file, awaited under the
       // start budget (04B-0: the endpoint appears before usability; the parse
       // call itself is the usability probe and its failures are classified).
       const deadline = Date.now() + input.startTimeoutMs;
       while (endpoint === null && Date.now() < deadline) {
-        if (input.abortSignal?.aborted) return { kind: "ABORTED" };
+        if (input.abortSignal?.aborted) return { kind: "ABORTED", ...evidence };
         endpoint = await readMineruEndpointFile(input.homeDir);
         if (endpoint === null) await sleep(ENDPOINT_POLL_MS, input.abortSignal);
       }
       if (endpoint === null) {
-        if (input.abortSignal?.aborted) return { kind: "ABORTED" };
-        if (startResult.timedOut || startResult.outputOverflow) return { kind: "START_TIMEOUT" };
-        return { kind: "START_FAILED", stderrTail: startResult.stderr.slice(-2000) };
+        if (input.abortSignal?.aborted) return { kind: "ABORTED", ...evidence };
+        if (startResult.timedOut || startResult.outputOverflow) return { kind: "START_TIMEOUT", ...evidence };
+        return { kind: "START_FAILED", stderrTail: startResult.stderr.slice(-2000), ...evidence };
       }
       endpointCreationTime = await captureFingerprint(endpoint);
       return null;
@@ -140,7 +141,11 @@ export async function createMineruServerSession(input: MineruServerSessionInput)
       if (stopped) return { kind: "STOPPED" };
       stopped = true;
       const recorded = endpoint ?? await readMineruEndpointFile(input.homeDir);
-      if (recorded === null) return { kind: "ALREADY_EXITED" };
+      // RF02 P1-05: absence of an endpoint is NOT proof of exit — the server
+      // may never have started, still be starting, have lost the endpoint
+      // write, or survive detached from a killed wrapper. The caller receives
+      // an honest unproven disposition and must keep the recovery home.
+      if (recorded === null) return { kind: "NO_ENDPOINT_UNPROVEN" };
       if (!input.abortSignal?.aborted) {
         const stopResult = await spawnBounded(input.executable, [...input.executableArgs, ...buildMineruServerArgs("stop")], { env: input.childEnvBase, cwd: input.homeDir, timeoutMs: input.stopTimeoutMs, maxOutputBytes: input.maxOutputBytes });
         if (stopResult.spawnErrorCode === "ENOENT") return await guardedKill(recorded);
@@ -155,7 +160,7 @@ export async function createMineruServerSession(input: MineruServerSessionInput)
   async function awaitRecordedExit(pid: number, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      if (await confirmedNotAlive(pid, input.processImagePattern, input.abortSignal)) return true;
+      if (await confirmedRecordedProcessGone(pid, { expectedImagePattern: input.processImagePattern, signal: input.abortSignal })) return true;
       if (endpointCreationTime !== null && (await processCreationTime(pid)) !== endpointCreationTime) return true;
       if (Date.now() >= deadline) return false;
       await sleep(STOP_VERIFY_POLL_MS, input.abortSignal);
@@ -176,13 +181,13 @@ export async function createMineruServerSession(input: MineruServerSessionInput)
   async function guardedKill(recorded: MineruEndpoint): Promise<MineruServerStopDisposition> {
     const fresh = await readMineruEndpointFile(input.homeDir);
     if (!fresh || fresh.pid !== recorded.pid || fresh.serverId !== recorded.serverId) {
-      if (await confirmedNotAlive(recorded.pid, input.processImagePattern, input.abortSignal)) return { kind: "ALREADY_EXITED" };
+      if (await confirmedRecordedProcessGone(recorded.pid, { expectedImagePattern: input.processImagePattern, signal: input.abortSignal })) return { kind: "ALREADY_EXITED" };
       return { kind: "ORPHAN_SUSPECT", reason: "ENDPOINT_IDENTITY_MISMATCH" };
     }
     if (endpointCreationTime === null) return { kind: "ORPHAN_SUSPECT", reason: "IDENTITY_NOT_CAPTURED" };
     const liveCreationTime = await processCreationTime(recorded.pid);
     if (liveCreationTime === null) {
-      if (await confirmedNotAlive(recorded.pid, input.processImagePattern, input.abortSignal)) return { kind: "ALREADY_EXITED" };
+      if (await confirmedRecordedProcessGone(recorded.pid, { expectedImagePattern: input.processImagePattern, signal: input.abortSignal })) return { kind: "ALREADY_EXITED" };
       return { kind: "ORPHAN_SUSPECT", reason: "LIVE_IDENTITY_UNPROVABLE" };
     }
     if (liveCreationTime !== endpointCreationTime) {

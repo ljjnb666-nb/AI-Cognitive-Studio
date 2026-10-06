@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
-import { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerOrphaned, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, validateOcrServerInstanceContract } from "../src/ocr-durability.js";
+import { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, validateOcrServerInstanceContract } from "../src/ocr-durability.js";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
@@ -189,9 +189,22 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
     // STARTING -> STOPPING is illegal (stopping is a deliberate RUNNING teardown).
     expect(await markOcrServerStopping(starting, "too-early")).toBe(false);
     expect((await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: starting } })).status).toBe("STARTING");
-    // STARTING -> STOPPED is the proven never-started cleanup path.
-    expect(await markOcrServerStopped(starting, "START_FAILED_NO_ENDPOINT")).toBe(true);
-    expect((await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: starting } })).stoppedAt).not.toBeNull();
+    // RF02 state-machine boundary: STARTING -> STOPPED only through the
+    // explicit never-started proof API, which encodes its own predicate
+    // (pid/serverId still NULL). markOcrServerStopped refuses STARTING.
+    expect(await markOcrServerStopped(starting, "free-form")).toBe(false);
+    expect(await markOcrServerStartNeverStarted(starting)).toBe(true);
+    const neverStarted = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: starting } });
+    expect(neverStarted.status).toBe("STOPPED");
+    expect(neverStarted.terminationReason).toBe("NEVER_STARTED_NO_ENDPOINT_IDENTITY");
+    // A STARTING row WITH a recorded endpoint identity is NOT never-started.
+    const startedWithIdentity = `hostclaim-${crypto.randomUUID()}`;
+    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: "host-machine", hostClaimToken: startedWithIdentity, runExecutionToken: "run-machine-3", mineruHome: "home-machine-3" });
+    await recordOcrServerEndpoint({ hostClaimToken: startedWithIdentity, endpoint: { pid: 444, serverId: "server-machine-3", transports: [{ type: "tcp", base_url: "http://127.0.0.1:15997" }] } });
+    expect(await markOcrServerStartNeverStarted(startedWithIdentity)).toBe(false);
+    // recordOcrServerEndpoint moved the row STARTING -> RUNNING; either way
+    // the never-started proof API refuses it (pid/serverId are recorded).
+    expect((await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: startedWithIdentity } })).status).toBe("RUNNING");
     // STOPPED is terminal for every helper.
     expect(await markOcrServerStopping(starting)).toBe(false);
     expect(await markOcrServerStopped(starting)).toBe(false);

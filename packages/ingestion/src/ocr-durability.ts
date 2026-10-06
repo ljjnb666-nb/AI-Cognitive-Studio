@@ -203,8 +203,42 @@ export async function markOcrServerStopping(hostClaimToken: string, terminationR
 
 export async function markOcrServerStopped(hostClaimToken: string, terminationReason?: string): Promise<boolean> {
   const changed = await prisma.ocrServerInstance.updateMany({
-    where: { hostClaimToken, status: { in: ["STOPPING", "STARTING"] } },
+    where: { hostClaimToken, status: "STOPPING" },
     data: { status: "STOPPED", stoppedAt: new Date(), lastObservedAt: new Date(), ...(terminationReason ? { terminationReason } : {}) },
+  });
+  return changed.count === 1;
+}
+
+/**
+ * The ONLY STARTING -> STOPPED path (RF02 state-machine boundary). The proof
+ * condition is encoded in the PostgreSQL predicate, never in a caller-supplied
+ * reason string: the row must STILL carry no endpoint identity (pid and
+ * serverId both NULL), which is durable evidence that recordOcrServerEndpoint
+ * never committed for this claim. Callers must additionally hold process-tree
+ * proof that nothing survived (spawn ENOENT, or a confirmed owned-tree
+ * termination) — this helper deliberately cannot express any other case.
+ */
+export async function markOcrServerStartNeverStarted(hostClaimToken: string): Promise<boolean> {
+  const changed = await prisma.ocrServerInstance.updateMany({
+    where: { hostClaimToken, status: "STARTING", pid: null, serverId: null },
+    data: { status: "STOPPED", stoppedAt: new Date(), lastObservedAt: new Date(), terminationReason: "NEVER_STARTED_NO_ENDPOINT_IDENTITY" },
+  });
+  return changed.count === 1;
+}
+
+/**
+ * The reconciler's proven-gone convergence (RF02 P1-03/state-machine
+ * boundary): a STARTING/RUNNING/STOPPING row whose durable endpoint identity
+ * WAS recorded may converge to STOPPED only through this explicitly named
+ * proof API, and only after the shared repeated-negative liveness rule has
+ * confirmed the recorded process gone. The predicate encodes the proof
+ * precondition in PostgreSQL — a row without durable identity (pid/serverId)
+ * can never pass, so endpoint-file-only evidence can never converge a row.
+ */
+export async function markOcrServerStoppedProcessGone(hostClaimToken: string, terminationReason: string): Promise<boolean> {
+  const changed = await prisma.ocrServerInstance.updateMany({
+    where: { hostClaimToken, status: { in: ["STARTING", "RUNNING", "STOPPING"] }, pid: { not: null }, serverId: { not: null } },
+    data: { status: "STOPPED", stoppedAt: new Date(), lastObservedAt: new Date(), terminationReason },
   });
   return changed.count === 1;
 }
@@ -229,12 +263,19 @@ export function validateOcrServerInstanceContract(row: { status: string; pid: nu
   return errors;
 }
 
-/** Same-host reconciler discovery for 04B-3 (durable evidence, not live handles). */
-export async function listReconcilableOcrServerInstances(hostId: string): Promise<Array<{ id: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; pid: number | null; serverId: string | null; status: string }>> {
+/**
+ * Same-host reconciler discovery (RF02 P1-01). ORPHANED is a TERMINAL,
+ * manual-intervention state: it is deliberately EXCLUDED from automatic
+ * discovery so old orphan rows can never consume the bounded batch and starve
+ * newer actionable STARTING/RUNNING/STOPPING rows. Batching is pushed into
+ * the database query (orderBy + take) — never fetch-unbounded-then-slice.
+ */
+export async function listReconcilableOcrServerInstances(hostId: string, batchSize = 20): Promise<Array<{ id: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; pid: number | null; serverId: string | null; status: string }>> {
   return prisma.ocrServerInstance.findMany({
-    where: { hostId, status: { in: ["STARTING", "RUNNING", "STOPPING", "ORPHANED"] } },
+    where: { hostId, status: { in: ["STARTING", "RUNNING", "STOPPING"] } },
     select: { id: true, hostClaimToken: true, runExecutionToken: true, mineruHome: true, pid: true, serverId: true, status: true },
     orderBy: { createdAt: "asc" },
+    take: batchSize,
   });
 }
 
