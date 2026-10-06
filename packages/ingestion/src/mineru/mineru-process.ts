@@ -86,7 +86,12 @@ export async function spawnBounded(executable: string, args: string[], options: 
   return await new Promise<BoundedSpawnResult>((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(executable, args, { env: options.env, ...(options.cwd ? { cwd: options.cwd } : {}), windowsHide: options.windowsHide ?? true, stdio: ["ignore", "pipe", "pipe"] });
+      // RF04 security gate: THE centralized process boundary for the MinerU
+      // executor. shell is explicitly disabled (Node default, made
+      // machine-visible here); `executable` is the startup-validated,
+      // version-verified deployment binary and `args` are application-
+      // generated argv elements — never shell text, never document/user input.
+      child = spawn(executable, args, { shell: false, env: options.env, ...(options.cwd ? { cwd: options.cwd } : {}), windowsHide: options.windowsHide ?? true, stdio: ["ignore", "pipe", "pipe"] });
     } catch {
       resolve({ code: null, signal: null, timedOut: false, aborted: false, outputOverflow: false, directChildExitObserved: false, treeTerminationConfirmed: false, stdout: "", stderr: "", spawnErrorCode: "CHILD_SPAWN_ERROR" });
       return;
@@ -124,10 +129,17 @@ export async function spawnBounded(executable: string, args: string[], options: 
       state.timedOut = true;
       runTermination();
       graceTimer = setTimeout(() => {
-        if (exitObserved) return;
-        // Escalation for the directly spawned tree, then the bounded disposition.
+        if (exitObserved || settled) return;
+        // Escalation for the directly spawned tree, then the bounded
+        // disposition — but the disposition still awaits the OWNED
+        // termination operation (bounded by its internal cap) so the verdict
+        // is honest: a slow-but-successful taskkill must not be reported as
+        // unconfirmed just because load delayed it.
         runTermination();
-        setTimeout(finish, Math.min(graceMs, 2_000));
+        // The owned operation is itself bounded (10s internal cap) — the
+        // disposition waits for it so a slow-but-successful taskkill is
+        // reported as confirmed rather than racing into an unconfirmed verdict.
+        void Promise.race([terminationPromise ?? Promise.resolve(), sleep(10_000)]).then(finish);
       }, graceMs);
     }, options.timeoutMs);
     let terminationPromise: Promise<void> | null = null;
@@ -169,15 +181,20 @@ export async function spawnBounded(executable: string, args: string[], options: 
         finish();
       };
       if (terminationPromise) {
-        void Promise.race([terminationPromise, sleep(3_000)]).then(verdict);
+        // Bounded by the owned operation's internal 10s cap, not by this
+        // wait: a slow-but-successful taskkill must still yield a confirmed
+        // verdict rather than racing into an unconfirmed disposition.
+        void Promise.race([terminationPromise, sleep(8_000)]).then(verdict);
       } else {
         verdict();
       }
     });
-    // `close` may never fire when a surviving detached descendant holds the
-    // stdio pipes; the exit event above already resolved us with the honest
-    // disposition, so close handling only covers the normal path.
-    child.on("close", () => finish());
+    // `close` must NOT resolve the caller: for a killed child it fires
+    // ~simultaneously with `exit` and would race the owned-termination
+    // verdict into a false "unconfirmed"; and it may never fire when a
+    // surviving detached descendant holds the stdio pipes. The exit handler
+    // owns resolution with the honest verdict (bounded by the owned
+    // termination's internal cap).
   });
 }
 

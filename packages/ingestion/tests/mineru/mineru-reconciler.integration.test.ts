@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prisma } from "@ai-cognitive/db";
-import { acquireOcrHostLease, createOcrServerInstance, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, reconcileOcrServerInstances, releaseOcrHostLease } from "../../src/index.js";
+import { acquireOcrHostLease, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, reconcileOcrServerInstances, releaseOcrHostLease } from "../../src/index.js";
 import { confirmedRecordedProcessGone, recordedProcessAlive } from "../../src/mineru/mineru-process.js";
 import { isWithinPath } from "../../src/mineru/mineru-config.js";
 import { createRunFixtureHelper } from "../helpers/ocr/reconciler-fixtures.js";
@@ -57,6 +57,18 @@ afterEach(async () => {
 
 afterAll(async () => { await prisma.$disconnect(); });
 
+
+/**
+ * LEGACY row creation for reconciler fixtures: reconciler tests simulate rows
+ * left behind by hard crashes of OLDER code versions (pre-RF04 fence), which
+ * the reconciler must still handle. Bypasses the live-lease handoff fence on
+ * purpose; the production path is the fenced createOcrServerInstance.
+ */
+async function createLegacyServerRow(input: { workspaceId: string; sourceDocumentId: string; ingestionRunId: string; hostId: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string }): Promise<string | null> {
+  const row = await prisma.ocrServerInstance.create({ data: { ...input, status: "STARTING" }, select: { id: true } });
+  return row.id;
+}
+
 function reconcilerConfig(hostId: string, homeRoot?: string) {
   return { hostId, executable: process.execPath, executableArgs: [fakeMineruPath], stopTimeoutMs: 10_000, homeRoot: homeRoot ?? join(tmpdir(), "no-such-fence-root"), processImagePattern: /node|python/i };
 }
@@ -64,11 +76,15 @@ function reconcilerConfig(hostId: string, homeRoot?: string) {
 /** Creates a lapsed RUNNING row with an endpoint file and MATCHING DB identity. */
 async function createLapsedRunningRow(hostId: string, home: string, endpoint: { pid: number; server_id: string }, runToken: string) {
   const fixture = await createRunFixtureHelper.create();
+  // LEGACY crash row: pre-dates the live lease (poison may already exist on
+  // this host from other orphans) — the reconciler still handles it.
   const claimToken = `hostclaim-${crypto.randomUUID()}`;
   mkdirSync(home, { recursive: true });
   writeFileSync(join(home, "doclib.endpoint.json"), JSON.stringify({ ...endpoint, transports: [{ type: "tcp", base_url: "http://127.0.0.1:1" }], version: 2 }));
-  await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: runToken, mineruHome: home });
+  await createLegacyServerRow({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: runToken, mineruHome: home });
   expect(await recordOcrServerEndpoint({ hostClaimToken: claimToken, endpoint: { pid: endpoint.pid, serverId: endpoint.server_id, transports: [{ type: "tcp" }] } })).toBe(true);
+  // Model the crash: the lease expires after identity was recorded.
+  await prisma.$executeRaw`UPDATE "OcrHostLease" SET "leaseUntil" = NOW() - INTERVAL '1 second' WHERE "hostId" = ${hostId}`;
   return { fixture, claimToken };
 }
 
@@ -95,29 +111,31 @@ describe("same-host OCR server reconciler (RF01 P1-06 + RF02)", () => {
   it("skips rows whose host lease still belongs to a live claim", async () => {
     const hostId = `reconciler-${crypto.randomUUID()}`;
     hostLeaseIds.push(hostId);
-    const lease = (await acquireOcrHostLease(hostId))!;
     const fixture = await createRunFixtureHelper.create();
-    // The row's hostClaimToken MUST be the live lease's actual token.
+    // The SKIP path requires durable live ownership: acquire the lease and
+    // create the row under its token (modern handoff, crash-simulated by
+    // leaving everything RUNNING with a live endpoint identity).
+    const lease = (await acquireOcrHostLease(hostId))!;
     const claimToken = lease.claimToken;
+    const legacyHome = join(newTempDir(), "home");
+    await createLegacyServerRow({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-x", mineruHome: legacyHome });
     const home = join(newTempDir(), "home");
     mkdirSync(home, { recursive: true });
-    await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-x", mineruHome: home });
     await recordOcrServerEndpoint({ hostClaimToken: claimToken, endpoint: { pid: 4_000_000, serverId: "s", transports: [{ type: "tcp" }] } });
 
     const result = await reconcileOcrServerInstances(reconcilerConfig(hostId));
     expect(result).toMatchObject({ examined: 1, skipped: 1, stopped: 0, orphaned: 0 });
     expect((await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimToken } })).status).toBe("RUNNING");
-    await releaseOcrHostLease(hostId, lease.claimToken);
   });
 
   it("resolves a lapsed row with no endpoint evidence to ORPHANED without touching anything", async () => {
     const hostId = `reconciler-${crypto.randomUUID()}`;
     hostLeaseIds.push(hostId);
     const fixture = await createRunFixtureHelper.create();
-    const claimToken = `hostclaim-${crypto.randomUUID()}`;
     const home = join(newTempDir(), "home");
     mkdirSync(home, { recursive: true });
-    await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-y", mineruHome: home });
+    const claimToken = `hostclaim-${crypto.randomUUID()}`;
+    await createLegacyServerRow({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-y", mineruHome: home });
 
     const result = await reconcileOcrServerInstances(reconcilerConfig(hostId));
     expect(result).toMatchObject({ examined: 1, orphaned: 1 });
@@ -144,9 +162,10 @@ describe("same-host OCR server reconciler (RF01 P1-06 + RF02)", () => {
     const orphanTokens: string[] = [];
     for (let index = 0; index < 25; index++) {
       const fixture = await createRunFixtureHelper.create();
+      const home = join(newTempDir(), `orphan-home-${index}`);
       const claimToken = `hostclaim-${crypto.randomUUID()}`;
+      await createLegacyServerRow({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: `run-orphan-${index}`, mineruHome: home });
       orphanTokens.push(claimToken);
-      await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: `run-orphan-${index}`, mineruHome: join(newTempDir(), `orphan-home-${index}`) });
       expect(await markOcrServerOrphaned(claimToken, "old-crash")).toBe(true);
     }
     // ...created BEFORE the one newer stale actionable row.
@@ -215,22 +234,21 @@ describe("same-host OCR server reconciler (RF01 P1-06 + RF02)", () => {
     const hostId = `reconciler-${crypto.randomUUID()}`;
     hostLeaseIds.push(hostId);
     const fixture = await createRunFixtureHelper.create();
-    const claimToken = `hostclaim-${crypto.randomUUID()}`;
     const home = join(newTempDir(), "home");
     // A STARTING row: startup crashed before recordOcrServerEndpoint; the
     // endpoint FILE alone lures with a live same-image pid.
     const lurePid = await spawnLongLivedNode();
     spawnedPids.push(lurePid);
+    const claimToken = `hostclaim-${crypto.randomUUID()}`;
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "doclib.endpoint.json"), JSON.stringify({ pid: lurePid, server_id: "unproven", transports: [{ type: "tcp", base_url: "http://127.0.0.1:1" }], version: 2 }));
-    await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-starting", mineruHome: home });
+    await createLegacyServerRow({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-starting", mineruHome: home });
     const stopLog = join(newTempDir(), "stops.log");
     process.env.MINERU_FAKE_STOP_LOG = stopLog;
 
     const result = await reconcileOcrServerInstances(reconcilerConfig(hostId));
     expect(result).toMatchObject({ examined: 1, orphaned: 1 });
-    const row = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimToken } });
-    expect(row.status).toBe("ORPHANED");
+    const row = await prisma.ocrServerInstance.findFirstOrThrow({ where: { hostId, status: "ORPHANED" } });
     expect(row.terminationReason).toBe("RECONCILER_START_IDENTITY_UNPROVEN");
     expect(await recordedProcessAlive(lurePid, /node|python/i)).toBe(true);
     expect(logTargetsPid(stopLog, lurePid)).toBe(false);
@@ -246,11 +264,14 @@ describe("same-host OCR server reconciler (RF01 P1-06 + RF02)", () => {
     spawnedPids.push(serverPid);
     await new Promise((resolve) => setTimeout(resolve, 120));
     const fixture = await createRunFixtureHelper.create();
-    const claimToken = `hostclaim-${crypto.randomUUID()}`;
+    const lease = (await acquireOcrHostLease(hostId))!;
+    const claimToken = lease.claimToken;
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "doclib.endpoint.json"), JSON.stringify({ pid: serverPid, server_id: "live-server", transports: [{ type: "tcp", base_url: "http://127.0.0.1:1" }], version: 2 }));
-    await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-live", mineruHome: home });
+    await createLegacyServerRow({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-live", mineruHome: home });
     expect(await recordOcrServerEndpoint({ hostClaimToken: claimToken, endpoint: { pid: serverPid, serverId: "live-server", transports: [{ type: "tcp" }] } })).toBe(true);
+    // The crash lapses the lease after identity was recorded.
+    await prisma.$executeRaw`UPDATE "OcrHostLease" SET "leaseUntil" = NOW() - INTERVAL '1 second' WHERE "hostId" = ${hostId}`;
 
     const result = await reconcileOcrServerInstances(reconcilerConfig(hostId));
     expect(result).toMatchObject({ examined: 1, stopped: 1 });
@@ -306,6 +327,23 @@ describe("same-host OCR server reconciler (RF01 P1-06 + RF02)", () => {
     expect(existsSync(join(claimDir, "home", "doclib.endpoint.json"))).toBe(true);
   });
 
+  it("REFUSES cleanup for a non-application layout shape (<homeRoot>/random/home) (RF04 P2-02)", async () => {
+    const hostId = `reconciler-${crypto.randomUUID()}`;
+    hostLeaseIds.push(hostId);
+    const homeRoot = join(newTempDir(), "home-root");
+    // Durable mineruHome INSIDE the fence root but NOT the app-generated
+    // shape: missing generation/page/claim segments.
+    const claimDir = join(homeRoot, "random-folder");
+    const home = join(claimDir, "home");
+    const { claimToken } = await createLapsedRunningRow(hostId, home, { pid: 4_000_007, server_id: "layout-server" }, "run-layout");
+    const result = await reconcileOcrServerInstances(reconcilerConfig(hostId, homeRoot));
+    expect(result).toMatchObject({ examined: 1, stopped: 1 });
+    // DB converged, but the layout fence refused the recursive deletion.
+    expect(existsSync(home)).toBe(true);
+    expect(existsSync(join(home, "doclib.endpoint.json"))).toBe(true);
+    void claimToken;
+  });
+
   it("ORPHANED rows keep their forensic home and are never cleaned (RF02 P1-04/RF03)", async () => {
     const hostId = `reconciler-${crypto.randomUUID()}`;
     hostLeaseIds.push(hostId);
@@ -314,9 +352,9 @@ describe("same-host OCR server reconciler (RF01 P1-06 + RF02)", () => {
     const home = join(claimDir, "home");
     const fixture = await createRunFixtureHelper.create();
     const claimToken = `hostclaim-${crypto.randomUUID()}`;
+    await createLegacyServerRow({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-orphan", mineruHome: home });
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "doclib.endpoint.json"), JSON.stringify({ pid: 4_000_006, server_id: "orphan-server", transports: [], version: 2 }));
-    await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-orphan", mineruHome: home });
     expect(await markOcrServerOrphaned(claimToken, "unproven")).toBe(true);
 
     const result = await reconcileOcrServerInstances(reconcilerConfig(hostId, homeRoot));
@@ -331,7 +369,7 @@ describe("same-host OCR server reconciler (RF01 P1-06 + RF02)", () => {
     hostLeaseIds.push(hostId);
     const fixture = await createRunFixtureHelper.create();
     const claimToken = `hostclaim-${crypto.randomUUID()}`;
-    await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-state", mineruHome: join(newTempDir(), "home") });
+    await createLegacyServerRow({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-state", mineruHome: join(newTempDir(), "home") });
     expect(await markOcrServerStopping(claimToken, "illegal")).toBe(false);
     expect(await markOcrServerStopped(claimToken, "free-form")).toBe(false);
     expect(await markOcrServerStartNeverStarted(claimToken)).toBe(true);

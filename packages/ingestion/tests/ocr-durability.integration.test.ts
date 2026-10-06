@@ -144,8 +144,10 @@ describe("OCR page checkpoint (real PostgreSQL)", () => {
 describe("OCR server instance durable identity (real PostgreSQL)", () => {
   it("SERVER_STARTING_NULL_ENDPOINT_ALLOWED: STARTING persists before launch with nullable endpoint fields", async () => {
     const { workspace, document, run } = await createRunFixture();
-    const hostClaimToken = `hostclaim-${crypto.randomUUID()}`;
-    const id = await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: "host-A", hostClaimToken, runExecutionToken: "run-token-1", mineruHome: "D:/scratch/servers/home-A" });
+    const hostA = "host-A";
+    hostLeaseIds.push(hostA);
+    const hostClaimToken = (await acquireOcrHostLease(hostA))!.claimToken;
+    const id = await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: hostA, hostClaimToken, runExecutionToken: "run-token-1", mineruHome: "D:/scratch/servers/home-A" });
     expect(id).not.toBeNull();
     const row = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken } });
     expect(row.status).toBe("STARTING");
@@ -163,8 +165,10 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
 
   it("RF01-05/RF01 SERVER_STATE_MACHINE: ORPHANED is terminal and STOPPED requires a legal previous state", async () => {
     const { workspace, document, run } = await createRunFixture();
-    const hostClaimToken = `hostclaim-${crypto.randomUUID()}`;
-    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: "host-orph", hostClaimToken, runExecutionToken: "run-orph", mineruHome: "home-orph" });
+    const orphanHost = "host-orph";
+    hostLeaseIds.push(orphanHost);
+    const hostClaimToken = (await acquireOcrHostLease(orphanHost))!.claimToken;
+    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: orphanHost, hostClaimToken, runExecutionToken: "run-orph", mineruHome: "home-orph" });
     await recordOcrServerEndpoint({ hostClaimToken, endpoint: { pid: 222, serverId: "server-orph", transports: [{ type: "tcp", base_url: "http://127.0.0.1:15999" }] } });
     expect(await markOcrServerOrphaned(hostClaimToken, "authority-lost")).toBe(true);
     let row = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken } });
@@ -184,8 +188,10 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
 
   it("RF01 SERVER_STATE_MACHINE: only legal transitions mutate rows (04B-3 RF01 P1-07)", async () => {
     const { workspace, document, run } = await createRunFixture();
-    const starting = `hostclaim-${crypto.randomUUID()}`;
-    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: "host-machine", hostClaimToken: starting, runExecutionToken: "run-machine", mineruHome: "home-machine" });
+    const machineHost = "host-machine-rf04";
+    hostLeaseIds.push(machineHost);
+    const starting = (await acquireOcrHostLease(machineHost))!.claimToken;
+    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: machineHost, hostClaimToken: starting, runExecutionToken: "run-machine", mineruHome: "home-machine" });
     // STARTING -> STOPPING is illegal (stopping is a deliberate RUNNING teardown).
     expect(await markOcrServerStopping(starting, "too-early")).toBe(false);
     expect((await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: starting } })).status).toBe("STARTING");
@@ -194,12 +200,14 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
     // (pid/serverId still NULL). markOcrServerStopped refuses STARTING.
     expect(await markOcrServerStopped(starting, "free-form")).toBe(false);
     expect(await markOcrServerStartNeverStarted(starting)).toBe(true);
+    // The never-started claim releases its slot before the next handoff.
+    await releaseOcrHostLease(machineHost, starting);
     const neverStarted = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: starting } });
     expect(neverStarted.status).toBe("STOPPED");
     expect(neverStarted.terminationReason).toBe("NEVER_STARTED_NO_ENDPOINT_IDENTITY");
     // A STARTING row WITH a recorded endpoint identity is NOT never-started.
-    const startedWithIdentity = `hostclaim-${crypto.randomUUID()}`;
-    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: "host-machine", hostClaimToken: startedWithIdentity, runExecutionToken: "run-machine-3", mineruHome: "home-machine-3" });
+    const startedWithIdentity = (await acquireOcrHostLease(machineHost))!.claimToken;
+    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: machineHost, hostClaimToken: startedWithIdentity, runExecutionToken: "run-machine-3", mineruHome: "home-machine-3" });
     await recordOcrServerEndpoint({ hostClaimToken: startedWithIdentity, endpoint: { pid: 444, serverId: "server-machine-3", transports: [{ type: "tcp", base_url: "http://127.0.0.1:15997" }] } });
     expect(await markOcrServerStartNeverStarted(startedWithIdentity)).toBe(false);
     // recordOcrServerEndpoint moved the row STARTING -> RUNNING; either way
@@ -210,9 +218,13 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
     expect(await markOcrServerStopped(starting)).toBe(false);
     expect(await markOcrServerOrphaned(starting, "late")).toBe(false);
 
-    // The full legal chain: RUNNING -> STOPPING -> STOPPED.
-    const running = `hostclaim-${crypto.randomUUID()}`;
-    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: "host-machine", hostClaimToken: running, runExecutionToken: "run-machine-2", mineruHome: "home-machine-2" });
+    // The full legal chain: RUNNING -> STOPPING -> STOPPED (on a fresh host:
+    // startedWithIdentity stays STARTING/RUNNING and poisons machineHost —
+    // the RF03 P1-02 invariant is asserted separately there).
+    const chainHost = "host-machine-chain";
+    hostLeaseIds.push(chainHost);
+    const running = (await acquireOcrHostLease(chainHost))!.claimToken;
+    await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: chainHost, hostClaimToken: running, runExecutionToken: "run-machine-2", mineruHome: "home-machine-2" });
     await recordOcrServerEndpoint({ hostClaimToken: running, endpoint: { pid: 333, serverId: "server-machine", transports: [{ type: "tcp", base_url: "http://127.0.0.1:15998" }] } });
     expect(await markOcrServerStopping(running, "page-claim-complete")).toBe(true);
     expect((await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: running } })).status).toBe("STOPPING");
@@ -223,14 +235,24 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
   it("RF01-06: duplicate hostClaimToken returns null; other DB errors keep their real class", async () => {
     const { workspace, document, run } = await createRunFixture();
     const hostClaimToken = `hostclaim-${crypto.randomUUID()}`;
-    const input = { workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: "host-dup", hostClaimToken, runExecutionToken: "run-dup", mineruHome: "home-dup" };
+    const dupHost = "host-dup";
+    hostLeaseIds.push(dupHost);
+    const dupLease = (await acquireOcrHostLease(dupHost))!;
+    const input = { workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: dupHost, hostClaimToken: dupLease.claimToken, runExecutionToken: "run-dup", mineruHome: "home-dup" };
     expect(await createOcrServerInstance(input)).not.toBeNull();
-    // Duplicate: explicit unique-conflict only -> null.
+    // Duplicate: explicit unique-conflict only -> null (RF04 fence ALSO
+    // refuses: the lease is live and matches, so unique-conflict fires first).
     expect(await createOcrServerInstance(input)).toBeNull();
-    // Cross-tenant lineage violation must NOT be swallowed as a duplicate.
+    // Cross-tenant lineage violation (RF04): a stranger reusing the live
+    // lease token passes the fence but hits the hostClaimToken unique
+    // constraint -> null; a stranger with a forged token is refused by the
+    // lease fence itself -> null. Either way it is NEVER swallowed as a
+    // foreign-key crash, and no cross-tenant row can appear.
     const stranger = await prisma.workspace.create({ data: { name: `stranger-${crypto.randomUUID()}` } });
     workspaceIds.push(stranger.id);
-    await expect(createOcrServerInstance({ ...input, hostClaimToken: `hostclaim-${crypto.randomUUID()}`, workspaceId: stranger.id })).rejects.toThrow();
+    expect(await createOcrServerInstance({ ...input, workspaceId: stranger.id, hostClaimToken: dupLease.claimToken })).toBeNull();
+    expect(await createOcrServerInstance({ ...input, workspaceId: stranger.id, hostClaimToken: `hostclaim-${crypto.randomUUID()}` })).toBeNull();
+    expect(await prisma.ocrServerInstance.count({ where: { workspaceId: stranger.id } })).toBe(0);
   });
 
   it("SERVER_OLD_INSTANCE_SURVIVES_NEW_HOST_CLAIM: reclaiming the host lease never overwrites prior instance evidence", async () => {
@@ -238,7 +260,7 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
     const hostId = `host-${crypto.randomUUID()}`;
     hostLeaseIds.push(hostId);
     const leaseA = (await acquireOcrHostLease(hostId))!;
-    const claimA = `hostclaim-${crypto.randomUUID()}`;
+    const claimA = leaseA.claimToken;
     expect(await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId, hostClaimToken: claimA, runExecutionToken: "runA", mineruHome: "home-A" })).not.toBeNull();
     expect(await recordOcrServerEndpoint({ hostClaimToken: claimA, endpoint: { pid: 111, serverId: "server-A", transports: [{ type: "tcp", base_url: "http://127.0.0.1:15980" }] } })).toBe(true);
     // A's lease expires. RF03 P1-02: B CANNOT take over the slot while A's
@@ -251,7 +273,7 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
     expect(await markOcrServerStoppedProcessGone(claimA, "handoff-verified")).toBe(true);
     const leaseB = await acquireOcrHostLease(hostId);
     expect(leaseB).not.toBeNull();
-    const claimB = `hostclaim-${crypto.randomUUID()}`;
+    const claimB = leaseB!.claimToken;
     expect(await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId, hostClaimToken: claimB, runExecutionToken: "runB", mineruHome: "home-B" })).not.toBeNull();
     const survivor = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimA } });
     expect(survivor.status).toBe("STOPPED");

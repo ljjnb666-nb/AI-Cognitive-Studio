@@ -86,15 +86,33 @@ export async function reconcileOcrServerInstances(input: OcrServerReconcilerInpu
  */
 async function cleanupRetainedClaimData(mineruHome: string, input: OcrServerReconcilerInput): Promise<void> {
   try {
-    const { basename, dirname } = await import("node:path");
-    const { rm } = await import("node:fs/promises");
+    const { basename, dirname, sep } = await import("node:path");
+    const { lstat, rm } = await import("node:fs/promises");
+    // RF04 P2-02: the ONLY deletable shape is the application-generated
+    // layout, validated segment by segment (case-insensitive containment on
+    // Windows via isWithinPath):
+    //   <homeRoot>/<runId>/generation-<int>/page-<int>/claim-<suffix>/home
+    // Arbitrary DB text like "<homeRoot>/random-folder/home" is refused.
     if (!isWithinPath(mineruHome, input.homeRoot) || basename(mineruHome) !== "home") {
       logger.warn("mineru.reconciler.cleanup_refused", { reason: "PATH_FENCE_FAILED", mineruHome });
       return;
     }
     const claimDir = dirname(mineruHome);
-    if (!isWithinPath(claimDir, input.homeRoot) || claimDir === input.homeRoot) {
+    const segments = claimDir.slice(input.homeRoot.length).split(sep).filter((segment) => segment.length > 0);
+    const layoutValid = segments.length === 4
+      && segments[0]!.length > 0
+      && /^generation-[0-9]+$/.test(segments[1]!)
+      && /^page-[0-9]+$/.test(segments[2]!)
+      && /^claim-.+$/.test(segments[3]!);
+    if (!layoutValid || !isWithinPath(claimDir, input.homeRoot) || claimDir === input.homeRoot) {
       logger.warn("mineru.reconciler.cleanup_refused", { reason: "PATH_FENCE_FAILED", mineruHome });
+      return;
+    }
+    // Junction/reparse surprise guard: refuse to recurse through anything
+    // that is not a real directory at the deletion root.
+    const claimStat = await lstat(claimDir).catch(() => null);
+    if (claimStat === null || claimStat.isSymbolicLink() || !claimStat.isDirectory()) {
+      logger.warn("mineru.reconciler.cleanup_refused", { reason: "CLAIM_ROOT_NOT_REAL_DIRECTORY", mineruHome });
       return;
     }
     // Bounded retries: Windows can transiently hold a just-touched directory
@@ -114,6 +132,28 @@ async function cleanupRetainedClaimData(mineruHome: string, input: OcrServerReco
   } catch (error) {
     logger.warn("mineru.reconciler.cleanup_refused", { reason: "CLEANUP_IO_FAILED", mineruHome, error: error instanceof Error ? error.message.slice(0, 200) : "unknown" });
   }
+}
+
+/**
+ * RF04 P1-03: cleanup is authorized ONLY by the durable STOPPED commit. The
+ * CAS can legitimately lose (another reconciler/manual action moved the row
+ * to ORPHANED first); when it does, the row is RE-READ and cleanup proceeds
+ * only if the durable current state is STOPPED for this same instance.
+ * ORPHANED rows keep their forensic evidence — never cleaned.
+ */
+async function convergeStoppedAndCleanup(row: { hostClaimToken: string; mineruHome: string }, reason: string, input: OcrServerReconcilerInput): Promise<boolean> {
+  const committed = await markOcrServerStoppedProcessGone(row.hostClaimToken, reason);
+  if (!committed) {
+    const current = await prisma.ocrServerInstance.findUnique({ where: { hostClaimToken: row.hostClaimToken }, select: { status: true, pid: true, serverId: true } });
+    if (current?.status !== "STOPPED") {
+      logger.warn("mineru.reconciler.cleanup_refused", { reason: "STOPPED_COMMIT_LOST", currentStatus: current?.status ?? "missing", hostClaimToken: row.hostClaimToken });
+      return false;
+    }
+    // Another authority already committed STOPPED for this same instance.
+    return true;
+  }
+  await cleanupRetainedClaimData(row.mineruHome, input);
+  return true;
 }
 
 async function reconcileRow(row: { id: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; pid: number | null; serverId: string | null; status: string }, input: OcrServerReconcilerInput): Promise<"skipped" | "stopped" | "orphaned"> {
@@ -148,9 +188,8 @@ async function reconcileRow(row: { id: string; hostClaimToken: string; runExecut
 
   // Proven gone: the SHARED conservative rule (two consecutive negatives).
   if (await confirmedRecordedProcessGone(row.pid!, { expectedImagePattern: imagePattern })) {
-    await markOcrServerStoppedProcessGone(row.hostClaimToken, "RECONCILER_PROCESS_GONE");
-    await cleanupRetainedClaimData(row.mineruHome, input);
-    return "stopped";
+    if (await convergeStoppedAndCleanup(row, "RECONCILER_PROCESS_GONE", input)) return "stopped";
+    return "orphaned";
   }
 
   // Live process: cleanup ONLY under the necessary cross-restart identity
@@ -163,9 +202,8 @@ async function reconcileRow(row: { id: string; hostClaimToken: string; runExecut
   const stopResult = await spawnBounded(input.executable, [...input.executableArgs, ...buildMineruServerArgs("stop")], { env: stopEnv, cwd: row.mineruHome, timeoutMs: input.stopTimeoutMs, maxOutputBytes: 1_048_576 });
   if (stopResult.spawnErrorCode !== "ENOENT") {
     if (await awaitEndpointProcessExit(endpoint!, row.mineruHome, imagePattern, 10_000)) {
-      await markOcrServerStoppedProcessGone(row.hostClaimToken, "RECONCILER_GRACEFUL_STOP");
-      await cleanupRetainedClaimData(row.mineruHome, input);
-      return "stopped";
+      if (await convergeStoppedAndCleanup(row, "RECONCILER_GRACEFUL_STOP", input)) return "stopped";
+      return "orphaned";
     }
   }
   // Re-prove identity IMMEDIATELY before the force kill (RF01 P1-05).
@@ -175,9 +213,8 @@ async function reconcileRow(row: { id: string; hostClaimToken: string; runExecut
   }
   const killed = await killByRecordedIdentity(row.pid!);
   if (killed && await awaitEndpointProcessExit(endpoint!, row.mineruHome, imagePattern, 10_000)) {
-    await markOcrServerStoppedProcessGone(row.hostClaimToken, "RECONCILER_FORCED_STOP");
-    await cleanupRetainedClaimData(row.mineruHome, input);
-    return "stopped";
+    if (await convergeStoppedAndCleanup(row, "RECONCILER_FORCED_STOP", input)) return "stopped";
+    return "orphaned";
   }
   await markOcrServerOrphaned(row.hostClaimToken, killed ? "RECONCILER_KILL_UNCONFIRMED" : "RECONCILER_KILL_REFUSED");
   return "orphaned";

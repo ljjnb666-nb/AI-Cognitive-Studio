@@ -92,24 +92,53 @@ export async function transitionRunToRetryable(runId: string, token: string, err
   }
 }
 
+export type OcrCapacityDeferralInput = {
+  workspaceId: string;
+  sourceDocumentId: string;
+  ingestionRunId: string;
+  physicalPageIndex: number;
+  routingGeneration: number;
+  pageClaimToken: string;
+  runExecutionToken: string;
+};
+
 /**
- * RF03 P1-03: capacity/deferral transition — the run goes back to QUEUED with
- * its processing-attempt budget restored, transactionally. The proof of
- * correctness for the give-back: claimIngestionRun atomically paired
- * (Job.attemptCount + 1, Job RUNNING, run RUNNING under THIS token); only the
- * live token owner can execute this transition (liveLeasePredicate), exactly
- * once per delivery, and the Job row must still be the one THIS claim moved to
- * RUNNING — so the decrement can never cancel anyone else's consumption.
- * Net effect of a capacity deferral on the durable attempt budget: exactly
- * zero. The scheduler (BullMQ delayed deferral) owns when the delivery
- * returns; PostgreSQL remains the upper-bound authority for real attempts.
+ * RF04 P1-02: THE atomic capacity deferral. ONE PostgreSQL transaction
+ * performs ALL THREE transitions or NONE of them:
+ *  1. OcrPageAttempt RUNNING(page token, live lease) -> PENDING, attemptCount
+ *     -1 (the claim's consumption given back);
+ *  2. IngestionRun RUNNING(run token, live lease) -> QUEUED, execution
+ *     ownership cleared;
+ *  3. Job RUNNING -> QUEUED, attemptCount -1 (the delivery's consumption
+ *     given back).
+ * Every predicate is fenced on live ownership (page token/lease, run token/
+ * lease); a stale page token, stale run token, expired page lease, or a Job
+ * that is no longer RUNNING makes the whole transaction return false with
+ * ZERO durable mutations (no page-refunded/run-consumed split state can ever
+ * be observed). Only a `true` return authorizes the scheduler deferral.
  */
-export async function transitionRunToDeferred(runId: string, token: string, errorCode: string): Promise<boolean> {
+export async function transitionOcrCapacityDeferred(input: OcrCapacityDeferralInput): Promise<boolean> {
   try {
     return await prisma.$transaction(async (tx) => {
-      const changed = await tx.$executeRaw`UPDATE "IngestionRun" SET "status" = 'QUEUED', "errorCode" = ${errorCode}, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${runId} ${liveLeasePredicate(token)}`;
-      if (changed !== 1) throw claimLost;
-      const jobs = await tx.$queryRaw<Array<{ attemptCount: number }>>`UPDATE "Job" SET "status" = 'QUEUED', "error" = ${JSON.stringify({ code: errorCode })}::jsonb, "updatedAt" = NOW(), "attemptCount" = GREATEST("attemptCount" - 1, 0) WHERE "id" = (SELECT "jobId" FROM "IngestionRun" WHERE "id" = ${runId}) AND "status" = 'RUNNING' AND "attemptCount" > 0 RETURNING "attemptCount"`;
+      const page = await tx.$executeRaw`
+        UPDATE "OcrPageAttempt" SET
+          "status" = 'PENDING', "claimToken" = NULL, "claimedAt" = NULL, "leaseUntil" = NULL,
+          "nextAttemptAt" = NULL, "errorCode" = 'SOURCE_OCR_HOST_CAPACITY', "updatedAt" = NOW(),
+          "attemptCount" = GREATEST("attemptCount" - 1, 0)
+        WHERE "workspaceId" = ${input.workspaceId} AND "ingestionRunId" = ${input.ingestionRunId}
+          AND "physicalPageIndex" = ${input.physicalPageIndex} AND "routingGeneration" = ${input.routingGeneration}
+          AND "status" = 'RUNNING' AND "claimToken" = ${input.pageClaimToken} AND "leaseUntil" > NOW()
+          AND "attemptCount" > 0`;
+      if (page !== 1) throw claimLost;
+      const run = await tx.$executeRaw`
+        UPDATE "IngestionRun" SET "status" = 'QUEUED', "errorCode" = 'SOURCE_OCR_HOST_CAPACITY', "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL
+        WHERE "id" = ${input.ingestionRunId} ${liveLeasePredicate(input.runExecutionToken)}`;
+      if (run !== 1) throw claimLost;
+      const jobs = await tx.$queryRaw<Array<{ attemptCount: number }>>`
+        UPDATE "Job" SET "status" = 'QUEUED', "error" = ${JSON.stringify({ code: "SOURCE_OCR_HOST_CAPACITY" })}::jsonb, "updatedAt" = NOW(), "attemptCount" = GREATEST("attemptCount" - 1, 0)
+        WHERE "id" = (SELECT "jobId" FROM "IngestionRun" WHERE "id" = ${input.ingestionRunId})
+          AND "status" = 'RUNNING' AND "attemptCount" > 0
+        RETURNING "attemptCount"`;
       if (jobs.length !== 1) throw claimLost;
       return true;
     });

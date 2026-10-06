@@ -46,9 +46,11 @@ describe("spawnBounded hard deadline (RF01 P1-04)", () => {
     const elapsed = Date.now() - started;
     expect(result.timedOut).toBe(true);
     expect(result.treeTerminationConfirmed).toBe(true);
-    // deadline + grace + bounded escalation — never an infinite wait.
-    expect(elapsed).toBeLessThan(400 + 700 + 2_500);
-  }, 20_000);
+    // deadline + grace + bounded escalation — never an infinite wait. The
+    // escalation now awaits the OWNED termination (taskkill self-bounded at
+    // 10s), so allow the honest-verdict wait in the bound.
+    expect(elapsed).toBeLessThan(400 + 700 + 10_000 + 2_500);
+  }, 30_000);
 
   it("treeTerminationConfirmed is NEVER true when the owned tree-termination operation fails (RF02 P2)", async () => {
     // The owned termination seam FAILS (simulates taskkill refusing/failing

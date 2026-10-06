@@ -165,7 +165,6 @@ describe("real BullMQ OCR capacity deferral (RF03 P1-03)", () => {
       const finalPageB = await prisma.ocrPageAttempt.findUniqueOrThrow({ where: { ingestionRunId_physicalPageIndex_routingGeneration: pageKeys.B } });
       const finalJobA = await prisma.job.findUniqueOrThrow({ where: { id: jobAId } });
       const finalPageA = await prisma.ocrPageAttempt.findUniqueOrThrow({ where: { ingestionRunId_physicalPageIndex_routingGeneration: pageKeys.A } });
-      console.log("BUDGET_DEBUG", JSON.stringify({ samplesLength: samples.length, jobB: finalJobB.attemptCount, pageB: { status: finalPageB.status, attemptCount: finalPageB.attemptCount }, jobA: finalJobA.attemptCount, pageA: { status: finalPageA.status, attemptCount: finalPageA.attemptCount } }));
       expect(finalJobB.attemptCount).toBe(1);
       expect(finalPageB).toMatchObject({ status: "SUCCEEDED", attemptCount: 1, parserName: "mineru" });
       expect(finalJobA.attemptCount).toBe(1);
@@ -173,6 +172,26 @@ describe("real BullMQ OCR capacity deferral (RF03 P1-03)", () => {
       // A also succeeded with its own real attempt.
       const finalRuns = await prisma.ingestionRun.findMany({ where: { id: { in: [runA, runB] } } });
       expect(finalRuns.map((run) => run.status).sort()).toEqual(["SUCCEEDED", "SUCCEEDED"]);
+      // P2-01: assert the REAL BullMQ job primitive directly. The loser was
+      // deferred >=8 times at a 2s cadence: had ANY deferral consumed a
+      // failure attempt, attemptsMade would be >=9. After eventual success it
+      // holds exactly the ONE real execution (moveToCompleted sets it to the
+      // succeeded attempt). attemptsStarted may grow; that is not the
+      // failure-attempt budget.
+      const { Queue } = await import("bullmq");
+      const { createRedisConnection } = await import("@ai-cognitive/shared/server");
+      const bullProbe = new Queue("source.ingestion", { connection: createRedisConnection(process.env.REDIS_URL!), prefix: bullmqPrefix });
+      try {
+        for (const [label, run] of [["A", runA], ["B", runB]] as const) {
+          const bullJob = await bullProbe.getJob(run);
+          expect(bullJob, `bullmq job for ${label}`).not.toBeNull();
+          expect(bullJob!.attemptsMade, `${label} attemptsMade after >=8 deferrals + success`).toBe(1);
+          // attemptsStarted legitimately grew (one START per deferral); it is
+          // not the failure-attempt budget — asserted via attemptsMade only.
+        }
+      } finally {
+        await bullProbe.close();
+      }
       // Both published exactly once with no cross-run provenance.
       for (const run of [runA, runB]) {
         expect(await prisma.documentExtraction.count({ where: { ingestionRunId: run } })).toBe(1);

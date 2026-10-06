@@ -139,29 +139,6 @@ export async function completeOcrPageAttempt(input: { workspaceId: string; inges
 
 export type OcrPageFailureKind = "transient" | "terminal";
 
-/**
- * RF03 P1-03: HOST CAPACITY unavailable is DEFERRAL, not processing failure.
- * Releases the claim WITHOUT consuming the page attempt budget, in ONE
- * transactional proof: the caller must still hold the live page claim token
- * (predicate enforces it), and the attemptCount it consumed on claim is given
- * back in the same statement (GREATEST floor guards against misuse). The page
- * returns to PENDING, immediately claimable, with NO future nextAttemptAt —
- * the scheduler's deferral cadence is the single retry clock (RF01 P1-01).
- * Only the live owner can defer, exactly one give-back per claim, so the net
- * page-attempt effect of a capacity deferral is exactly zero.
- */
-export async function deferOcrPageAttempt(input: { workspaceId: string; ingestionRunId: string; physicalPageIndex: number; routingGeneration: number; claimToken: string; errorCode: string }): Promise<boolean> {
-  const changed = await prisma.$executeRaw`
-    UPDATE "OcrPageAttempt" SET
-      "status" = 'PENDING', "claimToken" = NULL, "claimedAt" = NULL, "leaseUntil" = NULL,
-      "nextAttemptAt" = NULL, "errorCode" = ${input.errorCode}, "updatedAt" = NOW(),
-      "attemptCount" = GREATEST("attemptCount" - 1, 0)
-    WHERE "workspaceId" = ${input.workspaceId} AND "ingestionRunId" = ${input.ingestionRunId}
-      AND "physicalPageIndex" = ${input.physicalPageIndex} AND "routingGeneration" = ${input.routingGeneration}
-      AND "status" = 'RUNNING' AND "claimToken" = ${input.claimToken} AND "leaseUntil" > NOW()
-      AND "attemptCount" > 0`;
-  return changed === 1;
-}
 
 /**
  * Records a page failure under live ownership. Transient failures requeue to
@@ -195,12 +172,27 @@ export type OcrServerEndpoint = { pid: number; serverId: string; transports: Arr
 
 /** Persists the pre-launch STARTING row (endpoint identity intentionally absent). */
 export async function createOcrServerInstance(input: { workspaceId: string; sourceDocumentId: string; ingestionRunId: string; hostId: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string }): Promise<string | null> {
+  // RF04 P1-01 lease-to-server handoff fence: STARTING ownership becomes
+  // durable ONLY inside the same transaction that locks the OcrHostLease row
+  // and proves it is STILL ours (hostId + claimToken + leaseUntil > NOW()).
+  // The row lock also serializes against acquireOcrHostLease's own row write,
+  // so a reclaim cannot interleave between a stale owner's check and insert —
+  // exactly one ordering wins and two authoritative server claims can never
+  // coexist for the slot. Stale owners (lease expired/reclaimed) create
+  // NOTHING and must abort toward their orphan/cleanup paths.
   try {
-    const row = await prisma.ocrServerInstance.create({
-      data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, ingestionRunId: input.ingestionRunId, hostId: input.hostId, hostClaimToken: input.hostClaimToken, runExecutionToken: input.runExecutionToken, mineruHome: input.mineruHome, status: "STARTING" },
-      select: { id: true },
+    return await prisma.$transaction(async (tx) => {
+      const leases = await tx.$queryRaw<Array<{ claimToken: string }>>`
+        SELECT "claimToken" FROM "OcrHostLease"
+        WHERE "hostId" = ${input.hostId} AND "claimToken" = ${input.hostClaimToken} AND "leaseUntil" > NOW()
+        FOR UPDATE`;
+      if (leases.length !== 1) return null;
+      const row = await tx.ocrServerInstance.create({
+        data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, ingestionRunId: input.ingestionRunId, hostId: input.hostId, hostClaimToken: input.hostClaimToken, runExecutionToken: input.runExecutionToken, mineruHome: input.mineruHome, status: "STARTING" },
+        select: { id: true },
+      });
+      return row.id;
     });
-    return row.id;
   } catch (error) {
     // Only an explicit hostClaimToken unique-conflict maps to "already exists";
     // every other database failure (outage, FK/tenant-lineage violation) must

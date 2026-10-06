@@ -510,7 +510,7 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
     }
   });
 
-  it("PROCESS_TIMEOUT: a hung MinerU invocation is terminated by the hard timeout and classified transient", async () => {
+  it("PROCESS_TIMEOUT: a hung MinerU invocation is terminated by the hard timeout and classified transient", { timeout: 90_000 }, async () => {
     const bytes = await mixedPdf();
     const storage = new FakeStorageProvider();
     const { workspace, run } = await createPdfRunFixture(bytes, storage);

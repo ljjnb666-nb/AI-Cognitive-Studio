@@ -3,9 +3,26 @@ import { sha256Utf8 } from "@ai-cognitive/domain";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { extractNativePdf, pdfTextToBlocks, type Parsed, type ParsedBlock, type ParserLimits } from "./document-parsers.js";
 import { INGESTION_EXECUTION_OWNERSHIP_LOST } from "./ingestion-run-claim.js";
-import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, deferOcrPageAttempt, failOcrPageAttempt, writeRoutingPlan } from "./ocr-durability.js";
+import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, failOcrPageAttempt, writeRoutingPlan } from "./ocr-durability.js";
 import { PDF_EXTRACTION_PARSER, PDF_ROUTING_GENERATION, assertRoutingPlanReplay, evaluatePdfExtractionQuality, parseRoutingPlan, type PdfExtractionQualityDecision, type PdfOcrExecutor, type PdfOcrPageResult, type PdfPageExtractionOutcome, type PdfRoutingPlan } from "./pdf-routing.js";
 import { SourceError } from "./source-errors.js";
+
+/**
+ * RF04 P1-02: TYPED capacity-deferral signal — never parsed from a message.
+ * Carries the full durable claim identity so the ingestion service boundary
+ * can execute the ONE atomic PostgreSQL deferral transaction
+ * (transitionOcrCapacityDeferred) covering page + run + Job. Constructing
+ * this error performs NO durable mutation; all-or-nothing happens at the
+ * boundary, and only a committed deferral may reach the Redis scheduler.
+ */
+export class OcrCapacityDeferralError extends Error {
+  readonly deferral: { workspaceId: string; ingestionRunId: string; sourceDocumentId: string; physicalPageIndex: number; routingGeneration: number; pageClaimToken: string; runExecutionToken: string };
+  constructor(deferral: OcrCapacityDeferralError["deferral"]) {
+    super("SOURCE_OCR_HOST_CAPACITY");
+    this.name = "OcrCapacityDeferralError";
+    this.deferral = deferral;
+  }
+}
 
 /**
  * PDF run extraction pipeline (BOOK-INGESTION-04B-2, hardened in RF01).
@@ -177,16 +194,14 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
       if (!await completeOcrPageAttempt({ ...key, claimToken: claim.claimToken, authoritativeArtifactKey, textSha256, durationMs: Date.now() - startedAt })) return null;
       return await loadAuthoritativeOcrPage(input, physicalPageIndex, generation);
     }
-    // RF03 P1-03: HOST CAPACITY unavailable is a DEFERRAL, not a processing
-    // failure — it must run BEFORE failOcrPageAttempt, which would otherwise
-    // consume the page attempt. The claim is released with its attempt budget
-    // restored (deferOcrPageAttempt: net-zero page attempts) and a TYPED
-    // signal propagates to the run boundary, which restores the run/Job
-    // budget and lets the scheduler defer the delivery. CONTENT and PROCESS
-    // failures below still consume attempts exactly as before.
+    // RF04 P1-02: HOST CAPACITY unavailable is a DEFERRAL, not a processing
+    // failure. NO durable mutation happens here — the page claim identity is
+    // carried by a TYPED error to the ingestion service boundary, where ONE
+    // PostgreSQL transaction atomically releases page + run + Job budgets
+    // (transitionOcrCapacityDeferred). CONTENT and PROCESS failures below
+    // still consume attempts exactly as before.
     if (result.errorCode === SourceError.OCR_HOST_CAPACITY && result.kind === "transient") {
-      if (!await deferOcrPageAttempt({ ...key, claimToken: claim.claimToken, errorCode: SourceError.OCR_HOST_CAPACITY })) return null;
-      throw new Error(SourceError.OCR_HOST_CAPACITY);
+      throw new OcrCapacityDeferralError({ ...key, pageClaimToken: claim.claimToken, runExecutionToken: input.runExecutionToken });
     }
     if (!await failOcrPageAttempt({ ...key, claimToken: claim.claimToken, errorCode: result.errorCode, kind: result.kind, nextAttemptAt: result.nextAttemptAt })) return null;
     if (result.kind === "terminal") return null;
