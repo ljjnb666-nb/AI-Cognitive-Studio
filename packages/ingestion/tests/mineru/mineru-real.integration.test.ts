@@ -8,7 +8,7 @@ import { prisma } from "@ai-cognitive/db";
 import { parseCanonicalBlockMetadata } from "@ai-cognitive/domain";
 import type { Environment } from "@ai-cognitive/shared/server";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import { createIngestionService, createMineruPdfOcrExecutor, PDF_ROUTING_GENERATION, resolveMineruExecutorConfig } from "../../src/index.js";
+import { createIngestionService, createMineruPdfOcrExecutor, PDF_ROUTING_GENERATION, resolveMineruExecutorConfig, verifyMineruRuntime } from "../../src/index.js";
 import type { MineruExecutorConfig } from "../../src/mineru/mineru-config.js";
 
 /**
@@ -54,7 +54,7 @@ class FakeStorageProvider implements StorageProvider {
   async objectExists(key: string) { return this.objects.has(key); }
 }
 
-function realConfig(modelPath: string, hostId: string): MineruExecutorConfig {
+async function realConfig(modelPath: string, hostId: string): Promise<MineruExecutorConfig> {
   const tempRoot = mkdtempSync(join(tmpdir(), "mineru-real-"));
   tempRoots.push(tempRoot);
   const environment = {
@@ -64,7 +64,6 @@ function realConfig(modelPath: string, hostId: string): MineruExecutorConfig {
     MINERU_MODEL_PATH: modelPath,
     MINERU_EXECUTABLE: realExecutable,
     MINERU_TIER: "flash",
-    MINERU_VERSION: "4.0.3",
     MINERU_TIMEOUT_MS: 300_000,
     MINERU_SERVER_START_TIMEOUT_MS: 180_000,
     MINERU_SERVER_STOP_TIMEOUT_MS: 60_000,
@@ -73,7 +72,12 @@ function realConfig(modelPath: string, hostId: string): MineruExecutorConfig {
     MINERU_CAPACITY_RETRY_DELAY_MS: 30_000,
     OCR_HOST_ID: hostId,
   } as unknown as Environment;
-  return resolveMineruExecutorConfig(environment)!;
+  const config = resolveMineruExecutorConfig(environment)!;
+  // RF01 P1-08: the REAL acceptance proves the actual local runtime reports
+  // the pinned version through the same argv probe production uses.
+  const verification = await verifyMineruRuntime(config);
+  expect(verification.version).toBe("4.0.3");
+  return config;
 }
 
 async function createPdfRunFixture(bytes: Uint8Array, storage: FakeStorageProvider) {
@@ -150,7 +154,7 @@ describe.skipIf(!realGateActive)("REAL MinerU production cutover acceptance (mac
     const bytes = new Uint8Array(readFileSync(fixturePath));
     const storage = new FakeStorageProvider();
     const { workspace, run } = await createPdfRunFixture(bytes, storage);
-    const config = realConfig(realModelPath!, `mineru-real-${crypto.randomUUID()}`);
+    const config = await realConfig(realModelPath!, `mineru-real-${crypto.randomUUID()}`);
     const fingerprintBefore = modelRootFingerprint(realModelPath!);
     const handle = createMineruPdfOcrExecutor(config);
     try {
@@ -216,7 +220,7 @@ describe.skipIf(!realGateActive)("REAL MinerU production cutover acceptance (mac
     const emptyModelRoot = join(mkdtempSync(join(tmpdir(), "mineru-real-nomodel-")), "models");
     mkdirSync(emptyModelRoot, { recursive: true });
     tempRoots.push(emptyModelRoot);
-    const config = realConfig(emptyModelRoot, `mineru-real-nomodel-${crypto.randomUUID()}`);
+    const config = await realConfig(emptyModelRoot, `mineru-real-nomodel-${crypto.randomUUID()}`);
     const handle = createMineruPdfOcrExecutor(config);
     try {
       await expect(createIngestionService(storage, { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3, pdfOcrExecutor: handle.executor }).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_REQUIRED");

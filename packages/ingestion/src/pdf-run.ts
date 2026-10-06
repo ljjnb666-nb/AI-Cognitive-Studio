@@ -179,6 +179,13 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
     }
     if (!await failOcrPageAttempt({ ...key, claimToken: claim.claimToken, errorCode: result.errorCode, kind: result.kind, nextAttemptAt: result.nextAttemptAt })) return null;
     if (result.kind === "terminal") return null;
+    // RF01 P1-01: a durably RETRYABLE page (e.g. the host OCR capacity slot is
+    // owned by another live claim) must never terminalize the run as
+    // OCR_REQUIRED. The page stays PENDING and immediately claimable — NO
+    // future nextAttemptAt is stored — and this error propagates to the run's
+    // existing retryable execution authority (transitionRunToRetryable + the
+    // queue's retry cadence). The queue cadence is the single retry clock.
+    if (result.errorCode === SourceError.OCR_HOST_CAPACITY) throw new Error(SourceError.OCR_HOST_CAPACITY);
   }
 }
 

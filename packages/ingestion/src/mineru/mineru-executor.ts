@@ -1,11 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, lstat, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { logger } from "@ai-cognitive/shared";
-import { OCR_HOST_LEASE_TTL_MS, acquireOcrHostLease, createOcrServerInstance, markOcrServerStatus, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease } from "../ocr-durability.js";
+import { OCR_HOST_LEASE_TTL_MS, acquireOcrHostLease, createOcrServerInstance, markOcrServerOrphaned, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease } from "../ocr-durability.js";
 import type { PdfOcrExecutor, PdfOcrExecutorDescriptor, PdfOcrPageRequest, PdfOcrPageResult } from "../pdf-routing.js";
 import { SourceError } from "../source-errors.js";
 import { MINERU_EXECUTOR_NAME, buildMineruParseArgs, judgeMineruParseExit, mineruFailureForOutcome } from "./mineru-commands.js";
-import type { MineruExecutorConfig } from "./mineru-config.js";
+import { isWithinPath, type MineruExecutorConfig } from "./mineru-config.js";
 import { sleep, spawnBounded, type BoundedSpawnResult } from "./mineru-process.js";
 import { createMineruServerSession, type MineruServerSession } from "./mineru-server.js";
 
@@ -46,9 +46,16 @@ export type MineruPdfOcrExecutorHandle = {
   close(): Promise<void>;
 };
 
-/** Fixed process-scoped egress denial for MinerU children (defense in depth for MINERU_MODEL_SOURCE=local; 04B-0-verified mechanism, active in production). */
+/**
+ * Fixed process-scoped egress denial for MinerU children. Defense-in-depth
+ * PLUS the enforced MINERU_MODEL_SOURCE=local configuration: this is NOT a
+ * kernel/network sandbox — it denies the HTTP stacks MinerU's download paths
+ * use (requests/huggingface_hub/modelscope) and raw sockets are out of scope.
+ * Uppercase and lowercase conventional proxy variables are both covered.
+ */
 function mineruEgressDenialEnv(): Record<string, string> {
-  return { HTTP_PROXY: "http://127.0.0.1:9", HTTPS_PROXY: "http://127.0.0.1:9", ALL_PROXY: "http://127.0.0.1:9", NO_PROXY: "" };
+  const denial = { HTTP_PROXY: "http://127.0.0.1:9", HTTPS_PROXY: "http://127.0.0.1:9", ALL_PROXY: "http://127.0.0.1:9", NO_PROXY: "" };
+  return { ...denial, http_proxy: denial.HTTP_PROXY, https_proxy: denial.HTTPS_PROXY, all_proxy: denial.ALL_PROXY, no_proxy: "" };
 }
 
 export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): MineruPdfOcrExecutorHandle {
@@ -97,12 +104,15 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
     if (closing) return failure(SourceError.OCR_PROCESS_FAILED, "transient");
     const logContext = { ingestionRunId: request.ingestionRunId, physicalPageIndex: request.physicalPageIndex, routingGeneration: request.routingGeneration, executor: MINERU_EXECUTOR_NAME };
 
-    // 1. Host capacity authority (OcrHostLease). No busy-wait: a conflict is a
-    // bounded transient failure; the durable attempt budget governs retry.
+    // 1. Host capacity authority (OcrHostLease). No busy-wait and NO stored
+    // future page time (RF01 P1-01): the capacity failure propagates as a
+    // run-retryable error through 04B-2's existing retryable execution
+    // authority, leaving the page PENDING and immediately claimable — the
+    // queue's retry cadence is the single retry clock.
     const lease = await acquireOcrHostLease(config.hostId, OCR_HOST_LEASE_TTL_MS, { executable: config.executable, modelPath: config.modelPath, tier: config.tier, version: config.version }).catch(() => null);
     if (!lease) {
       logger.warn("mineru.ocr.host_capacity", { ...logContext, failureCode: SourceError.OCR_HOST_CAPACITY });
-      return await recordCall(request, failure(SourceError.OCR_HOST_CAPACITY, "transient", new Date(Date.now() + config.capacityRetryDelayMs)), startedAt);
+      return await recordCall(request, failure(SourceError.OCR_HOST_CAPACITY, "transient"), startedAt);
     }
     let leaseLost = false;
     const heartbeat = setInterval(() => {
@@ -185,7 +195,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
       } else if (parseResult.outputOverflow) {
         result = failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
       } else {
-        result = await resultForParseOutput(parseResult, outputMarkdownPath, config.maxOutputBytes);
+        result = await resultForParseOutput(parseResult, outputMarkdownPath, outputDir, config.maxOutputBytes);
       }
       return recordCall(request, result, startedAt);
     } catch (error) {
@@ -196,14 +206,23 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
       logger.warn("mineru.ocr.execution_error", { ...logContext, failureCode: stable });
       return recordCall(request, failure(stable, "transient"), startedAt);
     } finally {
-      // 6. Bounded cleanup of everything this claim owned, in every outcome.
+      // 6. Bounded cleanup of everything this claim owned, in every outcome,
+      // through the CLOSED server state machine (RF01 P1-07).
       clearInterval(heartbeat);
       if (session) {
+        if (serverStarted) await markOcrServerStopping(lease.claimToken).catch(() => false);
         const disposition = await session.stop();
         stopDisposition = disposition.kind;
         if (serverStarted && session.endpoint) {
           const terminated = disposition.kind === "STOPPED" || disposition.kind === "ALREADY_EXITED" || disposition.kind === "KILLED_BY_RECORDED_IDENTITY";
-          await markOcrServerStatus(lease.claimToken, terminated ? "STOPPED" : "ORPHANED", disposition.kind === "ORPHAN_SUSPECT" ? disposition.reason : disposition.kind).catch(() => undefined);
+          if (terminated) await markOcrServerStopped(lease.claimToken, disposition.kind).catch(() => undefined);
+          else await markOcrServerOrphaned(lease.claimToken, disposition.reason).catch(() => undefined);
+        } else if (!serverStarted && disposition.kind === "ALREADY_EXITED") {
+          // Startup never produced a usable server AND left no live endpoint
+          // evidence: the proven never-started cleanup state.
+          await markOcrServerStopped(lease.claimToken, "START_FAILED_NO_ENDPOINT").catch(() => undefined);
+        } else {
+          await markOcrServerOrphaned(lease.claimToken, `START_FAILED_${disposition.kind}`).catch(() => undefined);
         }
       }
       if (claimDir) await rm(claimDir, { recursive: true, force: true }).catch(() => undefined);
@@ -216,29 +235,56 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
       logger.info(serverStarted ? "mineru.ocr.page_invocation_completed" : "mineru.ocr.page_invocation_aborted", { ...logContext, stopDisposition, durationMs: Date.now() - startedAt });
     }
 
-    /** Reads and validates the bounded markdown output; classifies every deviation. */
-    async function resultForParseOutput(parseResult: BoundedSpawnResult, expectedMarkdownPath: string, maxOutputBytes: number): Promise<PdfOcrPageResult> {
+    /**
+     * Reads and validates the bounded markdown output; classifies every
+     * deviation. RF01 P1-03: the output is UNTRUSTED external-process output,
+     * so the bound is enforced BEFORE any allocation — resolved-path check,
+     * lstat (regular file, symlink/reparse rejected), size cap, then a read
+     * limited to the stat'd size that fails closed if the file grows.
+     */
+    async function resultForParseOutput(parseResult: BoundedSpawnResult, expectedMarkdownPath: string, outputDir: string, maxOutputBytes: number): Promise<PdfOcrPageResult> {
       const outcome = judgeMineruParseExit({ exitCode: parseResult.code, stdout: parseResult.stdout });
       if (outcome.kind !== "OUTPUT_WRITTEN") {
         const mapped = mineruFailureForOutcome(outcome);
         return failure(mapped.errorCode, mapped.kind);
       }
-      // The output MUST be exactly the application-generated path: MinerU
-      // output is untrusted external-process output — location, size and
-      // encoding are validated before consumption.
+      // The output MUST be exactly the application-generated path inside the
+      // application-generated output directory.
       if (outcome.markdownPath !== expectedMarkdownPath) return failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
-      let markdown: Buffer;
+      if (!isWithinPath(expectedMarkdownPath, outputDir)) return failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
+      let info;
       try {
-        markdown = await readFile(expectedMarkdownPath);
+        info = await lstat(expectedMarkdownPath);
       } catch {
         return failure(SourceError.OCR_TEMP_IO_ERROR, "transient");
       }
-      if (markdown.byteLength > maxOutputBytes) return failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
-      const text = stripUtf8Bom(markdown.toString("utf8"));
-      // "Actual candidate textual output" is the executor's bar for SUCCEEDED
-      // (mission output contract). Canonical usability stays 04B-2's authority.
-      if (text.trim().length === 0) return failure(SourceError.OCR_NO_USABLE_TEXT, "transient");
-      return { status: "SUCCEEDED", text };
+      // Symlink/reparse-point ambiguity and non-regular files are rejected
+      // before any read; the size cap is enforced BEFORE allocating memory.
+      if (info.isSymbolicLink() || !info.isFile()) return failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
+      if (info.size > maxOutputBytes) return failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
+      let fileHandle;
+      try {
+        fileHandle = await open(expectedMarkdownPath, "r");
+      } catch {
+        return failure(SourceError.OCR_TEMP_IO_ERROR, "transient");
+      }
+      try {
+        const markdown = Buffer.alloc(info.size);
+        const read = await fileHandle.read(markdown, 0, info.size, 0);
+        // Fail closed if the file changed size between stat and read.
+        const extra = Buffer.alloc(1);
+        const grew = (await fileHandle.read(extra, 0, 1, info.size)).bytesRead > 0;
+        if (grew || read.bytesRead !== info.size) return failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
+        const text = stripUtf8Bom(markdown.toString("utf8"));
+        // "Actual candidate textual output" is the executor's bar for SUCCEEDED
+        // (mission output contract). Canonical usability stays 04B-2's authority.
+        if (text.trim().length === 0) return failure(SourceError.OCR_NO_USABLE_TEXT, "transient");
+        return { status: "SUCCEEDED", text };
+      } catch {
+        return failure(SourceError.OCR_TEMP_IO_ERROR, "transient");
+      } finally {
+        await fileHandle.close().catch(() => undefined);
+      }
     }
   }
 

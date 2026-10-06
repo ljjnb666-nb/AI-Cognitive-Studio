@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { sep as osPathSep } from "node:path";
 import { buildMineruParseArgs, buildMineruServerArgs, judgeMineruParseExit, mineruFailureForOutcome, mineruPageSelector, parseMineruEndpoint, parseMineruParseEnvelope } from "../../src/mineru/mineru-commands.js";
 import { resolveMineruExecutorConfig } from "../../src/mineru/mineru-config.js";
 import { readEnvironment } from "@ai-cognitive/shared/server";
@@ -113,13 +114,40 @@ describe("MinerU executor configuration resolution (fail-fast contract)", () => 
 
   it("resolves a full valid configuration with pinned defaults", () => {
     const config = resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_EXECUTABLE_ARGS: JSON.stringify(["-x", "y"]) } as never))!;
-    expect(config).toMatchObject({ executable, executableArgs: ["-x", "y"], modelSource: "local", tier: "flash", version: "4.0.3", modelPath: import.meta.dirname, timeoutMs: 300_000, capacityRetryDelayMs: 30_000 });
+    expect(config).toMatchObject({ executable, executableArgs: ["-x", "y"], modelSource: "local", tier: "flash", version: "4.0.3", modelPath: import.meta.dirname, timeoutMs: 300_000 });
     expect(config.hostId).toMatch(/^mineru-/);
     expect(config).not.toHaveProperty("modelRevision");
   });
 
   it("fails fast when the model source is not exactly local", () => {
     expect(() => resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_SOURCE: "auto" } as never))).toThrow();
+  });
+
+  it("ignores a declared MINERU_VERSION: provenance is the pinned 4.0.3, never operator text (RF01 P1-08)", () => {
+    const config = resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_VERSION: "9.9.9-custom" } as never))!;
+    expect(config.version).toBe("4.0.3");
+  });
+
+  it("rejects model root / claim temp root overlaps in BOTH directions, equality, and Windows case differences (RF01 P1-09)", () => {
+    const anyDir = { directoryExists: () => true };
+    const modelRoot = import.meta.dirname;
+    const homeRoot = import.meta.dirname + osPathSep + "homes";
+    // model inside home / equality → reject
+    expect(() => resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: modelRoot, MINERU_HOME_ROOT: modelRoot } as never), anyDir)).toThrow(/^OCR_PATH_OVERLAP/);
+    expect(() => resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: modelRoot, MINERU_HOME_ROOT: modelRoot + osPathSep + "nested" } as never), anyDir)).toThrow(/^OCR_PATH_OVERLAP/);
+    // home inside model → reject
+    expect(() => resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: homeRoot, MINERU_HOME_ROOT: homeRoot + osPathSep + "claims" + osPathSep + "inner" } as never), anyDir)).toThrow(/^OCR_PATH_OVERLAP/);
+    // same path with different Windows casing → reject where applicable
+    expect(() => resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: modelRoot.toUpperCase(), MINERU_HOME_ROOT: modelRoot.toLowerCase() + osPathSep + "homes" } as never), anyDir)).toThrow(/^OCR_PATH_OVERLAP/);
+    // disjoint paths → accept
+    const elsewhere = import.meta.dirname + osPathSep + "disjoint-models";
+    const config = resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: elsewhere, MINERU_HOME_ROOT: homeRoot } as never), { directoryExists: (path) => path === elsewhere })!;
+    expect(config.modelPath).toBe(elsewhere);
+    expect(config.homeRoot).toBe(homeRoot);
+  });
+
+  it("treats OCR_HOST_ID as explicit OCR configuration for the provider-required fail-fast rule (RF01 P2)", () => {
+    expect(() => resolveMineruExecutorConfig(baseEnvironment({ OCR_HOST_ID: "mineru-host-x" } as never))).toThrow(/^OCR_PROVIDER_REQUIRED:OCR_HOST_ID$/);
   });
 
   it("fails fast when MINERU_MODEL_PATH is absent or does not exist", () => {

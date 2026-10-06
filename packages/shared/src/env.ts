@@ -44,13 +44,15 @@ export const environmentSchema = z.object({
   MINERU_MODEL_SOURCE: z.enum(["local"]).optional(),
   MINERU_MODEL_PATH: z.string().min(1).optional(),
   MINERU_TIER: z.enum(["flash"]).optional(),
+  // Recognized but deliberately UNUSED for provenance: the production MinerU
+  // version is pinned to 4.0.3 and verified against the runtime at startup
+  // (RF01 P1-08). An operator-declared value never reaches parserVersion.
   MINERU_VERSION: z.string().min(1).optional(),
   MINERU_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
   MINERU_SERVER_START_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
   MINERU_SERVER_STOP_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
   MINERU_HOME_ROOT: z.string().min(1).optional(),
   MINERU_MAX_OUTPUT_BYTES: z.coerce.number().int().positive().optional(),
-  MINERU_CAPACITY_RETRY_DELAY_MS: z.coerce.number().int().positive().optional(),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   BETA_ACCESS_MODE: z.enum(["OFF", "ENFORCED"]).default("OFF"),
   WORKSPACE_EXPENSIVE_OPERATION_LIMIT: z.coerce.number().int().min(1).max(16).default(2),

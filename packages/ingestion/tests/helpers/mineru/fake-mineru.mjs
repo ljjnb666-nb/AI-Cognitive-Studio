@@ -14,6 +14,10 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const [, , command, ...rest] = process.argv;
+if (command === "--version") {
+  console.log("MinerU 版本: " + (process.env.MINERU_FAKE_VERSION ?? "4.0.3"));
+  process.exit(0);
+}
 const home = process.env.MINERU_HOME;
 if (!home) {
   console.error("fake-mineru: MINERU_HOME not set");
@@ -51,9 +55,6 @@ if (command === "server" && rest[0] === "start") {
   process.exit(0);
 } else if (command === "parse") {
   runParse();
-} else if (command === "--version") {
-  console.log("MinerU 版本: 4.0.3-fake");
-  process.exit(0);
 } else {
   console.error("fake-mineru: unsupported command " + String(command));
   process.exit(9);

@@ -1,27 +1,29 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { forceKillRecordedPid, probeFreeTcpPort, recordedProcessAlive, sleep, spawnBounded, type BoundedSpawnOptions } from "./mineru-process.js";
+import { forceKillRecordedPid, probeFreeTcpPort, processCreationTime, recordedProcessAlive, sleep, spawnBounded, type BoundedSpawnOptions } from "./mineru-process.js";
 import { buildMineruServerArgs, parseMineruEndpoint, type MineruEndpoint } from "./mineru-commands.js";
 
 /**
- * Claim-scoped MinerU doclib server lifecycle (BOOK-INGESTION-04B-3).
+ * Claim-scoped MinerU doclib server lifecycle (BOOK-INGESTION-04B-3, hardened
+ * in 04B-3 RF01).
  *
  * 04B-0 established that `mineru parse` is a CLIENT of a per-MINERU_HOME
  * doclib server (parse without a server: exit 1 "server_not_running"), that a
  * claim-scoped home + pinned unique port + shared immutable model root is the
  * proven parallel-safe architecture, and that on Windows the ENDPOINT FILE
- * (pid + server_id) is the ONLY authoritative server identity — the CLI's own
- * pid is the wrapper, ports are never ownership, and a graceful-stop RPC can
- * reach the wrong server under dual-bind.
+ * (pid + server_id) is the ONLY durable server identity — the CLI's own pid is
+ * the wrapper, ports are never ownership, and a graceful-stop RPC can reach
+ * the wrong server under dual-bind.
  *
  * Consequently every claim runs its own short-lived server:
  *  - a fresh probe-allocated port is pinned via MINERU_DOCLIB_TCP_PORT
  *  - start is bounded; readiness evidence is the validated endpoint file
- *  - stop is graceful first, then a guarded force-kill that re-reads the
- *    endpoint file, requires pid + serverId to match the recorded identity,
- *    requires the live process image to be a python interpreter (pid-reuse
- *    guard), and only then kills the recorded tree. Identity mismatch is
- *    reported as ORPHAN_SUSPECT and NEVER killed.
+ *  - when the endpoint first becomes authoritative, the LIVE process creation
+ *    time is captured as the identity fingerprint (RF01 P1-05)
+ *  - stop is graceful first, then — ONLY IF the recorded pid still carries the
+ *    SAME creation-time fingerprint (plus the image-class check) — a guarded
+ *    force-kill. A same-image recycled pid is NEVER killed: safety beats
+ *    cleanup, and the row is handed to the reconciler as ORPHANED instead.
  */
 
 export type MineruServerStartFailure =
@@ -42,13 +44,6 @@ const ENDPOINT_POLL_MS = 250;
 const STOP_VERIFY_POLL_MS = 250;
 const STOP_VERIFY_TIMEOUT_MS = 10_000;
 
-export type MineruServerSession = {
-  /** Validated endpoint identity once started; null until then. */
-  readonly endpoint: MineruEndpoint | null;
-  start(): Promise<MineruServerStartFailure | null>;
-  stop(): Promise<MineruServerStopDisposition>;
-};
-
 export type MineruServerSessionInput = {
   executable: string;
   executableArgs: string[];
@@ -58,26 +53,57 @@ export type MineruServerSessionInput = {
   stopTimeoutMs: number;
   maxOutputBytes: number;
   abortSignal?: AbortSignal;
-  /** Recorded-pid live-image guard (pid-reuse protection; production pins python). */
+  /** Recorded-pid live-image guard (necessary condition only; production pins python). */
   processImagePattern?: RegExp;
 };
 
+export type MineruServerSession = {
+  /** Validated endpoint identity once started; null until then. */
+  readonly endpoint: MineruEndpoint | null;
+  /** Creation-time fingerprint of the endpoint process once captured; null when never proven. */
+  readonly endpointCreationTime: number | null;
+  start(): Promise<MineruServerStartFailure | null>;
+  stop(): Promise<MineruServerStopDisposition>;
+};
+
+/**
+ * A single negative liveness probe is NOT enough to declare a recorded server
+ * gone (the probe is an external tasklist/ps invocation that can return empty
+ * under load): two consecutive negative observations are required. Safety over
+ * aggressive cleanup — the cost of a second probe is milliseconds.
+ */
+async function confirmedNotAlive(pid: number, imagePattern: RegExp | undefined, signal?: AbortSignal): Promise<boolean> {
+  for (let observations = 0; observations < 2; observations++) {
+    if (await recordedProcessAlive(pid, imagePattern ?? /python/i)) return false;
+    if (observations === 0) await sleep(150, signal);
+  }
+  return true;
+}
+
+export async function readMineruEndpointFile(homeDir: string): Promise<MineruEndpoint | null> {
+  try {
+    return parseMineruEndpoint(await readFile(join(homeDir, ENDPOINT_FILE), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 export async function createMineruServerSession(input: MineruServerSessionInput): Promise<MineruServerSession> {
-  const endpointPath = join(input.homeDir, ENDPOINT_FILE);
   let endpoint: MineruEndpoint | null = null;
+  /** Creation-time fingerprint captured when the endpoint became authoritative (null = never proven). */
+  let endpointCreationTime: number | null = null;
   let stopped = false;
 
-  async function readEndpoint(): Promise<MineruEndpoint | null> {
-    try {
-      return parseMineruEndpoint(await readFile(endpointPath, "utf8"));
-    } catch {
-      return null;
-    }
+  async function captureFingerprint(candidate: MineruEndpoint): Promise<number | null> {
+    return await processCreationTime(candidate.pid);
   }
 
   return {
     get endpoint() {
       return endpoint;
+    },
+    get endpointCreationTime() {
+      return endpointCreationTime;
     },
     async start(): Promise<MineruServerStartFailure | null> {
       if (stopped) return { kind: "ABORTED" };
@@ -99,7 +125,7 @@ export async function createMineruServerSession(input: MineruServerSessionInput)
       const deadline = Date.now() + input.startTimeoutMs;
       while (endpoint === null && Date.now() < deadline) {
         if (input.abortSignal?.aborted) return { kind: "ABORTED" };
-        endpoint = await readEndpoint();
+        endpoint = await readMineruEndpointFile(input.homeDir);
         if (endpoint === null) await sleep(ENDPOINT_POLL_MS, input.abortSignal);
       }
       if (endpoint === null) {
@@ -107,55 +133,98 @@ export async function createMineruServerSession(input: MineruServerSessionInput)
         if (startResult.timedOut || startResult.outputOverflow) return { kind: "START_TIMEOUT" };
         return { kind: "START_FAILED", stderrTail: startResult.stderr.slice(-2000) };
       }
+      endpointCreationTime = await captureFingerprint(endpoint);
       return null;
     },
     async stop(): Promise<MineruServerStopDisposition> {
       if (stopped) return { kind: "STOPPED" };
       stopped = true;
-      const recorded = endpoint ?? await readEndpoint();
-      if (input.abortSignal?.aborted && recorded === null) return { kind: "ORPHAN_SUSPECT", reason: "ABORTED_BEFORE_ENDPOINT" };
+      const recorded = endpoint ?? await readMineruEndpointFile(input.homeDir);
       if (recorded === null) return { kind: "ALREADY_EXITED" };
       if (!input.abortSignal?.aborted) {
         const stopResult = await spawnBounded(input.executable, [...input.executableArgs, ...buildMineruServerArgs("stop")], { env: input.childEnvBase, cwd: input.homeDir, timeoutMs: input.stopTimeoutMs, maxOutputBytes: input.maxOutputBytes });
-        if (stopResult.spawnErrorCode === "ENOENT") return await guardedKill(recorded, endpointPath, input.processImagePattern);
-        const exited = await awaitPidExit(recorded.pid, STOP_VERIFY_TIMEOUT_MS, input.processImagePattern, input.abortSignal);
+        if (stopResult.spawnErrorCode === "ENOENT") return await guardedKill(recorded);
+        const exited = await awaitRecordedExit(recorded.pid, STOP_VERIFY_TIMEOUT_MS);
         if (exited) return { kind: "STOPPED" };
       }
-      return await guardedKill(recorded, endpointPath, input.processImagePattern);
+      return await guardedKill(recorded);
     },
   };
-}
 
-/** Polls until the recorded pid disappears (or the budget expires). */
-async function awaitPidExit(pid: number, timeoutMs: number, expectedImagePattern?: RegExp, signal?: AbortSignal): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (!(await recordedProcessAlive(pid, expectedImagePattern))) return true;
-    if (Date.now() >= deadline || signal?.aborted) return false;
-    await sleep(STOP_VERIFY_POLL_MS, signal);
+  /** Polls until the RECORDED process is gone. A live pid whose creation time no longer matches the recorded fingerprint is a recycled pid — the recorded process IS gone. */
+  async function awaitRecordedExit(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (await confirmedNotAlive(pid, input.processImagePattern, input.abortSignal)) return true;
+      if (endpointCreationTime !== null && (await processCreationTime(pid)) !== endpointCreationTime) return true;
+      if (Date.now() >= deadline) return false;
+      await sleep(STOP_VERIFY_POLL_MS, input.abortSignal);
+    }
+  }
+
+  /**
+   * The ONLY force-kill path, and it requires LIVE identity evidence
+   * (RF01 P1-05): the fingerprint captured when THIS claim's endpoint became
+   * authoritative must exist, the endpoint pid+serverId must re-match the
+   * file our own claim-scoped server wrote, the image class must match, AND
+   * the live creation time must equal that fingerprint. A same-image recycled
+   * pid fails the fingerprint equality — and a session that never captured a
+   * fingerprint (crafted/stale endpoint, abort before capture) has NO live
+   * identity evidence at all and is NEVER killed (ORPHAN_SUSPECT; the
+   * reconciler may only act on its own evidence later).
+   */
+  async function guardedKill(recorded: MineruEndpoint): Promise<MineruServerStopDisposition> {
+    const fresh = await readMineruEndpointFile(input.homeDir);
+    if (!fresh || fresh.pid !== recorded.pid || fresh.serverId !== recorded.serverId) {
+      if (await confirmedNotAlive(recorded.pid, input.processImagePattern, input.abortSignal)) return { kind: "ALREADY_EXITED" };
+      return { kind: "ORPHAN_SUSPECT", reason: "ENDPOINT_IDENTITY_MISMATCH" };
+    }
+    if (endpointCreationTime === null) return { kind: "ORPHAN_SUSPECT", reason: "IDENTITY_NOT_CAPTURED" };
+    const liveCreationTime = await processCreationTime(recorded.pid);
+    if (liveCreationTime === null) {
+      if (await confirmedNotAlive(recorded.pid, input.processImagePattern, input.abortSignal)) return { kind: "ALREADY_EXITED" };
+      return { kind: "ORPHAN_SUSPECT", reason: "LIVE_IDENTITY_UNPROVABLE" };
+    }
+    if (liveCreationTime !== endpointCreationTime) {
+      return { kind: "ORPHAN_SUSPECT", reason: "PID_REUSED_SAME_IMAGE" };
+    }
+    // The just-read creation time IS the live evidence: a dead process has no
+    // creation time to read, and equality proves this pid is exactly the
+    // recorded server. (An additional liveness probe here proved flaky under
+    // abort/termination bursts and is intentionally not required before the kill.)
+    if (!(await forceKillRecordedPid(recorded.pid))) return { kind: "ORPHAN_SUSPECT", reason: "FORCE_KILL_FAILED" };
+    if (!(await awaitPidExit(recorded.pid, STOP_VERIFY_TIMEOUT_MS))) return { kind: "ORPHAN_SUSPECT", reason: "KILL_NOT_CONFIRMED" };
+    return { kind: "KILLED_BY_RECORDED_IDENTITY" };
+  }
+
+  /** Post-kill liveness check: only the raw pid/image check applies here (the kill just happened; a recycle within this window is not survivable evidence). */
+  async function awaitPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (!(await recordedProcessAlive(pid, input.processImagePattern ?? /python/i))) return true;
+      if (Date.now() >= deadline || input.abortSignal?.aborted) return false;
+      await sleep(STOP_VERIFY_POLL_MS, input.abortSignal);
+    }
   }
 }
 
 /**
- * The ONLY force-kill path: endpoint identity (pid + serverId) must re-match
- * the file our own claim-scoped server wrote, and the live image must be a
- * python interpreter. Anything else is never killed (ORPHAN_SUSPECT) — port
- * alone, image name sweeps, and stale pids are all banned by 04B-0 evidence.
+ * NECESSARY (not sufficient) cross-restart identity evidence for a claim home
+ * we no longer hold in memory (RF01 P1-05/P1-06): the live process must be
+ * OLDER than the endpoint file — the server necessarily existed before it
+ * wrote the endpoint. A live pid created AFTER the endpoint was written is a
+ * recycled pid and can never be force-killed on this evidence; the caller
+ * reports ORPHANED instead.
  */
-async function guardedKill(recorded: MineruEndpoint, endpointPath: string, expectedImagePattern?: RegExp): Promise<MineruServerStopDisposition> {
-  const fresh = await (async () => {
-    try {
-      return parseMineruEndpoint(await readFile(endpointPath, "utf8"));
-    } catch {
-      return null;
-    }
-  })();
-  if (!fresh || fresh.pid !== recorded.pid || fresh.serverId !== recorded.serverId) {
-    if (!(await recordedProcessAlive(recorded.pid, expectedImagePattern))) return { kind: "ALREADY_EXITED" };
-    return { kind: "ORPHAN_SUSPECT", reason: "ENDPOINT_IDENTITY_MISMATCH" };
+export async function processPrecedesEndpointEvidence(endpoint: MineruEndpoint, homeDir: string, expectedImagePattern: RegExp): Promise<boolean> {
+  if (!(await recordedProcessAlive(endpoint.pid, expectedImagePattern))) return false;
+  let endpointMtime: number | null = null;
+  try {
+    endpointMtime = (await stat(join(homeDir, ENDPOINT_FILE))).mtimeMs;
+  } catch {
+    return false;
   }
-  if (!(await recordedProcessAlive(recorded.pid, expectedImagePattern))) return { kind: "ALREADY_EXITED" };
-  if (!(await forceKillRecordedPid(recorded.pid))) return { kind: "ORPHAN_SUSPECT", reason: "FORCE_KILL_FAILED" };
-  if (!(await awaitPidExit(recorded.pid, STOP_VERIFY_TIMEOUT_MS, expectedImagePattern))) return { kind: "ORPHAN_SUSPECT", reason: "KILL_NOT_CONFIRMED" };
-  return { kind: "KILLED_BY_RECORDED_IDENTITY" };
+  const creationTime = await processCreationTime(endpoint.pid);
+  if (creationTime === null) return false;
+  return creationTime <= endpointMtime;
 }

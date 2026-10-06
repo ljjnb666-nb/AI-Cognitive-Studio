@@ -4,16 +4,21 @@ import { platform } from "node:os";
 
 /**
  * Bounded, identity-scoped child-process primitives for the MinerU executor
- * (BOOK-INGESTION-04B-3).
+ * (BOOK-INGESTION-04B-3, hardened in 04B-3 RF01).
  *
- * Rules enforced here (04B-0 evidence + mission contract):
+ * Rules enforced here:
  *  - spawn argv arrays only; no shell is ever constructed
  *  - stdout/stderr are captured under explicit byte caps; overflow terminates
  *    the child (a degenerate process must not produce unlimited output)
- *  - every spawn has a hard timeout; on timeout the invocation's OWN process
- *    TREE is terminated (Windows: taskkill /PID <pid> /T /F via argv — the
- *    MinerU CLI spawns python children a bare kill() would orphan)
+ *  - every spawn has a hard deadline: timeout initiates termination of the
+ *    directly spawned process tree, then a BOUNDED escalation window runs, and
+ *    the caller ALWAYS receives a bounded disposition (RF01 P1-04). The
+ *    disposition states honestly whether termination was CONFIRMED — a
+ *    surviving (possibly orphaned) tree is never declared cleaned.
  *  - port probing is allocation only: a free port is never ownership evidence
+ *  - live-process identity evidence includes the process CREATION TIME
+ *    fingerprint (RF01 P1-05): an image-name match alone is explicitly NOT a
+ *    pid-reuse guard.
  */
 
 export type BoundedSpawnResult = {
@@ -22,6 +27,8 @@ export type BoundedSpawnResult = {
   timedOut: boolean;
   aborted: boolean;
   outputOverflow: boolean;
+  /** Honest termination disposition for timeout/abort paths: true only when the process (tree) termination was observed to complete. */
+  terminateConfirmed: boolean;
   stdout: string;
   stderr: string;
   spawnErrorCode?: string;
@@ -34,6 +41,11 @@ export type BoundedSpawnOptions = {
   maxOutputBytes: number;
   abortSignal?: AbortSignal;
   windowsHide?: boolean;
+  /**
+   * Bounded window granted to termination after the deadline before the
+   * caller receives its disposition anyway (default 5000ms; never infinite).
+   */
+  terminationGraceMs?: number;
 };
 
 /** Captures a stream under a byte cap; resolves true if the cap was exceeded. */
@@ -63,52 +75,82 @@ export async function spawnBounded(executable: string, args: string[], options: 
     try {
       child = spawn(executable, args, { env: options.env, ...(options.cwd ? { cwd: options.cwd } : {}), windowsHide: options.windowsHide ?? true, stdio: ["ignore", "pipe", "pipe"] });
     } catch {
-      resolve({ code: null, signal: null, timedOut: false, aborted: false, outputOverflow: false, stdout: "", stderr: "", spawnErrorCode: "CHILD_SPAWN_ERROR" });
+      resolve({ code: null, signal: null, timedOut: false, aborted: false, outputOverflow: false, terminateConfirmed: false, stdout: "", stderr: "", spawnErrorCode: "CHILD_SPAWN_ERROR" });
       return;
     }
-    const state: BoundedSpawnResult = { code: null, signal: null, timedOut: false, aborted: false, outputOverflow: false, stdout: "", stderr: "" };
+    const state: BoundedSpawnResult = { code: null, signal: null, timedOut: false, aborted: false, outputOverflow: false, terminateConfirmed: false, stdout: "", stderr: "" };
     let settled = false;
-    let timedOut = false;
-    const stdout = captureStream(child.stdout!, options.maxOutputBytes, () => { state.outputOverflow = true; terminateTree(child.pid); });
-    const stderr = captureStream(child.stderr!, options.maxOutputBytes, () => { state.outputOverflow = true; terminateTree(child.pid); });
+    let exitObserved = false;
+    let terminationInitiated = false;
+    const stdout = captureStream(child.stdout!, options.maxOutputBytes, () => { state.outputOverflow = true; initiateTermination(); });
+    const stderr = captureStream(child.stderr!, options.maxOutputBytes, () => { state.outputOverflow = true; initiateTermination(); });
     const finish = () => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(deadlineTimer);
+      clearTimeout(graceTimer);
       options.abortSignal?.removeEventListener("abort", onAbort);
-      void Promise.all([stdout.done(), stderr.done()]).then(() => {
+      // Bounded stream drain: a surviving detached descendant can hold the
+      // stdio pipes open forever; the captured chunks are already buffered,
+      // so the caller is resolved with a bounded drain either way (RF01 P1-04).
+      void Promise.race([Promise.all([stdout.done(), stderr.done()]), sleep(250)]).then(() => {
         state.stdout = stdout.text();
         state.stderr = stderr.text();
         resolve(state);
       });
     };
-    const timer = setTimeout(() => {
-      timedOut = true;
+    // RF01 P1-04: the deadline initiates termination, grants a bounded grace
+    // window, escalates once, and then ALWAYS resolves the caller — the
+    // directly spawned pid belongs to this invocation, so its disposition is
+    // reported honestly (terminateConfirmed=false ⇒ a tree may have survived).
+    const graceMs = options.terminationGraceMs ?? 5_000;
+    let graceTimer: NodeJS.Timeout | undefined;
+    const deadlineTimer = setTimeout(() => {
       state.timedOut = true;
-      terminateTree(child.pid);
+      initiateTermination();
+      graceTimer = setTimeout(() => {
+        if (exitObserved) return;
+        // Escalation for the directly spawned tree, then the bounded disposition.
+        initiateTermination();
+        setTimeout(finish, Math.min(graceMs, 2_000));
+      }, graceMs);
     }, options.timeoutMs);
-    const onAbort = () => {
-      if (settled || timedOut) return;
-      state.aborted = true;
+    const initiateTermination = () => {
+      if (exitObserved || settled) return;
+      terminationInitiated = true;
       terminateTree(child.pid);
+    };
+    const onAbort = () => {
+      if (settled || state.timedOut) return;
+      state.aborted = true;
+      initiateTermination();
+      // Abort never waits unbounded either: bounded disposition below.
+      graceTimer ??= setTimeout(() => { if (!exitObserved) finish(); }, graceMs);
     };
     options.abortSignal?.addEventListener("abort", onAbort, { once: true });
     child.on("error", (error: NodeJS.ErrnoException) => {
       state.spawnErrorCode = error.code ?? "CHILD_SPAWN_ERROR";
       finish();
     });
-    child.on("close", (code, signal) => {
+    child.on("exit", (code, signal) => {
+      exitObserved = true;
       state.code = code;
       state.signal = signal;
+      if (terminationInitiated) state.terminateConfirmed = true;
+      clearTimeout(graceTimer);
       finish();
     });
+    // `close` may never fire when a surviving detached descendant holds the
+    // stdio pipes; the exit event above already resolved us with the honest
+    // disposition, so close handling only covers the normal path.
+    child.on("close", () => finish());
   });
 }
 
 /**
  * Terminates a process TREE by recorded pid (Windows: taskkill /T /F; the
  * MinerU CLI wrapper parents python worker children). Argv-only — no shell.
- * Fire-and-forget: spawnBounded always also waits for `close`.
+ * Fire-and-forget: spawnBounded's bounded escalation always also resolves.
  */
 function terminateTree(pid: number | undefined): void {
   if (!pid || platform() !== "win32") {
@@ -134,19 +176,78 @@ export async function probeFreeTcpPort(): Promise<number> {
   });
 }
 
-const taskListCommand = platform() === "win32" ? "tasklist" : "ps";
+const isWindows = platform() === "win32";
+
+/**
+ * LIVE process creation-time fingerprint (RF01 P1-05). A recycled pid
+ * necessarily carries a NEW creation time, so equality with a fingerprint
+ * captured when identity was first established is the minimum live evidence
+ * that the pid is still the SAME process. Returns null when the process does
+ * not exist or creation time cannot be proven. The value is normalized to
+ * EPOCH MILLISECONDS so callers can compare it against filesystem mtimes.
+ */
+export async function processCreationTime(pid: number): Promise<number | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (isWindows) {
+    return await new Promise((resolve) => {
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).StartTime.ToFileTime()`], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+      } catch {
+        resolve(null);
+        return;
+      }
+      let out = "";
+      const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } }, 10_000);
+      child.stdout!.on("data", (chunk: Buffer) => { if (out.length < 4096) out += chunk.toString("utf8"); });
+      child.on("error", () => { clearTimeout(timer); resolve(null); });
+      child.on("close", () => {
+        clearTimeout(timer);
+        resolve(fileTimeTicksToEpochMs(out.trim()));
+      });
+    });
+  }
+  return await new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("ps", ["-o", "lstart=", "-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let out = "";
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } }, 5_000);
+    child.stdout!.on("data", (chunk: Buffer) => { if (out.length < 4096) out += chunk.toString("utf8"); });
+    child.on("error", () => { clearTimeout(timer); resolve(null); });
+    child.on("close", () => {
+      clearTimeout(timer);
+      const parsed = Date.parse(out.trim());
+      resolve(Number.isFinite(parsed) ? parsed : null);
+    });
+  });
+}
+
+/** Windows FILETIME (100ns ticks since 1601-01-01) → epoch milliseconds. The raw tick count exceeds MAX_SAFE_INTEGER, so the conversion divides in float space (sub-millisecond precision loss is irrelevant for identity evidence). */
+function fileTimeTicksToEpochMs(raw: string): number | null {
+  const ticks = Number.parseFloat(raw);
+  if (!Number.isFinite(ticks) || ticks <= 0) return null;
+  const epochMs = ticks / 10_000 - 11_644_473_600_000;
+  return Number.isFinite(epochMs) && epochMs > 0 ? epochMs : null;
+}
+
+const taskListCommand = isWindows ? "tasklist" : "ps";
 
 /**
  * Live-process evidence for a recorded pid. On Windows the image name must
- * match the expected server runtime pattern — the doclib server is a python
- * process, and this is the pid-reuse guard: a recycled pid owned by an
- * unrelated image is NEVER force-killed by identity-derived cleanup.
+ * match the expected server runtime pattern — a NECESSARY condition only
+ * (RF01 P1-05: it is NOT, by itself, a pid-reuse guard; pair it with the
+ * creation-time fingerprint).
  */
 export async function recordedProcessAlive(pid: number, expectedImagePattern: RegExp = /python/i): Promise<boolean> {
   return await new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = platform() === "win32" ? spawn(taskListCommand, ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }) : spawn(taskListCommand, ["-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"] });
+      child = isWindows ? spawn(taskListCommand, ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }) : spawn(taskListCommand, ["-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"] });
     } catch {
       resolve(false);
       return;
@@ -157,7 +258,7 @@ export async function recordedProcessAlive(pid: number, expectedImagePattern: Re
     child.on("error", () => { clearTimeout(timer); resolve(false); });
     child.on("close", () => {
       clearTimeout(timer);
-      if (platform() === "win32") {
+      if (isWindows) {
         const line = out.split(/\r?\n/).find((candidate) => candidate.includes(String(pid)));
         if (!line) return resolve(false);
         const image = line.split(",")[0]?.replace(/"/g, "") ?? "";
@@ -169,12 +270,19 @@ export async function recordedProcessAlive(pid: number, expectedImagePattern: Re
   });
 }
 
+/** Live identity: same pid, same image class, SAME creation-time fingerprint. */
+export async function recordedProcessIdentityMatches(pid: number, creationTime: number | null, expectedImagePattern: RegExp): Promise<boolean> {
+  if (creationTime === null) return false;
+  if (!(await recordedProcessAlive(pid, expectedImagePattern))) return false;
+  return (await processCreationTime(pid)) === creationTime;
+}
+
 /**
- * Force-kills a recorded pid's tree after `recordedProcessAlive`-style identity
- * verification has already happened at the call site. Windows argv-only.
+ * Force-kills a recorded pid's tree after live identity verification has
+ * already happened at the call site. Windows argv-only.
  */
 export async function forceKillRecordedPid(pid: number): Promise<boolean> {
-  if (platform() !== "win32") {
+  if (!isWindows) {
     try { process.kill(pid); return true; } catch { return false; }
   }
   return await new Promise((resolve) => {

@@ -225,7 +225,7 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
     }
   });
 
-  it("HOST_CAPACITY_CONFLICT: a busy slot yields a bounded transient capacity failure with zero MinerU invocations", async () => {
+  it("HOST_CAPACITY_RETRY_RECOVERS: a busy slot leaves the run retryable (never OCR_REQUIRED), and the normal scheduler redelivery completes it once the slot frees", async () => {
     const bytes = await mixedPdf();
     const storage = new FakeStorageProvider();
     const { workspace, run } = await createPdfRunFixture(bytes, storage);
@@ -233,19 +233,40 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
     const handle = createMineruPdfOcrExecutor(config);
     try {
       const squatter = (await acquireOcrHostLease(config.hostId))!;
-      await expect(serviceWith(storage, handle.executor).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_REQUIRED");
+      // First execution: the capacity failure must NOT terminalize the run.
+      await expect(serviceWith(storage, handle.executor).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_HOST_CAPACITY");
 
-      const failed = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
-      expect(failed.status).toBe("OCR_REQUIRED");
+      const retryable = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(retryable.status).toBe("QUEUED");
+      expect(retryable.errorCode).toBe("SOURCE_OCR_HOST_CAPACITY");
       const attempt = await attemptRow(workspace.id, run.id, 1);
       expect(attempt).toMatchObject({ status: "PENDING", attemptCount: 1, errorCode: "SOURCE_OCR_HOST_CAPACITY" });
-      expect(attempt.nextAttemptAt!.getTime()).toBeGreaterThan(Date.now());
-      // The squatter's lease was never touched (token-fenced release).
+      // RF01 P1-01: NO future page retry time is stored — the queue's retry
+      // cadence is the single retry clock and the page is claimable NOW.
+      expect(attempt.nextAttemptAt).toBeNull();
+      // The squatter's lease was never touched (token-fenced release); no
+      // capacity was consumed beyond the bounded attempt record.
       expect((await prisma.ocrHostLease.findUniqueOrThrow({ where: { hostId: config.hostId } })).claimToken).toBe(squatter.claimToken);
-      // No capacity was consumed beyond the bounded attempt record.
       expect(handle.executor.calls).toEqual([expect.objectContaining({ physicalPageIndex: 1, outcome: "FAILED", errorCode: "SOURCE_OCR_HOST_CAPACITY" })]);
       expect(await prisma.ocrServerInstance.count({ where: { ingestionRunId: run.id } })).toBe(0);
       await releaseOcrHostLease(config.hostId, squatter.claimToken);
+
+      // Capacity is available again: the SAME run is redelivered by the normal
+      // scheduler (the run is already QUEUED — no manual requeue) and succeeds.
+      process.env.MINERU_FAKE_TEXT = "capacity recovery scan text";
+      await serviceWith(storage, handle.executor).processIngestionRun(run.id);
+
+      const succeeded = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(succeeded.status).toBe("SUCCEEDED");
+      const recovered = await attemptRow(workspace.id, run.id, 1);
+      expect(recovered).toMatchObject({ status: "SUCCEEDED", attemptCount: 2 });
+      expect(recovered.attemptCount).toBeGreaterThan(attempt.attemptCount);
+      expect(recovered.textSha256).toBe(sha256("capacity recovery scan text"));
+      // Exactly one extraction, one bootstrap, one current pointer.
+      expect(await prisma.documentExtraction.count({ where: { sourceDocumentId: run.sourceDocumentId } })).toBe(1);
+      expect(await prisma.bookAnalysisBootstrap.count({ where: { ingestionRunId: run.id } })).toBe(1);
+      expect(await prisma.currentDocumentExtraction.count({ where: { workspaceId: workspace.id } })).toBe(1);
+      expect((await prisma.ocrHostLease.findUniqueOrThrow({ where: { hostId: config.hostId } })).claimToken).toBeNull();
     } finally {
       await handle.close();
     }
@@ -439,13 +460,18 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
     try {
       await Promise.allSettled([serviceWith(storage, handleA.executor).processIngestionRun(fixtureA.run.id), serviceWith(storage, handleB.executor).processIngestionRun(fixtureB.run.id)]);
       const states = await prisma.ingestionRun.findMany({ where: { id: { in: [fixtureA.run.id, fixtureB.run.id] } } });
-      expect(states.filter((run) => run.status === "SUCCEEDED").length + states.filter((run) => run.status === "OCR_REQUIRED").length).toBe(2);
+      // The winner succeeds; the capacity loser is durably RETRYABLE (QUEUED) — never terminal.
+      expect(states.filter((run) => run.status === "SUCCEEDED").length + states.filter((run) => run.status === "QUEUED" && run.errorCode === "SOURCE_OCR_HOST_CAPACITY").length).toBe(2);
       // The winner's page attempt is complete; the loser's is a clean PENDING
-      // capacity failure — never a mutation of the winner's attempt.
+      // capacity failure with no future retry time — never a mutation of the
+      // winner's attempt.
       for (const fixture of [fixtureA, fixtureB]) {
         const attempt = await attemptRow(fixture.workspace.id, fixture.run.id, 1);
         expect(["PENDING", "SUCCEEDED"]).toContain(attempt.status);
-        if (attempt.status === "PENDING") expect(attempt.errorCode).toBe("SOURCE_OCR_HOST_CAPACITY");
+        if (attempt.status === "PENDING") {
+          expect(attempt.errorCode).toBe("SOURCE_OCR_HOST_CAPACITY");
+          expect(attempt.nextAttemptAt).toBeNull();
+        }
       }
       // Claim homes stayed disjoint per (run, generation, page); no collision.
       const homes = await prisma.ocrServerInstance.findMany({ where: { ingestionRunId: { in: [fixtureA.run.id, fixtureB.run.id] } } });

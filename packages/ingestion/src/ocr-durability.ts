@@ -176,11 +176,43 @@ export async function recordOcrServerEndpoint(input: { hostClaimToken: string; e
   return changed.count === 1;
 }
 
-/** Late owners may transition only their own instance row (hostClaimToken-scoped). */
-export async function markOcrServerStatus(hostClaimToken: string, status: "STOPPING" | "STOPPED" | "ORPHANED", terminationReason?: string): Promise<boolean> {
+/**
+ * Explicit, state-machine-closed transitions (RF01 P1-07). The lifecycle is
+ * STARTING → RUNNING → STOPPING → STOPPED, with ORPHANED reachable from every
+ * non-terminal state when recovery evidence warrants it. Each helper enforces
+ * its legal previous-state predicate in PostgreSQL — arbitrary mutation
+ * ("anything but STOPPED") is no longer expressible:
+ *  - STOPPING: only from RUNNING (the owner is deliberately tearing down a
+ *    server whose identity it recorded).
+ *  - STOPPED: only from STOPPING, or from STARTING when cleanup can prove the
+ *    server never became usable (no endpoint identity ever existed).
+ *  - ORPHANED: from STARTING/RUNNING/STOPPING — a handled failure or a
+ *    reconciler with evidence that the row's process can no longer be
+ *    accounted for.
+ * All writes are hostClaimToken-scoped: a stale owner can never mutate a
+ * newer claim's row.
+ */
+
+export async function markOcrServerStopping(hostClaimToken: string, terminationReason?: string): Promise<boolean> {
   const changed = await prisma.ocrServerInstance.updateMany({
-    where: { hostClaimToken, status: { not: "STOPPED" } },
-    data: { status, ...(status === "STOPPED" ? { stoppedAt: new Date() } : {}), lastObservedAt: new Date(), ...(terminationReason ? { terminationReason } : {}) },
+    where: { hostClaimToken, status: "RUNNING" },
+    data: { status: "STOPPING", lastObservedAt: new Date(), ...(terminationReason ? { terminationReason } : {}) },
+  });
+  return changed.count === 1;
+}
+
+export async function markOcrServerStopped(hostClaimToken: string, terminationReason?: string): Promise<boolean> {
+  const changed = await prisma.ocrServerInstance.updateMany({
+    where: { hostClaimToken, status: { in: ["STOPPING", "STARTING"] } },
+    data: { status: "STOPPED", stoppedAt: new Date(), lastObservedAt: new Date(), ...(terminationReason ? { terminationReason } : {}) },
+  });
+  return changed.count === 1;
+}
+
+export async function markOcrServerOrphaned(hostClaimToken: string, terminationReason: string): Promise<boolean> {
+  const changed = await prisma.ocrServerInstance.updateMany({
+    where: { hostClaimToken, status: { in: ["STARTING", "RUNNING", "STOPPING"] } },
+    data: { status: "ORPHANED", lastObservedAt: new Date(), terminationReason },
   });
   return changed.count === 1;
 }
@@ -198,10 +230,10 @@ export function validateOcrServerInstanceContract(row: { status: string; pid: nu
 }
 
 /** Same-host reconciler discovery for 04B-3 (durable evidence, not live handles). */
-export async function listReconcilableOcrServerInstances(hostId: string): Promise<Array<{ id: string; hostClaimToken: string; mineruHome: string; pid: number | null; serverId: string | null; status: string }>> {
+export async function listReconcilableOcrServerInstances(hostId: string): Promise<Array<{ id: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; pid: number | null; serverId: string | null; status: string }>> {
   return prisma.ocrServerInstance.findMany({
     where: { hostId, status: { in: ["STARTING", "RUNNING", "STOPPING", "ORPHANED"] } },
-    select: { id: true, hostClaimToken: true, mineruHome: true, pid: true, serverId: true, status: true },
+    select: { id: true, hostClaimToken: true, runExecutionToken: true, mineruHome: true, pid: true, serverId: true, status: true },
     orderBy: { createdAt: "asc" },
   });
 }
