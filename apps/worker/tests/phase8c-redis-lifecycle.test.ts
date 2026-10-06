@@ -16,7 +16,7 @@ vi.mock("../src/source-ingestion.js", () => ({
   createSourceIngestionWorker: closable,
   createSourceIngestionQueue: closable,
   dispatchSourceIngestionWithQueue: async () => 0,
-  resolveSourceIngestionOcrExecutor: () => undefined,
+  resolveSourceIngestionOcrExecutor: async () => undefined,
 }));
 vi.mock("../src/worker.js", () => ({ createHealthCheckWorker: closable }));
 

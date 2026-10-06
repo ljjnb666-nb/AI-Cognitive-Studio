@@ -1,5 +1,5 @@
 import { Queue, Worker } from "bullmq";
-import { createIngestionService, createMineruPdfOcrExecutor, dispatchPendingIngestion, INGESTION_JOB, INGESTION_QUEUE, resolveMineruExecutorConfig, type PdfOcrExecutor } from "@ai-cognitive/ingestion";
+import { createIngestionService, createMineruPdfOcrExecutor, dispatchPendingIngestion, INGESTION_JOB, INGESTION_QUEUE, resolveMineruExecutorConfig, verifyMineruRuntime, type MineruExecutorConfig, type PdfOcrExecutor } from "@ai-cognitive/ingestion";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
 
@@ -10,19 +10,27 @@ export function createSourceIngestionWorker(environment: Environment, options: S
   return new Worker<{ ingestionRunId: string }>(INGESTION_QUEUE, async (job) => service.processIngestionRun(job.data.ingestionRunId), { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_INGESTION_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) });
 }
 
-export type SourceIngestionOcrRuntime = { pdfOcrExecutor: PdfOcrExecutor; close(): Promise<void> };
+export type SourceIngestionOcrRuntime = {
+  pdfOcrExecutor: PdfOcrExecutor;
+  /** Verified runtime configuration for same-host OCR server reconciliation (RF01 P1-06). */
+  config: MineruExecutorConfig;
+  close(): Promise<void>;
+};
 
 /**
- * Production OCR runtime resolution (BOOK-INGESTION-04B-3). Returns undefined
- * when OCR is intentionally unconfigured: production keeps the 04B-2 no-OCR
- * behavior. Malformed explicit MinerU configuration fails fast here, at worker
- * startup — never a silent fallback that could enable network behavior.
+ * Production OCR runtime resolution (BOOK-INGESTION-04B-3, RF01 P1-08).
+ * Returns undefined when OCR is intentionally unconfigured: production keeps
+ * the 04B-2 no-OCR behavior. Malformed explicit MinerU configuration AND a
+ * runtime whose --version does not report the pinned 4.0.3 fail fast here, at
+ * worker startup — provenance is the verified/pinned authority, never
+ * operator-declared text.
  */
-export function resolveSourceIngestionOcrExecutor(environment: Environment): SourceIngestionOcrRuntime | undefined {
+export async function resolveSourceIngestionOcrExecutor(environment: Environment): Promise<SourceIngestionOcrRuntime | undefined> {
   const config = resolveMineruExecutorConfig(environment);
   if (!config) return undefined;
+  await verifyMineruRuntime(config);
   const runtime = createMineruPdfOcrExecutor(config);
-  return { pdfOcrExecutor: runtime.executor, close: () => runtime.close() };
+  return { pdfOcrExecutor: runtime.executor, config, close: () => runtime.close() };
 }
 
 export function createSourceIngestionQueue(environment: Environment, options: SourceIngestionQueueOptions = {}) {
