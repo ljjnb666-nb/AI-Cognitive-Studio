@@ -10,7 +10,7 @@
 // Modes and timing come from the environment so the executor's own child env
 // inheritance carries them; no shell is used anywhere.
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const [, , command, ...rest] = process.argv;
@@ -39,6 +39,12 @@ function readArgs(tokens) {
 
 if (command === "server" && rest[0] === "start") {
   mkdirSync(home, { recursive: true });
+  // RF02 test mode: the start wrapper exits successfully WITHOUT spawning a
+  // server or writing the endpoint (models delayed/lost endpoint writes).
+  if (process.env.MINERU_FAKE_SERVER_START_MODE === "no_endpoint") {
+    console.log("服务已启动(无端点模拟)。");
+    process.exit(0);
+  }
   // A REAL killable descendant: the recorded endpoint pid is a dummy process
   // the guarded-kill path can verify and force-kill by recorded identity.
   const dummy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { detached: true, stdio: "ignore", windowsHide: true });
@@ -47,6 +53,17 @@ if (command === "server" && rest[0] === "start") {
   console.log("服务已启动(PID " + dummy.pid + ")。");
   process.exit(0);
 } else if (command === "server" && rest[0] === "stop") {
+  // RF02 evidence: record WHICH pid this stop targeted so tests can prove a
+  // stop/kill never targeted an untrusted/mismatched pid.
+  if (process.env.MINERU_FAKE_STOP_LOG) {
+    try {
+      appendFileSync(process.env.MINERU_FAKE_STOP_LOG, String(JSON.parse(readFileSync(endpointPath, "utf8")).pid) + "\n");
+    } catch { /* no endpoint */ }
+  }
+  if (process.env.MINERU_FAKE_STOP_MODE === "noop") {
+    console.log("服务停止被模拟跳过。");
+    process.exit(0);
+  }
   try {
     const endpoint = JSON.parse(readFileSync(endpointPath, "utf8"));
     try { process.kill(endpoint.pid); } catch { /* already gone */ }
