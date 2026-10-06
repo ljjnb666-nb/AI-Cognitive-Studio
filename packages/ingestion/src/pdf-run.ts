@@ -157,7 +157,7 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
     const startedAt = Date.now();
     let result: PdfOcrPageResult;
     try {
-      result = await executor.extractPage({ ...key, pdfBytes: input.pdfBytes });
+      result = await executor.extractPage({ ...key, runExecutionToken: input.runExecutionToken, pdfBytes: input.pdfBytes });
     } catch {
       result = { status: "FAILED", errorCode: SourceError.PARSE, kind: "transient" };
     }

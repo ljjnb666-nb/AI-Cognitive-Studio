@@ -29,6 +29,28 @@ export const environmentSchema = z.object({
   SOURCE_MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(104857600),
   SOURCE_MAX_PDF_PAGES: z.coerce.number().int().positive().default(2000),
   SOURCE_PARSE_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
+  // Real PDF OCR executor (BOOK-INGESTION-04B-3). Everything is optional:
+  // an unconfigured environment keeps the 04B-2 no-OCR behavior. Cross-field
+  // validation (provider=mineru requires local model source + existing model
+  // root; tier pinned to flash) lives in the ingestion MinerU config resolver,
+  // which fails fast at worker startup.
+  OCR_PROVIDER: z.enum(["mineru"]).optional(),
+  OCR_HOST_ID: z.string().min(1).optional(),
+  MINERU_EXECUTABLE: z.string().min(1).optional(),
+  // JSON array of fixed argv prefixed to every MinerU child invocation (e.g.
+  // ["C:\\venv\\Scripts\\python.exe","-m","mineru"]). Malformed JSON fails fast
+  // via the ingestion config resolver. Never accepts runtime/user input.
+  MINERU_EXECUTABLE_ARGS: z.string().optional(),
+  MINERU_MODEL_SOURCE: z.enum(["local"]).optional(),
+  MINERU_MODEL_PATH: z.string().min(1).optional(),
+  MINERU_TIER: z.enum(["flash"]).optional(),
+  MINERU_VERSION: z.string().min(1).optional(),
+  MINERU_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  MINERU_SERVER_START_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  MINERU_SERVER_STOP_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  MINERU_HOME_ROOT: z.string().min(1).optional(),
+  MINERU_MAX_OUTPUT_BYTES: z.coerce.number().int().positive().optional(),
+  MINERU_CAPACITY_RETRY_DELAY_MS: z.coerce.number().int().positive().optional(),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   BETA_ACCESS_MODE: z.enum(["OFF", "ENFORCED"]).default("OFF"),
   WORKSPACE_EXPENSIVE_OPERATION_LIMIT: z.coerce.number().int().min(1).max(16).default(2),

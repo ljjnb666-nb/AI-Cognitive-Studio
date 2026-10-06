@@ -25,6 +25,9 @@ export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, IN
 export { classifyIngestionFailure, ingestionStatusForTerminalFailure, type IngestionFailureClass } from "./ingestion-failure.js";
 export { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerStatus, OCR_HOST_LEASE_TTL_MS, OCR_PAGE_LEASE_TTL_MS, OCR_PAGE_MAX_ATTEMPTS, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, writeRoutingOutcome, writeRoutingPlan } from "./ocr-durability.js";
 export { INGESTION_RECONCILIATION_BATCH_SIZE, reconcileIngestionDeliveries, type IngestionDeliveryState, type IngestionReconciliationQueuePort, type IngestionReconciliationResult } from "./ingestion-reconciliation.js";
+export { MINERU_EXECUTOR_NAME, MINERU_PINNED_TIER, MINERU_PINNED_VERSION, buildMineruParseArgs, buildMineruServerArgs, judgeMineruParseExit, mineruFailureForOutcome, mineruPageSelector, parseMineruEndpoint, parseMineruParseEnvelope, type MineruEndpoint, type MineruParseOutcome } from "./mineru/mineru-commands.js";
+export { resolveMineruExecutorConfig, type MineruExecutorConfig } from "./mineru/mineru-config.js";
+export { createMineruPdfOcrExecutor, type MineruOcrCallRecord, type MineruPdfOcrExecutorHandle } from "./mineru/mineru-executor.js";
 
 export type TrustedRequestContext = { userId: string; workspaceId: string };
 export const INGESTION_QUEUE = "source.ingestion";

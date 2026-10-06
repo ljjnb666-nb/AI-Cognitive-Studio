@@ -10,7 +10,7 @@
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test:unit": "vitest run tests/object-inspection.test.ts tests/canonical-text.test.ts tests/document-parsers.test.ts tests/pdf-routing.test.ts tests/epub-native.test.ts tests/cross-format-consistency.test.ts tests/ingestion-failure.test.ts",
+    "test:unit": "vitest run tests/object-inspection.test.ts tests/canonical-text.test.ts tests/document-parsers.test.ts tests/pdf-routing.test.ts tests/epub-native.test.ts tests/cross-format-consistency.test.ts tests/ingestion-failure.test.ts tests/mineru/mineru-commands.test.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {

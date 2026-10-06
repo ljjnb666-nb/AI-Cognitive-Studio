@@ -192,7 +192,14 @@ export function assertRoutingPlanReplay(persisted: PdfRoutingPlan, runtime: PdfR
 // ---------------------------------------------------------------------------
 
 export type PdfOcrExecutorDescriptor = { name: string; version: string; parserMode?: string | null; modelRevision?: string | null };
-export type PdfOcrPageRequest = { ingestionRunId: string; workspaceId: string; sourceDocumentId: string; physicalPageIndex: number; routingGeneration: number; pdfBytes: Uint8Array };
+/**
+ * runExecutionToken (04B-3, additive): the caller's live IngestionRun execution
+ * claim token. Durable server-instance identity (OcrServerInstance) links each
+ * launched OCR server to the run execution that owns it, so reconciliation can
+ * never attribute a process to a superseded owner. 04B-2 routing authority is
+ * untouched: the token is ownership lineage only, never a quality/routing input.
+ */
+export type PdfOcrPageRequest = { ingestionRunId: string; workspaceId: string; sourceDocumentId: string; physicalPageIndex: number; routingGeneration: number; runExecutionToken: string; pdfBytes: Uint8Array };
 export type PdfOcrPageResult =
   | { status: "SUCCEEDED"; text: string }
   | { status: "FAILED"; errorCode: string; kind: "transient" | "terminal"; nextAttemptAt?: Date };
