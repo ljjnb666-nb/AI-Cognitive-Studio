@@ -7,7 +7,7 @@ import { createBookAnalysisWorker, createBookAnalysisQueue, dispatchBookAnalysis
 import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPodcastGenerationWithQueue } from "./podcast-generation.js";
 import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudioGenerationWithQueue } from "./audio-generation.js";
 import { createShortVideoGenerationWorker, createShortVideoGenerationQueue, dispatchShortVideoGenerationWithQueue, type ShortVideoRuntimeAdapter } from "./short-video-generation.js";
-import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue, INGESTION_JOB } from "./source-ingestion.js";
+import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue, resolveSourceIngestionOcrExecutor, INGESTION_JOB } from "./source-ingestion.js";
 import { reconcileIngestionDeliveries, type IngestionReconciliationQueuePort } from "@ai-cognitive/ingestion";
 import { createBookAnalysisBootstrapWorker, createBookAnalysisBootstrapQueue, dispatchBookAnalysisBootstrapWithQueue, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "./book-analysis-bootstrap.js";
 import { createHealthCheckWorker } from "./worker.js";
@@ -63,7 +63,12 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const gatewayConfigured = resolveBookWorkerCapability(source);
   const bookEnabled = Boolean(options.bookDependencies || bookConfigured || gatewayConfigured);
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
+  let sourceIngestionOcrRuntime: ReturnType<typeof resolveSourceIngestionOcrExecutor>;
   try {
+  // Real OCR runtime (04B-3): resolved+validated FIRST, before any worker or
+  // connection is constructed — malformed explicit MinerU configuration must
+  // fail fast at startup. undefined keeps the no-OCR behavior.
+  sourceIngestionOcrRuntime = resolveSourceIngestionOcrExecutor(environment);
   if (!podcastAdapter && source.PODCAST_GENERATION_PROVIDER?.trim()) {
     const runtime = productionPodcastGatewayRuntime = createPodcastProductionGatewayRuntime(source, options.bookProductionGatewayOverrides);
     podcastAdapter = { providerForRun: input => runtime.createProviderForRun(input), embeddingProviderForRun: input => runtime.createEmbeddingProviderForRun(input) };
@@ -73,7 +78,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const bookWorker = bookEnabled ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY)) : undefined;
   const bookBootstrapWorker = createBookAnalysisBootstrapWorker(environment, { ...workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY), source });
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);
-  const ingestionWorker = createSourceIngestionWorker(environment, workerOptions(environment.WORKER_INGESTION_CONCURRENCY));
+  const ingestionWorker = createSourceIngestionWorker(environment, { ...workerOptions(environment.WORKER_INGESTION_CONCURRENCY), ...(sourceIngestionOcrRuntime ? { pdfOcrExecutor: sourceIngestionOcrRuntime.pdfOcrExecutor } : {}) });
   if (!bookWorker) logger.info("worker.book_analysis.disabled", { reason: "BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED" });
   const podcastWorker = podcastAdapter ? createPodcastGenerationWorker(environment, podcastAdapter, workerOptions(environment.WORKER_PODCAST_GENERATION_CONCURRENCY)) : undefined;
   const audioWorker = audioConfigured ? createPodcastAudioWorker(environment, audioAdapter, workerOptions(environment.WORKER_AUDIO_CONCURRENCY)) : undefined;
@@ -163,8 +168,9 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   void reconcileDurableOperations();
   logger.info("worker.started", { queue: "system.health-check", podcastGenerationEnabled: Boolean(podcastWorker) });
   let closePromise: Promise<void> | undefined;
-  return { healthWorker, ingestionWorker, bookBootstrapWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.close().catch(() => undefined); await ingestionQueue.close(); await bookBootstrapQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); await ingestionWorker.close(); await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+  return { healthWorker, ingestionWorker, bookBootstrapWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.close().catch(() => undefined); await ingestionQueue.close(); await bookBootstrapQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); await ingestionWorker.close(); await sourceIngestionOcrRuntime?.close(); await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
+    await sourceIngestionOcrRuntime?.close();
     await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close();
     throw error;
   }

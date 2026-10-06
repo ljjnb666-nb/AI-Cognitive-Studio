@@ -1,13 +1,28 @@
 import { Queue, Worker } from "bullmq";
-import { createIngestionService, dispatchPendingIngestion, INGESTION_JOB, INGESTION_QUEUE } from "@ai-cognitive/ingestion";
+import { createIngestionService, createMineruPdfOcrExecutor, dispatchPendingIngestion, INGESTION_JOB, INGESTION_QUEUE, resolveMineruExecutorConfig, type PdfOcrExecutor } from "@ai-cognitive/ingestion";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
 
-export type SourceIngestionQueueOptions = { prefix?: string; concurrency?: number };
+export type SourceIngestionQueueOptions = { prefix?: string; concurrency?: number; /** Real OCR fallback executor (04B-3). Resolved once via resolveSourceIngestionOcrExecutor; injected for testability. */ pdfOcrExecutor?: PdfOcrExecutor };
 export function createSourceIngestionWorker(environment: Environment, options: SourceIngestionQueueOptions = {}) {
   const storage = new S3CompatibleStorageProvider({ endpoint: environment.S3_ENDPOINT, region: environment.S3_REGION, bucket: environment.S3_BUCKET, accessKey: environment.S3_ACCESS_KEY, secretKey: environment.S3_SECRET_KEY, forcePathStyle: environment.S3_FORCE_PATH_STYLE });
-  const service = createIngestionService(storage, { maxUploadBytes: environment.SOURCE_MAX_UPLOAD_BYTES, uploadTtlSeconds: environment.SOURCE_UPLOAD_URL_TTL_SECONDS, maxPdfPages: environment.SOURCE_MAX_PDF_PAGES, completionLeaseMs: environment.SOURCE_UPLOAD_COMPLETION_LEASE_MS, processMaxAttempts: environment.SOURCE_INGESTION_PROCESS_MAX_ATTEMPTS });
+  const service = createIngestionService(storage, { maxUploadBytes: environment.SOURCE_MAX_UPLOAD_BYTES, uploadTtlSeconds: environment.SOURCE_UPLOAD_URL_TTL_SECONDS, maxPdfPages: environment.SOURCE_MAX_PDF_PAGES, completionLeaseMs: environment.SOURCE_UPLOAD_COMPLETION_LEASE_MS, processMaxAttempts: environment.SOURCE_INGESTION_PROCESS_MAX_ATTEMPTS, ...(options.pdfOcrExecutor ? { pdfOcrExecutor: options.pdfOcrExecutor } : {}) });
   return new Worker<{ ingestionRunId: string }>(INGESTION_QUEUE, async (job) => service.processIngestionRun(job.data.ingestionRunId), { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_INGESTION_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) });
+}
+
+export type SourceIngestionOcrRuntime = { pdfOcrExecutor: PdfOcrExecutor; close(): Promise<void> };
+
+/**
+ * Production OCR runtime resolution (BOOK-INGESTION-04B-3). Returns undefined
+ * when OCR is intentionally unconfigured: production keeps the 04B-2 no-OCR
+ * behavior. Malformed explicit MinerU configuration fails fast here, at worker
+ * startup — never a silent fallback that could enable network behavior.
+ */
+export function resolveSourceIngestionOcrExecutor(environment: Environment): SourceIngestionOcrRuntime | undefined {
+  const config = resolveMineruExecutorConfig(environment);
+  if (!config) return undefined;
+  const runtime = createMineruPdfOcrExecutor(config);
+  return { pdfOcrExecutor: runtime.executor, close: () => runtime.close() };
 }
 
 export function createSourceIngestionQueue(environment: Environment, options: SourceIngestionQueueOptions = {}) {
