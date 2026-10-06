@@ -361,7 +361,16 @@ export const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
  */
 export async function confirmedRecordedProcessGone(pid: number, options: { expectedImagePattern?: RegExp; observations?: number; delayMs?: number; signal?: AbortSignal; probe?: (pid: number, pattern?: RegExp) => Promise<boolean> } = {}): Promise<boolean> {
   const required = options.observations ?? 2;
-  const probe = options.probe ?? recordedProcessAlive;
+  // The default liveness observation is deliberately DUAL-SOURCE: tasklist can
+  // transiently return an empty result under process churn, so a negative
+  // tasklist is cross-checked against an independent process-creation-time
+  // probe (powershell Get-Process). Only when BOTH sources agree the pid does
+  // not exist does the observation count as negative (RF03: a "proven gone"
+  // verdict that stops nothing must never fire while the process lives).
+  const probe = options.probe ?? (async (probePid: number, pattern?: RegExp) => {
+    if (await recordedProcessAlive(probePid, pattern)) return true;
+    return (await processCreationTime(probePid)) !== null;
+  });
   const pattern = options.expectedImagePattern;
   let negatives = 0;
   for (;;) {

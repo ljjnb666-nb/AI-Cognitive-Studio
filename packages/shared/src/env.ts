@@ -53,6 +53,10 @@ export const environmentSchema = z.object({
   MINERU_SERVER_STOP_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
   MINERU_HOME_ROOT: z.string().min(1).optional(),
   MINERU_MAX_OUTPUT_BYTES: z.coerce.number().int().positive().optional(),
+  // Scheduler deferral delay for OCR host-capacity contention (RF03 P1-03).
+  // Capacity deferral consumes ZERO processing attempts; this only shapes
+  // WHEN the deferred delivery returns.
+  MINERU_CAPACITY_DEFERRAL_DELAY_MS: z.coerce.number().int().positive().optional(),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   BETA_ACCESS_MODE: z.enum(["OFF", "ENFORCED"]).default("OFF"),
   WORKSPACE_EXPENSIVE_OPERATION_LIMIT: z.coerce.number().int().min(1).max(16).default(2),

@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
-import { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, validateOcrServerInstanceContract } from "../src/ocr-durability.js";
+import { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStopping, markOcrServerStoppedProcessGone, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, validateOcrServerInstanceContract } from "../src/ocr-durability.js";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
@@ -241,22 +241,27 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
     const claimA = `hostclaim-${crypto.randomUUID()}`;
     expect(await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId, hostClaimToken: claimA, runExecutionToken: "runA", mineruHome: "home-A" })).not.toBeNull();
     expect(await recordOcrServerEndpoint({ hostClaimToken: claimA, endpoint: { pid: 111, serverId: "server-A", transports: [{ type: "tcp", base_url: "http://127.0.0.1:15980" }] } })).toBe(true);
-    // A's lease expires; B takes over the SAME host capacity row.
+    // A's lease expires. RF03 P1-02: B CANNOT take over the slot while A's
+    // server instance is unresolved (RUNNING) — the possibly-live server
+    // poisons host capacity even though the lease row looks free.
     await prisma.$executeRaw`UPDATE "OcrHostLease" SET "leaseUntil" = NOW() - INTERVAL '1 second' WHERE "hostId" = ${hostId}`;
+    expect(await acquireOcrHostLease(hostId)).toBeNull();
+    // The handoff becomes legal only after A's instance is durably closed.
+    expect(await markOcrServerStopping(claimA, "owner-finished")).toBe(true);
+    expect(await markOcrServerStoppedProcessGone(claimA, "handoff-verified")).toBe(true);
     const leaseB = await acquireOcrHostLease(hostId);
     expect(leaseB).not.toBeNull();
     const claimB = `hostclaim-${crypto.randomUUID()}`;
     expect(await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId, hostClaimToken: claimB, runExecutionToken: "runB", mineruHome: "home-B" })).not.toBeNull();
     const survivor = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimA } });
-    expect(survivor.status).toBe("RUNNING");
+    expect(survivor.status).toBe("STOPPED");
     expect(survivor.serverId).toBe("server-A");
     expect(survivor.pid).toBe(111);
-    // B's fresh instance starts STARTING; late A must stop only its own row,
-    // through the legal RUNNING -> STOPPING -> STOPPED chain.
+    // B's fresh instance starts STARTING; A's closed row stays untouched and
+    // late A can only ever act on its own (now terminal) row.
     const fresh = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimB } });
     expect(fresh.status).toBe("STARTING");
-    expect(await markOcrServerStopping(claimA, "stale-owner-cleanup")).toBe(true);
-    expect(await markOcrServerStopped(claimA, "stale-owner-cleanup")).toBe(true);
+    expect(await markOcrServerStopping(claimA, "late-owner")).toBe(false);
     expect((await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimB } })).status).toBe("STARTING");
     expect((await listReconcilableOcrServerInstances(hostId)).map((r) => r.hostClaimToken)).toContain(claimB);
     expect(await releaseOcrHostLease(hostId, leaseB!.claimToken)).toBe(true);

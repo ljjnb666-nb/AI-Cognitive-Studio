@@ -17,20 +17,39 @@ export const OCR_PAGE_MAX_ATTEMPTS = 3;
 export type OcrHostLeaseGrant = { claimToken: string; leaseUntil: Date };
 
 /**
- * Atomically acquires the per-host OCR capacity slot. INSERT with a
- * conditional ON CONFLICT UPDATE: a live lease held by another token refuses
- * the takeover (0 rows), an expired lease is claimable. Advisory locks are
- * deliberately avoided — the row lease survives pool reconnects.
+ * Host OCR capacity invariant (RF03 P1-02): ONE authoritative live/possibly-
+ * live MinerU server per host capacity slot. A lease is grantable ONLY when
+ * BOTH predicates hold in the SAME atomic statement:
+ *  1. the slot itself is free or its lease expired, AND
+ *  2. NO unresolved OcrServerInstance exists for the host (STARTING / RUNNING
+ *     / STOPPING / ORPHANED) — a server whose process ownership has not been
+ *     durably closed may still be alive, so the capacity stays poisoned even
+ *     when the (expired) lease row looks free. ORPHANED rows therefore act as
+ *     a capacity poison: "manual intervention required" must actually stop
+ *     production from spawning a second server beside the unresolved one.
+ * STOPPED rows never block. The currently executing claim fits this ordering:
+ * it acquires the lease BEFORE creating its own server row; renewal/release
+ * stay token-fenced.
  */
 export async function acquireOcrHostLease(hostId: string, leaseMs = OCR_HOST_LEASE_TTL_MS, hostMetadata?: Record<string, unknown>): Promise<OcrHostLeaseGrant | null> {
   const claimToken = randomUUID();
   const rows = await prisma.$queryRaw<Array<{ claimToken: string; leaseUntil: Date }>>`
     INSERT INTO "OcrHostLease" ("hostId", "claimToken", "claimedAt", "leaseUntil", "hostMetadata", "updatedAt")
-    VALUES (${hostId}, ${claimToken}, NOW(), NOW() + (${leaseMs} * INTERVAL '1 millisecond'), ${hostMetadata ? JSON.stringify(hostMetadata) : null}::jsonb, NOW())
+    SELECT ${hostId}, ${claimToken}, NOW(), NOW() + (${leaseMs} * INTERVAL '1 millisecond'), ${hostMetadata ? JSON.stringify(hostMetadata) : null}::jsonb, NOW()
+    WHERE NOT EXISTS (
+      SELECT 1 FROM "OcrServerInstance" instance
+      WHERE instance."hostId" = ${hostId}
+        AND instance."status" IN ('STARTING', 'RUNNING', 'STOPPING', 'ORPHANED')
+    )
     ON CONFLICT ("hostId") DO UPDATE SET
       "claimToken" = EXCLUDED."claimToken", "claimedAt" = EXCLUDED."claimedAt", "leaseUntil" = EXCLUDED."leaseUntil",
       "hostMetadata" = EXCLUDED."hostMetadata", "updatedAt" = NOW()
-    WHERE "OcrHostLease"."leaseUntil" IS NULL OR "OcrHostLease"."leaseUntil" < NOW()
+    WHERE ("OcrHostLease"."leaseUntil" IS NULL OR "OcrHostLease"."leaseUntil" < NOW())
+      AND NOT EXISTS (
+        SELECT 1 FROM "OcrServerInstance" instance
+        WHERE instance."hostId" = EXCLUDED."hostId"
+          AND instance."status" IN ('STARTING', 'RUNNING', 'STOPPING', 'ORPHANED')
+      )
     RETURNING "claimToken", "leaseUntil"`;
   return rows.length === 1 ? { claimToken: rows[0]!.claimToken, leaseUntil: rows[0]!.leaseUntil } : null;
 }
@@ -119,6 +138,30 @@ export async function completeOcrPageAttempt(input: { workspaceId: string; inges
 }
 
 export type OcrPageFailureKind = "transient" | "terminal";
+
+/**
+ * RF03 P1-03: HOST CAPACITY unavailable is DEFERRAL, not processing failure.
+ * Releases the claim WITHOUT consuming the page attempt budget, in ONE
+ * transactional proof: the caller must still hold the live page claim token
+ * (predicate enforces it), and the attemptCount it consumed on claim is given
+ * back in the same statement (GREATEST floor guards against misuse). The page
+ * returns to PENDING, immediately claimable, with NO future nextAttemptAt —
+ * the scheduler's deferral cadence is the single retry clock (RF01 P1-01).
+ * Only the live owner can defer, exactly one give-back per claim, so the net
+ * page-attempt effect of a capacity deferral is exactly zero.
+ */
+export async function deferOcrPageAttempt(input: { workspaceId: string; ingestionRunId: string; physicalPageIndex: number; routingGeneration: number; claimToken: string; errorCode: string }): Promise<boolean> {
+  const changed = await prisma.$executeRaw`
+    UPDATE "OcrPageAttempt" SET
+      "status" = 'PENDING', "claimToken" = NULL, "claimedAt" = NULL, "leaseUntil" = NULL,
+      "nextAttemptAt" = NULL, "errorCode" = ${input.errorCode}, "updatedAt" = NOW(),
+      "attemptCount" = GREATEST("attemptCount" - 1, 0)
+    WHERE "workspaceId" = ${input.workspaceId} AND "ingestionRunId" = ${input.ingestionRunId}
+      AND "physicalPageIndex" = ${input.physicalPageIndex} AND "routingGeneration" = ${input.routingGeneration}
+      AND "status" = 'RUNNING' AND "claimToken" = ${input.claimToken} AND "leaseUntil" > NOW()
+      AND "attemptCount" > 0`;
+  return changed === 1;
+}
 
 /**
  * Records a page failure under live ownership. Transient failures requeue to

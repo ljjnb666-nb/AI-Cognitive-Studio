@@ -222,7 +222,11 @@ export async function createMineruServerSession(input: MineruServerSessionInput)
  * reports ORPHANED instead.
  */
 export async function processPrecedesEndpointEvidence(endpoint: MineruEndpoint, homeDir: string, expectedImagePattern: RegExp): Promise<boolean> {
-  if (!(await recordedProcessAlive(endpoint.pid, expectedImagePattern))) return false;
+  // RF03: liveness here is DUAL-SOURCE — the creation-time read IS the second
+  // source and doubles as the identity fingerprint. A single tasklist
+  // negative is a known false-negative shape under process churn and must not
+  // veto cleanup evidence on its own: creationTime === null (neither source
+  // can see the process) is the only "not alive" verdict.
   let endpointMtime: number | null = null;
   try {
     endpointMtime = (await stat(join(homeDir, ENDPOINT_FILE))).mtimeMs;
@@ -230,6 +234,12 @@ export async function processPrecedesEndpointEvidence(endpoint: MineruEndpoint, 
     return false;
   }
   const creationTime = await processCreationTime(endpoint.pid);
-  if (creationTime === null) return false;
+  if (creationTime === null) {
+    const tasklistAlive = await recordedProcessAlive(endpoint.pid, expectedImagePattern);
+    if (!tasklistAlive) return false;
+    // Conflicting sources: tasklist sees a process whose creation time is
+    // unreadable — identity is unprovable either way.
+    return false;
+  }
   return creationTime <= endpointMtime;
 }

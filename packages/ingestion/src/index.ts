@@ -8,7 +8,7 @@ import { CANONICAL_BLOCK_SEPARATOR, CANONICAL_NORMALIZATION_VERSION } from "./ca
 import { inspectObjectStream } from "./object-inspection.js";
 import { parseDocument, type Parsed, type ParsedBlock, DEFAULT_PARSER_LIMITS } from "./document-parsers.js";
 import { SourceError } from "./source-errors.js";
-import { claimIngestionRun, completeRunSuccess, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_RENEW_INTERVAL_MS, terminalizeRunWithRoutingOutcome, transitionRunToRetryable, transitionRunToTerminal, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
+import { claimIngestionRun, completeRunSuccess, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_RENEW_INTERVAL_MS, terminalizeRunWithRoutingOutcome, transitionRunToDeferred, transitionRunToRetryable, transitionRunToTerminal, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
 import { writeRoutingOutcome } from "./ocr-durability.js";
 import { classifyIngestionFailure, ingestionStatusForTerminalFailure } from "./ingestion-failure.js";
 import { runPdfExtraction, type PdfRunExtraction } from "./pdf-run.js";
@@ -21,9 +21,9 @@ export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export { parseDocument, extractNativePdf, pdfTextToBlocks, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
 export { PDF_EXTRACTION_PARSER, PDF_INSPECTOR_VERSION, PDF_QUALITY_REASON_CODES, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, PDF_ROUTING_REASON_CODES, assertRoutingPlanReplay, evaluatePdfExtractionQuality, inspectPdfPage, parseRoutingPlan, pdfRoutingOutcome, planPdfRouting, type PdfContentEvidence, type PdfExtractionQualityDecision, type PdfExtractionQualityStatus, type PdfOcrExecutor, type PdfOcrExecutorDescriptor, type PdfOcrPageRequest, type PdfOcrPageResult, type PdfPageEvidence, type PdfPageInspection, type PdfPageQualityDecision, type PdfPageRoute, type PdfPageExtractionOutcome, type PdfQualityReasonCode, type PdfRoutingOutcome, type PdfRoutingPlan, type PdfRoutingPlanPage, type PdfRoutingReasonCode } from "./pdf-routing.js";
 export { runPdfExtraction, type PdfRunExtraction, type PdfRunExtractionInput } from "./pdf-run.js";
-export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun, terminalizeRunWithRoutingOutcome, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
+export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun, terminalizeRunWithRoutingOutcome, transitionRunToDeferred, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
 export { classifyIngestionFailure, ingestionStatusForTerminalFailure, type IngestionFailureClass } from "./ingestion-failure.js";
-export { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStoppedProcessGone, markOcrServerStopping, OCR_HOST_LEASE_TTL_MS, OCR_PAGE_LEASE_TTL_MS, OCR_PAGE_MAX_ATTEMPTS, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, writeRoutingOutcome, writeRoutingPlan } from "./ocr-durability.js";
+export { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, deferOcrPageAttempt, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStoppedProcessGone, markOcrServerStopping, OCR_HOST_LEASE_TTL_MS, OCR_PAGE_LEASE_TTL_MS, OCR_PAGE_MAX_ATTEMPTS, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, writeRoutingOutcome, writeRoutingPlan } from "./ocr-durability.js";
 export { INGESTION_RECONCILIATION_BATCH_SIZE, reconcileIngestionDeliveries, type IngestionDeliveryState, type IngestionReconciliationQueuePort, type IngestionReconciliationResult } from "./ingestion-reconciliation.js";
 export { MINERU_EXECUTOR_NAME, MINERU_PINNED_TIER, MINERU_PINNED_VERSION, buildMineruParseArgs, buildMineruServerArgs, judgeMineruParseExit, mineruFailureForOutcome, mineruPageSelector, parseMineruEndpoint, parseMineruParseEnvelope, type MineruEndpoint, type MineruParseOutcome } from "./mineru/mineru-commands.js";
 export { resolveMineruExecutorConfig, verifyMineruRuntime, isWithinPath, type MineruExecutorConfig, type MineruRuntimeVerification } from "./mineru/mineru-config.js";
@@ -349,6 +349,16 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
         // Ownership loss writes NOTHING: the new owner (or the reconciler) owns
         // the outcome, and a stale worker must never mutate newer durable state.
         if (code === INGESTION_EXECUTION_OWNERSHIP_LOST || ownershipLost) throw error;
+        // RF03 P1-03: HOST CAPACITY unavailable is a scheduler DEFERRAL, not a
+        // processing failure. The run goes back to QUEUED with its durable
+        // attempt budget restored (transitionRunToDeferred: net-zero) and the
+        // typed signal propagates to the worker processor, which defers the
+        // BullMQ delivery (DelayedError + moveToDelayed — zero BullMQ
+        // attempts). Real processing failures keep the ordinary budget below.
+        if (code === SourceError.OCR_HOST_CAPACITY) {
+          if (await transitionRunToDeferred(run.id, claim.token, code)) logger.warn("ingestion.ocr_capacity_deferred", { ingestionRunId: run.id, code });
+          throw error;
+        }
         const failureClass = classifyIngestionFailure(code);
         if (failureClass === "RETRYABLE_RUN" && claim.attemptCount < options.processMaxAttempts) {
           // QUEUED is the retryable durable state; BullMQ's configured attempt

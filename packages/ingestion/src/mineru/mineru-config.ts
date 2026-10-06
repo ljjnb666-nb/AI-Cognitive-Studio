@@ -51,6 +51,8 @@ export type MineruExecutorConfig = {
   serverStopTimeoutMs: number;
   /** Bounded cap for MinerU markdown output. */
   maxOutputBytes: number;
+  /** Scheduler deferral delay for host-capacity contention (RF03 P1-03). */
+  capacityDeferralDelayMs: number;
   /**
    * MinerU version recorded in the executor descriptor provenance. It is the
    * PINNED production contract constant — never operator-declared text — and
@@ -69,7 +71,7 @@ export type MineruExecutorConfig = {
 };
 
 /** Recognized OCR/MinerU variables: set WITHOUT OCR_PROVIDER they fail fast (RF01 P2: includes args/host id; MINERU_VERSION is recognized but never alters provenance). */
-const OCR_VARIABLES = ["OCR_HOST_ID", "MINERU_EXECUTABLE", "MINERU_EXECUTABLE_ARGS", "MINERU_MODEL_SOURCE", "MINERU_MODEL_PATH", "MINERU_TIER", "MINERU_VERSION", "MINERU_TIMEOUT_MS", "MINERU_SERVER_START_TIMEOUT_MS", "MINERU_SERVER_STOP_TIMEOUT_MS", "MINERU_HOME_ROOT", "MINERU_MAX_OUTPUT_BYTES"] as const;
+const OCR_VARIABLES = ["OCR_HOST_ID", "MINERU_EXECUTABLE", "MINERU_EXECUTABLE_ARGS", "MINERU_MODEL_SOURCE", "MINERU_MODEL_PATH", "MINERU_TIER", "MINERU_VERSION", "MINERU_TIMEOUT_MS", "MINERU_SERVER_START_TIMEOUT_MS", "MINERU_SERVER_STOP_TIMEOUT_MS", "MINERU_HOME_ROOT", "MINERU_MAX_OUTPUT_BYTES", "MINERU_CAPACITY_DEFERRAL_DELAY_MS"] as const;
 
 export type ResolveMineruConfigOptions = {
   /** Injectable PATH search root list (defaults to the process PATH). */
@@ -180,6 +182,7 @@ export function resolveMineruExecutorConfig(environment: Environment, options: R
     serverStartTimeoutMs: environment.MINERU_SERVER_START_TIMEOUT_MS ?? 180_000,
     serverStopTimeoutMs: environment.MINERU_SERVER_STOP_TIMEOUT_MS ?? 60_000,
     maxOutputBytes: environment.MINERU_MAX_OUTPUT_BYTES ?? 4_000_000,
+    capacityDeferralDelayMs: environment.MINERU_CAPACITY_DEFERRAL_DELAY_MS ?? 30_000,
   };
 }
 

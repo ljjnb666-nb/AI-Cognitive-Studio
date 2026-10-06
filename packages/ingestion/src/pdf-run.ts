@@ -3,7 +3,7 @@ import { sha256Utf8 } from "@ai-cognitive/domain";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { extractNativePdf, pdfTextToBlocks, type Parsed, type ParsedBlock, type ParserLimits } from "./document-parsers.js";
 import { INGESTION_EXECUTION_OWNERSHIP_LOST } from "./ingestion-run-claim.js";
-import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, failOcrPageAttempt, writeRoutingPlan } from "./ocr-durability.js";
+import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, deferOcrPageAttempt, failOcrPageAttempt, writeRoutingPlan } from "./ocr-durability.js";
 import { PDF_EXTRACTION_PARSER, PDF_ROUTING_GENERATION, assertRoutingPlanReplay, evaluatePdfExtractionQuality, parseRoutingPlan, type PdfExtractionQualityDecision, type PdfOcrExecutor, type PdfOcrPageResult, type PdfPageExtractionOutcome, type PdfRoutingPlan } from "./pdf-routing.js";
 import { SourceError } from "./source-errors.js";
 
@@ -177,15 +177,19 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
       if (!await completeOcrPageAttempt({ ...key, claimToken: claim.claimToken, authoritativeArtifactKey, textSha256, durationMs: Date.now() - startedAt })) return null;
       return await loadAuthoritativeOcrPage(input, physicalPageIndex, generation);
     }
+    // RF03 P1-03: HOST CAPACITY unavailable is a DEFERRAL, not a processing
+    // failure — it must run BEFORE failOcrPageAttempt, which would otherwise
+    // consume the page attempt. The claim is released with its attempt budget
+    // restored (deferOcrPageAttempt: net-zero page attempts) and a TYPED
+    // signal propagates to the run boundary, which restores the run/Job
+    // budget and lets the scheduler defer the delivery. CONTENT and PROCESS
+    // failures below still consume attempts exactly as before.
+    if (result.errorCode === SourceError.OCR_HOST_CAPACITY && result.kind === "transient") {
+      if (!await deferOcrPageAttempt({ ...key, claimToken: claim.claimToken, errorCode: SourceError.OCR_HOST_CAPACITY })) return null;
+      throw new Error(SourceError.OCR_HOST_CAPACITY);
+    }
     if (!await failOcrPageAttempt({ ...key, claimToken: claim.claimToken, errorCode: result.errorCode, kind: result.kind, nextAttemptAt: result.nextAttemptAt })) return null;
     if (result.kind === "terminal") return null;
-    // RF01 P1-01: a durably RETRYABLE page (e.g. the host OCR capacity slot is
-    // owned by another live claim) must never terminalize the run as
-    // OCR_REQUIRED. The page stays PENDING and immediately claimable — NO
-    // future nextAttemptAt is stored — and this error propagates to the run's
-    // existing retryable execution authority (transitionRunToRetryable + the
-    // queue's retry cadence). The queue cadence is the single retry clock.
-    if (result.errorCode === SourceError.OCR_HOST_CAPACITY) throw new Error(SourceError.OCR_HOST_CAPACITY);
   }
 }
 

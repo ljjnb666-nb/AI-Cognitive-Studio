@@ -1,11 +1,12 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prisma } from "@ai-cognitive/db";
 import { acquireOcrHostLease, createOcrServerInstance, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, reconcileOcrServerInstances, releaseOcrHostLease } from "../../src/index.js";
 import { confirmedRecordedProcessGone, recordedProcessAlive } from "../../src/mineru/mineru-process.js";
+import { isWithinPath } from "../../src/mineru/mineru-config.js";
 import { createRunFixtureHelper } from "../helpers/ocr/reconciler-fixtures.js";
 
 /**
@@ -56,8 +57,8 @@ afterEach(async () => {
 
 afterAll(async () => { await prisma.$disconnect(); });
 
-function reconcilerConfig(hostId: string) {
-  return { hostId, executable: process.execPath, executableArgs: [fakeMineruPath], stopTimeoutMs: 10_000, processImagePattern: /node|python/i };
+function reconcilerConfig(hostId: string, homeRoot?: string) {
+  return { hostId, executable: process.execPath, executableArgs: [fakeMineruPath], stopTimeoutMs: 10_000, homeRoot: homeRoot ?? join(tmpdir(), "no-such-fence-root"), processImagePattern: /node|python/i };
 }
 
 /** Creates a lapsed RUNNING row with an endpoint file and MATCHING DB identity. */
@@ -69,6 +70,16 @@ async function createLapsedRunningRow(hostId: string, home: string, endpoint: { 
   await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: runToken, mineruHome: home });
   expect(await recordOcrServerEndpoint({ hostClaimToken: claimToken, endpoint: { pid: endpoint.pid, serverId: endpoint.server_id, transports: [{ type: "tcp" }] } })).toBe(true);
   return { fixture, claimToken };
+}
+
+/** Bounded condition poll for filesystem assertions. */
+async function waitForCondition(check: () => boolean, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (check()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 /** True when the stop log exists AND lists the pid as a targeted stop. */
@@ -246,6 +257,73 @@ describe("same-host OCR server reconciler (RF01 P1-06 + RF02)", () => {
     const row = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimToken } });
     expect(row.status).toBe("STOPPED");
     expect(await recordedProcessAlive(serverPid, /node|python/i)).toBe(false);
+  });
+
+  it("cleans the retained claim tree ONLY after a proven stop, fenced by homeRoot (RF03 P1-04)", async () => {
+    const hostId = `reconciler-${crypto.randomUUID()}`;
+    hostLeaseIds.push(hostId);
+    // A realistic crashed-claim layout under a REAL home root.
+    const homeRoot = join(newTempDir(), "home-root");
+    const claimDir = join(homeRoot, "run-1", "generation-1", "page-0", "claim-abc");
+    const home = join(claimDir, "home");
+    const modelsDir = join(newTempDir(), "models");
+    mkdirSync(modelsDir, { recursive: true });
+    mkdirSync(join(home), { recursive: true });
+    mkdirSync(join(claimDir, "input"), { recursive: true });
+    mkdirSync(join(claimDir, "output"), { recursive: true });
+    writeFileSync(join(claimDir, "input", "input.pdf"), "%PDF-fake source bytes");
+    writeFileSync(join(claimDir, "output", "result.md"), "stale ocr output");
+    // A NEIGHBOR claim that must survive.
+    const neighborDir = join(homeRoot, "run-2", "generation-1", "page-0", "claim-neighbor");
+    mkdirSync(join(neighborDir, "home"), { recursive: true });
+    writeFileSync(join(neighborDir, "input.marker"), "neighbor data");
+
+    const { claimToken } = await createLapsedRunningRow(hostId, home, { pid: 4_000_004, server_id: "cleanup-server" }, "run-cleanup");
+    const result = await reconcileOcrServerInstances(reconcilerConfig(hostId, homeRoot));
+    expect(result).toMatchObject({ examined: 1, stopped: 1 });
+    expect((await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimToken } })).status).toBe("STOPPED");
+    // The whole claim tree (with the source PDF leak) is gone...
+    expect(existsSync(claimDir)).toBe(false);
+    // ...the neighbor claim and the model root are untouched (bounded poll:
+    // Windows existsSync can transiently return false for a fresh directory).
+    expect(await waitForCondition(() => existsSync(neighborDir))).toBe(true);
+    expect(await waitForCondition(() => existsSync(modelsDir))).toBe(true);
+  });
+
+  it("REFUSES cleanup when the durable mineruHome lies outside the configured homeRoot (RF03 P1-04)", async () => {
+    const hostId = `reconciler-${crypto.randomUUID()}`;
+    hostLeaseIds.push(hostId);
+    // A claim tree OUTSIDE any plausible fence root.
+    const outsideRoot = join(newTempDir(), "outside-root");
+    const claimDir = join(outsideRoot, "run-x", "claim-xyz");
+    const home = join(claimDir, "home");
+    const { claimToken } = await createLapsedRunningRow(hostId, home, { pid: 4_000_005, server_id: "outside-server" }, "run-outside");
+    const result = await reconcileOcrServerInstances(reconcilerConfig(hostId, join(newTempDir(), "different-fence-root")));
+    expect(result).toMatchObject({ examined: 1, stopped: 1 });
+    expect((await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimToken } })).status).toBe("STOPPED");
+    // The DB converged, but the fence refused the filesystem cleanup.
+    expect(existsSync(claimDir)).toBe(true);
+    expect(existsSync(join(claimDir, "home", "doclib.endpoint.json"))).toBe(true);
+  });
+
+  it("ORPHANED rows keep their forensic home and are never cleaned (RF02 P1-04/RF03)", async () => {
+    const hostId = `reconciler-${crypto.randomUUID()}`;
+    hostLeaseIds.push(hostId);
+    const homeRoot = join(newTempDir(), "home-root");
+    const claimDir = join(homeRoot, "run-orphan", "claim-orphan");
+    const home = join(claimDir, "home");
+    const fixture = await createRunFixtureHelper.create();
+    const claimToken = `hostclaim-${crypto.randomUUID()}`;
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "doclib.endpoint.json"), JSON.stringify({ pid: 4_000_006, server_id: "orphan-server", transports: [], version: 2 }));
+    await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: claimToken, runExecutionToken: "run-orphan", mineruHome: home });
+    expect(await markOcrServerOrphaned(claimToken, "unproven")).toBe(true);
+
+    const result = await reconcileOcrServerInstances(reconcilerConfig(hostId, homeRoot));
+    // ORPHANED is terminal: zero discovery, zero cleanup.
+    expect(result).toMatchObject({ examined: 0 });
+    expect(existsSync(claimDir)).toBe(true);
+    expect(existsSync(join(home, "doclib.endpoint.json"))).toBe(true);
   });
 
   it("keeps the state machine legal for stale late owners (STOPPING only from RUNNING; STOPPED never from free-form STARTING)", async () => {

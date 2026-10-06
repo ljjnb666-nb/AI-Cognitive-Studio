@@ -256,10 +256,14 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
       expect(retryable.status).toBe("QUEUED");
       expect(retryable.errorCode).toBe("SOURCE_OCR_HOST_CAPACITY");
       const attempt = await attemptRow(workspace.id, run.id, 1);
-      expect(attempt).toMatchObject({ status: "PENDING", attemptCount: 1, errorCode: "SOURCE_OCR_HOST_CAPACITY" });
-      // RF01 P1-01: NO future page retry time is stored — the queue's retry
-      // cadence is the single retry clock and the page is claimable NOW.
+      // RF03 P1-03: capacity DEFERRAL consumes ZERO page attempts — the
+      // claim's +1 was transactionally given back (net zero).
+      expect(attempt).toMatchObject({ status: "PENDING", attemptCount: 0, errorCode: "SOURCE_OCR_HOST_CAPACITY" });
+      // RF01 P1-01: NO future page retry time is stored — the scheduler's
+      // deferral cadence is the single retry clock and the page is claimable NOW.
       expect(attempt.nextAttemptAt).toBeNull();
+      // The run/Job attempt budget was restored too.
+      expect((await prisma.job.findUniqueOrThrow({ where: { id: run.jobId } })).attemptCount).toBe(0);
       // The squatter's lease was never touched (token-fenced release); no
       // capacity was consumed beyond the bounded attempt record.
       expect((await prisma.ocrHostLease.findUniqueOrThrow({ where: { hostId: config.hostId } })).claimToken).toBe(squatter.claimToken);
@@ -275,7 +279,9 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
       const succeeded = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
       expect(succeeded.status).toBe("SUCCEEDED");
       const recovered = await attemptRow(workspace.id, run.id, 1);
-      expect(recovered).toMatchObject({ status: "SUCCEEDED", attemptCount: 2 });
+      // The successful execution is the FIRST consumed attempt (the deferral
+      // was net-zero): one deferral + one real claim = attemptCount 1.
+      expect(recovered).toMatchObject({ status: "SUCCEEDED", attemptCount: 1 });
       expect(recovered.attemptCount).toBeGreaterThan(attempt.attemptCount);
       expect(recovered.textSha256).toBe(sha256("capacity recovery scan text"));
       // Exactly one extraction, one bootstrap, one current pointer.
@@ -439,13 +445,30 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
     process.env.MINERU_FAKE_SERVER_START_MODE = "no_endpoint";
     const handle = createMineruPdfOcrExecutor(fakeMineruConfig({ serverStartTimeoutMs: 1_500 }));
     try {
-      await expect(serviceWith(storage, handle.executor).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_REQUIRED");
+      // One execution: attempt 1 starts, fails unproven (ORPHANED row, one
+      // consumed page attempt); attempt 2 then hits the host POISON left by
+      // that very orphan and the whole run defers safely.
+      await expect(serviceWith(storage, handle.executor).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_HOST_CAPACITY");
       const row = await prisma.ocrServerInstance.findFirstOrThrow({ where: { ingestionRunId: run.id } });
       expect(row.status).toBe("ORPHANED");
       expect(row.terminationReason).toBe("START_IDENTITY_UNAVAILABLE");
-      // The durable budget exhausted through stable transient failures.
-      expect(await attemptRow(workspace.id, run.id, 1)).toMatchObject({ status: "FAILED", attemptCount: 3, errorCode: "SOURCE_OCR_PROCESS_FAILED" });
+      const deferredRun = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(deferredRun).toMatchObject({ status: "QUEUED", errorCode: "SOURCE_OCR_HOST_CAPACITY" });
+      // Exactly ONE real processing attempt was consumed (the start failure);
+      // the capacity deferral itself was net-zero.
+      expect(await attemptRow(workspace.id, run.id, 1)).toMatchObject({ status: "PENDING", attemptCount: 1, errorCode: "SOURCE_OCR_HOST_CAPACITY" });
+      expect((await prisma.job.findUniqueOrThrow({ where: { id: run.jobId } })).attemptCount).toBe(0);
       expect(await prisma.documentExtraction.count({ where: { ingestionRunId: run.id } })).toBe(0);
+      // And a further delivery keeps deferring (never OCR_REQUIRED/FAILED).
+      await expect(serviceWith(storage, handle.executor).processIngestionRun(run.id)).rejects.toThrow("SOURCE_OCR_HOST_CAPACITY");
+      // Operator resolution (manual removal of the orphan condition — never
+      // automatic) unblocks the host slot for the deferred work.
+      await prisma.ocrServerInstance.delete({ where: { id: row.id } });
+      delete process.env.MINERU_FAKE_SERVER_START_MODE;
+      process.env.MINERU_FAKE_TEXT = "recovered after operator resolution";
+      await serviceWith(storage, handle.executor).processIngestionRun(run.id);
+      expect((await prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe("SUCCEEDED");
+      expect(await prisma.documentExtraction.count({ where: { ingestionRunId: run.id } })).toBe(1);
     } finally {
       await handle.close();
     }

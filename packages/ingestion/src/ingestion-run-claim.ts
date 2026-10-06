@@ -92,6 +92,33 @@ export async function transitionRunToRetryable(runId: string, token: string, err
   }
 }
 
+/**
+ * RF03 P1-03: capacity/deferral transition — the run goes back to QUEUED with
+ * its processing-attempt budget restored, transactionally. The proof of
+ * correctness for the give-back: claimIngestionRun atomically paired
+ * (Job.attemptCount + 1, Job RUNNING, run RUNNING under THIS token); only the
+ * live token owner can execute this transition (liveLeasePredicate), exactly
+ * once per delivery, and the Job row must still be the one THIS claim moved to
+ * RUNNING — so the decrement can never cancel anyone else's consumption.
+ * Net effect of a capacity deferral on the durable attempt budget: exactly
+ * zero. The scheduler (BullMQ delayed deferral) owns when the delivery
+ * returns; PostgreSQL remains the upper-bound authority for real attempts.
+ */
+export async function transitionRunToDeferred(runId: string, token: string, errorCode: string): Promise<boolean> {
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const changed = await tx.$executeRaw`UPDATE "IngestionRun" SET "status" = 'QUEUED', "errorCode" = ${errorCode}, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${runId} ${liveLeasePredicate(token)}`;
+      if (changed !== 1) throw claimLost;
+      const jobs = await tx.$queryRaw<Array<{ attemptCount: number }>>`UPDATE "Job" SET "status" = 'QUEUED', "error" = ${JSON.stringify({ code: errorCode })}::jsonb, "updatedAt" = NOW(), "attemptCount" = GREATEST("attemptCount" - 1, 0) WHERE "id" = (SELECT "jobId" FROM "IngestionRun" WHERE "id" = ${runId}) AND "status" = 'RUNNING' AND "attemptCount" > 0 RETURNING "attemptCount"`;
+      if (jobs.length !== 1) throw claimLost;
+      return true;
+    });
+  } catch (error) {
+    if (error === claimLost) return false;
+    throw error;
+  }
+}
+
 /** Terminal failure statuses a run may take (Job always becomes FAILED). */
 export type IngestionTerminalStatus = "FAILED" | "REJECTED" | "OCR_REQUIRED" | "PASSWORD_REQUIRED";
 

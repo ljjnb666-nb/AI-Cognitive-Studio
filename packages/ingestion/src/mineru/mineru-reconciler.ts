@@ -3,6 +3,7 @@ import { prisma } from "@ai-cognitive/db";
 import { logger } from "@ai-cognitive/shared";
 import { markOcrServerOrphaned, markOcrServerStoppedProcessGone, listReconcilableOcrServerInstances } from "../ocr-durability.js";
 import { buildMineruServerArgs } from "./mineru-commands.js";
+import { isWithinPath } from "./mineru-config.js";
 import { confirmedRecordedProcessGone, processCreationTime, sleep, spawnBounded } from "./mineru-process.js";
 import { processPrecedesEndpointEvidence, readMineruEndpointFile } from "./mineru-server.js";
 
@@ -46,6 +47,8 @@ export type OcrServerReconcilerInput = {
   executable: string;
   executableArgs: string[];
   stopTimeoutMs: number;
+  /** Configured per-claim temp home root (RF03 P1-04): the fence every cleanup target must live inside. */
+  homeRoot: string;
   /** Upper bound on rows examined per sweep (enforced inside the DB query). */
   batchSize?: number;
   processImagePattern?: RegExp;
@@ -67,6 +70,50 @@ export async function reconcileOcrServerInstances(input: OcrServerReconcilerInpu
   }
   if (result.examined > 0) logger.info("mineru.reconciler.sweep", { hostId: input.hostId, ...result });
   return result;
+}
+
+/**
+ * RF03 P1-04: after a PROVEN stop, the claim tree retained by a hard crash
+ * (home/ + input/input.pdf + output/*) is an unbounded disk + source-data
+ * leak. Cleanup happens ONLY when every safety gate holds:
+ *  - the converged row's durable mineruHome is the ONLY path input;
+ *  - it points at the application-generated layout "<claim>/home";
+ *  - the whole claim tree lives INSIDE the configured homeRoot (so the shared
+ *    model root and anything outside the per-claim temp tree can never match);
+ *  - the claim directory is removed as one unit — never another claim, never
+ *    ORPHANED rows (their callers never reach cleanup), and if the path fence
+ *    cannot be proven the data is left in place with a stable warning.
+ */
+async function cleanupRetainedClaimData(mineruHome: string, input: OcrServerReconcilerInput): Promise<void> {
+  try {
+    const { basename, dirname } = await import("node:path");
+    const { rm } = await import("node:fs/promises");
+    if (!isWithinPath(mineruHome, input.homeRoot) || basename(mineruHome) !== "home") {
+      logger.warn("mineru.reconciler.cleanup_refused", { reason: "PATH_FENCE_FAILED", mineruHome });
+      return;
+    }
+    const claimDir = dirname(mineruHome);
+    if (!isWithinPath(claimDir, input.homeRoot) || claimDir === input.homeRoot) {
+      logger.warn("mineru.reconciler.cleanup_refused", { reason: "PATH_FENCE_FAILED", mineruHome });
+      return;
+    }
+    // Bounded retries: Windows can transiently hold a just-touched directory
+    // (AV/indexer scans); a refused cleanup would silently leak the claim.
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        await rm(claimDir, { recursive: true, force: true });
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        await sleep(200);
+      }
+    }
+    if (lastError !== null) throw lastError;
+  } catch (error) {
+    logger.warn("mineru.reconciler.cleanup_refused", { reason: "CLEANUP_IO_FAILED", mineruHome, error: error instanceof Error ? error.message.slice(0, 200) : "unknown" });
+  }
 }
 
 async function reconcileRow(row: { id: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; pid: number | null; serverId: string | null; status: string }, input: OcrServerReconcilerInput): Promise<"skipped" | "stopped" | "orphaned"> {
@@ -102,6 +149,7 @@ async function reconcileRow(row: { id: string; hostClaimToken: string; runExecut
   // Proven gone: the SHARED conservative rule (two consecutive negatives).
   if (await confirmedRecordedProcessGone(row.pid!, { expectedImagePattern: imagePattern })) {
     await markOcrServerStoppedProcessGone(row.hostClaimToken, "RECONCILER_PROCESS_GONE");
+    await cleanupRetainedClaimData(row.mineruHome, input);
     return "stopped";
   }
 
@@ -116,6 +164,7 @@ async function reconcileRow(row: { id: string; hostClaimToken: string; runExecut
   if (stopResult.spawnErrorCode !== "ENOENT") {
     if (await awaitEndpointProcessExit(endpoint!, row.mineruHome, imagePattern, 10_000)) {
       await markOcrServerStoppedProcessGone(row.hostClaimToken, "RECONCILER_GRACEFUL_STOP");
+      await cleanupRetainedClaimData(row.mineruHome, input);
       return "stopped";
     }
   }
@@ -127,6 +176,7 @@ async function reconcileRow(row: { id: string; hostClaimToken: string; runExecut
   const killed = await killByRecordedIdentity(row.pid!);
   if (killed && await awaitEndpointProcessExit(endpoint!, row.mineruHome, imagePattern, 10_000)) {
     await markOcrServerStoppedProcessGone(row.hostClaimToken, "RECONCILER_FORCED_STOP");
+    await cleanupRetainedClaimData(row.mineruHome, input);
     return "stopped";
   }
   await markOcrServerOrphaned(row.hostClaimToken, killed ? "RECONCILER_KILL_UNCONFIRMED" : "RECONCILER_KILL_REFUSED");
