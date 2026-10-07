@@ -148,6 +148,9 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
   const source = sourceRows[0]!;
 
   const ignoredFields: ProductIdentityIgnoredField[] = [];
+  const title = candidate.title && normalizeProductIdentityTitleForComparison(candidate.title.value).length > 0
+    ? candidate.title.value
+    : null;
   const language = candidate.language && isPromotableProductLanguage(candidate.language.value)
     ? candidate.language.value.trim()
     : null;
@@ -166,7 +169,7 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
   }
 
   if (!source.editionId) {
-    if (!candidate.title) {
+    if (!title) {
       return createPromotion(tx, {
         ...input,
         status: "BLOCKED",
@@ -176,7 +179,7 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
     }
 
     const work = await tx.work.create({
-      data: { workspaceId: input.workspaceId, title: candidate.title.value },
+      data: { workspaceId: input.workspaceId, title },
       select: { id: true },
     });
     const edition = await tx.edition.create({
@@ -229,8 +232,8 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
   const edition = identities[0]!;
 
   const conflicts: ProductIdentityConflict[] = [];
-  if (candidate.title && !sameTitle(edition.title, candidate.title.value)) {
-    conflicts.push({ field: "work.title", existing: edition.title, candidate: candidate.title.value });
+  if (title && !sameTitle(edition.title, title)) {
+    conflicts.push({ field: "work.title", existing: edition.title, candidate: title });
   }
   if (language && edition.language && !sameLanguage(edition.language, language)) {
     conflicts.push({ field: "edition.language", existing: edition.language, candidate: language });
