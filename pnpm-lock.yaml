@@ -280,6 +280,9 @@ importers:
       pdfjs-dist:
         specifier: ^6.2.108
         version: 6.2.108
+      tsx:
+        specifier: 4.23.11
+        version: 4.23.11
     devDependencies:
       '@eslint/js':
         specifier: ^9.39.1

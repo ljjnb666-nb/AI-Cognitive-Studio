@@ -18,8 +18,9 @@ import { SourceError } from "./source-errors.js";
 /**
  * EPUB native ingestion (epub-parser-v2).
  *
- * The ZIP subsystem (central-directory walking, per-entry/total/compression
- * limits, encrypted-flag rejection) stays authoritative and untouched. v2
+ * The ZIP subsystem is authoritative: central-directory and local-header
+ * identity, duplicate-name rejection, archive bounds, per-entry/total/compression
+ * limits, and encrypted-flag rejection are checked before inflation. v2
  * replaces regex-based structure discovery with namespace-aware XML DOM
  * parsing (@xmldom/xmldom, pure JS, no network, no entity expansion) and adds
  * durable EPUB format metadata, safe archive-relative href resolution, DOM
@@ -63,7 +64,7 @@ const NAV_STRUCTURAL_FAILURE = "EPUB_NAV_STRUCTURAL_FAILURE";
 const MAX_WALK_DEPTH = 256;
 const MAX_NAVIGATION_DEPTH = 64;
 
-type ZipEntry = { name: string; method: number; flags: number; compressed: Buffer; compressedSize: number; uncompressedSize: number };
+type ZipEntry = { name: string; method: number; flags: number; compressed: Buffer; compressedSize: number; uncompressedSize: number; localOffset: number; localExtraLength: number };
 type ManifestItem = { id: string; href: string; mediaType: string | null; properties: string[] };
 type EpubPackage = { path: string; version: string | null; renditionLayout: EpubRenditionLayout; manifest: Map<string, ManifestItem>; spineIds: string[]; spineTocId: string | null; dcTitle: string | null; dcLanguage: string | null; dcIdentifier: string | null };
 type NavigationResult = { source: EpubNavigationSource; entries: EpubNavigationEntry[]; degraded: boolean };
@@ -72,7 +73,12 @@ type BlockContext = { spineIndex: number; docPath: string; provenance: BlockExtr
 export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: ParserDescriptor): Parsed {
   const entries = readZip(bytes, limits);
   const byName = new Map(entries.map((entry) => [entry.name, entry]));
-  if (entryText(byName, "mimetype", limits) !== "application/epub+zip") throw new Error(SourceError.CORRUPTED);
+  const mimetype = byName.get("mimetype");
+  // OCF authority: mimetype is the first local file, STORED (never deflated)
+  // and carries no local extra field. This prevents ambiguous/self-extracting
+  // ZIP layouts from being accepted as EPUB containers.
+  if (!mimetype || mimetype.localOffset !== 0 || mimetype.method !== 0 || mimetype.localExtraLength !== 0 ||
+      entryText(byName, "mimetype", limits) !== "application/epub+zip") throw new Error(SourceError.CORRUPTED);
   if (byName.has("META-INF/encryption.xml")) throw new Error(SourceError.ARCHIVE_UNSAFE);
   const provenance: BlockExtractionProvenance = { sourceMethod: parser.sourceMethod, parserName: parser.name, parserVersion: parser.version };
   const opf = readPackage(byName, limits);
@@ -661,24 +667,149 @@ function safeXmlText(xml: string): string {
 
 function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
   const data = Buffer.from(bytes);
-  const eocd = data.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-  if (eocd < 0 || eocd + 22 > data.length) throw new Error(SourceError.CORRUPTED);
-  const count = data.readUInt16LE(eocd + 10), directoryOffset = data.readUInt32LE(eocd + 16);
-  if (count > limits.maxArchiveEntries || directoryOffset >= data.length) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  let offset = directoryOffset, total = 0;
+  const eocd = findEndOfCentralDirectory(data);
+  if (eocd < 0) throw new Error(SourceError.CORRUPTED);
+
+  const diskNumber = data.readUInt16LE(eocd + 4);
+  const directoryDisk = data.readUInt16LE(eocd + 6);
+  const entriesOnDisk = data.readUInt16LE(eocd + 8);
+  const count = data.readUInt16LE(eocd + 10);
+  const directorySize = data.readUInt32LE(eocd + 12);
+  const directoryOffset = data.readUInt32LE(eocd + 16);
+  const commentLength = data.readUInt16LE(eocd + 20);
+
+  // EPUB is a single-file OCF container. Multi-disk and ZIP64 sentinels are
+  // unsupported and fail closed instead of falling through 32-bit arithmetic.
+  if (diskNumber !== 0 || directoryDisk !== 0 || entriesOnDisk !== count ||
+      count === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff) throw new Error(SourceError.ARCHIVE_UNSAFE);
+  if (count > limits.maxArchiveEntries) throw new Error(SourceError.ARCHIVE_UNSAFE);
+  if (eocd + 22 + commentLength !== data.length) throw new Error(SourceError.CORRUPTED);
+  if (!hasZipRange(data, directoryOffset, directorySize) || directoryOffset + directorySize !== eocd) throw new Error(SourceError.CORRUPTED);
+
+  let offset = directoryOffset;
+  let total = 0;
   const entries: ZipEntry[] = [];
+  const seenNames = new Set<string>();
+  const localRanges: Array<{ start: number; end: number }> = [];
+
   for (let index = 0; index < count; index++) {
-    if (data.readUInt32LE(offset) !== 0x02014b50) throw new Error(SourceError.CORRUPTED);
-    const flags = data.readUInt16LE(offset + 8), method = data.readUInt16LE(offset + 10), compressedSize = data.readUInt32LE(offset + 20), uncompressedSize = data.readUInt32LE(offset + 24), nameLength = data.readUInt16LE(offset + 28), extraLength = data.readUInt16LE(offset + 30), commentLength = data.readUInt16LE(offset + 32), localOffset = data.readUInt32LE(offset + 42);
-    const name = data.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
-    if ((flags & 1) || !isSafePath(name) || uncompressedSize > limits.maxArchiveEntryBytes || (compressedSize && uncompressedSize / compressedSize > limits.maxArchiveCompressionRatio)) throw new Error(SourceError.ARCHIVE_UNSAFE);
+    if (!hasZipRange(data, offset, 46) || data.readUInt32LE(offset) !== 0x02014b50) throw new Error(SourceError.CORRUPTED);
+    const flags = data.readUInt16LE(offset + 8);
+    const method = data.readUInt16LE(offset + 10);
+    const crc32 = data.readUInt32LE(offset + 16);
+    const compressedSize = data.readUInt32LE(offset + 20);
+    const uncompressedSize = data.readUInt32LE(offset + 24);
+    const nameLength = data.readUInt16LE(offset + 28);
+    const extraLength = data.readUInt16LE(offset + 30);
+    const commentLength = data.readUInt16LE(offset + 32);
+    const localOffset = data.readUInt32LE(offset + 42);
+    const centralLength = 46 + nameLength + extraLength + commentLength;
+    if (!hasZipRange(data, offset, centralLength) || offset + centralLength > eocd) throw new Error(SourceError.CORRUPTED);
+
+    const name = decodeZipName(data.subarray(offset + 46, offset + 46 + nameLength));
+    const isDirectory = name.endsWith("/");
+    const authorityPath = isDirectory ? name.slice(0, -1) : name;
+    if (seenNames.has(name)) throw new Error(SourceError.ARCHIVE_UNSAFE);
+    seenNames.add(name);
+    if ((flags & 1) || (method !== 0 && method !== 8) || !isSafePath(authorityPath) ||
+        uncompressedSize > limits.maxArchiveEntryBytes ||
+        (compressedSize === 0 && uncompressedSize !== 0) ||
+        (compressedSize > 0 && uncompressedSize / compressedSize > limits.maxArchiveCompressionRatio)) throw new Error(SourceError.ARCHIVE_UNSAFE);
+    if (isDirectory && uncompressedSize !== 0) throw new Error(SourceError.CORRUPTED);
+    if (method === 0 && compressedSize !== uncompressedSize) throw new Error(SourceError.CORRUPTED);
+
     total += uncompressedSize;
-    if (total > limits.maxArchiveTotalBytes || data.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(SourceError.ARCHIVE_UNSAFE);
-    const localName = data.readUInt16LE(localOffset + 26), localExtra = data.readUInt16LE(localOffset + 28), start = localOffset + 30 + localName + localExtra;
-    entries.push({ name, method, flags, compressed: data.subarray(start, start + compressedSize), compressedSize, uncompressedSize });
-    offset += 46 + nameLength + extraLength + commentLength;
+    if (total > limits.maxArchiveTotalBytes) throw new Error(SourceError.ARCHIVE_UNSAFE);
+
+    if (!hasZipRange(data, localOffset, 30) || localOffset >= directoryOffset || data.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(SourceError.CORRUPTED);
+    const localFlags = data.readUInt16LE(localOffset + 6);
+    const localMethod = data.readUInt16LE(localOffset + 8);
+    const localCrc32 = data.readUInt32LE(localOffset + 14);
+    const localCompressedSize = data.readUInt32LE(localOffset + 18);
+    const localUncompressedSize = data.readUInt32LE(localOffset + 22);
+    const localNameLength = data.readUInt16LE(localOffset + 26);
+    const localExtraLength = data.readUInt16LE(localOffset + 28);
+    const localHeaderLength = 30 + localNameLength + localExtraLength;
+    if (!hasZipRange(data, localOffset, localHeaderLength)) throw new Error(SourceError.CORRUPTED);
+    const localName = decodeZipName(data.subarray(localOffset + 30, localOffset + 30 + localNameLength));
+    if (localName !== name || localFlags !== flags || localMethod !== method) throw new Error(SourceError.CORRUPTED);
+
+    // With no data descriptor, the local CRC/size fields mirror the central
+    // record exactly. With bit 3 set, local fields may be zero placeholders,
+    // but any populated field must still agree with the central authority.
+    if ((flags & 0x08) === 0) {
+      if (localCrc32 !== crc32 || localCompressedSize !== compressedSize || localUncompressedSize !== uncompressedSize) throw new Error(SourceError.CORRUPTED);
+    } else if ((localCrc32 !== 0 && localCrc32 !== crc32) ||
+               (localCompressedSize !== 0 && localCompressedSize !== compressedSize) ||
+               (localUncompressedSize !== 0 && localUncompressedSize !== uncompressedSize)) {
+      throw new Error(SourceError.CORRUPTED);
+    }
+
+    const start = localOffset + localHeaderLength;
+    const dataEnd = start + compressedSize;
+    if (!hasZipRange(data, start, compressedSize) || dataEnd > directoryOffset) throw new Error(SourceError.CORRUPTED);
+    const localEnd = (flags & 0x08) !== 0 ? readZipDataDescriptorEnd(data, dataEnd, directoryOffset, crc32, compressedSize, uncompressedSize) : dataEnd;
+    localRanges.push({ start: localOffset, end: localEnd });
+    if (!isDirectory) entries.push({ name, method, flags, compressed: data.subarray(start, dataEnd), compressedSize, uncompressedSize, localOffset, localExtraLength });
+    offset += centralLength;
+  }
+
+  if (offset !== eocd) throw new Error(SourceError.CORRUPTED);
+  localRanges.sort((left, right) => left.start - right.start);
+  for (let index = 1; index < localRanges.length; index++) {
+    if (localRanges[index - 1]!.end > localRanges[index]!.start) throw new Error(SourceError.CORRUPTED);
   }
   return entries;
+}
+
+function findEndOfCentralDirectory(data: Buffer): number {
+  // EOCD may be followed by up to 65,535 comment bytes, and the comment itself
+  // may contain a second fully-formed EOCD. A ZIP with two candidates whose
+  // declared comments both reach EOF has two competing central-directory
+  // authorities; fail closed instead of choosing the last signature.
+  const minimum = Math.max(0, data.length - 22 - 0xffff);
+  let candidate = -1;
+  for (let offset = data.length - 22; offset >= minimum; offset--) {
+    if (data.readUInt32LE(offset) !== 0x06054b50) continue;
+    const commentLength = data.readUInt16LE(offset + 20);
+    if (offset + 22 + commentLength !== data.length) continue;
+    if (candidate !== -1) return -1;
+    candidate = offset;
+  }
+  return candidate;
+}
+
+function hasZipRange(data: Buffer, offset: number, length: number): boolean {
+  return Number.isSafeInteger(offset) && Number.isSafeInteger(length) && offset >= 0 && length >= 0 && offset <= data.length && length <= data.length - offset;
+}
+
+/**
+ * GPBF bit 3 moves CRC/sizes into a trailing data descriptor. The central
+ * directory remains the size authority, but the descriptor itself must be
+ * present, bounded, and identity-equal; otherwise bytes between local records
+ * can alias as unvalidated archive structure. ZIP64 descriptors are excluded
+ * by the archive's ZIP64 fail-closed policy.
+ */
+function readZipDataDescriptorEnd(data: Buffer, offset: number, directoryOffset: number, crc32: number, compressedSize: number, uncompressedSize: number): number {
+  const unsigned = hasZipRange(data, offset, 12) && offset + 12 <= directoryOffset &&
+    data.readUInt32LE(offset) === crc32 &&
+    data.readUInt32LE(offset + 4) === compressedSize &&
+    data.readUInt32LE(offset + 8) === uncompressedSize;
+  const signed = hasZipRange(data, offset, 16) && offset + 16 <= directoryOffset &&
+    data.readUInt32LE(offset) === 0x08074b50 &&
+    data.readUInt32LE(offset + 4) === crc32 &&
+    data.readUInt32LE(offset + 8) === compressedSize &&
+    data.readUInt32LE(offset + 12) === uncompressedSize;
+  if (unsigned === signed) throw new Error(SourceError.CORRUPTED);
+  return signed ? offset + 16 : offset + 12;
+}
+
+function decodeZipName(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(SourceError.CORRUPTED);
+  }
 }
 
 function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): string {
@@ -694,7 +825,7 @@ function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserL
 
 /** ZIP entry names stay strict: no traversal segments of any kind. */
 function isSafePath(path: string): boolean {
-  return !!path && !/^(?:[\\/]|[a-zA-Z]:|\\\\)/.test(path) && !path.split(/[\\/]/).some((part) => part === ".." || !part) && !/%2e|%2f|%5c/i.test(path);
+  return !!path && !path.includes("\\") && !/^(?:[\\/]|[a-zA-Z]:|\\\\)/.test(path) && !path.split("/").some((part) => part === "." || part === ".." || !part) && !/%2e|%2f|%5c/i.test(path);
 }
 
 // ---------------------------------------------------------------------------

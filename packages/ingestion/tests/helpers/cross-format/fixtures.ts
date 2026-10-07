@@ -54,11 +54,13 @@ function zip(entries: ZipEntry[]): Uint8Array {
   for (const entry of entries) {
     const name = Buffer.from(entry.name);
     const raw = Buffer.from(entry.text, "utf8");
-    const body = deflateRawSync(raw);
+    const stored = entry.name === "mimetype";
+    const body = stored ? raw : deflateRawSync(raw);
+    const method = stored ? 0 : 8;
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(8, 8);
+    local.writeUInt16LE(method, 8);
     local.writeUInt32LE(body.length, 18);
     local.writeUInt32LE(raw.length, 22);
     local.writeUInt16LE(name.length, 26);
@@ -67,7 +69,7 @@ function zip(entries: ZipEntry[]): Uint8Array {
     record.writeUInt32LE(0x02014b50, 0);
     record.writeUInt16LE(20, 4);
     record.writeUInt16LE(20, 6);
-    record.writeUInt16LE(8, 10);
+    record.writeUInt16LE(method, 10);
     record.writeUInt32LE(body.length, 20);
     record.writeUInt32LE(raw.length, 24);
     record.writeUInt16LE(name.length, 28);

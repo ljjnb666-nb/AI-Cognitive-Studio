@@ -20,7 +20,8 @@
     "@ai-cognitive/storage": "workspace:*",
     "@xmldom/xmldom": "0.9.12",
     "bullmq": "^5.61.0",
-    "pdfjs-dist": "^6.2.108"
+    "pdfjs-dist": "^6.2.108",
+    "tsx": "4.23.11"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
