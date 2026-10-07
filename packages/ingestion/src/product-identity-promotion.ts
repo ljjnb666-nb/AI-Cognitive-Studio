@@ -35,6 +35,7 @@ type PersistedPromotion = {
 
 export type ProductIdentityPromotionOutcome =
   | { status: "STALE"; expectedExtractionId: string; currentExtractionId: string | null }
+  | { status: "SUPERSEDED"; expectedSourceDocumentId: string; latestSourceDocumentId: string }
   | { status: "APPLIED" | "NOOP" | "CONFLICT" | "BLOCKED"; promotion: PersistedPromotion };
 
 type PromotionInput = {
@@ -146,6 +147,25 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
   `;
   if (sourceRows.length !== 1) throw new Error("PRODUCT_IDENTITY_SOURCE_BINDING_INVALID");
   const source = sourceRows[0]!;
+
+  // Product identity is Source-level authority. A historical SourceDocument
+  // may still have its own CurrentDocumentExtraction, so that marker alone is
+  // insufficient: only the highest durable SourceDocument.version may promote.
+  // Future code that creates a new version for an existing Source must take the
+  // same Source row lock before inserting that version.
+  const latestDocument = await tx.sourceDocument.findFirst({
+    where: { sourceId: source.id, workspaceId: input.workspaceId },
+    orderBy: [{ version: "desc" }, { createdAt: "desc" }],
+    select: { id: true },
+  });
+  if (!latestDocument) throw new Error("PRODUCT_IDENTITY_SOURCE_BINDING_INVALID");
+  if (latestDocument.id !== input.sourceDocumentId) {
+    return {
+      status: "SUPERSEDED",
+      expectedSourceDocumentId: input.sourceDocumentId,
+      latestSourceDocumentId: latestDocument.id,
+    };
+  }
 
   const ignoredFields: ProductIdentityIgnoredField[] = [];
   const title = candidate.title && normalizeProductIdentityTitleForComparison(candidate.title.value).length > 0
