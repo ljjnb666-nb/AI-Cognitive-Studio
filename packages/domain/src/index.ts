@@ -28,6 +28,15 @@ export {
   type EpubRenditionLayout,
 } from "./epub-extraction-metadata.js";
 export {
+  PRODUCT_IDENTITY_CANDIDATE_SCHEMA_VERSION,
+  buildEpubProductIdentityCandidate,
+  parseProductIdentityCandidate,
+  productIdentityCandidateSchema,
+  tryParseProductIdentityCandidate,
+  type ProductIdentityCandidate,
+  type ProductIdentityEvidence,
+} from "./product-identity-candidate.js";
+export {
   blockExtractionProvenanceSchema,
   canonicalBlockMetadataSchema,
   CANONICAL_SCHEMA_VERSION,
