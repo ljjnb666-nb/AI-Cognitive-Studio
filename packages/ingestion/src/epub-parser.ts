@@ -764,15 +764,19 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
 
 function findEndOfCentralDirectory(data: Buffer): number {
   // EOCD may be followed by up to 65,535 comment bytes, and the comment itself
-  // may contain the EOCD signature. Scan for a candidate whose own declared
-  // comment length reaches EOF instead of trusting lastIndexOf(signature).
+  // may contain a second fully-formed EOCD. A ZIP with two candidates whose
+  // declared comments both reach EOF has two competing central-directory
+  // authorities; fail closed instead of choosing the last signature.
   const minimum = Math.max(0, data.length - 22 - 0xffff);
+  let candidate = -1;
   for (let offset = data.length - 22; offset >= minimum; offset--) {
     if (data.readUInt32LE(offset) !== 0x06054b50) continue;
     const commentLength = data.readUInt16LE(offset + 20);
-    if (offset + 22 + commentLength === data.length) return offset;
+    if (offset + 22 + commentLength !== data.length) continue;
+    if (candidate !== -1) return -1;
+    candidate = offset;
   }
-  return -1;
+  return candidate;
 }
 
 function hasZipRange(data: Buffer, offset: number, length: number): boolean {

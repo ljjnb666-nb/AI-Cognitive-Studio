@@ -62,6 +62,25 @@ describe("safe EPUB parser", () => {
     input.writeUInt16LE(comment.length, eocd + 20);
     await expect(parseDocument(input, "application/epub+zip")).resolves.toMatchObject({ parser: { name: "builtin-epub" } });
   });
+  it("rejects competing EOCD authorities hidden inside the ZIP comment", async () => {
+    const original = Buffer.from(epub());
+    const realEocd = original.length - 22;
+    const count = original.readUInt16LE(realEocd + 10);
+    const directorySize = original.readUInt32LE(realEocd + 12);
+    const directoryOffset = original.readUInt32LE(realEocd + 16);
+    const duplicateDirectory = original.subarray(directoryOffset, directoryOffset + directorySize);
+    const fakeEocd = Buffer.alloc(22);
+    fakeEocd.writeUInt32LE(0x06054b50, 0);
+    fakeEocd.writeUInt16LE(count, 8);
+    fakeEocd.writeUInt16LE(count, 10);
+    fakeEocd.writeUInt32LE(duplicateDirectory.length, 12);
+    fakeEocd.writeUInt32LE(original.length, 16);
+    const comment = Buffer.concat([duplicateDirectory, fakeEocd]);
+    expect(comment.length).toBeLessThanOrEqual(0xffff);
+    const input = Buffer.concat([original, comment]);
+    input.writeUInt16LE(comment.length, realEocd + 20);
+    await expect(parseDocument(input, "application/epub+zip")).rejects.toThrow("SOURCE_CORRUPTED");
+  });
   it("enforces OCF mimetype as the first local stored file", async () => {
     const input = zip([
       { name: "META-INF/", text: "" },
