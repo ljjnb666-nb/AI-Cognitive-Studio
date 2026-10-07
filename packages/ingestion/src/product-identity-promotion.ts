@@ -94,12 +94,19 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
   if (locked.length !== 1) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
   if (locked[0]!.mediaType !== "application/epub+zip") throw new Error("PRODUCT_IDENTITY_SOURCE_FORMAT_NOT_PROMOTABLE");
 
-  const current = await tx.currentDocumentExtraction.findUnique({
-    where: { sourceDocumentId_workspaceId: { sourceDocumentId: input.sourceDocumentId, workspaceId: input.workspaceId } },
-    select: { extractionId: true },
-  });
-  if (current?.extractionId !== input.expectedExtractionId) {
-    return { status: "STALE", expectedExtractionId: input.expectedExtractionId, currentExtractionId: current?.extractionId ?? null };
+  // CurrentDocumentExtraction is the actual promotion fence. Lock the marker
+  // row so ingestion cannot switch current extraction between this check and
+  // the product-identity mutation. If ingestion won first, we observe its new
+  // extraction and return STALE; if promotion won first, ingestion waits.
+  const currentRows = await tx.$queryRaw<Array<{ extractionId: string }>>`
+    SELECT "extractionId"
+    FROM "CurrentDocumentExtraction"
+    WHERE "sourceDocumentId" = ${input.sourceDocumentId} AND "workspaceId" = ${input.workspaceId}
+    FOR UPDATE
+  `;
+  const currentExtractionId = currentRows[0]?.extractionId ?? null;
+  if (currentExtractionId !== input.expectedExtractionId) {
+    return { status: "STALE", expectedExtractionId: input.expectedExtractionId, currentExtractionId };
   }
 
   const extraction = await tx.documentExtraction.findUnique({
@@ -278,7 +285,8 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
  * Trusted boundary for controlled product identity promotion.
  *
  * The caller MUST pass the extraction it observed. The transaction locks the
- * SourceDocument plus Source identity row and refuses promotion if CurrentDocumentExtraction moved,
+ * SourceDocument, CurrentDocumentExtraction marker, and Source identity row;
+ * it refuses promotion if CurrentDocumentExtraction moved,
  * preventing an old page/worker from promoting stale extraction metadata.
  */
 export async function promoteCurrentProductIdentityForUser(
@@ -288,9 +296,10 @@ export async function promoteCurrentProductIdentityForUser(
   return prisma.$transaction(async (tx) => {
     const membership = await tx.workspaceMember.findUnique({
       where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } },
-      select: { userId: true },
+      select: { userId: true, role: true },
     });
     if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
+    if (membership.role === "VIEWER") throw new Error("WORKSPACE_WRITE_ACCESS_DENIED");
     return promoteInTransaction(tx, { workspaceId: context.workspaceId, ...input });
   });
 }

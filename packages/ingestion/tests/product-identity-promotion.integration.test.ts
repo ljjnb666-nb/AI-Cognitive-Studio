@@ -187,6 +187,21 @@ afterEach(async () => {
 afterAll(async () => { await prisma.$disconnect(); });
 
 describe("controlled product identity promotion authority", () => {
+  it("denies VIEWER identity mutation with zero durable side effects", async () => {
+    const value = await fixture({ title: "Protected Book" });
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: value.workspace.id, userId: value.user.id } },
+      data: { role: "VIEWER" },
+    });
+    await expect(promoteCurrentProductIdentityForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
+    )).rejects.toThrow("WORKSPACE_WRITE_ACCESS_DENIED");
+    await expect(prisma.productIdentityPromotion.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+    await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+  });
+
   it("creates and binds one Work/Edition from the current candidate and is exact-extraction idempotent", async () => {
     const value = await fixture({ title: "Fixture Book", language: "en", identifier: "urn:isbn:978-0-306-40615-7" });
     const context = { userId: value.user.id, workspaceId: value.workspace.id };
