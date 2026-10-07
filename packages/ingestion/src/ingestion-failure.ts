@@ -27,7 +27,7 @@ const terminalCodes = new Set<string>([
   SourceError.PARSE_TIMEOUT,
   SourceError.CANONICAL_BLOCK_CONTRACT_INVALID,
   SourceError.FORMAT_METADATA_CONTRACT_INVALID,
-  // PDF routing/quality contract failures (04B-2): deterministic, never retryable
+  // Publication quality contract failures (PDF 04B-2 / EPUB 04C-3): deterministic, never retryable
   SourceError.QUALITY_REJECTED,
   SourceError.QUALITY_GATE_BLOCKED,
   SourceError.ROUTING_PLAN_CONFLICT,

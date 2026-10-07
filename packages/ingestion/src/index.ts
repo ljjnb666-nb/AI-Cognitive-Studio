@@ -13,6 +13,7 @@ import { writeRoutingOutcome } from "./ocr-durability.js";
 import { classifyIngestionFailure, ingestionStatusForTerminalFailure } from "./ingestion-failure.js";
 import { runPdfExtraction, type PdfRunExtraction } from "./pdf-run.js";
 import { OcrCapacityDeferredError, OcrCapacityDeferralError } from "./ocr-capacity-errors.js";
+import { evaluateEpubExtractionQuality, type EpubExtractionQualityDecision } from "./epub-quality.js";
 import { PDF_EXTRACTION_PARSER, pdfRoutingOutcome, type PdfOcrExecutor } from "./pdf-routing.js";
 import { claimUploadCompletion, rejectCompletionClaim, releaseCompletionClaim, renewCompletionClaim } from "./upload-completion-claim.js";
 import { dispatchPendingOutbox } from "./outbox-dispatcher.js";
@@ -20,6 +21,7 @@ export { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDisp
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export { parseDocument, extractNativePdf, pdfTextToBlocks, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
+export { EPUB_QUALITY_REASON_CODES, evaluateEpubExtractionQuality, type EpubExtractionQualityDecision, type EpubExtractionQualityStatus, type EpubQualityReasonCode } from "./epub-quality.js";
 export { PDF_EXTRACTION_PARSER, PDF_INSPECTOR_VERSION, PDF_QUALITY_REASON_CODES, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, PDF_ROUTING_REASON_CODES, assertRoutingPlanReplay, evaluatePdfExtractionQuality, inspectPdfPage, parseRoutingPlan, pdfRoutingOutcome, planPdfRouting, type PdfContentEvidence, type PdfExtractionQualityDecision, type PdfExtractionQualityStatus, type PdfOcrExecutor, type PdfOcrExecutorDescriptor, type PdfOcrPageRequest, type PdfOcrPageResult, type PdfPageEvidence, type PdfPageInspection, type PdfPageQualityDecision, type PdfPageRoute, type PdfPageExtractionOutcome, type PdfQualityReasonCode, type PdfRoutingOutcome, type PdfRoutingPlan, type PdfRoutingPlanPage, type PdfRoutingReasonCode } from "./pdf-routing.js";
 export { OcrCapacityDeferredError, OcrCapacityDeferralError } from "./ocr-capacity-errors.js";
 export { runPdfExtraction, type PdfRunExtraction, type PdfRunExtractionInput } from "./pdf-run.js";
@@ -41,12 +43,9 @@ export const BOOK_ANALYSIS_BOOTSTRAP_TOPIC = "book.analysis.bootstrap.requested"
 const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").map((character) => character.charCodeAt(0) < 32 ? "_" : character).join("").slice(0, 180) || "source";
 
 /**
- * Quality recorded for a non-PDF successful parse (and the defensive fallback
- * for PDFs, which can no longer produce it). Parser success is never equated
- * with quality acceptance: a canonical-book-v1 extraction starts at UNKNOWN
- * with an empty (evidence-free) warning list. PDF extractions are
- * quality-authoritative since 04B-2: the routing pipeline's deterministic
- * quality decision (ACCEPTED/DEGRADED) is persisted verbatim.
+ * Quality metadata for formats that still have no production quality gate.
+ * PDF is authoritative since 04B-2 and EPUB since 04C-3; TXT/Markdown remain
+ * intentionally UNKNOWN until a later scoped quality phase.
  */
 const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
 
@@ -201,11 +200,13 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
       try {
         const bytes = await storage.getObjectBytes(run.sourceDocument.storageKey);
         const limits = { ...DEFAULT_PARSER_LIMITS, maxPdfPages: options.maxPdfPages };
-        // PDFs run the 04B-2 routing pipeline: inspect → write-once routing
-        // plan → native extraction + OCR executor seam → merged page-level
-        // result → deterministic quality decision. Other formats parse directly.
+        // PDFs run the 04B-2 routing pipeline. EPUB parses in its isolated
+        // boundary and then runs the 04C-3 deterministic publication-quality
+        // gate. TXT/Markdown still parse directly without a production quality
+        // decision.
         let parsed: Parsed;
         let pdfRouting: Extract<PdfRunExtraction, { kind: "PUBLISH" }> | null = null;
+        let epubQuality: EpubExtractionQualityDecision | null = null;
         if (run.sourceDocument.mediaType === "application/pdf") {
           const extraction = await runPdfExtraction({
             runId: run.id,
@@ -236,6 +237,20 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
           pdfRouting = extraction;
         } else {
           parsed = await parseDocument(bytes, run.sourceDocument.mediaType, limits);
+          if (run.sourceDocument.mediaType === "application/epub+zip") {
+            epubQuality = evaluateEpubExtractionQuality(parsed);
+            if (epubQuality.status === "REJECTED") {
+              // EPUB has no alternate extraction fallback in v1. Known missing
+              // primary reading-order evidence is a deterministic content
+              // rejection. Terminalize BEFORE text storage or any publication
+              // row can be written; the live PostgreSQL claim is the authority.
+              if (!await transitionRunToTerminal(run.id, claim.token, "REJECTED", SourceError.QUALITY_REJECTED)) {
+                throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
+              }
+              nonPublishTerminalized = true;
+              throw new Error(SourceError.QUALITY_REJECTED);
+            }
+          }
         }
         const canonicalBlocks = parsed.pages.flatMap((page) => page.blocks);
         const text = canonicalBlocks.map((block) => block.text).join(CANONICAL_BLOCK_SEPARATOR);
@@ -255,11 +270,17 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
           // assert live claim ownership BEFORE any extraction data is written.
           // The row lock holds the run against reclaim until this transaction ends.
           if (ownershipLost || !(await lockRunForPublication(tx, run.id, claim.token))) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
-          // Publication hard gate (04B-2): a PDF may persist an extraction only
-          // with a quality decision, and only an ACCEPTED/DEGRADED decision may
-          // publish. The pipeline never returns forbidden decisions — reaching
-          // here with one is an internal contract bug and must abort the write.
+          // Publication hard gate: PDF (04B-2) and EPUB (04C-3) can persist a
+          // current extraction only after a deterministic quality decision.
+          // Reaching this transaction without an ACCEPTED/DEGRADED decision is
+          // an internal authority bug and aborts the entire publication write.
           if (pdfRouting && (pdfRouting.decision.status === "REQUIRES_FALLBACK" || pdfRouting.decision.status === "REJECTED")) throw new Error(SourceError.QUALITY_GATE_BLOCKED);
+          if (run.sourceDocument.mediaType === "application/epub+zip" &&
+              (!epubQuality || (epubQuality.status !== "ACCEPTED" && epubQuality.status !== "DEGRADED"))) {
+            throw new Error(SourceError.QUALITY_GATE_BLOCKED);
+          }
+          const extractionQualityStatus = pdfRouting ? pdfRouting.decision.status : epubQuality ? epubQuality.status : "UNKNOWN";
+          const extractionQualityWarnings = pdfRouting ? pdfRouting.decision.qualityWarnings : epubQuality ? epubQuality.qualityWarnings : parsed.qualityWarnings ?? [];
           const extraction = await tx.documentExtraction.create({
             data: {
               ingestionRunId: run.id,
@@ -272,13 +293,12 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
               parserVersion: pdfRouting ? PDF_EXTRACTION_PARSER.version : parsed.parser.version,
               normalizationVersion: CANONICAL_NORMALIZATION_VERSION,
               canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION,
-              // PDF: the deterministic quality gate's decision, verbatim —
-              // successful PDF publication is never UNKNOWN anymore. Other
-              // formats remain unassessed (UNKNOWN).
-              qualityStatus: pdfRouting ? pdfRouting.decision.status : "UNKNOWN",
-              // Quality warnings are typed, evidence-backed observations only
-              // (for routed PDFs: OCR_USED when fallback content was merged).
-              qualityMetadata: parsed.qualityWarnings?.length ? parseExtractionQualityMetadata({ warnings: parsed.qualityWarnings }) : UNASSESSED_EXTRACTION_QUALITY,
+              // PDF and EPUB publication are quality-authoritative: a
+              // successful current extraction is never UNKNOWN for either.
+              // TXT/Markdown remain explicitly unassessed.
+              qualityStatus: extractionQualityStatus,
+              // Persist the exact evidence consumed by the quality authority.
+              qualityMetadata: extractionQualityWarnings.length ? parseExtractionQualityMetadata({ warnings: extractionQualityWarnings }) : UNASSESSED_EXTRACTION_QUALITY,
               // Format-native metadata (EPUB package/navigation evidence),
               // gated by canonicalFormatMetadata: EPUB requires schema-valid
               // metadata, non-EPUB formats must stay NULL. A violation is an
