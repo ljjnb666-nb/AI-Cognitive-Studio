@@ -23,13 +23,12 @@ export const SourceError = {
   // produce) format metadata in violation of the persistence contract. Never
   // surfaced as Zod details; classified FAILED, not REJECTED.
   FORMAT_METADATA_CONTRACT_INVALID: "SOURCE_FORMAT_METADATA_CONTRACT_INVALID",
-  // PDF extraction quality gate (04B-2): the gate rejected the extraction —
-  // the content cannot safely produce a canonical document (e.g. every page
-  // is genuinely empty). Deterministic content-truth REJECTED.
+  // Extraction quality gate: PDF (04B-2) / EPUB (04C-3) rejected the
+  // canonical result before publication. Deterministic content-truth REJECTED.
   QUALITY_REJECTED: "SOURCE_QUALITY_REJECTED",
-  // Publication hard gate (04B-2): a PDF reached persistence without an
-  // ACCEPTED/DEGRADED quality decision. Unreachable by construction; a
-  // violation is an internal routing/pipeline contract bug.
+  // Publication hard gate: a quality-authoritative PDF/EPUB reached
+  // persistence without ACCEPTED/DEGRADED. Unreachable by construction; a
+  // violation is an internal pipeline contract bug.
   QUALITY_GATE_BLOCKED: "SOURCE_QUALITY_GATE_BLOCKED",
   // Routing replay fence (04B-2): a persisted immutable routing plan conflicts
   // with runtime-derived inspection, or is structurally invalid. Internal
