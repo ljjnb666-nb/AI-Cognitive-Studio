@@ -44,8 +44,9 @@ import { SourceError } from "./source-errors.js";
  *
  * Non-negotiables carried over from BOOK-01: no fabricated physical pages
  * (SourcePage stays 0, physicalPageIndex stays null), per-block provenance,
- * qualityStatus UNKNOWN, and fail-closed handling of DOCTYPE/ENTITY and every
- * external resource reference.
+ * qualityStatus UNKNOWN, fail-closed handling of DOCTYPE/ENTITY, and
+ * no-network reference handling (safe outbound links / declared remote media
+ * are accepted as inert metadata; ingestion never dereferences them).
  */
 
 const EPUB_OPS_NAMESPACE = "http://www.idpf.org/2007/ops";
@@ -83,6 +84,7 @@ type SpineItemRef = { idref: string; linear: boolean };
 type EpubPackage = { path: string; version: string | null; renditionLayout: EpubRenditionLayout; manifest: Map<string, ManifestItem>; spine: SpineItemRef[]; spineTocId: string | null; dcTitle: string | null; dcLanguage: string | null; dcIdentifier: string | null };
 type NavigationResult = { source: EpubNavigationSource; entries: EpubNavigationEntry[]; degraded: boolean };
 type BlockContext = { spineIndex: number; docPath: string; provenance: BlockExtractionProvenance; footnote: boolean; warnings: Set<ExtractionQualityWarningCode>; limits: ParserLimits };
+type XmlReferencePolicy = { kind: "container" | "package" | "navigation" | "content"; allowRemoteResources?: boolean };
 
 export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: ParserDescriptor): Parsed {
   const entries = readZip(bytes, limits);
@@ -120,7 +122,12 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
     if (!ref.linear) return;
 
     const mediaType = contentItem.mediaType ?? "";
-    const document = parseXmlResource(entryText(byName, resource.path, limits), limits, resource.path);
+    const document = parseXmlResource(
+      entryText(byName, resource.path, limits),
+      limits,
+      resource.path,
+      { kind: "content", allowRemoteResources: contentItem.properties.includes("remote-resources") },
+    );
     const root = document.documentElement;
     if (!root) throw new Error(SourceError.CORRUPTED);
     const context: BlockContext = { spineIndex, docPath: resource.path, provenance, footnote: false, warnings, limits };
@@ -154,7 +161,7 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
 // ---------------------------------------------------------------------------
 
 function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubPackage {
-  const container = parseXmlResource(entryText(byName, "META-INF/container.xml", limits), limits, "");
+  const container = parseXmlResource(entryText(byName, "META-INF/container.xml", limits), limits, "", { kind: "container" });
   let opfPath: string | null = null;
   for (const rootfile of elementsByLocalName(container, "rootfile", limits)) {
     const mediaType = rootfile.getAttribute("media-type");
@@ -166,7 +173,7 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
     if (byName.has(resolved.path)) { opfPath = resolved.path; break; }
   }
   if (!opfPath) throw new Error(SourceError.CORRUPTED);
-  const opf = parseXmlResource(entryText(byName, opfPath, limits), limits, opfPath);
+  const opf = parseXmlResource(entryText(byName, opfPath, limits), limits, opfPath, { kind: "package" });
   const packageElement = opf.documentElement;
   if (!packageElement || localName(packageElement) !== "package") throw new Error(SourceError.CORRUPTED);
   const manifestElement = elementsByLocalName(opf, "manifest", limits)[0];
@@ -330,7 +337,7 @@ function readNavigation(opf: EpubPackage, byName: Map<string, ZipEntry>, limits:
     const navItem = [...opf.manifest.values()].find((item) => item.properties.includes("nav"));
     if (navItem) {
       const navPath = resolveNavDocumentPath(navItem, opf, byName);
-      const document = parseXmlResource(entryText(byName, navPath, limits), limits, navPath);
+      const document = parseXmlResource(entryText(byName, navPath, limits), limits, navPath, { kind: "navigation" });
       const entries = flattenEpub3Nav(document, navPath, limits);
       return entries.length ? { source: "EPUB3_NAV", entries, degraded: false } : { source: "NONE", entries: [], degraded: true };
     }
@@ -338,7 +345,7 @@ function readNavigation(opf: EpubPackage, byName: Map<string, ZipEntry>, limits:
     const ncxItem = (opf.spineTocId ? opf.manifest.get(opf.spineTocId) : undefined) ?? [...opf.manifest.values()].find((item) => item.mediaType === NCX_MEDIA_TYPE);
     if (ncxItem) {
       const ncxPath = resolveNavDocumentPath(ncxItem, opf, byName);
-      const document = parseXmlResource(entryText(byName, ncxPath, limits), limits, ncxPath);
+      const document = parseXmlResource(entryText(byName, ncxPath, limits), limits, ncxPath, { kind: "navigation" });
       const entries = flattenNcx(document, ncxPath, limits);
       return entries.length ? { source: "EPUB2_NCX", entries, degraded: false } : { source: "NONE", entries: [], degraded: true };
     }
@@ -422,29 +429,58 @@ function assertNavigationCapacity(entries: EpubNavigationEntry[], limits: Parser
  * fragment is separated here and never participates in archive lookup. Pure
  * string semantics: nothing is fetched, nothing is read from disk.
  */
+const OCF_TEST_ROOT = new URL("https://epub.invalid/__ocf__/");
+
 function resolveArchiveHref(basePath: string, href: string): { path: string; fragmentId: string | null } {
-  if (!href || /[\0]/.test(href) || /%00|%2e|%2f|%5c/i.test(href)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  if (/[\\]/.test(href)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  const hash = href.indexOf("#");
-  const rawPath = hash >= 0 ? href.slice(0, hash) : href;
-  const fragmentId = hash >= 0 && hash + 1 < href.length ? href.slice(hash + 1) : null;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(rawPath)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  if (/^(?:[\\/]|[a-zA-Z]:|\\\\)/.test(rawPath)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  if (!rawPath) return { path: basePath, fragmentId };
-  const parts = basePath.split("/");
-  parts.pop();
-  for (const part of rawPath.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (!parts.length) throw new Error(SourceError.ARCHIVE_UNSAFE);
-      parts.pop();
-      continue;
-    }
-    parts.push(part);
+  if (!href || href.includes("\0") || href.includes("\\")) throw new Error(SourceError.ARCHIVE_UNSAFE);
+
+  let resolved: URL;
+  try {
+    const base = basePath ? new URL(archivePathToUrlPath(basePath), OCF_TEST_ROOT) : OCF_TEST_ROOT;
+    resolved = new URL(href, base);
+  } catch {
+    throw new Error(SourceError.ARCHIVE_UNSAFE);
   }
-  const resolved = parts.join("/");
-  if (!resolved || !isSafePath(resolved)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  return { path: resolved, fragmentId };
+
+  // Internal EPUB references must remain under the artificial container-root
+  // sentinel. This mirrors the OCF "cannot leak above root" URL algorithm and
+  // catches literal or percent-encoded dot-segment escapes.
+  const rootPath = OCF_TEST_ROOT.pathname;
+  if (resolved.origin !== OCF_TEST_ROOT.origin || !resolved.pathname.startsWith(rootPath) || resolved.search) throw new Error(SourceError.ARCHIVE_UNSAFE);
+  const encodedPath = resolved.pathname.slice(rootPath.length);
+  if (!encodedPath) {
+    if (!basePath) throw new Error(SourceError.ARCHIVE_UNSAFE);
+    return { path: basePath, fragmentId: decodeUrlFragment(resolved.hash) };
+  }
+
+  const segments = encodedPath.split("/").map((segment) => decodeUrlPathSegment(segment));
+  if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\") || segment.includes("\0"))) {
+    throw new Error(SourceError.ARCHIVE_UNSAFE);
+  }
+  const path = segments.join("/");
+  if (!isSafePath(path)) throw new Error(SourceError.ARCHIVE_UNSAFE);
+  return { path, fragmentId: decodeUrlFragment(resolved.hash) };
+}
+
+function archivePathToUrlPath(path: string): string {
+  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
+
+function decodeUrlPathSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new Error(SourceError.ARCHIVE_UNSAFE);
+  }
+}
+
+function decodeUrlFragment(hash: string): string | null {
+  if (!hash || hash === "#") return null;
+  try {
+    return decodeURIComponent(hash.slice(1));
+  } catch {
+    throw new Error(SourceError.ARCHIVE_UNSAFE);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -597,9 +633,9 @@ function emitImageEvidence(img: XmlElement, context: BlockContext, blocks: Parse
  * or whitespace-padded external URLs never survive parsing unnoticed. The raw
  * prefilter stays in front as defense in depth; the DOM gate is authoritative.
  */
-function parseXmlResource(xml: string, limits: ParserLimits, basePath: string): XmlDocument {
+function parseXmlResource(xml: string, limits: ParserLimits, basePath: string, policy: XmlReferencePolicy): XmlDocument {
   const document = parseXmlDocument(safeXmlText(xml), limits);
-  assertDomResourceReferences(document, basePath, limits);
+  assertDomResourceReferences(document, basePath, limits, policy);
   return document;
 }
 
@@ -621,13 +657,12 @@ function parseXmlDocument(xml: string, limits: ParserLimits): XmlDocument {
 }
 
 /**
- * Post-DOM gate: validates every resource-reference attribute using the
- * parser-decoded value. Raw-regex prefiltering is not authoritative — decoded
- * values defeat entity obfuscation and padded schemes. Allowed: #fragment and
- * archive-relative paths (including legal ../) that stay inside the archive
- * root. Everything else fails closed. No resource is ever fetched.
+ * Post-DOM gate: validates decoded resource-reference attributes. Internal
+ * references use OCF URL semantics and must stay under the container root.
+ * Safe outbound hyperlinks and explicitly-declared remote media are accepted
+ * as inert references; no resource is ever fetched.
  */
-function assertDomResourceReferences(document: XmlDocument, basePath: string, limits: ParserLimits): void {
+function assertDomResourceReferences(document: XmlDocument, basePath: string, limits: ParserLimits, policy: XmlReferencePolicy): void {
   const root = document.documentElement;
   if (!root) throw new Error(SourceError.CORRUPTED);
   for (const element of iterXmlElements(root, limits)) {
@@ -640,9 +675,43 @@ function assertDomResourceReferences(document: XmlDocument, basePath: string, li
       if (name !== "src" && name !== "href" && name !== "full-path") continue;
       const value = (attribute.value ?? "").trim();
       if (!value || value.startsWith("#")) continue;
+      if (isAllowedExternalReference(element, name, value, policy)) continue;
       resolveArchiveHref(basePath, value);
     }
   }
+}
+
+function isAllowedExternalReference(element: XmlElement, attributeName: string, value: string, policy: XmlReferencePolicy): boolean {
+  let external: URL;
+  try {
+    external = new URL(value);
+  } catch {
+    return false;
+  }
+
+  const tag = localName(element);
+  const protocol = external.protocol.toLowerCase();
+  const isWeb = protocol === "http:" || protocol === "https:";
+
+  // Outbound hyperlinks are not publication resources and are never fetched
+  // by ingestion. Drop the URL after validation and retain only visible text.
+  if ((policy.kind === "content" || policy.kind === "navigation") &&
+      attributeName === "href" && (tag === "a" || tag === "area") &&
+      (isWeb || protocol === "mailto:" || protocol === "tel:")) return true;
+
+  // Package-manifest/metadata remote resources are descriptive here. The
+  // parser never dereferences them; any remote item selected by spine/nav
+  // authority is rejected later by the internal resolver.
+  if (policy.kind === "package" && attributeName === "href" &&
+      (tag === "item" || tag === "link") && isWeb) return true;
+
+  // EPUB remote publication resources must be explicitly advertised by the
+  // host content document. Keep this narrow to the standard remote-media/script
+  // embedding surfaces we can classify without executing or fetching content.
+  if (policy.kind === "content" && policy.allowRemoteResources && attributeName === "src" && isWeb &&
+      (tag === "audio" || tag === "video" || tag === "source" || tag === "track" || tag === "script")) return true;
+
+  return false;
 }
 
 /**

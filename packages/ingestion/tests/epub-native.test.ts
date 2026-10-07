@@ -154,6 +154,54 @@ describe("epub-parser-v2 navigation", () => {
     expect(two?.locator).toMatchObject({ spineIndex: 1, elementPath: "/html[1]/body[1]/p[2]", fragmentId: null });
   });
 
+  it("uses URL-standard percent and fragment semantics for internal references", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/ch%201.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/ch 1.xhtml", text: contentDocument('<p id="sec 1">Encoded path</p>') },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed)[0]?.text).toBe("Encoded path");
+    expect(epubLocatorOf(blocksOf(parsed)[0]!)?.href).toBe("OEBPS/text/ch 1.xhtml");
+
+    const navOpf = opfDocument({
+      manifest: '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="c1" href="text/ch%201.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const withNav = await parseDocument(book({ opf: navOpf, files: [
+      { name: "OEBPS/nav.xhtml", text: navDocument('<li><a href="text/ch%201.xhtml#sec%201">Encoded</a></li>') },
+      { name: "OEBPS/text/ch 1.xhtml", text: contentDocument('<p id="sec 1">Encoded path</p>') },
+    ] }), "application/epub+zip");
+    expect(parseEpubExtractionMetadata(withNav.formatMetadata).navigation[0]).toMatchObject({
+      href: "OEBPS/text/ch 1.xhtml",
+      fragmentId: "sec 1",
+    });
+  });
+
+  it("normalizes legal percent-encoded dot segments but rejects root escape and encoded slash aliases", async () => {
+    const legal = opfDocument({
+      manifest: '<item id="c1" href="sub/%2e%2e/text/ch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const parsed = await parseDocument(book({ opf: legal, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument("<p>Legal dot</p>") },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed)[0]?.text).toBe("Legal dot");
+
+    const escape = opfDocument({
+      manifest: '<item id="c1" href="%2e%2e/%2e%2e/%2e%2e/escape.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: escape, files: basicFiles }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+
+    const encodedSlash = opfDocument({
+      manifest: '<item id="c1" href="text%2Fch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: encodedSlash, files: basicFiles }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+
   it("keeps spine order authoritative regardless of manifest order", async () => {
     const opf = opfDocument({ manifest: '<item id="b" href="text/b.xhtml" media-type="application/xhtml+xml"/><item id="a" href="text/a.xhtml" media-type="application/xhtml+xml"/>', spine: '<itemref idref="a"/><itemref idref="b"/>' });
     const parsed = await parseDocument(book({ opf, files: [
@@ -614,10 +662,11 @@ describe("RF01 post-DOM resource gate", () => {
     return parseDocument(book({ opf: epub3Opf(), files: [...basicFiles.slice(0, 1), { name: "OEBPS/text/ch1.xhtml", text: doc }] }), "application/epub+zip");
   };
 
-  it("rejects direct and whitespace-padded external references", async () => {
+  it("allows inert outbound links while still rejecting undeclared remote embedded resources", async () => {
     await expect(parse('<img src="https://evil.test/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
     await expect(parse('<img src=" https://evil.test/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
-    await expect(parse('<a href=" https://evil.test/x">link</a>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    const linked = await parse('<p>Read <a href="https://example.test/article">the article</a>.</p>');
+    expect(blocksOf(linked).map((block) => block.text)).toEqual(["Read the article."]);
   });
 
   it("rejects entity-obfuscated external references that the decoded DOM reveals", async () => {
@@ -637,6 +686,29 @@ describe("RF01 post-DOM resource gate", () => {
     const parsed = await parse('<p>See <a href="#anchor">note</a></p><figure><img src="../images/a.png" alt="Chart"/></figure>');
     expect(blocksOf(parsed).map((block) => block.text)).toEqual(["See note", "Chart"]);
     expect(parsed.qualityWarnings).toEqual([]);
+  });
+
+  it("allows declared remote audio as inert content but never broadens remote images", async () => {
+    const remoteOpf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml" properties="remote-resources"/><item id="audio" href="https://media.example.test/ch1.mp3" media-type="audio/mpeg"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const parsed = await parseDocument(book({ opf: remoteOpf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<p>Before</p><audio src="https://media.example.test/ch1.mp3"/><p>After</p>') },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Before", "After"]);
+
+    const undeclaredOpf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: undeclaredOpf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<audio src="https://media.example.test/ch1.mp3"/>') },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+
+    await expect(parseDocument(book({ opf: remoteOpf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<img src="https://media.example.test/cover.png" alt="remote"/>') },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
   });
 
   it("validates SVG xlink:href against the same contract", async () => {
@@ -708,9 +780,10 @@ describe("RF01 namespace-prefixed documents", () => {
     ]);
   });
 
-  it("rejects external references inside prefixed documents", async () => {
-    const evilXhtml = prefixedXhtml.replace("<xhtml:p>Prefixed para</xhtml:p>", '<xhtml:p><xhtml:a href="https://evil.test/x">bad</xhtml:a></xhtml:p>');
-    await expect(parseDocument(prefixedBook(evilXhtml), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  it("keeps outbound hyperlinks inert inside prefixed documents", async () => {
+    const linkedXhtml = prefixedXhtml.replace("<xhtml:p>Prefixed para</xhtml:p>", '<xhtml:p><xhtml:a href="https://example.test/x">Outbound</xhtml:a></xhtml:p>');
+    const parsed = await parseDocument(prefixedBook(linkedXhtml), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toContain("Outbound");
   });
 });
 
