@@ -2,6 +2,7 @@ import { crc32, deflateRawSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { parseEpubExtractionMetadata } from "@ai-cognitive/domain";
 import { parseDocument, type Parsed, type ParsedBlock } from "../src/document-parsers.js";
+import { evaluateEpubExtractionQuality } from "../src/epub-quality.js";
 import { SourceError } from "../src/source-errors.js";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,104 @@ const basicFiles: Entry[] = [
 
 const blocksOf = (parsed: Parsed) => parsed.pages[0]?.blocks ?? [];
 const epubLocatorOf = (block: { locator?: ParsedBlock["locator"] }) => (block.locator?.kind === "epub" ? block.locator : undefined);
+
+// ---------------------------------------------------------------------------
+// Production quality authority (BOOK-INGESTION-04C-3)
+// ---------------------------------------------------------------------------
+
+describe("epub production quality gate", () => {
+  it("accepts a complete EPUB with no evidence-backed quality loss", async () => {
+    const parsed = await parseDocument(book({ opf: epub3Opf(), files: basicFiles }), "application/epub+zip");
+    expect(evaluateEpubExtractionQuality(parsed)).toEqual({
+      status: "ACCEPTED",
+      reasonCodes: [],
+      qualityWarnings: [],
+    });
+  });
+
+  it("degrades deterministic structural, navigation, and fixed-layout losses", async () => {
+    const table = await parseDocument(book({
+      opf: epub3Opf(),
+      files: [
+        ...basicFiles.slice(0, 1),
+        { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<table><tr><td rowspan="2">A</td><td>1</td></tr><tr><td>2</td></tr></table>') },
+      ],
+    }), "application/epub+zip");
+    expect(evaluateEpubExtractionQuality(table)).toEqual({
+      status: "DEGRADED",
+      reasonCodes: ["STRUCTURE_LOSS"],
+      qualityWarnings: ["TABLE_FLATTENED"],
+    });
+
+    const navigation = await parseDocument(book({
+      opf: epub3Opf(),
+      files: [
+        { name: "OEBPS/nav.xhtml", text: '<?xml version="1.0"?><html><nav><ol><li><a href="text/ch1.xhtml">Broken' },
+        { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+      ],
+    }), "application/epub+zip");
+    expect(evaluateEpubExtractionQuality(navigation)).toEqual({
+      status: "DEGRADED",
+      reasonCodes: ["NAVIGATION_DEGRADED"],
+      qualityWarnings: ["EPUB_NAVIGATION_DEGRADED"],
+    });
+
+    const fixed = await parseDocument(book({
+      opf: opfDocument({
+        metadata: '<meta property="rendition:layout">pre-paginated</meta>',
+        manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>',
+        spine: '<itemref idref="c1"/>',
+      }),
+      files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }],
+    }), "application/epub+zip");
+    expect(evaluateEpubExtractionQuality(fixed)).toEqual({
+      status: "DEGRADED",
+      reasonCodes: ["FIXED_LAYOUT"],
+      qualityWarnings: ["EPUB_FIXED_LAYOUT"],
+    });
+  });
+
+  it("rejects a successful parse that is known to omit primary reading-order evidence", async () => {
+    const parsed = await parseDocument(book({
+      opf: opfDocument({
+        manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/empty.xhtml" media-type="application/xhtml+xml"/>',
+        spine: '<itemref idref="c1"/><itemref idref="c2"/>',
+      }),
+      files: [
+        { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+        { name: "OEBPS/text/empty.xhtml", text: contentDocument("<div></div>") },
+      ],
+    }), "application/epub+zip");
+    expect(evaluateEpubExtractionQuality(parsed)).toEqual({
+      status: "REJECTED",
+      reasonCodes: ["PRIMARY_CONTENT_MISSING"],
+      qualityWarnings: ["PARTIAL_EXTRACTION"],
+    });
+  });
+
+  it("fails closed on impossible EPUB warning vocabularies and fixed-layout evidence disagreement", async () => {
+    const clean = await parseDocument(book({ opf: epub3Opf(), files: basicFiles }), "application/epub+zip");
+    expect(() => evaluateEpubExtractionQuality({ ...clean, qualityWarnings: ["OCR_USED"] })).toThrow(SourceError.QUALITY_GATE_BLOCKED);
+
+    const fixedMetadata = parseEpubExtractionMetadata({
+      ...parseEpubExtractionMetadata(clean.formatMetadata),
+      renditionLayout: "PRE_PAGINATED",
+    });
+    expect(() => evaluateEpubExtractionQuality({ ...clean, formatMetadata: fixedMetadata })).toThrow(SourceError.QUALITY_GATE_BLOCKED);
+  });
+
+  it("rejects zero usable canonical blocks defensively even though the isolated parser forbids them", async () => {
+    const parsed = await parseDocument(book({ opf: epub3Opf(), files: basicFiles }), "application/epub+zip");
+    expect(evaluateEpubExtractionQuality({
+      ...parsed,
+      pages: [{ physicalPageIndex: null, blocks: [] }],
+    })).toEqual({
+      status: "REJECTED",
+      reasonCodes: ["NO_USABLE_CONTENT"],
+      qualityWarnings: [],
+    });
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Navigation evidence
@@ -668,7 +767,7 @@ describe("epub-parser-v2 semantic blocks", () => {
 describe("epub-parser-v2 fixed layout", () => {
   const fixedOpf = (manifest: string, spine: string) => opfDocument({ manifest, spine, metadata: '<meta property="rendition:layout">pre-paginated</meta>' });
 
-  it("detects pre-paginated renditions, keeps UNKNOWN quality, and records the warning", async () => {
+  it("detects pre-paginated renditions and records fixed-layout quality evidence", async () => {
     const parsed = await parseDocument(book({ opf: fixedOpf('<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>', '<itemref idref="c1"/>'), files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }] }), "application/epub+zip");
     const metadata = parseEpubExtractionMetadata(parsed.formatMetadata);
     expect(metadata.renditionLayout).toBe("PRE_PAGINATED");
