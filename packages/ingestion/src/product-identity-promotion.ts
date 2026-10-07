@@ -184,7 +184,7 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
     });
     await tx.source.update({
       where: { id_workspaceId: { id: source.id, workspaceId: input.workspaceId } },
-      data: { editionId: edition.editionId },
+      data: { editionId: edition.id },
     });
 
     const appliedFields = ["source.editionId", "work.title"];
@@ -195,7 +195,7 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
       ...input,
       status: "APPLIED",
       workId: work.id,
-      editionId: edition.editionId,
+      editionId: edition.id,
       appliedFields,
       ignoredFields,
     });
@@ -278,7 +278,7 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
  * Trusted boundary for controlled product identity promotion.
  *
  * The caller MUST pass the extraction it observed. The transaction locks the
- * SourceDocument and refuses promotion if CurrentDocumentExtraction moved,
+ * SourceDocument plus Source identity row and refuses promotion if CurrentDocumentExtraction moved,
  * preventing an old page/worker from promoting stale extraction metadata.
  */
 export async function promoteCurrentProductIdentityForUser(
