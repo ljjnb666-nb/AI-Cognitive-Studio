@@ -48,35 +48,59 @@ describe("lease-to-server handoff fence (RF04 P1-01)", () => {
     await releaseOcrHostLease(hostId, leaseB.claimToken);
   });
 
-  it("HANDOFF_RECLAIM_RACE: the lease-row lock serializes handoff vs reclaim — exactly one authority wins", async () => {
+  it("RF05 HANDOFF_LOCK_HOLD_RACE: A locks the lease row while LIVE, the lease expires during the hold, B blocks — A's STARTING commit poisons capacity and B MUST return null", async () => {
     const hostId = `handoff-race-${crypto.randomUUID()}`;
-    const leaseA = (await acquireOcrHostLease(hostId))!;
-    // Expire A's lease WITHOUT yielding: both A (handoff) and B (reclaim)
-    // now race for the same OcrHostLease row.
-    await prisma.$executeRaw`UPDATE "OcrHostLease" SET "leaseUntil" = NOW() - INTERVAL '1 second' WHERE "hostId" = ${hostId}`;
+    // A owns a LIVE lease with a 5s TTL — long enough to hold the lock past
+    // B's start, short enough to expire deterministically during the hold.
+    const leaseA = (await acquireOcrHostLease(hostId, 5_000))!;
     const fixture = await createRunFixtureHelper.create();
-    const [aResult, bResult] = await Promise.all([
-      createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: leaseA.claimToken, runExecutionToken: "race-a", mineruHome: join(tmpdir(), "race-a-home") }),
-      (async () => {
-        const leaseB = (await acquireOcrHostLease(hostId))!;
-        const row = await createOcrServerInstance({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, hostId, hostClaimToken: leaseB.claimToken, runExecutionToken: "race-b", mineruHome: join(tmpdir(), "race-b-home") });
-        return { leaseB, row };
-      })(),
-    ]);
-    // Exactly one ordering wins: either A's stale handoff is refused, or it
-    // won the lock before B's reclaim. NEVER two authoritative rows.
+
+    // Deterministic barrier: A's transaction holds the OcrHostLease row lock
+    // (afterLeaseLock fired) and PAUSES until the lease deadline has passed.
+    // B is started while A still holds the lock: B MUST block on the same row.
+    let aLockedResolve!: () => void;
+    const aLocked = new Promise<void>((resolve) => { aLockedResolve = resolve; });
+    let bSettled = false;
+    const aPromise = createOcrServerInstance({
+      workspaceId: fixture.workspaceId,
+      sourceDocumentId: fixture.documentId,
+      ingestionRunId: fixture.runId,
+      hostId,
+      hostClaimToken: leaseA.claimToken,
+      runExecutionToken: "race-a",
+      mineruHome: join(tmpdir(), "race-a-home"),
+      afterLeaseLock: async () => {
+        aLockedResolve();
+        // Hold the lock across the lease deadline.
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          const row = await prisma.ocrHostLease.findUnique({ where: { hostId }, select: { leaseUntil: true } });
+          if (!row?.leaseUntil || row.leaseUntil.getTime() <= Date.now()) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      },
+    });
+    await aLocked;
+    const bPromise = acquireOcrHostLease(hostId, 60_000).then((grant) => { bSettled = true; return grant; });
+    // B MUST be blocked on the locked capacity row (its INSERT..ON CONFLICT /
+    // FOR UPDATE waits for A's transaction) while the lease deadline passes.
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(bSettled).toBe(false);
+    // A now inserts STARTING and commits (TTL refreshed as part of handoff).
+    const aRow = await aPromise;
+    expect(aRow).not.toBeNull();
+    const bGrant = await bPromise;
+    // RF05 P1-01: B MUST return null — A's committed STARTING row poisons
+    // capacity, and the lease is A's (refreshed by the handoff).
+    expect(bGrant).toBeNull();
+    expect(bSettled).toBe(true);
     const rows = await prisma.ocrServerInstance.findMany({ where: { hostId } });
-    if (aResult !== null) {
-      // A won the race: B's reclaim was refused (null lease) and B created nothing.
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.hostClaimToken).toBe(leaseA.claimToken);
-      expect(bResult.row).toBeNull();
-    } else {
-      // B won: A's stale handoff created nothing; exactly B's row exists.
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.hostClaimToken).toBe(bResult.leaseB.claimToken);
-    }
-    await releaseOcrHostLease(hostId, (await prisma.ocrHostLease.findUniqueOrThrow({ where: { hostId } })).claimToken!);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ hostClaimToken: leaseA.claimToken, status: "STARTING" });
+    const leaseAfter = await prisma.ocrHostLease.findUniqueOrThrow({ where: { hostId } });
+    expect(leaseAfter.claimToken).toBe(leaseA.claimToken);
+    expect(leaseAfter.leaseUntil!.getTime()).toBeGreaterThan(Date.now());
+    await releaseOcrHostLease(hostId, leaseA.claimToken);
   });
 });
 
@@ -168,6 +192,28 @@ describe("atomic capacity deferral (RF04 P1-02)", () => {
     expect(page).toMatchObject({ status: "RUNNING", attemptCount: 1, claimToken: pageClaim.claimToken });
     expect((await prisma.ingestionRun.findUniqueOrThrow({ where: { id: fixture.runId } })).status).toBe("RUNNING");
     expect((await prisma.job.findUniqueOrThrow({ where: { id: jobId } })).attemptCount).toBe(jobAttemptBefore);
+  });
+});
+
+describe("RF05 P1-02 service-order chain (C)", () => {
+  it("stale run ownership: the PG deferral is consulted and returns false; the ownership-loss result NEVER becomes a scheduler signal", async () => {
+    const fixture = await createRunFixtureHelper.create();
+    const runExecutionToken = `stale-${crypto.randomUUID()}`;
+    // Run claimed, then its lease expires (the in-memory ownershipLost shape).
+    await prisma.ingestionRun.update({ where: { id: fixture.runId }, data: { status: "RUNNING", executionClaimToken: runExecutionToken, executionClaimedAt: new Date(), executionLeaseUntil: new Date(Date.now() + 60_000) } });
+    await createOcrPageIntents({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, routingGeneration: 1, pages: [{ physicalPageIndex: 1 }] });
+    const pageClaim = (await claimOcrPageAttempt({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, physicalPageIndex: 1, routingGeneration: 1, parserName: "mineru", parserVersion: "4.0.3", runExecutionToken }))!;
+    await prisma.$executeRaw`UPDATE "IngestionRun" SET "executionLeaseUntil" = NOW() - INTERVAL '1 second' WHERE "id" = ${fixture.runId}`;
+
+    // PostgreSQL authority is consulted FIRST: the stale run lease makes the
+    // atomic deferral return false with ZERO mutations (page stays RUNNING).
+    const committed = await transitionOcrCapacityDeferred({ workspaceId: fixture.workspaceId, sourceDocumentId: fixture.documentId, ingestionRunId: fixture.runId, physicalPageIndex: 1, routingGeneration: 1, pageClaimToken: pageClaim.claimToken, runExecutionToken });
+    expect(committed).toBe(false);
+    const page = await prisma.ocrPageAttempt.findUniqueOrThrow({ where: { ingestionRunId_physicalPageIndex_routingGeneration: { ingestionRunId: fixture.runId, physicalPageIndex: 1, routingGeneration: 1 } } });
+    expect(page).toMatchObject({ status: "RUNNING", attemptCount: 1 });
+    // The service maps committed=false to the ownership-loss result, which
+    // the worker scheduler seam NEVER defers (worker unit gate covers that
+    // side; here the PG authority decision is what is proven).
   });
 });
 

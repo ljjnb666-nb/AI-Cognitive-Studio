@@ -17,42 +17,57 @@ export const OCR_PAGE_MAX_ATTEMPTS = 3;
 export type OcrHostLeaseGrant = { claimToken: string; leaseUntil: Date };
 
 /**
- * Host OCR capacity invariant (RF03 P1-02): ONE authoritative live/possibly-
- * live MinerU server per host capacity slot. A lease is grantable ONLY when
- * BOTH predicates hold in the SAME atomic statement:
- *  1. the slot itself is free or its lease expired, AND
- *  2. NO unresolved OcrServerInstance exists for the host (STARTING / RUNNING
- *     / STOPPING / ORPHANED) — a server whose process ownership has not been
- *     durably closed may still be alive, so the capacity stays poisoned even
- *     when the (expired) lease row looks free. ORPHANED rows therefore act as
- *     a capacity poison: "manual intervention required" must actually stop
- *     production from spawning a second server beside the unresolved one.
- * STOPPED rows never block. The currently executing claim fits this ordering:
- * it acquires the lease BEFORE creating its own server row; renewal/release
- * stay token-fenced.
+ * Host OCR capacity invariant (RF03 P1-02 + RF05 P1-01): acquisition and
+ * handoff serialize through THE SAME OcrHostLease row with ONE lock ordering
+ * (lease row first, then OcrServerInstance state). The sequence runs in ONE
+ * transaction:
+ *  1. the host-capacity row is ensured to exist (idempotent, no grant);
+ *  2. that row is SELECTed FOR UPDATE — the serialization point;
+ *  3. only AFTER the lock is held, in a fresh READ-COMMITTED statement, the
+ *     unresolved OcrServerInstance set is queried, so a concurrent handoff
+ *     that committed a STARTING row while this claim waited on the lock is
+ *     always visible;
+ *  4. the CURRENT locked lease is inspected: a live claim refuses; free/
+ *     expired with an unresolved instance refuses; free/expired with no
+ *     unresolved instance grants.
+ *  5. the SAME row is updated with the new token + leaseUntil and committed.
+ * No read-before-lock race exists: the grant decision and the write share the
+ * lock's serialization authority.
  */
 export async function acquireOcrHostLease(hostId: string, leaseMs = OCR_HOST_LEASE_TTL_MS, hostMetadata?: Record<string, unknown>): Promise<OcrHostLeaseGrant | null> {
   const claimToken = randomUUID();
-  const rows = await prisma.$queryRaw<Array<{ claimToken: string; leaseUntil: Date }>>`
-    INSERT INTO "OcrHostLease" ("hostId", "claimToken", "claimedAt", "leaseUntil", "hostMetadata", "updatedAt")
-    SELECT ${hostId}, ${claimToken}, NOW(), NOW() + (${leaseMs} * INTERVAL '1 millisecond'), ${hostMetadata ? JSON.stringify(hostMetadata) : null}::jsonb, NOW()
-    WHERE NOT EXISTS (
-      SELECT 1 FROM "OcrServerInstance" instance
-      WHERE instance."hostId" = ${hostId}
-        AND instance."status" IN ('STARTING', 'RUNNING', 'STOPPING', 'ORPHANED')
-    )
-    ON CONFLICT ("hostId") DO UPDATE SET
-      "claimToken" = EXCLUDED."claimToken", "claimedAt" = EXCLUDED."claimedAt", "leaseUntil" = EXCLUDED."leaseUntil",
-      "hostMetadata" = EXCLUDED."hostMetadata", "updatedAt" = NOW()
-    WHERE ("OcrHostLease"."leaseUntil" IS NULL OR "OcrHostLease"."leaseUntil" < NOW())
-      AND NOT EXISTS (
-        SELECT 1 FROM "OcrServerInstance" instance
-        WHERE instance."hostId" = EXCLUDED."hostId"
-          AND instance."status" IN ('STARTING', 'RUNNING', 'STOPPING', 'ORPHANED')
-      )
-    RETURNING "claimToken", "leaseUntil"`;
-  return rows.length === 1 ? { claimToken: rows[0]!.claimToken, leaseUntil: rows[0]!.leaseUntil } : null;
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      INSERT INTO "OcrHostLease" ("hostId", "updatedAt")
+      VALUES (${hostId}, NOW())
+      ON CONFLICT ("hostId") DO NOTHING`;
+    await tx.$queryRaw`
+      SELECT "claimToken" FROM "OcrHostLease"
+      WHERE "hostId" = ${hostId}
+      FOR UPDATE`;
+    // Fresh READ-COMMITTED statement AFTER the row lock: a STARTING row
+    // committed by a handoff that held this lock is always observed here.
+    const unresolved = await tx.$queryRaw<Array<{ one: number }>>`
+      SELECT 1 AS one FROM "OcrServerInstance"
+      WHERE "hostId" = ${hostId} AND "status" IN ('STARTING', 'RUNNING', 'STOPPING', 'ORPHANED')
+      LIMIT 1`;
+    if (unresolved.length > 0) return null;
+    const rows = await tx.$queryRaw<Array<{ claimToken: string; leaseUntil: Date }>>`
+      UPDATE "OcrHostLease" SET
+        "claimToken" = ${claimToken}, "claimedAt" = NOW(),
+        "leaseUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond'),
+        "hostMetadata" = ${hostMetadata ? JSON.stringify(hostMetadata) : null}::jsonb, "updatedAt" = NOW()
+      WHERE "hostId" = ${hostId}
+        AND ("claimToken" IS NULL OR "leaseUntil" IS NULL OR "leaseUntil" < NOW())
+      RETURNING "claimToken", "leaseUntil"`;
+    // The serialization wait is bounded (the owned operation self-caps): this
+    // transaction may legitimately sit on the OcrHostLease row lock while an
+    // in-flight handoff commits; 15s covers that, then the fresh-snapshot
+    // unresolved check returns null.
+    return rows.length === 1 ? { claimToken: rows[0]!.claimToken, leaseUntil: rows[0]!.leaseUntil } : null;
+  }, { timeout: 15_000, maxWait: 5_000 });
 }
+
 
 /** Renewal requires hostId + claimToken + still-live lease; stale renewals are no-ops. */
 export async function renewOcrHostLease(hostId: string, claimToken: string, leaseMs = OCR_HOST_LEASE_TTL_MS): Promise<boolean> {
@@ -171,7 +186,7 @@ export async function failOcrPageAttempt(input: { workspaceId: string; ingestion
 export type OcrServerEndpoint = { pid: number; serverId: string; transports: Array<Record<string, unknown>> };
 
 /** Persists the pre-launch STARTING row (endpoint identity intentionally absent). */
-export async function createOcrServerInstance(input: { workspaceId: string; sourceDocumentId: string; ingestionRunId: string; hostId: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string }): Promise<string | null> {
+export async function createOcrServerInstance(input: { workspaceId: string; sourceDocumentId: string; ingestionRunId: string; hostId: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; /** RF05 deterministic test barrier: invoked inside the transaction right after the lease-row lock is held, before the STARTING insert commits. Never supplied in production. */ afterLeaseLock?: () => Promise<void> }): Promise<string | null> {
   // RF04 P1-01 lease-to-server handoff fence: STARTING ownership becomes
   // durable ONLY inside the same transaction that locks the OcrHostLease row
   // and proves it is STILL ours (hostId + claimToken + leaseUntil > NOW()).
@@ -181,18 +196,28 @@ export async function createOcrServerInstance(input: { workspaceId: string; sour
   // coexist for the slot. Stale owners (lease expired/reclaimed) create
   // NOTHING and must abort toward their orphan/cleanup paths.
   try {
+    // The handoff may legitimately wait on the lease-row lock while another
+    // claim's transaction finishes; 15s is bounded and well above any
+    // production handoff duration (the barrier seam's hold is 5s in tests).
     return await prisma.$transaction(async (tx) => {
       const leases = await tx.$queryRaw<Array<{ claimToken: string }>>`
         SELECT "claimToken" FROM "OcrHostLease"
         WHERE "hostId" = ${input.hostId} AND "claimToken" = ${input.hostClaimToken} AND "leaseUntil" > NOW()
         FOR UPDATE`;
       if (leases.length !== 1) return null;
+      if (input.afterLeaseLock) await input.afterLeaseLock();
+      // RF05 handoff hardening: refresh the lease TTL inside the SAME
+      // transaction so a lease with only milliseconds remaining cannot become
+      // immediately stale right after the STARTING row commits.
+      await tx.$executeRaw`
+        UPDATE "OcrHostLease" SET "leaseUntil" = NOW() + (${OCR_HOST_LEASE_TTL_MS} * INTERVAL '1 millisecond'), "updatedAt" = NOW()
+        WHERE "hostId" = ${input.hostId} AND "claimToken" = ${input.hostClaimToken}`;
       const row = await tx.ocrServerInstance.create({
         data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, ingestionRunId: input.ingestionRunId, hostId: input.hostId, hostClaimToken: input.hostClaimToken, runExecutionToken: input.runExecutionToken, mineruHome: input.mineruHome, status: "STARTING" },
         select: { id: true },
       });
       return row.id;
-    });
+    }, { timeout: 15_000, maxWait: 5_000 });
   } catch (error) {
     // Only an explicit hostClaimToken unique-conflict maps to "already exists";
     // every other database failure (outage, FK/tenant-lineage violation) must

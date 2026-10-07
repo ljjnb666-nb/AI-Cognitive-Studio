@@ -49,6 +49,8 @@ export type OcrServerReconcilerInput = {
   stopTimeoutMs: number;
   /** Configured per-claim temp home root (RF03 P1-04): the fence every cleanup target must live inside. */
   homeRoot: string;
+  /** RF05 deterministic test barrier: invoked right before the STOPPED CAS on a proven-gone row. Never supplied in production. */
+  beforeStoppedCas?: (row: { hostClaimToken: string }) => Promise<void>;
   /** Upper bound on rows examined per sweep (enforced inside the DB query). */
   batchSize?: number;
   processImagePattern?: RegExp;
@@ -144,12 +146,16 @@ async function cleanupRetainedClaimData(mineruHome: string, input: OcrServerReco
 async function convergeStoppedAndCleanup(row: { hostClaimToken: string; mineruHome: string }, reason: string, input: OcrServerReconcilerInput): Promise<boolean> {
   const committed = await markOcrServerStoppedProcessGone(row.hostClaimToken, reason);
   if (!committed) {
-    const current = await prisma.ocrServerInstance.findUnique({ where: { hostClaimToken: row.hostClaimToken }, select: { status: true, pid: true, serverId: true } });
+    // RF05 P2-01 follow-through: when the CAS loses but the SAME instance is
+    // durably STOPPED (another reconciler won the race), the retained claim
+    // tree is cleaned IDEMPOTENTLY here — leaving it would be the unbounded
+    // disk/source-data leak this reconciler exists to close.
+    const current = await prisma.ocrServerInstance.findUnique({ where: { hostClaimToken: row.hostClaimToken }, select: { status: true } });
     if (current?.status !== "STOPPED") {
       logger.warn("mineru.reconciler.cleanup_refused", { reason: "STOPPED_COMMIT_LOST", currentStatus: current?.status ?? "missing", hostClaimToken: row.hostClaimToken });
       return false;
     }
-    // Another authority already committed STOPPED for this same instance.
+    await cleanupRetainedClaimData(row.mineruHome, input);
     return true;
   }
   await cleanupRetainedClaimData(row.mineruHome, input);
@@ -188,6 +194,7 @@ async function reconcileRow(row: { id: string; hostClaimToken: string; runExecut
 
   // Proven gone: the SHARED conservative rule (two consecutive negatives).
   if (await confirmedRecordedProcessGone(row.pid!, { expectedImagePattern: imagePattern })) {
+    if (input.beforeStoppedCas) await input.beforeStoppedCas(row);
     if (await convergeStoppedAndCleanup(row, "RECONCILER_PROCESS_GONE", input)) return "stopped";
     return "orphaned";
   }

@@ -5,47 +5,8 @@ import { extractNativePdf, pdfTextToBlocks, type Parsed, type ParsedBlock, type 
 import { INGESTION_EXECUTION_OWNERSHIP_LOST } from "./ingestion-run-claim.js";
 import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, failOcrPageAttempt, writeRoutingPlan } from "./ocr-durability.js";
 import { PDF_EXTRACTION_PARSER, PDF_ROUTING_GENERATION, assertRoutingPlanReplay, evaluatePdfExtractionQuality, parseRoutingPlan, type PdfExtractionQualityDecision, type PdfOcrExecutor, type PdfOcrPageResult, type PdfPageExtractionOutcome, type PdfRoutingPlan } from "./pdf-routing.js";
+import { OcrCapacityDeferralError } from "./ocr-capacity-errors.js";
 import { SourceError } from "./source-errors.js";
-
-/**
- * RF04 P1-02: TYPED capacity-deferral signal — never parsed from a message.
- * Carries the full durable claim identity so the ingestion service boundary
- * can execute the ONE atomic PostgreSQL deferral transaction
- * (transitionOcrCapacityDeferred) covering page + run + Job. Constructing
- * this error performs NO durable mutation; all-or-nothing happens at the
- * boundary, and only a committed deferral may reach the Redis scheduler.
- */
-export class OcrCapacityDeferralError extends Error {
-  readonly deferral: { workspaceId: string; ingestionRunId: string; sourceDocumentId: string; physicalPageIndex: number; routingGeneration: number; pageClaimToken: string; runExecutionToken: string };
-  constructor(deferral: OcrCapacityDeferralError["deferral"]) {
-    super("SOURCE_OCR_HOST_CAPACITY");
-    this.name = "OcrCapacityDeferralError";
-    this.deferral = deferral;
-  }
-}
-
-/**
- * PDF run extraction pipeline (BOOK-INGESTION-04B-2, hardened in RF01).
- *
- * Orchestrates one execution claim over the durable routing primitives:
- * native inspection → write-once routing plan (or replay-validated reuse) →
- * durable OCR page intents/attempts through the PdfOcrExecutor seam → merged
- * page-level canonical result → deterministic quality decision. It NEVER
- * publishes by itself: the ingestion service owns the publication transaction.
- *
- * Durability invariants (RF01):
- *  - P1-01 a SUCCEEDED OcrPageAttempt is authoritative: its immutable artifact
- *    is reused on resume and a null claim is re-checked against a concurrent
- *    completion before any page may be called unresolved.
- *  - P1-02 page claims carry the caller's run-execution token, so the
- *    authoritative run owner can reclaim a superseded execution's live page
- *    claim; page token fencing itself is unchanged.
- *  - P1-04 executor success means nothing by itself: output must canonicalize
- *    to at least one usable block before the checkpoint may succeed.
- * Production default in 04B-2 has no OCR executor: OCR-required pages then end
- * in the existing OCR_REQUIRED terminal semantics with the durable routing
- * intent persisted. The real MinerU executor (04B-3) plugs in unchanged.
- */
 
 export type PdfRunExtractionInput = {
   runId: string;

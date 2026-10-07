@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prisma } from "@ai-cognitive/db";
-import { acquireOcrHostLease, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, reconcileOcrServerInstances, releaseOcrHostLease } from "../../src/index.js";
+import type { OcrServerReconcilerInput } from "../../src/mineru/mineru-reconciler.js";
+import { acquireOcrHostLease, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStoppedProcessGone, markOcrServerStopping, recordOcrServerEndpoint, reconcileOcrServerInstances, releaseOcrHostLease } from "../../src/index.js";
 import { confirmedRecordedProcessGone, recordedProcessAlive } from "../../src/mineru/mineru-process.js";
 import { isWithinPath } from "../../src/mineru/mineru-config.js";
 import { createRunFixtureHelper } from "../helpers/ocr/reconciler-fixtures.js";
@@ -69,7 +70,7 @@ async function createLegacyServerRow(input: { workspaceId: string; sourceDocumen
   return row.id;
 }
 
-function reconcilerConfig(hostId: string, homeRoot?: string) {
+function reconcilerConfig(hostId: string, homeRoot?: string): OcrServerReconcilerInput {
   return { hostId, executable: process.execPath, executableArgs: [fakeMineruPath], stopTimeoutMs: 10_000, homeRoot: homeRoot ?? join(tmpdir(), "no-such-fence-root"), processImagePattern: /node|python/i };
 }
 
@@ -342,6 +343,61 @@ describe("same-host OCR server reconciler (RF01 P1-06 + RF02)", () => {
     expect(existsSync(home)).toBe(true);
     expect(existsSync(join(home, "doclib.endpoint.json"))).toBe(true);
     void claimToken;
+  });
+
+  it("RF05 ORPHAN_CAS_RACE: the reconciler proves the process gone, an operator ORPHANS the row mid-flight (deterministic seam), the STOPPED CAS loses — evidence preserved, result NOT stopped (RF05 P2-01)", { timeout: 60_000 }, async () => {
+    const hostId = `reconciler-${crypto.randomUUID()}`;
+    hostLeaseIds.push(hostId);
+    const homeRoot = join(newTempDir(), "home-root");
+    const claimDir = join(homeRoot, "run-race", "generation-1", "page-1", "claim-race");
+    const home = join(claimDir, "home");
+    const { claimToken } = await createLapsedRunningRow(hostId, home, { pid: 4_000_100, server_id: "race-server" }, "run-race");
+    mkdirSync(join(claimDir, "input"), { recursive: true });
+    mkdirSync(join(claimDir, "output"), { recursive: true });
+    writeFileSync(join(claimDir, "input", "input.pdf"), "%PDF-forensic source bytes");
+    writeFileSync(join(claimDir, "output", "result.md"), "stale output");
+
+    // Deterministic seam: pause the reconciler right before the STOPPED CAS
+    // and perform the concurrent actor's ORPHANED transition, then resume.
+    const config = reconcilerConfig(hostId, homeRoot);
+    config.beforeStoppedCas = async (casRow: { hostClaimToken: string }) => {
+      expect(casRow.hostClaimToken).toBe(claimToken);
+      await markOcrServerOrphaned(claimToken, "operator-intervention");
+    };
+    const result = await reconcileOcrServerInstances(config);
+
+    // STOPPED CAS lost; row remains ORPHANED; result is NOT "stopped".
+    expect(result).toMatchObject({ examined: 1, stopped: 0, orphaned: 1 });
+    const row = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimToken } });
+    expect(row.status).toBe("ORPHANED");
+    // ALL forensic evidence preserved (endpoint + input + output).
+    expect(existsSync(join(home, "doclib.endpoint.json"))).toBe(true);
+    expect(existsSync(join(claimDir, "input", "input.pdf"))).toBe(true);
+    expect(existsSync(join(claimDir, "output", "result.md"))).toBe(true);
+  });
+
+  it("RF05 STOPPED_RESIDUE_CLEANUP control: when another authority already committed STOPPED, the reconciler idempotently cleans the remaining claim tree", { timeout: 60_000 }, async () => {
+    const hostId = `reconciler-${crypto.randomUUID()}`;
+    hostLeaseIds.push(hostId);
+    const homeRoot = join(newTempDir(), "home-root");
+    const claimDir = join(homeRoot, "run-ctrl", "generation-1", "page-1", "claim-ctrl");
+    const home = join(claimDir, "home");
+    const { claimToken } = await createLapsedRunningRow(hostId, home, { pid: 4_000_101, server_id: "ctrl-server" }, "run-ctrl");
+    mkdirSync(join(claimDir, "input"), { recursive: true });
+    writeFileSync(join(claimDir, "input", "input.pdf"), "%PDF-stale source bytes");
+
+    // R2's seam lets R1 (a full prior pass) commit STOPPED + clean first;
+    // R2's own CAS then loses and the re-read shows STOPPED -> idempotent
+    // follow-through cleanup (no-op here) and an honest "stopped" result.
+    const config = reconcilerConfig(hostId, homeRoot);
+    config.beforeStoppedCas = async (casRow: { hostClaimToken: string }) => {
+      expect(await markOcrServerStoppedProcessGone(casRow.hostClaimToken, "R1_WON")).toBe(true);
+    };
+    const result = await reconcileOcrServerInstances(config);
+    expect(result).toMatchObject({ examined: 1, stopped: 1 });
+    const row = await prisma.ocrServerInstance.findUniqueOrThrow({ where: { hostClaimToken: claimToken } });
+    expect(row.status).toBe("STOPPED");
+    expect(existsSync(claimDir)).toBe(false);
   });
 
   it("ORPHANED rows keep their forensic home and are never cleaned (RF02 P1-04/RF03)", async () => {
