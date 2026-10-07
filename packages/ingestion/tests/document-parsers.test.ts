@@ -28,6 +28,28 @@ describe("safe EPUB parser", () => {
     ["encryption", epub([{ name: "META-INF/encryption.xml", text: "<encryption/>" }]), {}],
   ])("rejects %s", async (_name, input) => { await expect(parseDocument(input as Uint8Array, "application/epub+zip")).rejects.toThrow(); });
   it("enforces archive limits during inspection", async () => { await expect(parseDocument(epub(), "application/epub+zip", { maxArchiveEntries: 1 })).rejects.toThrow("SOURCE_ARCHIVE_UNSAFE"); await expect(parseDocument(zip([{ name: "mimetype", text: "A".repeat(10_000), deflate: true }]), "application/epub+zip", { maxArchiveCompressionRatio: 1 })).rejects.toThrow("SOURCE_ARCHIVE_UNSAFE"); });
+  it("rejects duplicate central-directory names before Map materialization", async () => {
+    await expect(parseDocument(epub([{ name: "OPS/a.xhtml", text: "<html><body><p>shadow</p></body></html>" }]), "application/epub+zip")).rejects.toThrow("SOURCE_ARCHIVE_UNSAFE");
+  });
+  it("rejects central/local header identity mismatches deterministically", async () => {
+    const input = Buffer.from(epub());
+    // First local header belongs to mimetype. Central says STORE (0); mutate
+    // the local method only so authority disagreement is observable.
+    input.writeUInt16LE(8, 8);
+    await expect(parseDocument(input, "application/epub+zip")).rejects.toThrow("SOURCE_CORRUPTED");
+  });
+  it("isolates EPUB parsing behind a memory-capped child with a hard deadline", async () => {
+    const fixture = fileURLToPath(new URL("./fixtures/pdf-child-stall.mjs", import.meta.url));
+    await expect(parseDocument(epub(), "application/epub+zip", { epubChildEntry: fixture, epubTimeoutMs: 5 })).rejects.toThrow("SOURCE_PARSE_TIMEOUT");
+  });
+  it("rejects abnormal EPUB child exits and bounds both IPC channels", async () => {
+    const abnormal = fileURLToPath(new URL("./fixtures/pdf-child-abnormal.mjs", import.meta.url));
+    const stdout = fileURLToPath(new URL("./fixtures/pdf-child-utf8-stdout.mjs", import.meta.url));
+    const stderr = fileURLToPath(new URL("./fixtures/pdf-child-utf8-stderr.mjs", import.meta.url));
+    await expect(parseDocument(epub(), "application/epub+zip", { epubChildEntry: abnormal })).rejects.toThrow("SOURCE_PARSE_ERROR");
+    await expect(parseDocument(epub(), "application/epub+zip", { epubChildEntry: stdout, maxEpubIpcBytes: 5 })).rejects.toThrow("SOURCE_TOO_LARGE");
+    await expect(parseDocument(epub(), "application/epub+zip", { epubChildEntry: stderr, maxEpubStderrBytes: 5 })).rejects.toThrow("SOURCE_PARSE_ERROR");
+  });
 });
 
 describe("isolated PDF parser", () => {

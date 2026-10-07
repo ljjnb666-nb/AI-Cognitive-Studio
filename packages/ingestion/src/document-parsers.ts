@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BlockExtractionProvenance, CanonicalSourceLocator, ExtractionQualityWarningCode, SourceBlockBbox } from "@ai-cognitive/domain";
 import { normalizeCanonicalText, splitCanonicalBlock } from "./canonical-text.js";
-import { parseEpub } from "./epub-parser.js";
 import { inspectPdfPage, planPdfRouting, type PdfPageEvidence, type PdfPageInspection, type PdfRoutingPlan } from "./pdf-routing.js";
 import { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 
@@ -18,8 +17,8 @@ export type ParsedBlock = { kind: SourceBlockKind; text: string; locator?: Canon
  * codes); PDF/TXT/Markdown keep them unset and an empty warning list.
  */
 export type Parsed = { parser: { name: string; version: string }; pages: Array<{ physicalPageIndex: number | null; blocks: ParsedBlock[] }>; qualityWarnings?: ExtractionQualityWarningCode[]; formatMetadata?: unknown };
-export type ParserLimits = { maxPdfPages: number; maxPdfOutputChars: number; pdfTimeoutMs: number; pdfMemoryMb: number; maxPdfIpcBytes: number; maxPdfStderrBytes: number; pdfChildEntry?: string; maxArchiveEntries: number; maxArchiveEntryBytes: number; maxArchiveTotalBytes: number; maxArchiveCompressionRatio: number; maxEpubXmlChars: number; maxEpubNavigationEntries: number; maxEpubDomNodes: number };
-export const DEFAULT_PARSER_LIMITS: ParserLimits = { maxPdfPages: 2000, maxPdfOutputChars: 20_000_000, pdfTimeoutMs: 30_000, pdfMemoryMb: 128, maxPdfIpcBytes: 24_000_000, maxPdfStderrBytes: 32_000, maxArchiveEntries: 10_000, maxArchiveEntryBytes: 25_000_000, maxArchiveTotalBytes: 100_000_000, maxArchiveCompressionRatio: 100, maxEpubXmlChars: 8_000_000, maxEpubNavigationEntries: 20_000, maxEpubDomNodes: 400_000 };
+export type ParserLimits = { maxPdfPages: number; maxPdfOutputChars: number; pdfTimeoutMs: number; pdfMemoryMb: number; maxPdfIpcBytes: number; maxPdfStderrBytes: number; pdfChildEntry?: string; epubTimeoutMs: number; epubMemoryMb: number; maxEpubIpcBytes: number; maxEpubStderrBytes: number; epubChildEntry?: string; maxArchiveEntries: number; maxArchiveEntryBytes: number; maxArchiveTotalBytes: number; maxArchiveCompressionRatio: number; maxEpubXmlChars: number; maxEpubNavigationEntries: number; maxEpubDomNodes: number };
+export const DEFAULT_PARSER_LIMITS: ParserLimits = { maxPdfPages: 2000, maxPdfOutputChars: 20_000_000, pdfTimeoutMs: 30_000, pdfMemoryMb: 128, maxPdfIpcBytes: 24_000_000, maxPdfStderrBytes: 32_000, epubTimeoutMs: 30_000, epubMemoryMb: 256, maxEpubIpcBytes: 32_000_000, maxEpubStderrBytes: 32_000, maxArchiveEntries: 10_000, maxArchiveEntryBytes: 25_000_000, maxArchiveTotalBytes: 100_000_000, maxArchiveCompressionRatio: 100, maxEpubXmlChars: 8_000_000, maxEpubNavigationEntries: 20_000, maxEpubDomNodes: 400_000 };
 
 const parsers = {
   text: { name: "builtin-text", version: "text-parser-v1", sourceMethod: "NATIVE_TEXT" },
@@ -42,8 +41,112 @@ export async function parseDocument(bytes: Uint8Array, mediaType: string, limits
   if (mediaType === "text/plain") return blocksFromText(decodeUtf8Text(bytes), "PARAGRAPH", parsers.text);
   if (mediaType === "text/markdown") return { parser: parsers.markdown, pages: [{ physicalPageIndex: null, blocks: markdownBlocks(decodeUtf8Text(bytes), parsers.markdown) }] };
   if (mediaType === "application/pdf") return parsePdf(bytes, effective);
-  if (mediaType === "application/epub+zip") return parseEpub(bytes, effective, parsers.epub);
+  if (mediaType === "application/epub+zip") return parseEpubIsolated(bytes, effective);
   throw new Error(SourceError.UNSUPPORTED_TYPE);
+}
+
+/**
+ * EPUB is untrusted ZIP/XML/HTML. Keep all archive inflation, DOM parsing and
+ * traversal outside the ingestion worker process. The subprocess has its own
+ * V8 heap cap, wall-clock deadline, and bounded stdout/stderr channels.
+ *
+ * The child is TypeScript because this repository's production worker itself
+ * runs through tsx; invoking Node with --import tsx preserves the same module
+ * resolution contract without duplicating the EPUB parser implementation.
+ */
+async function parseEpubIsolated(bytes: Uint8Array, limits: ParserLimits): Promise<Parsed> {
+  const dir = join(tmpdir(), `ai-cognitive-epub-${randomUUID()}`);
+  const input = join(dir, "source.epub");
+  try {
+    await mkdir(dir);
+    await writeFile(input, bytes);
+    return await runEpubChild(input, limits);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function epubChildLimits(limits: ParserLimits) {
+  return {
+    maxPdfPages: limits.maxPdfPages,
+    maxPdfOutputChars: limits.maxPdfOutputChars,
+    pdfTimeoutMs: limits.pdfTimeoutMs,
+    pdfMemoryMb: limits.pdfMemoryMb,
+    maxPdfIpcBytes: limits.maxPdfIpcBytes,
+    maxPdfStderrBytes: limits.maxPdfStderrBytes,
+    epubTimeoutMs: limits.epubTimeoutMs,
+    epubMemoryMb: limits.epubMemoryMb,
+    maxEpubIpcBytes: limits.maxEpubIpcBytes,
+    maxEpubStderrBytes: limits.maxEpubStderrBytes,
+    maxArchiveEntries: limits.maxArchiveEntries,
+    maxArchiveEntryBytes: limits.maxArchiveEntryBytes,
+    maxArchiveTotalBytes: limits.maxArchiveTotalBytes,
+    maxArchiveCompressionRatio: limits.maxArchiveCompressionRatio,
+    maxEpubXmlChars: limits.maxEpubXmlChars,
+    maxEpubNavigationEntries: limits.maxEpubNavigationEntries,
+    maxEpubDomNodes: limits.maxEpubDomNodes,
+  };
+}
+
+export function epubChildArgs(input: string, limits: ParserLimits): string[] {
+  const childEntry = limits.epubChildEntry ?? fileURLToPath(new URL("./epub-parser-child.ts", import.meta.url));
+  const encodedLimits = Buffer.from(JSON.stringify(epubChildLimits(limits)), "utf8").toString("base64url");
+  return [`--max-old-space-size=${limits.epubMemoryMb}`, "--import", "tsx", childEntry, input, encodedLimits];
+}
+
+async function runEpubChild(input: string, limits: ParserLimits): Promise<Parsed> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, epubChildArgs(input, limits), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    let parentStop: string | null = null;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const stop = (code: string) => {
+      if (parentStop) return;
+      parentStop = code;
+      try { child.kill(); } catch { /* process already gone */ }
+      finish(() => reject(new Error(code)));
+    };
+    const timer = setTimeout(() => stop(SourceError.PARSE_TIMEOUT), limits.epubTimeoutMs);
+    child.stdout.on("data", (data: Buffer) => {
+      stdoutBytes += data.length;
+      if (stdoutBytes > limits.maxEpubIpcBytes) stop(SourceError.TOO_LARGE);
+      else stdout += data.toString("utf8");
+    });
+    child.stderr.on("data", (data: Buffer) => {
+      stderrBytes += data.length;
+      if (stderrBytes > limits.maxEpubStderrBytes) stop(SourceError.PARSE);
+      else stderr += data.toString("utf8");
+    });
+    child.on("error", () => finish(() => reject(new Error(SourceError.PARSE))));
+    child.on("close", (code, signal) => finish(() => {
+      if (parentStop) return;
+      if (signal || code !== 0) return reject(new Error(SourceError.PARSE));
+      try {
+        const records = stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: unknown; code?: unknown; parsed?: unknown });
+        if (records.length !== 1) throw new Error("EPUB_CHILD_PROTOCOL");
+        const record = records[0]!;
+        if (record.type === "error" && typeof record.code === "string") return reject(new Error(record.code));
+        if (record.type !== "result" || !record.parsed || typeof record.parsed !== "object") throw new Error("EPUB_CHILD_PROTOCOL");
+        const parsed = record.parsed as Parsed;
+        if (parsed.parser?.name !== parsers.epub.name || parsed.parser?.version !== parsers.epub.version || !Array.isArray(parsed.pages)) throw new Error("EPUB_CHILD_PROTOCOL");
+        resolve(parsed);
+      } catch {
+        // Stderr is intentionally not surfaced: untrusted source bytes or
+        // parser-library diagnostics must never become durable/user-visible.
+        void stderr;
+        reject(new Error(SourceError.PARSE));
+      }
+    }));
+  });
 }
 
 function decodeUtf8Text(bytes: Uint8Array): string { if (bytes.includes(0)) throw new Error(SourceError.TYPE_MISMATCH); try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new Error(SourceError.CORRUPTED); } }
