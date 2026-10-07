@@ -184,6 +184,83 @@ describe("epub-parser-v2 navigation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Package / spine reading-order authority (BOOK-INGESTION-04C-2)
+// ---------------------------------------------------------------------------
+
+describe("epub-parser-v2 package and spine authority", () => {
+  it("keeps linear=no auxiliary content out of the canonical primary stream", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/><item id="aux" href="text/answers.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/c2.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/><itemref idref="aux" linear="no"/><itemref idref="c2"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Primary one</p>") },
+      { name: "OEBPS/text/answers.xhtml", text: contentDocument("<p>Auxiliary answer</p>") },
+      { name: "OEBPS/text/c2.xhtml", text: contentDocument("<p>Primary two</p>") },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Primary one", "Primary two"]);
+    expect(blocksOf(parsed).map((block) => epubLocatorOf(block)?.spineIndex)).toEqual([0, 2]);
+    expect(parseEpubExtractionMetadata(parsed.formatMetadata).spineItemCount).toBe(3);
+  });
+
+  it("rejects a spine with no primary item and invalid linear values", async () => {
+    const manifest = '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/>';
+    const files = [{ name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Aux</p>") }];
+    await expect(parseDocument(book({ opf: opfDocument({ manifest, spine: '<itemref idref="c1" linear="no"/>' }), files }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+    await expect(parseDocument(book({ opf: opfDocument({ manifest, spine: '<itemref idref="c1" linear="maybe"/>' }), files }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+
+  it("rejects duplicate manifest ids and duplicate spine itemrefs deterministically", async () => {
+    const duplicateManifest = opfDocument({
+      manifest: '<item id="dup" href="text/a.xhtml" media-type="application/xhtml+xml"/><item id="dup" href="text/b.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="dup"/>',
+    });
+    await expect(parseDocument(book({ opf: duplicateManifest, files: [
+      { name: "OEBPS/text/a.xhtml", text: contentDocument("<p>A</p>") },
+      { name: "OEBPS/text/b.xhtml", text: contentDocument("<p>B</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const duplicateSpine = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/><itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: duplicateSpine, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>One</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+
+  it("uses the manifest fallback chain for a foreign top-level spine resource", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="foreign" href="data/ch1.bin" media-type="application/x-example" fallback="fallback"/><item id="fallback" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="foreign"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/data/ch1.bin", text: "foreign bytes are never parsed" },
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument("<p>Fallback body</p>") },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Fallback body"]);
+    expect(epubLocatorOf(blocksOf(parsed)[0]!)?.href).toBe("OEBPS/text/ch1.xhtml");
+  });
+
+  it("rejects missing and cyclic manifest fallback chains", async () => {
+    const missing = opfDocument({
+      manifest: '<item id="foreign" href="data/ch1.bin" media-type="application/x-example"/>',
+      spine: '<itemref idref="foreign"/>',
+    });
+    await expect(parseDocument(book({ opf: missing, files: [{ name: "OEBPS/data/ch1.bin", text: "x" }] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const cycle = opfDocument({
+      manifest: '<item id="a" href="data/a.bin" media-type="application/x-a" fallback="b"/><item id="b" href="data/b.bin" media-type="application/x-b" fallback="a"/>',
+      spine: '<itemref idref="a"/>',
+    });
+    await expect(parseDocument(book({ opf: cycle, files: [
+      { name: "OEBPS/data/a.bin", text: "a" },
+      { name: "OEBPS/data/b.bin", text: "b" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // DOM locators
 // ---------------------------------------------------------------------------
 

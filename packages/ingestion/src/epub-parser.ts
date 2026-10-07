@@ -65,8 +65,9 @@ const MAX_WALK_DEPTH = 256;
 const MAX_NAVIGATION_DEPTH = 64;
 
 type ZipEntry = { name: string; method: number; flags: number; compressed: Buffer; compressedSize: number; uncompressedSize: number; localOffset: number; localExtraLength: number };
-type ManifestItem = { id: string; href: string; mediaType: string | null; properties: string[] };
-type EpubPackage = { path: string; version: string | null; renditionLayout: EpubRenditionLayout; manifest: Map<string, ManifestItem>; spineIds: string[]; spineTocId: string | null; dcTitle: string | null; dcLanguage: string | null; dcIdentifier: string | null };
+type ManifestItem = { id: string; href: string; mediaType: string | null; properties: string[]; fallback: string | null };
+type SpineItemRef = { idref: string; linear: boolean };
+type EpubPackage = { path: string; version: string | null; renditionLayout: EpubRenditionLayout; manifest: Map<string, ManifestItem>; spine: SpineItemRef[]; spineTocId: string | null; dcTitle: string | null; dcLanguage: string | null; dcIdentifier: string | null };
 type NavigationResult = { source: EpubNavigationSource; entries: EpubNavigationEntry[]; degraded: boolean };
 type BlockContext = { spineIndex: number; docPath: string; provenance: BlockExtractionProvenance; footnote: boolean; warnings: Set<ExtractionQualityWarningCode>; limits: ParserLimits };
 
@@ -85,30 +86,27 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
   const navigation = readNavigation(opf, byName, limits);
   const warnings = new Set<ExtractionQualityWarningCode>();
   const blocks: ParsedBlock[] = [];
-  // Spine reading-order accounting (RF01-05): usable text documents, text
-  // documents that yielded nothing, and unsupported (binary/media) items.
-  // Unsupported items are counted, never inflated or decoded.
+  // The package spine is the reading-order authority. Every itemref is
+  // validated, but only primary (linear=yes/implicit) items contribute to the
+  // canonical reading stream. Auxiliary linear=no content remains addressable
+  // EPUB content; it is not silently mixed into Book Intelligence input.
   let textSpineItems = 0;
   let emptyTextSpineItems = 0;
-  let unsupportedSpineItems = 0;
-  opf.spineIds.forEach((id, spineIndex) => {
-    const item = opf.manifest.get(id);
+  opf.spine.forEach((ref, spineIndex) => {
+    const item = opf.manifest.get(ref.idref);
     if (!item) throw new Error(SourceError.CORRUPTED);
-    // RF02-01: EVERY spine reference must exist — resolution and archive
-    // presence are checked BEFORE media-type classification, so a missing
-    // item is always fatal/corrupted regardless of its declared media type.
-    const resource = resolveArchiveHref(opf.path, item.href);
+
+    // Preserve the pre-04C-2 invariant that every spine-declared local resource
+    // exists, even when it is auxiliary or requires a manifest fallback.
+    const declaredResource = resolveArchiveHref(opf.path, item.href);
+    if (!byName.has(declaredResource.path)) throw new Error(SourceError.CORRUPTED);
+
+    const contentItem = resolveSpineContentItem(opf.manifest, item);
+    const resource = resolveArchiveHref(opf.path, contentItem.href);
     if (!byName.has(resource.path)) throw new Error(SourceError.CORRUPTED);
-    const mediaType = item.mediaType ?? "";
-    // Reading order is spine order; only processable content documents are
-    // parsed. Unsupported media items are counted and skipped WITHOUT
-    // inflating or decoding their entries. A manifest item without a
-    // declared media-type is spec-violating but seen in legacy books:
-    // attempt content parsing (v1 parity) instead of skipping it.
-    if (mediaType && !CONTENT_MEDIA_TYPES.has(mediaType) && mediaType !== SVG_MEDIA_TYPE) {
-      unsupportedSpineItems += 1;
-      return;
-    }
+    if (!ref.linear) return;
+
+    const mediaType = contentItem.mediaType ?? "";
     const document = parseXmlResource(entryText(byName, resource.path, limits), limits, resource.path);
     const root = document.documentElement;
     if (!root) throw new Error(SourceError.CORRUPTED);
@@ -116,13 +114,11 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
     const countBefore = blocks.length;
     if (mediaType === SVG_MEDIA_TYPE) emitSvgEvidence(root, context, blocks);
     else emitBlocksFor(root, context, blocks, 0);
-    // A text media-type spine document that yields nothing is degradable
-    // evidence (PARTIAL_EXTRACTION); only a fully text-less extraction fails.
     if (blocks.length > countBefore) textSpineItems += 1;
     else emptyTextSpineItems += 1;
   });
   if (opf.renditionLayout === "PRE_PAGINATED") warnings.add("EPUB_FIXED_LAYOUT");
-  if (textSpineItems > 0 && emptyTextSpineItems + unsupportedSpineItems > 0) warnings.add("PARTIAL_EXTRACTION");
+  if (textSpineItems > 0 && emptyTextSpineItems > 0) warnings.add("PARTIAL_EXTRACTION");
   if (!blocks.length) throw new Error(opf.renditionLayout === "PRE_PAGINATED" ? SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED : SourceError.EPUB_NO_USABLE_TEXT);
   if (navigation.degraded) warnings.add("EPUB_NAVIGATION_DEGRADED");
   const formatMetadata: EpubExtractionMetadata = parseEpubExtractionMetadata({
@@ -130,7 +126,7 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
     epubVersion: opf.version,
     packagePath: opf.path,
     renditionLayout: opf.renditionLayout,
-    spineItemCount: opf.spineIds.length,
+    spineItemCount: opf.spine.length,
     navigationSource: navigation.source,
     navigation: navigation.entries,
     dcTitle: opf.dcTitle,
@@ -168,22 +164,59 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
     const id = item.getAttribute("id");
     const href = item.getAttribute("href");
     if (!id || !href) continue;
-    manifest.set(id, { id, href, mediaType: item.getAttribute("media-type") || null, properties: (item.getAttribute("properties") || "").split(/\s+/).filter(Boolean) });
+    if (manifest.has(id)) throw new Error(SourceError.CORRUPTED);
+    manifest.set(id, {
+      id,
+      href,
+      mediaType: item.getAttribute("media-type") || null,
+      properties: (item.getAttribute("properties") || "").split(/\s+/).filter(Boolean),
+      fallback: item.getAttribute("fallback") || null,
+    });
   }
-  const spineIds = directElementChildrenByLocalName(spineElement, "itemref").map((itemref) => itemref.getAttribute("idref")).filter((id): id is string => !!id);
-  // Reading order is spine-authoritative; manifest order is never a fallback.
-  if (!spineIds.length) throw new Error(SourceError.CORRUPTED);
+
+  const spine: SpineItemRef[] = [];
+  const seenSpineIds = new Set<string>();
+  for (const itemref of directElementChildrenByLocalName(spineElement, "itemref")) {
+    const idref = itemref.getAttribute("idref");
+    const linearValue = itemref.getAttribute("linear");
+    if (!idref || seenSpineIds.has(idref) || (linearValue && linearValue !== "yes" && linearValue !== "no")) throw new Error(SourceError.CORRUPTED);
+    seenSpineIds.add(idref);
+    spine.push({ idref, linear: linearValue !== "no" });
+  }
+  // EPUB requires at least one primary item; omitted linear means "yes".
+  if (!spine.length || !spine.some((itemref) => itemref.linear)) throw new Error(SourceError.CORRUPTED);
+
   return {
     path: opfPath,
     version: packageElement.getAttribute("version") || null,
     renditionLayout: readRenditionLayout(packageElement, opf, limits),
     manifest,
-    spineIds,
+    spine,
     spineTocId: spineElement.getAttribute("toc") || null,
     dcTitle: dcElementText(opf, limits, "title"),
     dcLanguage: dcElementText(opf, limits, "language"),
     dcIdentifier: dcElementText(opf, limits, "identifier"),
   };
+}
+
+function isProcessableSpineContent(item: ManifestItem): boolean {
+  const mediaType = item.mediaType ?? "";
+  // Preserve legacy v2 tolerance for missing media-type: attempt XML content
+  // parsing rather than silently discarding old-but-readable books.
+  return !mediaType || CONTENT_MEDIA_TYPES.has(mediaType) || mediaType === SVG_MEDIA_TYPE;
+}
+
+function resolveSpineContentItem(manifest: Map<string, ManifestItem>, start: ManifestItem): ManifestItem {
+  let current = start;
+  const seen = new Set<string>();
+  while (!isProcessableSpineContent(current)) {
+    if (seen.has(current.id) || !current.fallback) throw new Error(SourceError.CORRUPTED);
+    seen.add(current.id);
+    const next = manifest.get(current.fallback);
+    if (!next) throw new Error(SourceError.CORRUPTED);
+    current = next;
+  }
+  return current;
 }
 
 function readRenditionLayout(packageElement: XmlElement, opf: XmlDocument, limits: ParserLimits): EpubRenditionLayout {
