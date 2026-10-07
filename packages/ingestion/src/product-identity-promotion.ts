@@ -2,6 +2,7 @@ import { Prisma, prisma } from "@ai-cognitive/db";
 import {
   classifyProductIdentifierForPromotion,
   isPromotableProductLanguage,
+  normalizeIsbnForComparison,
   normalizeProductIdentityTitleForComparison,
   parseProductIdentityCandidate,
 } from "@ai-cognitive/domain";
@@ -259,10 +260,10 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
   if (language && edition.language && !sameLanguage(edition.language, language)) {
     conflicts.push({ field: "edition.language", existing: edition.language, candidate: language });
   }
-  if (isbn10 && edition.isbn10 && edition.isbn10 !== isbn10) {
+  if (isbn10 && edition.isbn10 && normalizeIsbnForComparison(edition.isbn10, "ISBN10") !== isbn10) {
     conflicts.push({ field: "edition.isbn10", existing: edition.isbn10, candidate: isbn10 });
   }
-  if (isbn13 && edition.isbn13 && edition.isbn13 !== isbn13) {
+  if (isbn13 && edition.isbn13 && normalizeIsbnForComparison(edition.isbn13, "ISBN13") !== isbn13) {
     conflicts.push({ field: "edition.isbn13", existing: edition.isbn13, candidate: isbn13 });
   }
 
@@ -318,12 +319,17 @@ export async function promoteCurrentProductIdentityForUser(
   input: { sourceDocumentId: string; expectedExtractionId: string },
 ): Promise<ProductIdentityPromotionOutcome> {
   return prisma.$transaction(async (tx) => {
-    const membership = await tx.workspaceMember.findUnique({
-      where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } },
-      select: { userId: true, role: true },
-    });
-    if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
-    if (membership.role === "VIEWER") throw new Error("WORKSPACE_WRITE_ACCESS_DENIED");
+    // Lock the membership row for the full mutation transaction so a concurrent
+    // downgrade/removal cannot commit between authorization and product-identity
+    // writes. Role changes serialize either before this check or after commit.
+    const memberships = await tx.$queryRaw<Array<{ role: string }>>`
+      SELECT "role"::text AS "role"
+      FROM "WorkspaceMember"
+      WHERE "workspaceId" = ${context.workspaceId} AND "userId" = ${context.userId}
+      FOR UPDATE
+    `;
+    if (memberships.length !== 1) throw new Error("WORKSPACE_ACCESS_DENIED");
+    if (memberships[0]!.role === "VIEWER") throw new Error("WORKSPACE_WRITE_ACCESS_DENIED");
     return promoteInTransaction(tx, { workspaceId: context.workspaceId, ...input });
   });
 }
