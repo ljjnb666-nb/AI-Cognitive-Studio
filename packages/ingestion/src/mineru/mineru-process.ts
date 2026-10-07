@@ -307,7 +307,9 @@ export async function recordedProcessAlive(pid: number, expectedImagePattern: Re
   return await new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = isWindows ? spawn(taskListCommand, ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }) : spawn(taskListCommand, ["-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"] });
+      child = isWindows
+        ? spawn(taskListCommand, ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })
+        : spawn(taskListCommand, ["-o", "comm=", "-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"] });
     } catch {
       resolve(false);
       return;
@@ -325,7 +327,12 @@ export async function recordedProcessAlive(pid: number, expectedImagePattern: Re
         resolve(expectedImagePattern.test(image));
         return;
       }
-      resolve(out.trim().length > 0);
+      // POSIX `ps -p <pid>` prints a header even when the pid does not
+      // exist, so a non-empty stdout check is a false-positive liveness
+      // oracle. `comm=` suppresses the header and gives us the executable
+      // image name directly; apply the same image-class fence as Windows.
+      const image = out.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+      resolve(image.length > 0 && expectedImagePattern.test(image));
     });
   });
 }

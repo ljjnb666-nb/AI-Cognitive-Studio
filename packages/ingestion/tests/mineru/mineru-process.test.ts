@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnBounded } from "../../src/mineru/mineru-process.js";
+import { recordedProcessAlive, spawnBounded } from "../../src/mineru/mineru-process.js";
 
 /**
  * RF01 P1-04 teeth for spawnBounded's hard deadline:
@@ -38,6 +38,15 @@ afterEach(() => {
   spawnedPids.length = 0;
   for (const root of tempRoots) rmSync(root, { recursive: true, force: true });
   tempRoots.length = 0;
+});
+
+describe("recordedProcessAlive POSIX contract", () => {
+  it("uses header-free ps output and enforces the expected image class", async () => {
+    if (process.platform === "win32") return;
+    expect(await recordedProcessAlive(process.pid, /node/i)).toBe(true);
+    expect(await recordedProcessAlive(process.pid, /definitely-not-node-runtime/i)).toBe(false);
+    expect(await recordedProcessAlive(2_147_483_647, /node/i)).toBe(false);
+  });
 });
 
 describe("spawnBounded hard deadline (RF01 P1-04)", () => {
