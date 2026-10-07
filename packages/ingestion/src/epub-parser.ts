@@ -1,4 +1,4 @@
-import { inflateRawSync } from "node:zlib";
+import { crc32, inflateRawSync } from "node:zlib";
 import { DOMParser } from "@xmldom/xmldom";
 import type { Document as XmlDocument, Element as XmlElement, Node as XmlNode } from "@xmldom/xmldom";
 import { parseEpubExtractionMetadata } from "@ai-cognitive/domain";
@@ -78,7 +78,7 @@ const NAV_STRUCTURAL_FAILURE = "EPUB_NAV_STRUCTURAL_FAILURE";
 const MAX_WALK_DEPTH = 256;
 const MAX_NAVIGATION_DEPTH = 64;
 
-type ZipEntry = { name: string; method: number; flags: number; compressed: Buffer; compressedSize: number; uncompressedSize: number; localOffset: number; localExtraLength: number };
+type ZipEntry = { name: string; method: number; flags: number; crc32: number; compressed: Buffer; compressedSize: number; uncompressedSize: number; localOffset: number; localExtraLength: number };
 type ManifestItem = { id: string; href: string; mediaType: string | null; properties: string[]; fallback: string | null };
 type SpineItemRef = { idref: string; linear: boolean };
 type EpubPackage = { path: string; version: string | null; renditionLayout: EpubRenditionLayout; manifest: Map<string, ManifestItem>; spine: SpineItemRef[]; spineTocId: string | null; dcTitle: string | null; dcLanguage: string | null; dcIdentifier: string | null };
@@ -1004,7 +1004,7 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
     if (!hasZipRange(data, start, compressedSize) || dataEnd > directoryOffset) throw new Error(SourceError.CORRUPTED);
     const localEnd = (flags & 0x08) !== 0 ? readZipDataDescriptorEnd(data, dataEnd, directoryOffset, crc32, compressedSize, uncompressedSize) : dataEnd;
     localRanges.push({ start: localOffset, end: localEnd });
-    if (!isDirectory) entries.push({ name, method, flags, compressed: data.subarray(start, dataEnd), compressedSize, uncompressedSize, localOffset, localExtraLength });
+    if (!isDirectory) entries.push({ name, method, flags, crc32, compressed: data.subarray(start, dataEnd), compressedSize, uncompressedSize, localOffset, localExtraLength });
     offset += centralLength;
   }
 
@@ -1074,6 +1074,7 @@ function entryBytes(entries: Map<string, ZipEntry>, name: string, limits: Parser
     data = entry.method === 0 ? entry.compressed : entry.method === 8 ? inflateRawSync(entry.compressed, { maxOutputLength: limits.maxArchiveEntryBytes }) : (() => { throw new Error("unsupported"); })();
   } catch { throw new Error(SourceError.ARCHIVE_UNSAFE); }
   if (data.length !== entry.uncompressedSize) throw new Error(SourceError.CORRUPTED);
+  if ((crc32(data) >>> 0) !== entry.crc32) throw new Error(SourceError.CORRUPTED);
   return data;
 }
 

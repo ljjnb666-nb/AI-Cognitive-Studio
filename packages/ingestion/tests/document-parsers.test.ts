@@ -1,4 +1,4 @@
-import { deflateRawSync } from "node:zlib";
+import { crc32, deflateRawSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import PDFDocument from "pdfkit";
@@ -9,11 +9,11 @@ type Entry = { name: string; text: string; deflate?: boolean; descriptor?: boole
 function zip(entries: Entry[]): Uint8Array {
   const locals: Buffer[] = [], central: Buffer[] = []; let offset = 0;
   for (const entry of entries) {
-    const name = Buffer.from(entry.name), raw = Buffer.from(entry.text), body = entry.deflate ? deflateRawSync(raw) : raw, method = entry.deflate ? 8 : 0, flags = entry.descriptor ? 0x08 : 0;
-    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(flags, 6); local.writeUInt16LE(method, 8); if (!entry.descriptor) { local.writeUInt32LE(body.length, 18); local.writeUInt32LE(raw.length, 22); } local.writeUInt16LE(name.length, 26);
-    const descriptor = entry.descriptor && !entry.omitDescriptor ? Buffer.alloc(16) : Buffer.alloc(0); if (descriptor.length) { descriptor.writeUInt32LE(0x08074b50, 0); descriptor.writeUInt32LE(body.length, 8); descriptor.writeUInt32LE(raw.length, 12); }
+    const name = Buffer.from(entry.name), raw = Buffer.from(entry.text), body = entry.deflate ? deflateRawSync(raw) : raw, method = entry.deflate ? 8 : 0, flags = entry.descriptor ? 0x08 : 0, checksum = crc32(raw) >>> 0;
+    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(flags, 6); local.writeUInt16LE(method, 8); if (!entry.descriptor) { local.writeUInt32LE(checksum, 14); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(raw.length, 22); } local.writeUInt16LE(name.length, 26);
+    const descriptor = entry.descriptor && !entry.omitDescriptor ? Buffer.alloc(16) : Buffer.alloc(0); if (descriptor.length) { descriptor.writeUInt32LE(0x08074b50, 0); descriptor.writeUInt32LE(checksum, 4); descriptor.writeUInt32LE(body.length, 8); descriptor.writeUInt32LE(raw.length, 12); }
     locals.push(local, name, body, descriptor);
-    const record = Buffer.alloc(46); record.writeUInt32LE(0x02014b50, 0); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(flags, 8); record.writeUInt16LE(method, 10); record.writeUInt32LE(body.length, 20); record.writeUInt32LE(raw.length, 24); record.writeUInt16LE(name.length, 28); record.writeUInt32LE(offset, 42); central.push(record, name); offset += local.length + name.length + body.length + descriptor.length;
+    const record = Buffer.alloc(46); record.writeUInt32LE(0x02014b50, 0); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(flags, 8); record.writeUInt16LE(method, 10); record.writeUInt32LE(checksum, 16); record.writeUInt32LE(body.length, 20); record.writeUInt32LE(raw.length, 24); record.writeUInt16LE(name.length, 28); record.writeUInt32LE(offset, 42); central.push(record, name); offset += local.length + name.length + body.length + descriptor.length;
   }
   const directory = Buffer.concat(central), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16); return Buffer.concat([...locals, directory, end]);
 }
@@ -51,6 +51,17 @@ describe("safe EPUB parser", () => {
     // EOCD remains single-disk, so this per-entry declaration must fail closed.
     input.writeUInt16LE(1, directoryOffset + 34);
     await expect(parseDocument(input, "application/epub+zip")).rejects.toThrow("SOURCE_ARCHIVE_UNSAFE");
+  });
+  it("verifies CRC32 against the decompressed payload, not only header identity", async () => {
+    const input = Buffer.from(epub());
+    const marker = Buffer.from(">First<");
+    const payloadOffset = input.indexOf(marker);
+    expect(payloadOffset).toBeGreaterThanOrEqual(0);
+    // Keep the stored payload length and XML grammar valid while changing one
+    // byte. Local/central CRC fields remain mutually equal but no longer match
+    // the actual content, so only payload verification can catch this.
+    input[payloadOffset + 1] = "G".charCodeAt(0);
+    await expect(parseDocument(input, "application/epub+zip")).rejects.toThrow("SOURCE_CORRUPTED");
   });
   it("accepts safe directory records after the mandatory first mimetype entry", async () => {
     const input = zip([
