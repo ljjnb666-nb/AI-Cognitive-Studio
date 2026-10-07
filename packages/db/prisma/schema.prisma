@@ -1273,6 +1273,9 @@ model ProductIdentityPromotion {
   createdAt        DateTime                       @default(now())
   extraction       DocumentExtraction             @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
 
+  // Prisma requires the complete defining-side field tuple to be unique for a
+  // one-to-one composite relation, even though extractionId alone is unique.
+  @@unique([extractionId, sourceDocumentId, workspaceId])
   @@index([sourceDocumentId, workspaceId, createdAt])
 }
 

@@ -22,6 +22,8 @@ CREATE TABLE "ProductIdentityPromotion" (
 );
 
 CREATE UNIQUE INDEX "ProductIdentityPromotion_extractionId_key" ON "ProductIdentityPromotion"("extractionId");
+CREATE UNIQUE INDEX "ProductIdentityPromotion_extractionId_sourceDocumentId_workspaceId_key"
+    ON "ProductIdentityPromotion"("extractionId", "sourceDocumentId", "workspaceId");
 CREATE INDEX "ProductIdentityPromotion_sourceDocumentId_workspaceId_createdAt_idx"
     ON "ProductIdentityPromotion"("sourceDocumentId", "workspaceId", "createdAt");
 
