@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +27,13 @@ function newTempDir(): string {
 
 afterEach(() => {
   for (const pid of spawnedPids) {
-    try { spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }); } catch { /* gone */ }
+    if (process.platform === "win32") {
+      // Synchronous cleanup prevents an ENOENT child-process error from
+      // escaping after the test finishes; taskkill is Windows-only.
+      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    } else {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
   }
   spawnedPids.length = 0;
   for (const root of tempRoots) rmSync(root, { recursive: true, force: true });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sep as osPathSep } from "node:path";
+import { join, sep as osPathSep } from "node:path";
 import { buildMineruParseArgs, buildMineruServerArgs, judgeMineruParseExit, mineruFailureForOutcome, mineruPageSelector, parseMineruEndpoint, parseMineruParseEnvelope } from "../../src/mineru/mineru-commands.js";
 import { resolveMineruExecutorConfig } from "../../src/mineru/mineru-config.js";
 import { readEnvironment } from "@ai-cognitive/shared/server";
@@ -137,8 +137,10 @@ describe("MinerU executor configuration resolution (fail-fast contract)", () => 
     expect(() => resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: modelRoot, MINERU_HOME_ROOT: modelRoot + osPathSep + "nested" } as never), anyDir)).toThrow(/^OCR_PATH_OVERLAP/);
     // home inside model → reject
     expect(() => resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: homeRoot, MINERU_HOME_ROOT: homeRoot + osPathSep + "claims" + osPathSep + "inner" } as never), anyDir)).toThrow(/^OCR_PATH_OVERLAP/);
-    // same path with different Windows casing → reject where applicable
-    expect(() => resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: modelRoot.toUpperCase(), MINERU_HOME_ROOT: modelRoot.toLowerCase() + osPathSep + "homes" } as never), anyDir)).toThrow(/^OCR_PATH_OVERLAP/);
+    // Windows path semantics are case-insensitive; POSIX paths are not.
+    if (process.platform === "win32") {
+      expect(() => resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: modelRoot.toUpperCase(), MINERU_HOME_ROOT: modelRoot.toLowerCase() + osPathSep + "homes" } as never), anyDir)).toThrow(/^OCR_PATH_OVERLAP/);
+    }
     // disjoint paths → accept
     const elsewhere = import.meta.dirname + osPathSep + "disjoint-models";
     const config = resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_MODEL_PATH: elsewhere, MINERU_HOME_ROOT: homeRoot } as never), { directoryExists: (path) => path === elsewhere })!;
@@ -172,7 +174,10 @@ describe("MinerU executor configuration resolution (fail-fast contract)", () => 
   });
 
   it("resolves a bare executable name against explicit PATH directories", () => {
-    const config = resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_EXECUTABLE: "fake-mineru-detective" } as never), { pathDirectories: ["D:\\\\tools"], fileExists: (path) => path === "D:\\\\tools\\\\fake-mineru-detective.exe" || path === "D:\\tools\\fake-mineru-detective.exe" })!;
-    expect(config.executable).toMatch(/fake-mineru-detective\.exe$/);
+    const executableName = "fake-mineru-detective";
+    const toolDir = join(import.meta.dirname, "fake-path-bin");
+    const expectedExecutable = join(toolDir, process.platform === "win32" ? `${executableName}.exe` : executableName);
+    const config = resolveMineruExecutorConfig(baseEnvironment({ ...configured, MINERU_EXECUTABLE: executableName } as never), { pathDirectories: [toolDir], fileExists: (path) => path === expectedExecutable })!;
+    expect(config.executable).toBe(expectedExecutable);
   });
 });
