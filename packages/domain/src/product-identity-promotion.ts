@@ -15,6 +15,16 @@ export function normalizeProductIdentityTitleForComparison(value: string): strin
   return value.normalize("NFKC").replace(/\s+/g, " ").trim();
 }
 
+export function normalizeIsbnForComparison(value: string, kind: "ISBN10" | "ISBN13"): string | null {
+  const compact = value
+    .trim()
+    .replace(/^isbn(?:-1[03])?(?::|\s+)\s*/i, "")
+    .replace(/[\s-]+/g, "")
+    .toUpperCase();
+  if (kind === "ISBN10") return validIsbn10(compact) ? compact : null;
+  return validIsbn13(compact) ? compact : null;
+}
+
 export function isPromotableProductLanguage(value: string): boolean {
   const normalized = value.trim();
   return normalized.length <= 64 && /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(normalized);
@@ -32,7 +42,7 @@ function validIsbn10(value: string): boolean {
 }
 
 function validIsbn13(value: string): boolean {
-  if (!/^\d{13}$/.test(value)) return false;
+  if (!/^(?:978|979)\d{10}$/.test(value)) return false;
   let sum = 0;
   for (let index = 0; index < 12; index++) {
     sum += Number(value[index]!) * (index % 2 === 0 ? 1 : 3);
