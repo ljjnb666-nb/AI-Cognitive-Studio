@@ -102,6 +102,42 @@ async function fixture(input: {
   return { user, workspace, source, document, extraction };
 }
 
+async function addDocumentVersion(value: Awaited<ReturnType<typeof fixture>>, input: { title?: string | null; language?: string | null; identifier?: string | null }) {
+  const document = await prisma.sourceDocument.create({
+    data: {
+      workspaceId: value.workspace.id,
+      sourceId: value.source.id,
+      sourceBlobId: value.document.sourceBlobId,
+      version: 2,
+      sha256: value.document.sha256,
+      sizeBytes: value.document.sizeBytes,
+      mediaType: "application/epub+zip",
+      storageKey: value.document.storageKey,
+    },
+  });
+  const job = await prisma.job.create({
+    data: { userId: value.user.id, workspaceId: value.workspace.id, type: "source.ingest", payload: { sourceDocumentId: document.id }, idempotencyKey: `identity:${crypto.randomUUID()}` },
+  });
+  const run = await prisma.ingestionRun.create({
+    data: { workspaceId: value.workspace.id, sourceDocumentId: document.id, jobId: job.id, parserVersion: "epub-parser-v2", normalizationVersion: "canonical-text-v1", status: "SUCCEEDED" },
+  });
+  const candidate = buildEpubProductIdentityCandidate({
+    kind: "epub", epubVersion: "3.0", packagePath: "OEBPS/content.opf", renditionLayout: "REFLOWABLE",
+    spineItemCount: 1, navigationSource: "NONE", navigation: [],
+    dcTitle: input.title ?? null, dcLanguage: input.language ?? null, dcIdentifier: input.identifier ?? null,
+  });
+  const extraction = await prisma.documentExtraction.create({
+    data: {
+      ingestionRunId: run.id, sourceDocumentId: document.id, workspaceId: value.workspace.id,
+      status: "SUCCEEDED", parserName: "builtin-epub", parserVersion: "epub-parser-v2",
+      normalizationVersion: "canonical-text-v1", canonicalSchemaVersion: "canonical-book-v1",
+      qualityStatus: "ACCEPTED", qualityMetadata: { warnings: [] }, productIdentityCandidate: candidate,
+    },
+  });
+  await prisma.currentDocumentExtraction.create({ data: { sourceDocumentId: document.id, workspaceId: value.workspace.id, extractionId: extraction.id } });
+  return { document, extraction };
+}
+
 async function addExtraction(value: Awaited<ReturnType<typeof fixture>>, input: { title?: string | null; language?: string | null; identifier?: string | null }) {
   const job = await prisma.job.create({
     data: { userId: value.user.id, workspaceId: value.workspace.id, type: "source.ingest", payload: { sourceDocumentId: value.document.id }, idempotencyKey: `identity:${crypto.randomUUID()}` },
@@ -225,6 +261,22 @@ describe("controlled product identity promotion authority", () => {
     expect(result).toEqual({ status: "STALE", expectedExtractionId: value.extraction.id, currentExtractionId: newer.id });
     await expect(prisma.productIdentityPromotion.count({ where: { extractionId: value.extraction.id } })).resolves.toBe(0);
     await expect(prisma.source.findUniqueOrThrow({ where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } } })).resolves.toMatchObject({ editionId: null });
+  });
+
+  it("serializes concurrent promotions across two SourceDocument versions of the same Source", async () => {
+    const value = await fixture({ title: "Version One" });
+    const second = await addDocumentVersion(value, { title: "Version Two" });
+    const context = { userId: value.user.id, workspaceId: value.workspace.id };
+
+    const results = await Promise.all([
+      promoteCurrentProductIdentityForUser(context, { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id }),
+      promoteCurrentProductIdentityForUser(context, { sourceDocumentId: second.document.id, expectedExtractionId: second.extraction.id }),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(["APPLIED", "CONFLICT"]);
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    const bound = await prisma.source.findUniqueOrThrow({ where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } } });
+    expect(bound.editionId).not.toBeNull();
   });
 
   it("blocks unbound promotion without a title and never guesses ISBN from bare digits", async () => {

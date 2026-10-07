@@ -85,13 +85,14 @@ async function createPromotion(
 }
 
 async function promoteInTransaction(tx: Prisma.TransactionClient, input: PromotionInput): Promise<ProductIdentityPromotionOutcome> {
-  const locked = await tx.$queryRaw<Array<{ id: string; sourceId: string }>>`
-    SELECT "id", "sourceId"
+  const locked = await tx.$queryRaw<Array<{ id: string; sourceId: string; mediaType: string }>>`
+    SELECT "id", "sourceId", "mediaType"
     FROM "SourceDocument"
     WHERE "id" = ${input.sourceDocumentId} AND "workspaceId" = ${input.workspaceId}
     FOR UPDATE
   `;
   if (locked.length !== 1) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
+  if (locked[0]!.mediaType !== "application/epub+zip") throw new Error("PRODUCT_IDENTITY_SOURCE_FORMAT_NOT_PROMOTABLE");
 
   const current = await tx.currentDocumentExtraction.findUnique({
     where: { sourceDocumentId_workspaceId: { sourceDocumentId: input.sourceDocumentId, workspaceId: input.workspaceId } },
@@ -118,14 +119,26 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
     throw new Error("PRODUCT_IDENTITY_EXTRACTION_NOT_PROMOTABLE");
   }
 
-  const candidate = parseProductIdentityCandidate(extraction.productIdentityCandidate);
+  let candidate: ReturnType<typeof parseProductIdentityCandidate>;
+  try {
+    candidate = parseProductIdentityCandidate(extraction.productIdentityCandidate);
+  } catch {
+    throw new Error("PRODUCT_IDENTITY_CANDIDATE_INVALID");
+  }
   const existingPromotion = await tx.productIdentityPromotion.findUnique({ where: { extractionId: extraction.id } });
   if (existingPromotion) return { status: existingPromotion.status, promotion: existingPromotion };
 
-  const source = await tx.source.findUniqueOrThrow({
-    where: { id_workspaceId: { id: locked[0]!.sourceId, workspaceId: input.workspaceId } },
-    select: { id: true, editionId: true },
-  });
+  // Product identity is Source-scoped, while SourceDocument is version-scoped.
+  // Lock the Source row so concurrent promotions from two document versions
+  // cannot both observe editionId = NULL and create competing identities.
+  const sourceRows = await tx.$queryRaw<Array<{ id: string; editionId: string | null }>>`
+    SELECT "id", "editionId"
+    FROM "Source"
+    WHERE "id" = ${locked[0]!.sourceId} AND "workspaceId" = ${input.workspaceId}
+    FOR UPDATE
+  `;
+  if (sourceRows.length !== 1) throw new Error("PRODUCT_IDENTITY_SOURCE_BINDING_INVALID");
+  const source = sourceRows[0]!;
 
   const ignoredFields: ProductIdentityIgnoredField[] = [];
   const language = candidate.language && isPromotableProductLanguage(candidate.language.value)
@@ -171,7 +184,7 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
     });
     await tx.source.update({
       where: { id_workspaceId: { id: source.id, workspaceId: input.workspaceId } },
-      data: { editionId: edition.id },
+      data: { editionId: edition.editionId },
     });
 
     const appliedFields = ["source.editionId", "work.title"];
@@ -182,20 +195,35 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
       ...input,
       status: "APPLIED",
       workId: work.id,
-      editionId: edition.id,
+      editionId: edition.editionId,
       appliedFields,
       ignoredFields,
     });
   }
 
-  const edition = await tx.edition.findUniqueOrThrow({
-    where: { id_workspaceId: { id: source.editionId, workspaceId: input.workspaceId } },
-    include: { work: true },
-  });
+  // Lock both Edition and Work before comparing or filling fields. This makes
+  // the read/decision/write sequence safe against concurrent user edits too.
+  const identities = await tx.$queryRaw<Array<{
+    editionId: string;
+    workId: string;
+    title: string;
+    language: string | null;
+    isbn10: string | null;
+    isbn13: string | null;
+  }>>`
+    SELECT e."id" AS "editionId", e."workId" AS "workId", w."title" AS "title",
+           e."language" AS "language", e."isbn10" AS "isbn10", e."isbn13" AS "isbn13"
+    FROM "Edition" e
+    JOIN "Work" w ON w."id" = e."workId" AND w."workspaceId" = e."workspaceId"
+    WHERE e."id" = ${source.editionId} AND e."workspaceId" = ${input.workspaceId}
+    FOR UPDATE OF e, w
+  `;
+  if (identities.length !== 1) throw new Error("PRODUCT_IDENTITY_SOURCE_BINDING_INVALID");
+  const edition = identities[0]!;
 
   const conflicts: ProductIdentityConflict[] = [];
-  if (candidate.title && !sameTitle(edition.work.title, candidate.title.value)) {
-    conflicts.push({ field: "work.title", existing: edition.work.title, candidate: candidate.title.value });
+  if (candidate.title && !sameTitle(edition.title, candidate.title.value)) {
+    conflicts.push({ field: "work.title", existing: edition.title, candidate: candidate.title.value });
   }
   if (language && edition.language && !sameLanguage(edition.language, language)) {
     conflicts.push({ field: "edition.language", existing: edition.language, candidate: language });
@@ -212,7 +240,7 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
       ...input,
       status: "CONFLICT",
       workId: edition.workId,
-      editionId: edition.id,
+      editionId: edition.editionId,
       conflicts,
       ignoredFields,
     });
@@ -233,14 +261,14 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
     appliedFields.push("edition.isbn13");
   }
   if (appliedFields.length) {
-    await tx.edition.update({ where: { id_workspaceId: { id: edition.id, workspaceId: input.workspaceId } }, data: editionData });
+    await tx.edition.update({ where: { id_workspaceId: { id: edition.editionId, workspaceId: input.workspaceId } }, data: editionData });
   }
 
   return createPromotion(tx, {
     ...input,
     status: appliedFields.length ? "APPLIED" : "NOOP",
     workId: edition.workId,
-    editionId: edition.id,
+    editionId: edition.editionId,
     appliedFields,
     ignoredFields,
   });
