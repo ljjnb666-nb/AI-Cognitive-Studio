@@ -1,4 +1,4 @@
-import { inflateRawSync } from "node:zlib";
+import { crc32, inflateRawSync } from "node:zlib";
 import { DOMParser } from "@xmldom/xmldom";
 import type { Document as XmlDocument, Element as XmlElement, Node as XmlNode } from "@xmldom/xmldom";
 import { parseEpubExtractionMetadata } from "@ai-cognitive/domain";
@@ -44,17 +44,31 @@ import { SourceError } from "./source-errors.js";
  *
  * Non-negotiables carried over from BOOK-01: no fabricated physical pages
  * (SourcePage stays 0, physicalPageIndex stays null), per-block provenance,
- * qualityStatus UNKNOWN, and fail-closed handling of DOCTYPE/ENTITY and every
- * external resource reference.
+ * qualityStatus UNKNOWN, fail-closed handling of DOCTYPE/ENTITY, and
+ * no-network reference handling (safe outbound links / declared remote media
+ * are accepted as inert metadata; ingestion never dereferences them).
  */
 
 const EPUB_OPS_NAMESPACE = "http://www.idpf.org/2007/ops";
 const EPUB_RENDITION_NAMESPACE = "http://www.idpf.org/2013/rendition";
+const OCF_CONTAINER_NAMESPACE = "urn:oasis:names:tc:opendocument:xmlns:container";
+const XML_ENCRYPTION_NAMESPACE = "http://www.w3.org/2001/04/xmlenc#";
+const IDPF_FONT_OBFUSCATION_ALGORITHM = "http://www.idpf.org/2008/embedding";
 const DC_ELEMENTS_NAMESPACE = "http://purl.org/dc/elements/1.1/";
 const OPF_MEDIA_TYPE = "application/oebps-package+xml";
 const NCX_MEDIA_TYPE = "application/x-dtbncx+xml";
 const CONTENT_MEDIA_TYPES = new Set(["application/xhtml+xml", "text/html", "application/x-dtbook+xml"]);
 const SVG_MEDIA_TYPE = "image/svg+xml";
+const FONT_MEDIA_TYPES = new Set([
+  "font/otf",
+  "font/ttf",
+  "font/woff",
+  "font/woff2",
+  // Legacy EPUB 2/early EPUB 3 aliases retained for backwards compatibility.
+  "application/font-sfnt",
+  "application/font-woff",
+  "application/vnd.ms-opentype",
+]);
 const FOOTNOTE_TYPES = new Set(["footnote", "endnote", "footnotes", "endnotes"]);
 const BLOCK_PRODUCERS = new Set(["p", "li", "blockquote", "pre", "table", "figcaption", "math", "svg", "img", "h1", "h2", "h3", "h4", "h5", "h6"]);
 const CONTAINER_TAGS = new Set(["html", "body", "main", "div", "section", "article", "aside", "nav", "header", "footer", "figure", "ul", "ol", "dl", "details", "center"]);
@@ -64,11 +78,13 @@ const NAV_STRUCTURAL_FAILURE = "EPUB_NAV_STRUCTURAL_FAILURE";
 const MAX_WALK_DEPTH = 256;
 const MAX_NAVIGATION_DEPTH = 64;
 
-type ZipEntry = { name: string; method: number; flags: number; compressed: Buffer; compressedSize: number; uncompressedSize: number; localOffset: number; localExtraLength: number };
-type ManifestItem = { id: string; href: string; mediaType: string | null; properties: string[] };
-type EpubPackage = { path: string; version: string | null; renditionLayout: EpubRenditionLayout; manifest: Map<string, ManifestItem>; spineIds: string[]; spineTocId: string | null; dcTitle: string | null; dcLanguage: string | null; dcIdentifier: string | null };
+type ZipEntry = { name: string; method: number; flags: number; crc32: number; compressed: Buffer; compressedSize: number; uncompressedSize: number; localOffset: number; localExtraLength: number };
+type ManifestItem = { id: string; href: string; mediaType: string | null; properties: string[]; fallback: string | null };
+type SpineItemRef = { idref: string; linear: boolean };
+type EpubPackage = { path: string; version: string | null; renditionLayout: EpubRenditionLayout; manifest: Map<string, ManifestItem>; spine: SpineItemRef[]; spineTocId: string | null; dcTitle: string | null; dcLanguage: string | null; dcIdentifier: string | null };
 type NavigationResult = { source: EpubNavigationSource; entries: EpubNavigationEntry[]; degraded: boolean };
 type BlockContext = { spineIndex: number; docPath: string; provenance: BlockExtractionProvenance; footnote: boolean; warnings: Set<ExtractionQualityWarningCode>; limits: ParserLimits };
+type XmlReferencePolicy = { kind: "container" | "package" | "navigation" | "content"; allowRemoteResources?: boolean };
 
 export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: ParserDescriptor): Parsed {
   const entries = readZip(bytes, limits);
@@ -79,50 +95,50 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
   // ZIP layouts from being accepted as EPUB containers.
   if (!mimetype || mimetype.localOffset !== 0 || mimetype.method !== 0 || mimetype.localExtraLength !== 0 ||
       entryText(byName, "mimetype", limits) !== "application/epub+zip") throw new Error(SourceError.CORRUPTED);
-  if (byName.has("META-INF/encryption.xml")) throw new Error(SourceError.ARCHIVE_UNSAFE);
   const provenance: BlockExtractionProvenance = { sourceMethod: parser.sourceMethod, parserName: parser.name, parserVersion: parser.version };
   const opf = readPackage(byName, limits);
+  assertSupportedContainerEncryption(byName, opf, limits);
   const navigation = readNavigation(opf, byName, limits);
   const warnings = new Set<ExtractionQualityWarningCode>();
   const blocks: ParsedBlock[] = [];
-  // Spine reading-order accounting (RF01-05): usable text documents, text
-  // documents that yielded nothing, and unsupported (binary/media) items.
-  // Unsupported items are counted, never inflated or decoded.
+  // The package spine is the reading-order authority. Every itemref is
+  // validated, but only primary (linear=yes/implicit) items contribute to the
+  // canonical reading stream. Auxiliary linear=no content remains addressable
+  // EPUB content; it is not silently mixed into Book Intelligence input.
   let textSpineItems = 0;
   let emptyTextSpineItems = 0;
-  let unsupportedSpineItems = 0;
-  opf.spineIds.forEach((id, spineIndex) => {
-    const item = opf.manifest.get(id);
+  opf.spine.forEach((ref, spineIndex) => {
+    const item = opf.manifest.get(ref.idref);
     if (!item) throw new Error(SourceError.CORRUPTED);
-    // RF02-01: EVERY spine reference must exist — resolution and archive
-    // presence are checked BEFORE media-type classification, so a missing
-    // item is always fatal/corrupted regardless of its declared media type.
-    const resource = resolveArchiveHref(opf.path, item.href);
+
+    // Preserve the pre-04C-2 invariant that every spine-declared local resource
+    // exists, even when it is auxiliary or requires a manifest fallback.
+    const declaredResource = resolveArchiveHref(opf.path, item.href);
+    if (!byName.has(declaredResource.path)) throw new Error(SourceError.CORRUPTED);
+
+    const contentItem = resolveSpineContentItem(opf.manifest, item);
+    const resource = resolveArchiveHref(opf.path, contentItem.href);
     if (!byName.has(resource.path)) throw new Error(SourceError.CORRUPTED);
-    const mediaType = item.mediaType ?? "";
-    // Reading order is spine order; only processable content documents are
-    // parsed. Unsupported media items are counted and skipped WITHOUT
-    // inflating or decoding their entries. A manifest item without a
-    // declared media-type is spec-violating but seen in legacy books:
-    // attempt content parsing (v1 parity) instead of skipping it.
-    if (mediaType && !CONTENT_MEDIA_TYPES.has(mediaType) && mediaType !== SVG_MEDIA_TYPE) {
-      unsupportedSpineItems += 1;
-      return;
-    }
-    const document = parseXmlResource(entryText(byName, resource.path, limits), limits, resource.path);
+    if (!ref.linear) return;
+
+    const mediaType = contentItem.mediaType ?? "";
+    const document = parseXmlResource(
+      entryXmlText(byName, resource.path, limits),
+      limits,
+      resource.path,
+      { kind: "content", allowRemoteResources: contentItem.properties.includes("remote-resources") },
+    );
     const root = document.documentElement;
     if (!root) throw new Error(SourceError.CORRUPTED);
     const context: BlockContext = { spineIndex, docPath: resource.path, provenance, footnote: false, warnings, limits };
     const countBefore = blocks.length;
     if (mediaType === SVG_MEDIA_TYPE) emitSvgEvidence(root, context, blocks);
     else emitBlocksFor(root, context, blocks, 0);
-    // A text media-type spine document that yields nothing is degradable
-    // evidence (PARTIAL_EXTRACTION); only a fully text-less extraction fails.
     if (blocks.length > countBefore) textSpineItems += 1;
     else emptyTextSpineItems += 1;
   });
   if (opf.renditionLayout === "PRE_PAGINATED") warnings.add("EPUB_FIXED_LAYOUT");
-  if (textSpineItems > 0 && emptyTextSpineItems + unsupportedSpineItems > 0) warnings.add("PARTIAL_EXTRACTION");
+  if (textSpineItems > 0 && emptyTextSpineItems > 0) warnings.add("PARTIAL_EXTRACTION");
   if (!blocks.length) throw new Error(opf.renditionLayout === "PRE_PAGINATED" ? SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED : SourceError.EPUB_NO_USABLE_TEXT);
   if (navigation.degraded) warnings.add("EPUB_NAVIGATION_DEGRADED");
   const formatMetadata: EpubExtractionMetadata = parseEpubExtractionMetadata({
@@ -130,7 +146,7 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
     epubVersion: opf.version,
     packagePath: opf.path,
     renditionLayout: opf.renditionLayout,
-    spineItemCount: opf.spineIds.length,
+    spineItemCount: opf.spine.length,
     navigationSource: navigation.source,
     navigation: navigation.entries,
     dcTitle: opf.dcTitle,
@@ -145,7 +161,7 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
 // ---------------------------------------------------------------------------
 
 function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubPackage {
-  const container = parseXmlResource(entryText(byName, "META-INF/container.xml", limits), limits, "");
+  const container = parseXmlResource(entryXmlText(byName, "META-INF/container.xml", limits), limits, "", { kind: "container" });
   let opfPath: string | null = null;
   for (const rootfile of elementsByLocalName(container, "rootfile", limits)) {
     const mediaType = rootfile.getAttribute("media-type");
@@ -157,7 +173,7 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
     if (byName.has(resolved.path)) { opfPath = resolved.path; break; }
   }
   if (!opfPath) throw new Error(SourceError.CORRUPTED);
-  const opf = parseXmlResource(entryText(byName, opfPath, limits), limits, opfPath);
+  const opf = parseXmlResource(entryXmlText(byName, opfPath, limits), limits, opfPath, { kind: "package" });
   const packageElement = opf.documentElement;
   if (!packageElement || localName(packageElement) !== "package") throw new Error(SourceError.CORRUPTED);
   const manifestElement = elementsByLocalName(opf, "manifest", limits)[0];
@@ -167,23 +183,149 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
   for (const item of directElementChildrenByLocalName(manifestElement, "item")) {
     const id = item.getAttribute("id");
     const href = item.getAttribute("href");
-    if (!id || !href) continue;
-    manifest.set(id, { id, href, mediaType: item.getAttribute("media-type") || null, properties: (item.getAttribute("properties") || "").split(/\s+/).filter(Boolean) });
+    if (!id || !href || manifest.has(id)) throw new Error(SourceError.CORRUPTED);
+    manifest.set(id, {
+      id,
+      href,
+      mediaType: item.getAttribute("media-type") || null,
+      properties: (item.getAttribute("properties") || "").split(/\s+/).filter(Boolean),
+      fallback: item.getAttribute("fallback") || null,
+    });
   }
-  const spineIds = directElementChildrenByLocalName(spineElement, "itemref").map((itemref) => itemref.getAttribute("idref")).filter((id): id is string => !!id);
-  // Reading order is spine-authoritative; manifest order is never a fallback.
-  if (!spineIds.length) throw new Error(SourceError.CORRUPTED);
+
+  assertManifestUrlAuthority(manifest, opfPath);
+  assertManifestFallbackGraph(manifest);
+
+  const spine: SpineItemRef[] = [];
+  const seenSpineIds = new Set<string>();
+  for (const itemref of directElementChildrenByLocalName(spineElement, "itemref")) {
+    const idref = itemref.getAttribute("idref");
+    const hasLinear = itemref.hasAttribute("linear");
+    const linearValue = itemref.getAttribute("linear");
+    if (!idref || seenSpineIds.has(idref) || (hasLinear && linearValue !== "yes" && linearValue !== "no")) throw new Error(SourceError.CORRUPTED);
+    seenSpineIds.add(idref);
+    spine.push({ idref, linear: !hasLinear || linearValue === "yes" });
+  }
+  // Every spine IDREF is package authority, not something to discover lazily
+  // only when canonical extraction reaches that item.
+  if (!spine.length || !spine.some((itemref) => itemref.linear)) throw new Error(SourceError.CORRUPTED);
+  if (spine.some((itemref) => !manifest.has(itemref.idref))) throw new Error(SourceError.CORRUPTED);
+
   return {
     path: opfPath,
     version: packageElement.getAttribute("version") || null,
     renditionLayout: readRenditionLayout(packageElement, opf, limits),
     manifest,
-    spineIds,
+    spine,
     spineTocId: spineElement.getAttribute("toc") || null,
     dcTitle: dcElementText(opf, limits, "title"),
     dcLanguage: dcElementText(opf, limits, "language"),
     dcIdentifier: dcElementText(opf, limits, "identifier"),
   };
+}
+
+function assertManifestUrlAuthority(manifest: Map<string, ManifestItem>, packagePath: string): void {
+  const seen = new Set<string>();
+  for (const item of manifest.values()) {
+    if (item.href.includes("#")) throw new Error(SourceError.CORRUPTED);
+
+    let key: string;
+    try {
+      key = `absolute:${new URL(item.href).href}`;
+    } catch {
+      const resolved = resolveArchiveHref(packagePath, item.href);
+      if (resolved.fragmentId || resolved.path === packagePath || resolved.path === "mimetype" || resolved.path.startsWith("META-INF/")) {
+        throw new Error(SourceError.CORRUPTED);
+      }
+      key = `container:${resolved.path}`;
+    }
+
+    if (seen.has(key)) throw new Error(SourceError.CORRUPTED);
+    seen.add(key);
+  }
+}
+
+function assertManifestFallbackGraph(manifest: Map<string, ManifestItem>): void {
+  // EPUB fallback IDREFs are package-global authority: every declared edge
+  // must resolve, and no chain may contain self/circular references, even if
+  // the item is not selected by this parser for the canonical reading stream.
+  for (const start of manifest.values()) {
+    const seen = new Set<string>([start.id]);
+    let current = start;
+    while (current.fallback) {
+      const next = manifest.get(current.fallback);
+      if (!next || seen.has(next.id)) throw new Error(SourceError.CORRUPTED);
+      seen.add(next.id);
+      current = next;
+    }
+  }
+}
+
+function assertSupportedContainerEncryption(byName: Map<string, ZipEntry>, opf: EpubPackage, limits: ParserLimits): void {
+  if (!byName.has("META-INF/encryption.xml")) return;
+
+  const document = parseXmlDocument(safeXmlText(entryXmlText(byName, "META-INF/encryption.xml", limits)), limits);
+  const root = document.documentElement;
+  if (!root || localName(root) !== "encryption" || root.namespaceURI !== OCF_CONTAINER_NAMESPACE) throw new Error(SourceError.CORRUPTED);
+
+  const children = directElementChildren(root);
+  if (!children.length) throw new Error(SourceError.CORRUPTED);
+  const encryptedData = children.filter((child) => localName(child) === "EncryptedData" && child.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+  const encryptedKeys = children.filter((child) => localName(child) === "EncryptedKey" && child.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+  if (children.length !== encryptedData.length + encryptedKeys.length) throw new Error(SourceError.CORRUPTED);
+
+  // This ingestion path never decrypts publication content. True XML
+  // Encryption therefore remains a security/compatibility hard stop.
+  if (encryptedKeys.length) throw new Error(SourceError.ARCHIVE_UNSAFE);
+
+  const seenUris = new Set<string>();
+  for (const encrypted of encryptedData) {
+    const methods = directElementChildrenByLocalName(encrypted, "EncryptionMethod").filter((element) => element.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+    const cipherData = directElementChildrenByLocalName(encrypted, "CipherData").filter((element) => element.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+    if (methods.length !== 1 || cipherData.length !== 1) throw new Error(SourceError.CORRUPTED);
+
+    const algorithm = methods[0]!.getAttribute("Algorithm");
+    if (algorithm !== IDPF_FONT_OBFUSCATION_ALGORITHM) throw new Error(SourceError.ARCHIVE_UNSAFE);
+
+    const references = directElementChildrenByLocalName(cipherData[0]!, "CipherReference").filter((element) => element.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+    if (references.length !== 1) throw new Error(SourceError.CORRUPTED);
+    const uri = references[0]!.getAttribute("URI");
+    if (!uri || seenUris.has(uri)) throw new Error(SourceError.CORRUPTED);
+    seenUris.add(uri);
+
+    // META-INF URLs are parsed against the container root. Font obfuscation is
+    // legal only for a font core-media-type resource that is actually packaged.
+    const resolved = resolveArchiveHref("", uri);
+    if (resolved.fragmentId || !byName.has(resolved.path)) throw new Error(SourceError.CORRUPTED);
+    const manifestItem = [...opf.manifest.values()].find((item) => {
+      try {
+        return resolveArchiveHref(opf.path, item.href).path === resolved.path;
+      } catch {
+        return false;
+      }
+    });
+    if (!manifestItem || !manifestItem.mediaType || !FONT_MEDIA_TYPES.has(manifestItem.mediaType)) throw new Error(SourceError.CORRUPTED);
+  }
+}
+
+function isProcessableSpineContent(item: ManifestItem): boolean {
+  const mediaType = item.mediaType ?? "";
+  // Preserve legacy v2 tolerance for missing media-type: attempt XML content
+  // parsing rather than silently discarding old-but-readable books.
+  return !mediaType || CONTENT_MEDIA_TYPES.has(mediaType) || mediaType === SVG_MEDIA_TYPE;
+}
+
+function resolveSpineContentItem(manifest: Map<string, ManifestItem>, start: ManifestItem): ManifestItem {
+  let current = start;
+  const seen = new Set<string>();
+  while (!isProcessableSpineContent(current)) {
+    if (seen.has(current.id) || !current.fallback) throw new Error(SourceError.CORRUPTED);
+    seen.add(current.id);
+    const next = manifest.get(current.fallback);
+    if (!next) throw new Error(SourceError.CORRUPTED);
+    current = next;
+  }
+  return current;
 }
 
 function readRenditionLayout(packageElement: XmlElement, opf: XmlDocument, limits: ParserLimits): EpubRenditionLayout {
@@ -216,16 +358,18 @@ function readNavigation(opf: EpubPackage, byName: Map<string, ZipEntry>, limits:
     const navItem = [...opf.manifest.values()].find((item) => item.properties.includes("nav"));
     if (navItem) {
       const navPath = resolveNavDocumentPath(navItem, opf, byName);
-      const document = parseXmlResource(entryText(byName, navPath, limits), limits, navPath);
+      const document = parseXmlResource(entryXmlText(byName, navPath, limits), limits, navPath, { kind: "navigation" });
       const entries = flattenEpub3Nav(document, navPath, limits);
+      if (entries.length) assertNavigationTargets(entries, opf, byName, limits);
       return entries.length ? { source: "EPUB3_NAV", entries, degraded: false } : { source: "NONE", entries: [], degraded: true };
     }
     // No EPUB3 nav: EPUB2 NCX via spine toc, then any declared NCX manifest item.
     const ncxItem = (opf.spineTocId ? opf.manifest.get(opf.spineTocId) : undefined) ?? [...opf.manifest.values()].find((item) => item.mediaType === NCX_MEDIA_TYPE);
     if (ncxItem) {
       const ncxPath = resolveNavDocumentPath(ncxItem, opf, byName);
-      const document = parseXmlResource(entryText(byName, ncxPath, limits), limits, ncxPath);
+      const document = parseXmlResource(entryXmlText(byName, ncxPath, limits), limits, ncxPath, { kind: "navigation" });
       const entries = flattenNcx(document, ncxPath, limits);
+      if (entries.length) assertNavigationTargets(entries, opf, byName, limits);
       return entries.length ? { source: "EPUB2_NCX", entries, degraded: false } : { source: "NONE", entries: [], degraded: true };
     }
     // A legal EPUB may ship without any TOC: no warning without evidence.
@@ -235,6 +379,37 @@ function readNavigation(opf: EpubPackage, byName: Map<string, ZipEntry>, limits:
     // other primary-navigation failure degrades to a deterministic warning.
     if (error instanceof Error && (error.message === SourceError.ARCHIVE_UNSAFE || error.message === SourceError.TOO_LARGE)) throw error;
     return { source: "NONE", entries: [], degraded: true };
+  }
+}
+
+function assertNavigationTargets(entries: EpubNavigationEntry[], opf: EpubPackage, byName: Map<string, ZipEntry>, limits: ParserLimits): void {
+  // toc/NCX navigation must resolve into the top-level content plane, i.e. a
+  // spine content document (or its selected EPUB-content fallback), not merely
+  // any arbitrary file that happens to exist in the ZIP.
+  const topLevelPaths = new Set<string>();
+  for (const ref of opf.spine) {
+    const declared = opf.manifest.get(ref.idref);
+    if (!declared) throw new Error(NAV_STRUCTURAL_FAILURE);
+    const content = resolveSpineContentItem(opf.manifest, declared);
+    const target = resolveArchiveHref(opf.path, content.href);
+    if (!byName.has(target.path)) throw new Error(NAV_STRUCTURAL_FAILURE);
+    topLevelPaths.add(target.path);
+  }
+
+  const parsedTargets = new Map<string, XmlDocument>();
+  for (const entry of entries) {
+    if (!topLevelPaths.has(entry.href) || !byName.has(entry.href)) throw new Error(NAV_STRUCTURAL_FAILURE);
+    if (!entry.fragmentId) continue;
+
+    let document = parsedTargets.get(entry.href);
+    if (!document) {
+      document = parseXmlDocument(safeXmlText(entryXmlText(byName, entry.href, limits)), limits);
+      parsedTargets.set(entry.href, document);
+    }
+    const root = document.documentElement;
+    if (!root) throw new Error(NAV_STRUCTURAL_FAILURE);
+    const exists = iterXmlElements(root, limits).some((element) => element.getAttribute("id") === entry.fragmentId);
+    if (!exists) throw new Error(NAV_STRUCTURAL_FAILURE);
   }
 }
 
@@ -308,29 +483,67 @@ function assertNavigationCapacity(entries: EpubNavigationEntry[], limits: Parser
  * fragment is separated here and never participates in archive lookup. Pure
  * string semantics: nothing is fetched, nothing is read from disk.
  */
+// OCF's leak-detection algorithm deliberately resolves each relative URL
+// against two different artificial container roots. A single sentinel is not
+// sufficient: an attacker can escape with ".." and then navigate back into the
+// sentinel's literal path, making a leaked URL look internal again.
+const OCF_TEST_ROOTS = [
+  new URL("https://a.example.org/A/"),
+  new URL("https://b.example.org/B/"),
+] as const;
+
 function resolveArchiveHref(basePath: string, href: string): { path: string; fragmentId: string | null } {
-  if (!href || /[\0]/.test(href) || /%00|%2e|%2f|%5c/i.test(href)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  if (/[\\]/.test(href)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  const hash = href.indexOf("#");
-  const rawPath = hash >= 0 ? href.slice(0, hash) : href;
-  const fragmentId = hash >= 0 && hash + 1 < href.length ? href.slice(hash + 1) : null;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(rawPath)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  if (/^(?:[\\/]|[a-zA-Z]:|\\\\)/.test(rawPath)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  if (!rawPath) return { path: basePath, fragmentId };
-  const parts = basePath.split("/");
-  parts.pop();
-  for (const part of rawPath.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (!parts.length) throw new Error(SourceError.ARCHIVE_UNSAFE);
-      parts.pop();
-      continue;
+  if (!href || href.includes("\0") || href.includes("\\")) throw new Error(SourceError.ARCHIVE_UNSAFE);
+
+  const resolved = OCF_TEST_ROOTS.map((root) => {
+    try {
+      const base = basePath ? new URL(archivePathToUrlPath(basePath), root) : root;
+      const candidate = new URL(href, base);
+      const rootPath = root.pathname;
+      if (candidate.origin !== root.origin || !candidate.pathname.startsWith(rootPath) || candidate.search) throw new Error(SourceError.ARCHIVE_UNSAFE);
+      return { candidate, encodedPath: candidate.pathname.slice(rootPath.length) };
+    } catch {
+      throw new Error(SourceError.ARCHIVE_UNSAFE);
     }
-    parts.push(part);
+  });
+
+  // Both artificial roots must produce the same in-container relative path.
+  // This is the collision guard required by the OCF algorithm.
+  if (resolved[0]!.encodedPath !== resolved[1]!.encodedPath) throw new Error(SourceError.ARCHIVE_UNSAFE);
+  const encodedPath = resolved[0]!.encodedPath;
+  if (!encodedPath) {
+    if (!basePath) throw new Error(SourceError.ARCHIVE_UNSAFE);
+    return { path: basePath, fragmentId: decodeUrlFragment(resolved[0]!.candidate.hash) };
   }
-  const resolved = parts.join("/");
-  if (!resolved || !isSafePath(resolved)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  return { path: resolved, fragmentId };
+
+  const segments = encodedPath.split("/").map((segment) => decodeUrlPathSegment(segment));
+  if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\") || segment.includes("\0"))) {
+    throw new Error(SourceError.ARCHIVE_UNSAFE);
+  }
+  const path = segments.join("/");
+  if (!isSafePath(path)) throw new Error(SourceError.ARCHIVE_UNSAFE);
+  return { path, fragmentId: decodeUrlFragment(resolved[0]!.candidate.hash) };
+}
+
+function archivePathToUrlPath(path: string): string {
+  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
+
+function decodeUrlPathSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new Error(SourceError.ARCHIVE_UNSAFE);
+  }
+}
+
+function decodeUrlFragment(hash: string): string | null {
+  if (!hash || hash === "#") return null;
+  try {
+    return decodeURIComponent(hash.slice(1));
+  } catch {
+    throw new Error(SourceError.ARCHIVE_UNSAFE);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +552,7 @@ function resolveArchiveHref(basePath: string, href: string): { path: string; fra
 
 function emitBlocksFor(element: XmlElement, context: BlockContext, blocks: ParsedBlock[], depth: number): void {
   if (depth > MAX_WALK_DEPTH) throw new Error(SourceError.CORRUPTED);
+  if (isHiddenFromCanonicalText(element)) return;
   const tag = localName(element);
   // EPUB3 semantic footnotes/endnotes: the whole note subtree becomes FOOTNOTE.
   const footnoteTypes = (epubType(element) || "").split(/\s+/).filter(Boolean);
@@ -351,7 +565,7 @@ function emitBlocksFor(element: XmlElement, context: BlockContext, blocks: Parse
   // never extracted twice.
   if (tag === "blockquote") return emitInlineBlock(element, inner, blocks, "QUOTE", { flatten: true });
   if (tag === "figcaption") return emitInlineBlock(element, inner, blocks, "CAPTION", { flatten: true });
-  if (tag === "pre") return emitTextBlock("CODE", normalizeCanonicalText((element.textContent ?? "").replace(/\u00a0/g, " ")), element, inner, blocks);
+  if (tag === "pre") return emitTextBlock("CODE", normalizeCanonicalText(visibleTextContent(element).replace(/\u00a0/g, " ")), element, inner, blocks);
   if (tag === "table") return emitTableBlock(element, inner, blocks);
   if (tag === "math") return emitEquation(element, inner, blocks);
   if (tag === "svg") return emitSvgEvidence(element, inner, blocks);
@@ -380,7 +594,7 @@ function walkInline(element: XmlElement, walk: { buffer: string }, context: Bloc
     if (child.nodeType !== 1) continue;
     const elementChild = child as XmlElement;
     const tag = localName(elementChild);
-    if (SKIPPED_TAGS.has(tag)) continue;
+    if (SKIPPED_TAGS.has(tag) || isHiddenFromCanonicalText(elementChild)) continue;
     if (options.flatten) {
       // Flattened mode: nested block markup contributes text to the owning
       // block, only real evidence objects (img/math/svg) split out.
@@ -436,7 +650,7 @@ function emitTableBlock(table: XmlElement, context: BlockContext, blocks: Parsed
       // v1 keeps readable text and flags the loss of merged-cell geometry
       // instead of reconstructing a 2D grid.
       if (cell.getAttribute("rowspan") || cell.getAttribute("colspan")) flattened = true;
-      cells.push(collapsedText(cell));
+      cells.push(visibleCollapsedText(cell));
     }
     const rowText = cells.join("\t");
     if (rowText) rows.push(rowText);
@@ -451,16 +665,18 @@ function emitEquation(math: XmlElement, context: BlockContext, blocks: ParsedBlo
   // Evidence priority: TeX annotation > accessible alttext > normalized
   // MathML text content. No LLM guessing, no raw markup dumps.
   const annotations = [...elementsByLocalName(math, "annotation", context.limits), ...elementsByLocalName(math, "annotation-xml", context.limits)];
-  const tex = annotations.find((annotation) => (annotation.getAttribute("encoding") || "").trim() === "application/x-tex");
+  const tex = annotations.find((annotation) => !isHiddenFromCanonicalText(annotation) && (annotation.getAttribute("encoding") || "").trim() === "application/x-tex");
   const alttext = (math.getAttribute("alttext") || "").trim();
-  const text = (tex && collapsedText(tex)) || (alttext && alttext.replace(/\s+/g, " ")) || collapsedText(math);
+  const text = (tex && visibleCollapsedText(tex)) || (alttext && alttext.replace(/\s+/g, " ")) || visibleCollapsedText(math);
   if (!text) return;
   emitOwnedBlocks(context.footnote ? "FOOTNOTE" : "EQUATION", text, math, context, blocks, null);
 }
 
 function emitSvgEvidence(svg: XmlElement, context: BlockContext, blocks: ParsedBlock[]): void {
   // SVG is never rendered or executed: only deterministic accessibility text.
-  const text = collapsedText(elementsByLocalName(svg, "title", context.limits)[0]) || collapsedText(elementsByLocalName(svg, "desc", context.limits)[0]);
+  const title = elementsByLocalName(svg, "title", context.limits).find((element) => !isHiddenFromCanonicalText(element));
+  const desc = elementsByLocalName(svg, "desc", context.limits).find((element) => !isHiddenFromCanonicalText(element));
+  const text = visibleCollapsedText(title) || visibleCollapsedText(desc);
   if (!text) return;
   emitOwnedBlocks(context.footnote ? "FOOTNOTE" : "IMAGE", text, svg, context, blocks, null);
 }
@@ -483,9 +699,9 @@ function emitImageEvidence(img: XmlElement, context: BlockContext, blocks: Parse
  * or whitespace-padded external URLs never survive parsing unnoticed. The raw
  * prefilter stays in front as defense in depth; the DOM gate is authoritative.
  */
-function parseXmlResource(xml: string, limits: ParserLimits, basePath: string): XmlDocument {
+function parseXmlResource(xml: string, limits: ParserLimits, basePath: string, policy: XmlReferencePolicy): XmlDocument {
   const document = parseXmlDocument(safeXmlText(xml), limits);
-  assertDomResourceReferences(document, basePath, limits);
+  assertDomResourceReferences(document, basePath, limits, policy);
   return document;
 }
 
@@ -507,13 +723,12 @@ function parseXmlDocument(xml: string, limits: ParserLimits): XmlDocument {
 }
 
 /**
- * Post-DOM gate: validates every resource-reference attribute using the
- * parser-decoded value. Raw-regex prefiltering is not authoritative — decoded
- * values defeat entity obfuscation and padded schemes. Allowed: #fragment and
- * archive-relative paths (including legal ../) that stay inside the archive
- * root. Everything else fails closed. No resource is ever fetched.
+ * Post-DOM gate: validates decoded resource-reference attributes. Internal
+ * references use OCF URL semantics and must stay under the container root.
+ * Safe outbound hyperlinks and explicitly-declared remote media are accepted
+ * as inert references; no resource is ever fetched.
  */
-function assertDomResourceReferences(document: XmlDocument, basePath: string, limits: ParserLimits): void {
+function assertDomResourceReferences(document: XmlDocument, basePath: string, limits: ParserLimits, policy: XmlReferencePolicy): void {
   const root = document.documentElement;
   if (!root) throw new Error(SourceError.CORRUPTED);
   for (const element of iterXmlElements(root, limits)) {
@@ -526,9 +741,43 @@ function assertDomResourceReferences(document: XmlDocument, basePath: string, li
       if (name !== "src" && name !== "href" && name !== "full-path") continue;
       const value = (attribute.value ?? "").trim();
       if (!value || value.startsWith("#")) continue;
+      if (isAllowedExternalReference(element, name, value, policy)) continue;
       resolveArchiveHref(basePath, value);
     }
   }
+}
+
+function isAllowedExternalReference(element: XmlElement, attributeName: string, value: string, policy: XmlReferencePolicy): boolean {
+  let external: URL;
+  try {
+    external = new URL(value);
+  } catch {
+    return false;
+  }
+
+  const tag = localName(element);
+  const protocol = external.protocol.toLowerCase();
+  const isWeb = protocol === "http:" || protocol === "https:";
+
+  // Outbound hyperlinks are not publication resources and are never fetched
+  // by ingestion. Drop the URL after validation and retain only visible text.
+  if ((policy.kind === "content" || policy.kind === "navigation") &&
+      attributeName === "href" && (tag === "a" || tag === "area") &&
+      (isWeb || protocol === "mailto:" || protocol === "tel:")) return true;
+
+  // Package-manifest/metadata remote resources are descriptive here. The
+  // parser never dereferences them; any remote item selected by spine/nav
+  // authority is rejected later by the internal resolver.
+  if (policy.kind === "package" && attributeName === "href" &&
+      (tag === "item" || tag === "link") && isWeb) return true;
+
+  // EPUB remote publication resources must be explicitly advertised by the
+  // host content document. Keep this narrow to the standard remote-media/script
+  // embedding surfaces we can classify without executing or fetching content.
+  if (policy.kind === "content" && policy.allowRemoteResources && attributeName === "src" && isWeb &&
+      (tag === "audio" || tag === "video" || tag === "source" || tag === "track" || tag === "script")) return true;
+
+  return false;
 }
 
 /**
@@ -755,7 +1004,7 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
     if (!hasZipRange(data, start, compressedSize) || dataEnd > directoryOffset) throw new Error(SourceError.CORRUPTED);
     const localEnd = (flags & 0x08) !== 0 ? readZipDataDescriptorEnd(data, dataEnd, directoryOffset, crc32, compressedSize, uncompressedSize) : dataEnd;
     localRanges.push({ start: localOffset, end: localEnd });
-    if (!isDirectory) entries.push({ name, method, flags, compressed: data.subarray(start, dataEnd), compressedSize, uncompressedSize, localOffset, localExtraLength });
+    if (!isDirectory) entries.push({ name, method, flags, crc32, compressed: data.subarray(start, dataEnd), compressedSize, uncompressedSize, localOffset, localExtraLength });
     offset += centralLength;
   }
 
@@ -817,7 +1066,7 @@ function decodeZipName(bytes: Uint8Array): string {
   }
 }
 
-function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): string {
+function entryBytes(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): Buffer {
   const entry = entries.get(name);
   if (!entry) throw new Error(SourceError.CORRUPTED);
   let data: Buffer;
@@ -825,7 +1074,55 @@ function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserL
     data = entry.method === 0 ? entry.compressed : entry.method === 8 ? inflateRawSync(entry.compressed, { maxOutputLength: limits.maxArchiveEntryBytes }) : (() => { throw new Error("unsupported"); })();
   } catch { throw new Error(SourceError.ARCHIVE_UNSAFE); }
   if (data.length !== entry.uncompressedSize) throw new Error(SourceError.CORRUPTED);
-  try { return new TextDecoder("utf-8", { fatal: true }).decode(data); } catch { throw new Error(SourceError.CORRUPTED); }
+  if ((crc32(data) >>> 0) !== entry.crc32) throw new Error(SourceError.CORRUPTED);
+  return data;
+}
+
+function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(entryBytes(entries, name, limits));
+  } catch {
+    throw new Error(SourceError.CORRUPTED);
+  }
+}
+
+type XmlByteEncoding = "utf-8" | "utf-16le" | "utf-16be";
+
+function entryXmlText(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): string {
+  const data = entryBytes(entries, name, limits);
+  try {
+    if (data.length >= 4 &&
+        ((data[0] === 0x00 && data[1] === 0x00 && data[2] === 0xfe && data[3] === 0xff) ||
+         (data[0] === 0xff && data[1] === 0xfe && data[2] === 0x00 && data[3] === 0x00) ||
+         (data[0] === 0x00 && data[1] === 0x00 && data[2] === 0x00 && data[3] === 0x3c) ||
+         (data[0] === 0x3c && data[1] === 0x00 && data[2] === 0x00 && data[3] === 0x00))) {
+      throw new Error(SourceError.CORRUPTED);
+    }
+
+    let encoding: XmlByteEncoding = "utf-8";
+    if (data.length >= 2 && data[0] === 0xff && data[1] === 0xfe) encoding = "utf-16le";
+    else if (data.length >= 2 && data[0] === 0xfe && data[1] === 0xff) encoding = "utf-16be";
+    else if (data.length >= 4 && data[0] === 0x3c && data[1] === 0x00 && data[2] === 0x3f && data[3] === 0x00) encoding = "utf-16le";
+    else if (data.length >= 4 && data[0] === 0x00 && data[1] === 0x3c && data[2] === 0x00 && data[3] === 0x3f) encoding = "utf-16be";
+
+    const text = new TextDecoder(encoding, { fatal: true }).decode(data);
+    assertXmlDeclarationEncoding(text, encoding);
+    return text;
+  } catch (error) {
+    if (error instanceof Error && error.message === SourceError.CORRUPTED) throw error;
+    throw new Error(SourceError.CORRUPTED);
+  }
+}
+
+function assertXmlDeclarationEncoding(xml: string, actual: XmlByteEncoding): void {
+  const declaration = /^<\?xml\s+[^?]*\bencoding\s*=\s*(["'])([^"']+)\1/i.exec(xml);
+  if (!declaration) return;
+  const declared = declaration[2]!.trim().toLowerCase().replace(/_/g, "-");
+  const matches =
+    (actual === "utf-8" && declared === "utf-8") ||
+    (actual === "utf-16le" && (declared === "utf-16" || declared === "utf-16le")) ||
+    (actual === "utf-16be" && (declared === "utf-16" || declared === "utf-16be"));
+  if (!matches) throw new Error(SourceError.CORRUPTED);
 }
 
 /** ZIP entry names stay strict: no traversal segments of any kind. */
@@ -866,6 +1163,30 @@ function epubType(element: XmlElement): string | null {
     if (attribute.localName === "type" && attribute.namespaceURI === EPUB_OPS_NAMESPACE) return attribute.value || null;
   }
   return element.getAttribute("epub:type") || null;
+}
+
+function isHiddenFromCanonicalText(element: XmlElement): boolean {
+  if (element.hasAttribute("hidden") || element.hasAttribute("inert")) return true;
+  return (element.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true";
+}
+
+function visibleTextContent(element: XmlElement): string {
+  let result = "";
+  for (const child of Array.from(element.childNodes)) {
+    if (child.nodeType === 3 || child.nodeType === 4) {
+      result += child.nodeValue ?? "";
+      continue;
+    }
+    if (child.nodeType !== 1) continue;
+    const childElement = child as XmlElement;
+    if (SKIPPED_TAGS.has(localName(childElement)) || isHiddenFromCanonicalText(childElement)) continue;
+    result += visibleTextContent(childElement);
+  }
+  return result;
+}
+
+function visibleCollapsedText(element: XmlElement | null | undefined): string {
+  return element ? visibleTextContent(element).replace(/\s+/g, " ").trim() : "";
 }
 
 function collapsedText(element: XmlElement | null | undefined): string {

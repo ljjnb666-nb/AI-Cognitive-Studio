@@ -1,4 +1,4 @@
-import { deflateRawSync } from "node:zlib";
+import { crc32, deflateRawSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { parseEpubExtractionMetadata } from "@ai-cognitive/domain";
 import { parseDocument, type Parsed, type ParsedBlock } from "../src/document-parsers.js";
@@ -8,14 +8,14 @@ import { SourceError } from "../src/source-errors.js";
 // Deterministic, repo-local EPUB fixtures (synthetic but structurally real).
 // ---------------------------------------------------------------------------
 
-type Entry = { name: string; text: string };
+type Entry = { name: string; text?: string; bytes?: Buffer };
 
 function zip(entries: Entry[]): Uint8Array {
   const locals: Buffer[] = [], central: Buffer[] = []; let offset = 0;
   for (const entry of entries) {
-    const name = Buffer.from(entry.name), raw = Buffer.from(entry.text), stored = entry.name === "mimetype", body = stored ? raw : deflateRawSync(raw), method = stored ? 0 : 8;
-    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(raw.length, 22); local.writeUInt16LE(name.length, 26); locals.push(local, name, body);
-    const record = Buffer.alloc(46); record.writeUInt32LE(0x02014b50, 0); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(method, 10); record.writeUInt32LE(body.length, 20); record.writeUInt32LE(raw.length, 24); record.writeUInt16LE(name.length, 28); record.writeUInt32LE(offset, 42); central.push(record, name); offset += local.length + name.length + body.length;
+    const name = Buffer.from(entry.name), raw = entry.bytes ?? Buffer.from(entry.text ?? ""), stored = entry.name === "mimetype", body = stored ? raw : deflateRawSync(raw), method = stored ? 0 : 8, checksum = crc32(raw) >>> 0;
+    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8); local.writeUInt32LE(checksum, 14); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(raw.length, 22); local.writeUInt16LE(name.length, 26); locals.push(local, name, body);
+    const record = Buffer.alloc(46); record.writeUInt32LE(0x02014b50, 0); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(method, 10); record.writeUInt32LE(checksum, 16); record.writeUInt32LE(body.length, 20); record.writeUInt32LE(raw.length, 24); record.writeUInt16LE(name.length, 28); record.writeUInt32LE(offset, 42); central.push(record, name); offset += local.length + name.length + body.length;
   }
   const directory = Buffer.concat(central), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16); return Buffer.concat([...locals, directory, end]);
 }
@@ -59,7 +59,7 @@ describe("epub-parser-v2 navigation", () => {
   it("detects a valid EPUB3 nav and flattens nested order and depth deterministically", async () => {
     const parsed = await parseDocument(book({ opf: epub3Opf(), files: [
       { name: "OEBPS/nav.xhtml", text: navDocument('<li><a href="text/ch1.xhtml">Part One</a><ol><li><a href="text/ch1.xhtml#s1">Section 1</a></li><li><a href="text/ch1.xhtml#s2">Section 2</a></li></ol></li><li><a href="text/ch1.xhtml#s3">Part Two</a></li>') },
-      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<h1>Alpha</h1><p id="s1">First paragraph.</p><p id="s2">Second paragraph.</p><p id="s3">Third paragraph.</p>') },
     ] }), "application/epub+zip");
     const metadata = parseEpubExtractionMetadata(parsed.formatMetadata);
     expect(metadata.navigationSource).toBe("EPUB3_NAV");
@@ -79,7 +79,7 @@ describe("epub-parser-v2 navigation", () => {
     const opf = opfDocument({ version: "2.0", manifest: '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>', spine: '<itemref idref="c1"/>' }).replace("<spine>", '<spine toc="ncx">');
     const parsed = await parseDocument(book({ opf, files: [
       { name: "OEBPS/toc.ncx", text: ncx },
-      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<h1>Alpha</h1><p id="s1">First paragraph.</p>') },
     ] }), "application/epub+zip");
     const metadata = parseEpubExtractionMetadata(parsed.formatMetadata);
     expect(metadata.navigationSource).toBe("EPUB2_NCX");
@@ -96,12 +96,14 @@ describe("epub-parser-v2 navigation", () => {
       { name: "OEBPS/toc.ncx", text: '<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint id="n1"><navLabel><text>NCX Entry</text></navLabel><content src="text/ch1.xhtml"/></navPoint></navMap></ncx>' },
       { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
     ];
-    const parsed = await parseDocument(book({ opf: epub3Opf(' extra', ' <itemref idref="ncx"/>').replace('<item id="c1"', '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="c1"'), files }), "application/epub+zip");
+    const parsed = await parseDocument(book({
+      opf: epub3Opf('<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'),
+      files,
+    }), "application/epub+zip");
     const metadata = parseEpubExtractionMetadata(parsed.formatMetadata);
     expect(metadata.navigationSource).toBe("EPUB3_NAV");
     expect(metadata.navigation.map((entry) => entry.label)).toEqual(["Nav Entry"]);
   });
-
   it("still parses the body when no navigation exists, without a fabricated warning", async () => {
     const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>', spine: '<itemref idref="c1"/>' });
     const parsed = await parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }] }), "application/epub+zip");
@@ -120,6 +122,27 @@ describe("epub-parser-v2 navigation", () => {
     expect(parseEpubExtractionMetadata(parsed.formatMetadata).navigationSource).toBe("NONE");
     expect(parsed.qualityWarnings).toEqual(["EPUB_NAVIGATION_DEGRADED"]);
     expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
+  });
+
+  it("degrades navigation whose top-level target or fragment does not exist", async () => {
+    const missingFragment = await parseDocument(book({ opf: epub3Opf(), files: [
+      { name: "OEBPS/nav.xhtml", text: navDocument('<li><a href="text/ch1.xhtml#missing">Missing fragment</a></li>') },
+      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+    ] }), "application/epub+zip");
+    expect(parseEpubExtractionMetadata(missingFragment.formatMetadata).navigationSource).toBe("NONE");
+    expect(missingFragment.qualityWarnings).toContain("EPUB_NAVIGATION_DEGRADED");
+    expect(blocksOf(missingFragment).map((block) => block.text)).toContain("Alpha");
+
+    const nonSpineTarget = await parseDocument(book({
+      opf: epub3Opf('<item id="appendix" href="text/appendix.xhtml" media-type="application/xhtml+xml"/>'),
+      files: [
+        { name: "OEBPS/nav.xhtml", text: navDocument('<li><a href="text/appendix.xhtml">Not top level</a></li>') },
+        { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+        { name: "OEBPS/text/appendix.xhtml", text: contentDocument("<p>Appendix</p>") },
+      ],
+    }), "application/epub+zip");
+    expect(parseEpubExtractionMetadata(nonSpineTarget.formatMetadata).navigationSource).toBe("NONE");
+    expect(nonSpineTarget.qualityWarnings).toContain("EPUB_NAVIGATION_DEGRADED");
   });
 
   it("fails closed on unsafe nav targets: external URL and archive-root escape", async () => {
@@ -152,6 +175,64 @@ describe("epub-parser-v2 navigation", () => {
     expect(two?.locator).toMatchObject({ spineIndex: 1, elementPath: "/html[1]/body[1]/p[2]", fragmentId: null });
   });
 
+  it("uses URL-standard percent and fragment semantics for internal references", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/ch%201.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/ch 1.xhtml", text: contentDocument('<p id="sec 1">Encoded path</p>') },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed)[0]?.text).toBe("Encoded path");
+    expect(epubLocatorOf(blocksOf(parsed)[0]!)?.href).toBe("OEBPS/text/ch 1.xhtml");
+
+    const navOpf = opfDocument({
+      manifest: '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="c1" href="text/ch%201.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const withNav = await parseDocument(book({ opf: navOpf, files: [
+      { name: "OEBPS/nav.xhtml", text: navDocument('<li><a href="text/ch%201.xhtml#sec%201">Encoded</a></li>') },
+      { name: "OEBPS/text/ch 1.xhtml", text: contentDocument('<p id="sec 1">Encoded path</p>') },
+    ] }), "application/epub+zip");
+    expect(parseEpubExtractionMetadata(withNav.formatMetadata).navigation[0]).toMatchObject({
+      href: "OEBPS/text/ch 1.xhtml",
+      fragmentId: "sec 1",
+    });
+  });
+
+  it("rejects OCF test-root collision escapes that a single sentinel would accept", async () => {
+    const collision = opfDocument({
+      manifest: '<item id="c1" href="../../A/evil.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: collision, files: [
+      { name: "A/evil.xhtml", text: contentDocument("<p>escaped</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+
+  it("normalizes legal percent-encoded dot segments but rejects root escape and encoded slash aliases", async () => {
+    const legal = opfDocument({
+      manifest: '<item id="c1" href="sub/%2e%2e/text/ch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const parsed = await parseDocument(book({ opf: legal, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument("<p>Legal dot</p>") },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed)[0]?.text).toBe("Legal dot");
+
+    const escape = opfDocument({
+      manifest: '<item id="c1" href="%2e%2e/%2e%2e/%2e%2e/escape.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: escape, files: basicFiles }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+
+    const encodedSlash = opfDocument({
+      manifest: '<item id="c1" href="text%2Fch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: encodedSlash, files: basicFiles }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+
   it("keeps spine order authoritative regardless of manifest order", async () => {
     const opf = opfDocument({ manifest: '<item id="b" href="text/b.xhtml" media-type="application/xhtml+xml"/><item id="a" href="text/a.xhtml" media-type="application/xhtml+xml"/>', spine: '<itemref idref="a"/><itemref idref="b"/>' });
     const parsed = await parseDocument(book({ opf, files: [
@@ -180,6 +261,245 @@ describe("epub-parser-v2 navigation", () => {
     const second = await parseDocument(bytes, "application/epub+zip");
     expect(second).toEqual(first);
     expect(first.qualityWarnings).toEqual(["TABLE_FLATTENED"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// XML encoding correctness (BOOK-INGESTION-04C-2)
+// ---------------------------------------------------------------------------
+
+function utf16leXml(xml: string, bom = true): Buffer {
+  const body = Buffer.from(xml, "utf16le");
+  return bom ? Buffer.concat([Buffer.from([0xff, 0xfe]), body]) : body;
+}
+
+function utf16beXml(xml: string, bom = true): Buffer {
+  const le = Buffer.from(xml, "utf16le");
+  const be = Buffer.alloc(le.length);
+  for (let index = 0; index < le.length; index += 2) {
+    be[index] = le[index + 1]!;
+    be[index + 1] = le[index]!;
+  }
+  return bom ? Buffer.concat([Buffer.from([0xfe, 0xff]), be]) : be;
+}
+
+describe("epub-parser-v2 XML encodings", () => {
+  it("parses UTF-16LE and UTF-16BE content documents with BOMs", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="le" href="text/le.xhtml" media-type="application/xhtml+xml"/><item id="be" href="text/be.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="le"/><itemref idref="be"/>',
+    });
+    const le = '<?xml version="1.0" encoding="UTF-16"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>LE 世界</p></body></html>';
+    const be = '<?xml version="1.0" encoding="UTF-16"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>BE 世界</p></body></html>';
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/le.xhtml", bytes: utf16leXml(le) },
+      { name: "OEBPS/text/be.xhtml", bytes: utf16beXml(be) },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["LE 世界", "BE 世界"]);
+  });
+
+  it("autodetects BOM-less UTF-16 XML signatures and rejects malformed UTF-16", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="le" href="text/le.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="le"/>',
+    });
+    const xml = '<?xml version="1.0" encoding="UTF-16"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>No BOM</p></body></html>';
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/le.xhtml", bytes: utf16leXml(xml, false) },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["No BOM"]);
+
+    const malformed = Buffer.from([0xff, 0xfe, 0x3c]);
+    await expect(parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/le.xhtml", bytes: malformed },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+
+  it("rejects XML declarations that contradict the actual byte encoding", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/c1.xhtml", text: '<?xml version="1.0" encoding="UTF-16"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>wrong</p></body></html>' },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    await expect(parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/c1.xhtml", bytes: utf16leXml('<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>wrong</p></body></html>') },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OCF encryption / font-obfuscation authority (BOOK-INGESTION-04C-2)
+// ---------------------------------------------------------------------------
+
+describe("epub-parser-v2 OCF encryption authority", () => {
+  const encryptionXml = (algorithm: string, uri: string) =>
+    `<?xml version="1.0"?><encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:enc="http://www.w3.org/2001/04/xmlenc#"><enc:EncryptedData><enc:EncryptionMethod Algorithm="${algorithm}"/><enc:CipherData><enc:CipherReference URI="${uri}"/></enc:CipherData></enc:EncryptedData></encryption>`;
+
+  it("accepts standard IDPF font obfuscation metadata without reading the font bytes", async () => {
+    const opf = epub3Opf('<item id="font" href="fonts/book.woff2" media-type="font/woff2"/>');
+    const parsed = await parseDocument(book({ opf, files: [
+      ...basicFiles,
+      { name: "OEBPS/fonts/book.woff2", text: "obfuscated-font-bytes" },
+      { name: "META-INF/encryption.xml", text: encryptionXml("http://www.idpf.org/2008/embedding", "OEBPS/fonts/book.woff2") },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
+  });
+
+  it("rejects true XML Encryption algorithms because ingestion cannot decrypt publication content", async () => {
+    const xml = encryptionXml("http://www.w3.org/2001/04/xmlenc#aes256-cbc", "OEBPS/text/ch1.xhtml");
+    await expect(parseDocument(book({ opf: epub3Opf(), files: [
+      ...basicFiles,
+      { name: "META-INF/encryption.xml", text: xml },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+
+  it("rejects malformed or non-font uses of the IDPF obfuscation algorithm", async () => {
+    await expect(parseDocument(book({ opf: epub3Opf(), files: [
+      ...basicFiles,
+      { name: "META-INF/encryption.xml", text: '<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"/>' },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    await expect(parseDocument(book({ opf: epub3Opf(), files: [
+      ...basicFiles,
+      { name: "META-INF/encryption.xml", text: encryptionXml("http://www.idpf.org/2008/embedding", "OEBPS/text/ch1.xhtml") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Package / spine reading-order authority (BOOK-INGESTION-04C-2)
+// ---------------------------------------------------------------------------
+
+describe("epub-parser-v2 package and spine authority", () => {
+  it("keeps linear=no auxiliary content out of the canonical primary stream", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/><item id="aux" href="text/answers.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/c2.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/><itemref idref="aux" linear="no"/><itemref idref="c2"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Primary one</p>") },
+      { name: "OEBPS/text/answers.xhtml", text: contentDocument("<p>Auxiliary answer</p>") },
+      { name: "OEBPS/text/c2.xhtml", text: contentDocument("<p>Primary two</p>") },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Primary one", "Primary two"]);
+    expect(blocksOf(parsed).map((block) => epubLocatorOf(block)?.spineIndex)).toEqual([0, 2]);
+    expect(parseEpubExtractionMetadata(parsed.formatMetadata).spineItemCount).toBe(3);
+  });
+
+  it("rejects a spine with no primary item and invalid linear values", async () => {
+    const manifest = '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/>';
+    const files = [{ name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Aux</p>") }];
+    await expect(parseDocument(book({ opf: opfDocument({ manifest, spine: '<itemref idref="c1" linear="no"/>' }), files }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+    await expect(parseDocument(book({ opf: opfDocument({ manifest, spine: '<itemref idref="c1" linear="maybe"/>' }), files }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+    await expect(parseDocument(book({ opf: opfDocument({ manifest, spine: '<itemref idref="c1" linear=""/>' }), files }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+
+  it("rejects duplicate manifest ids and duplicate spine itemrefs deterministically", async () => {
+    const duplicateManifest = opfDocument({
+      manifest: '<item id="dup" href="text/a.xhtml" media-type="application/xhtml+xml"/><item id="dup" href="text/b.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="dup"/>',
+    });
+    await expect(parseDocument(book({ opf: duplicateManifest, files: [
+      { name: "OEBPS/text/a.xhtml", text: contentDocument("<p>A</p>") },
+      { name: "OEBPS/text/b.xhtml", text: contentDocument("<p>B</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const duplicateSpine = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/><itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: duplicateSpine, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>One</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+
+  it("enforces parsed manifest URL identity and forbids fragments and package self-reference", async () => {
+    const duplicate = opfDocument({
+      manifest: '<item id="a" href="text/ch%201.xhtml" media-type="application/xhtml+xml"/><item id="b" href="text/ch 1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="a"/>',
+    });
+    await expect(parseDocument(book({ opf: duplicate, files: [
+      { name: "OEBPS/text/ch 1.xhtml", text: contentDocument("<p>One</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const fragment = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml#section" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: fragment, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument("<p>One</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const self = opfDocument({
+      manifest: '<item id="self" href="content.opf" media-type="application/oebps-package+xml"/><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: self, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument("<p>One</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+
+  it("validates every declared manifest fallback edge even when the item is not in the spine", async () => {
+    const missing = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/><item id="unused" href="data/unused.bin" media-type="application/x-example" fallback="missing"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: missing, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Primary</p>") },
+      { name: "OEBPS/data/unused.bin", text: "unused" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const cycle = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/><item id="a" href="data/a.bin" media-type="application/x-a" fallback="b"/><item id="b" href="data/b.bin" media-type="application/x-b" fallback="a"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: cycle, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Primary</p>") },
+      { name: "OEBPS/data/a.bin", text: "a" },
+      { name: "OEBPS/data/b.bin", text: "b" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const self = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/><item id="unused" href="data/unused.bin" media-type="application/x-example" fallback="unused"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: self, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Primary</p>") },
+      { name: "OEBPS/data/unused.bin", text: "unused" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+
+  it("uses the manifest fallback chain for a foreign top-level spine resource", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="foreign" href="data/ch1.bin" media-type="application/x-example" fallback="fallback"/><item id="fallback" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="foreign"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/data/ch1.bin", text: "foreign bytes are never parsed" },
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument("<p>Fallback body</p>") },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Fallback body"]);
+    expect(epubLocatorOf(blocksOf(parsed)[0]!)?.href).toBe("OEBPS/text/ch1.xhtml");
+  });
+
+  it("rejects missing and cyclic manifest fallback chains", async () => {
+    const missing = opfDocument({
+      manifest: '<item id="foreign" href="data/ch1.bin" media-type="application/x-example"/>',
+      spine: '<itemref idref="foreign"/>',
+    });
+    await expect(parseDocument(book({ opf: missing, files: [{ name: "OEBPS/data/ch1.bin", text: "x" }] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const cycle = opfDocument({
+      manifest: '<item id="a" href="data/a.bin" media-type="application/x-a" fallback="b"/><item id="b" href="data/b.bin" media-type="application/x-b" fallback="a"/>',
+      spine: '<itemref idref="a"/>',
+    });
+    await expect(parseDocument(book({ opf: cycle, files: [
+      { name: "OEBPS/data/a.bin", text: "a" },
+      { name: "OEBPS/data/b.bin", text: "b" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
 });
 
@@ -218,6 +538,28 @@ describe("epub-parser-v2 DOM locators", () => {
 
 describe("epub-parser-v2 semantic blocks", () => {
   const parse = async (body: string) => parseDocument(book({ opf: epub3Opf(), files: [...basicFiles.slice(0, 1), { name: "OEBPS/text/ch1.xhtml", text: contentDocument(body) }] }), "application/epub+zip");
+
+  it("excludes hidden and aria-hidden subtrees from canonical text", async () => {
+    const parsed = await parse(
+      '<p>Visible <span hidden="hidden">secret</span> text <span aria-hidden="true">silent</span><span inert="inert">inert</span>.</p>' +
+      '<section hidden="hidden"><p>Hidden section</p></section>' +
+      '<section inert="inert"><p>Inert section</p></section>' +
+      '<p aria-hidden="true">ARIA hidden paragraph</p>' +
+      '<p aria-hidden="false">Kept paragraph</p>',
+    );
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Visible text .", "Kept paragraph"]);
+  });
+
+  it("keeps hidden descendants out of PRE and TABLE evidence", async () => {
+    const parsed = await parse(
+      '<pre>line 1<span hidden="hidden">SECRET</span>\nline 2</pre>' +
+      '<table><tr><td>A<span aria-hidden="true">X</span></td><td>B</td></tr></table>',
+    );
+    expect(blocksOf(parsed).map((block) => [block.kind, block.text])).toEqual([
+      ["CODE", "line 1\nline 2"],
+      ["TABLE", "A\tB"],
+    ]);
+  });
 
   it("extracts nested lists without duplicating text", async () => {
     const parsed = await parse("<ul><li><p>Outer item</p><ol><li>Inner item</li></ol></li></ul>");
@@ -304,8 +646,11 @@ describe("epub-parser-v2 semantic blocks", () => {
     expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Visible"]);
   });
 
-  it("emits PARTIAL_EXTRACTION when a text spine document yields nothing", async () => {
-    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/empty.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/cover.png" media-type="image/png"/>', spine: '<itemref idref="c1"/><itemref idref="c2"/><itemref idref="img"/>' });
+  it("emits PARTIAL_EXTRACTION when a primary text spine document yields nothing", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/empty.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/cover.png" media-type="image/png" fallback="c1"/>',
+      spine: '<itemref idref="c1"/><itemref idref="c2"/><itemref idref="img" linear="no"/>',
+    });
     const parsed = await parseDocument(book({ opf, files: [
       { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
       { name: "OEBPS/text/empty.xhtml", text: contentDocument("<div></div>") },
@@ -332,10 +677,13 @@ describe("epub-parser-v2 fixed layout", () => {
     for (const block of blocksOf(parsed)) expect(block.locator?.kind).toBe("epub");
   });
 
-  it("fails explicitly when a fixed-layout book has no usable textual evidence", async () => {
-    await expect(parseDocument(book({ opf: fixedOpf('<item id="img" href="media/page1.png" media-type="image/png"/>', '<itemref idref="img"/>'), files: [{ name: "OEBPS/media/page1.png", text: "PNG" }] }), "application/epub+zip")).rejects.toThrow(SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED);
+  it("fails explicitly when a fixed-layout EPUB content document has no usable textual evidence", async () => {
+    const svg = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>';
+    await expect(parseDocument(book({
+      opf: fixedOpf('<item id="page" href="pages/page1.svg" media-type="image/svg+xml"/>', '<itemref idref="page"/>'),
+      files: [{ name: "OEBPS/pages/page1.svg", text: svg }],
+    }), "application/epub+zip")).rejects.toThrow(SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED);
   });
-
   it("marks reflowable renditions without a rendition signal as UNKNOWN", async () => {
     const parsed = await parseDocument(book({ opf: epub3Opf(), files: basicFiles }), "application/epub+zip");
     expect(parseEpubExtractionMetadata(parsed.formatMetadata).renditionLayout).toBe("UNKNOWN");
@@ -396,14 +744,20 @@ describe("epub-parser-v2 invariants and limits", () => {
     expect(parseEpubExtractionMetadata(parsed.formatMetadata).navigationSource).toBe("NONE");
   });
 
-  it("never inflates non-required archive resources and flags the unsupported spine item", async () => {
-    // Pseudo-random bytes: poor compression (passes the archive ratio limit)
-    // and invalid UTF-8, so if the parser ever read this entry it would fail.
+  it("never inflates manifest-only non-required archive resources", async () => {
+    // Pseudo-random bytes: poor compression and invalid UTF-8. If the parser
+    // inflates/decodes this unreferenced resource, the parse would fail.
     const bomb = String.fromCharCode(...Array.from({ length: 8192 }, (_, index) => ((index * 31 + 17) % 251) + 1));
-    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="big" href="media/big.bin" media-type="application/octet-stream"/>', spine: '<itemref idref="c1"/><itemref idref="big"/>' });
-    const parsed = await parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }, { name: "OEBPS/media/big.bin", text: bomb }] }), "application/epub+zip");
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="big" href="media/big.bin" media-type="application/octet-stream"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+      { name: "OEBPS/media/big.bin", text: bomb },
+    ] }), "application/epub+zip");
     expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
-    expect(parsed.qualityWarnings).toContain("PARTIAL_EXTRACTION");
+    expect(parsed.qualityWarnings).toEqual([]);
   });
 });
 
@@ -453,10 +807,11 @@ describe("RF01 post-DOM resource gate", () => {
     return parseDocument(book({ opf: epub3Opf(), files: [...basicFiles.slice(0, 1), { name: "OEBPS/text/ch1.xhtml", text: doc }] }), "application/epub+zip");
   };
 
-  it("rejects direct and whitespace-padded external references", async () => {
+  it("allows inert outbound links while still rejecting undeclared remote embedded resources", async () => {
     await expect(parse('<img src="https://evil.test/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
     await expect(parse('<img src=" https://evil.test/x.png"/>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
-    await expect(parse('<a href=" https://evil.test/x">link</a>')).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+    const linked = await parse('<p>Read <a href="https://example.test/article">the article</a>.</p>');
+    expect(blocksOf(linked).map((block) => block.text)).toEqual(["Read the article."]);
   });
 
   it("rejects entity-obfuscated external references that the decoded DOM reveals", async () => {
@@ -476,6 +831,29 @@ describe("RF01 post-DOM resource gate", () => {
     const parsed = await parse('<p>See <a href="#anchor">note</a></p><figure><img src="../images/a.png" alt="Chart"/></figure>');
     expect(blocksOf(parsed).map((block) => block.text)).toEqual(["See note", "Chart"]);
     expect(parsed.qualityWarnings).toEqual([]);
+  });
+
+  it("allows declared remote audio as inert content but never broadens remote images", async () => {
+    const remoteOpf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml" properties="remote-resources"/><item id="audio" href="https://media.example.test/ch1.mp3" media-type="audio/mpeg"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const parsed = await parseDocument(book({ opf: remoteOpf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<p>Before</p><audio src="https://media.example.test/ch1.mp3"/><p>After</p>') },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Before", "After"]);
+
+    const undeclaredOpf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: undeclaredOpf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<audio src="https://media.example.test/ch1.mp3"/>') },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+
+    await expect(parseDocument(book({ opf: remoteOpf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<img src="https://media.example.test/cover.png" alt="remote"/>') },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
   });
 
   it("validates SVG xlink:href against the same contract", async () => {
@@ -499,7 +877,7 @@ describe("RF01 namespace-prefixed documents", () => {
   const prefixedContainer = '<?xml version="1.0"?><c:container xmlns:c="urn:oasis:names:tc:opendocument:xmlns:container"><c:rootfiles><c:rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></c:rootfiles></c:container>';
   const prefixedOpf = '<?xml version="1.0"?><opf:package xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0" unique-identifier="pub-id"><opf:metadata><dc:identifier id="pub-id">urn:uuid:prefixed</dc:identifier><dc:title>Prefixed Book</dc:title><dc:language>en</dc:language></opf:metadata><opf:manifest><opf:item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><opf:item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/></opf:manifest><opf:spine><opf:itemref idref="c1"/></opf:spine></opf:package>';
   const prefixedNav = '<?xml version="1.0"?><xhtml:html xmlns:xhtml="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><xhtml:body><xhtml:nav epub:type="toc"><xhtml:ol><xhtml:li><xhtml:a href="text/ch1.xhtml">Prefixed Chapter</xhtml:a><xhtml:ol><xhtml:li><xhtml:a href="text/ch1.xhtml#s1">Prefixed Section</xhtml:a></xhtml:li></xhtml:ol></xhtml:li></xhtml:ol></xhtml:nav></xhtml:body></xhtml:html>';
-  const prefixedXhtml = '<?xml version="1.0"?><xhtml:html xmlns:xhtml="http://www.w3.org/1999/xhtml"><xhtml:body><xhtml:h1 id="px">Prefixed Head</xhtml:h1><xhtml:p>Prefixed para</xhtml:p><xhtml:table><xhtml:tr><xhtml:td>A</xhtml:td><xhtml:td>1</xhtml:td></xhtml:tr></xhtml:table></xhtml:body></xhtml:html>';
+  const prefixedXhtml = '<?xml version="1.0"?><xhtml:html xmlns:xhtml="http://www.w3.org/1999/xhtml"><xhtml:body><xhtml:h1 id="px">Prefixed Head</xhtml:h1><xhtml:p id="s1">Prefixed para</xhtml:p><xhtml:table><xhtml:tr><xhtml:td>A</xhtml:td><xhtml:td>1</xhtml:td></xhtml:tr></xhtml:table></xhtml:body></xhtml:html>';
 
   const prefixedBook = (contentXhtml: string) => zip([
     { name: "mimetype", text: "application/epub+zip" },
@@ -547,9 +925,10 @@ describe("RF01 namespace-prefixed documents", () => {
     ]);
   });
 
-  it("rejects external references inside prefixed documents", async () => {
-    const evilXhtml = prefixedXhtml.replace("<xhtml:p>Prefixed para</xhtml:p>", '<xhtml:p><xhtml:a href="https://evil.test/x">bad</xhtml:a></xhtml:p>');
-    await expect(parseDocument(prefixedBook(evilXhtml), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  it("keeps outbound hyperlinks inert inside prefixed documents", async () => {
+    const linkedXhtml = prefixedXhtml.replace('<xhtml:p id="s1">Prefixed para</xhtml:p>', '<xhtml:p id="s1"><xhtml:a href="https://example.test/x">Outbound</xhtml:a></xhtml:p>');
+    const parsed = await parseDocument(prefixedBook(linkedXhtml), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toContain("Outbound");
   });
 });
 
@@ -558,26 +937,38 @@ describe("RF01 namespace-prefixed documents", () => {
 // ---------------------------------------------------------------------------
 
 describe("RF01 unsupported spine content", () => {
-  it("fails a reflowable book with no usable textual evidence on SOURCE_EPUB_NO_USABLE_TEXT", async () => {
-    const opf = opfDocument({ manifest: '<item id="img" href="media/cover.png" media-type="image/png"/>', spine: '<itemref idref="img"/>' });
-    await expect(parseDocument(book({ opf, files: [{ name: "OEBPS/media/cover.png", text: "PNGDATA" }] }), "application/epub+zip")).rejects.toThrow(SourceError.EPUB_NO_USABLE_TEXT);
+  it("fails a reflowable EPUB content document with no usable textual evidence on SOURCE_EPUB_NO_USABLE_TEXT", async () => {
+    const svg = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>';
+    const opf = opfDocument({ manifest: '<item id="page" href="pages/page1.svg" media-type="image/svg+xml"/>', spine: '<itemref idref="page"/>' });
+    await expect(parseDocument(book({ opf, files: [{ name: "OEBPS/pages/page1.svg", text: svg }] }), "application/epub+zip")).rejects.toThrow(SourceError.EPUB_NO_USABLE_TEXT);
   });
-
-  it("counts unsupported media-type spine items as unusable text without inflation", async () => {
-    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="f1" href="media/font.woff" media-type="application/font-woff"/><item id="a1" href="media/audio.mp3" media-type="audio/mpeg"/>', spine: '<itemref idref="f1"/><itemref idref="c1"/><itemref idref="a1"/>' });
-    const parsed = await parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }, { name: "OEBPS/media/font.woff", text: "WWOFFDATA" }, { name: "OEBPS/media/audio.mp3", text: "MP3DATA" }] }), "application/epub+zip");
+  it("validates auxiliary foreign spine items through fallback without inflating them", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="f1" href="media/font.woff" media-type="application/font-woff" fallback="c1"/><item id="a1" href="media/audio.mp3" media-type="audio/mpeg" fallback="c1"/>',
+      spine: '<itemref idref="f1" linear="no"/><itemref idref="c1"/><itemref idref="a1" linear="no"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+      { name: "OEBPS/media/font.woff", text: "WWOFFDATA" },
+      { name: "OEBPS/media/audio.mp3", text: "MP3DATA" },
+    ] }), "application/epub+zip");
     expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
-    expect(parsed.qualityWarnings).toEqual(["PARTIAL_EXTRACTION"]);
+    expect(parsed.qualityWarnings).toEqual([]);
   });
-
   it("fails a missing unsupported spine item as corrupted before media-type classification", async () => {
-    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/missing.png" media-type="image/png"/>', spine: '<itemref idref="c1"/><itemref idref="img"/>' });
+    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/missing.png" media-type="image/png" fallback="c1"/>', spine: '<itemref idref="c1"/><itemref idref="img"/>' });
     await expect(parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
 
   it("fails an all-binary spine with one missing item as corrupted, not no-usable-text", async () => {
-    const opf = opfDocument({ manifest: '<item id="img1" href="media/cover.png" media-type="image/png"/><item id="img2" href="media/missing.png" media-type="image/png"/>', spine: '<itemref idref="img1"/><itemref idref="img2"/>' });
-    await expect(parseDocument(book({ opf, files: [{ name: "OEBPS/media/cover.png", text: "PNGDATA" }] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+    const opf = opfDocument({
+      manifest: '<item id="fallback" href="text/fallback.xhtml" media-type="application/xhtml+xml"/><item id="img1" href="media/cover.png" media-type="image/png" fallback="fallback"/><item id="img2" href="media/missing.png" media-type="image/png" fallback="fallback"/>',
+      spine: '<itemref idref="img1"/><itemref idref="img2" linear="no"/>',
+    });
+    await expect(parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/fallback.xhtml", text: contentDocument("<p>Fallback</p>") },
+      { name: "OEBPS/media/cover.png", text: "PNGDATA" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
 });
 
