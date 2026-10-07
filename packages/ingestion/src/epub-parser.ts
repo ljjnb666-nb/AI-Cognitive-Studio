@@ -702,9 +702,14 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
     const nameLength = data.readUInt16LE(offset + 28);
     const extraLength = data.readUInt16LE(offset + 30);
     const commentLength = data.readUInt16LE(offset + 32);
+    const diskNumberStart = data.readUInt16LE(offset + 34);
     const localOffset = data.readUInt32LE(offset + 42);
     const centralLength = 46 + nameLength + extraLength + commentLength;
     if (!hasZipRange(data, offset, centralLength) || offset + centralLength > eocd) throw new Error(SourceError.CORRUPTED);
+    // EOCD single-disk fields are not sufficient: each central-directory
+    // entry independently declares the disk that owns its local header.
+    // Any nonzero diskNumberStart contradicts the single-file EPUB authority.
+    if (diskNumberStart !== 0) throw new Error(SourceError.ARCHIVE_UNSAFE);
 
     const name = decodeZipName(data.subarray(offset + 46, offset + 46 + nameLength));
     const isDirectory = name.endsWith("/");

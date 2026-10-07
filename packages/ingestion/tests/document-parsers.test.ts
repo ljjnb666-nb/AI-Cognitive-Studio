@@ -43,6 +43,15 @@ describe("safe EPUB parser", () => {
     input.writeUInt16LE(8, 8);
     await expect(parseDocument(input, "application/epub+zip")).rejects.toThrow("SOURCE_CORRUPTED");
   });
+  it("rejects a central-directory entry assigned to a different ZIP disk", async () => {
+    const input = Buffer.from(epub());
+    const eocd = input.length - 22;
+    const directoryOffset = input.readUInt32LE(eocd + 16);
+    // disk number start lives at +34 in each central-directory file header.
+    // EOCD remains single-disk, so this per-entry declaration must fail closed.
+    input.writeUInt16LE(1, directoryOffset + 34);
+    await expect(parseDocument(input, "application/epub+zip")).rejects.toThrow("SOURCE_ARCHIVE_UNSAFE");
+  });
   it("accepts safe directory records after the mandatory first mimetype entry", async () => {
     const input = zip([
       { name: "mimetype", text: "application/epub+zip" },
