@@ -327,7 +327,7 @@ export async function promoteCurrentProductIdentityForUser(
     // row so concurrent role downgrade/removal serializes with identity writes:
     // either promotion finishes first under the still-valid role, or promotion
     // waits and observes the new role / missing membership before any mutation.
-    const memberships = await tx.$queryRaw<Array<{ userId: string; role: "OWNER" | "EDITOR" | "VIEWER" }>>`
+    const memberships = await tx.$queryRaw<Array<{ userId: string; role: string }>>`
       SELECT "userId", "role"
       FROM "WorkspaceMember"
       WHERE "workspaceId" = ${context.workspaceId} AND "userId" = ${context.userId}
@@ -335,7 +335,9 @@ export async function promoteCurrentProductIdentityForUser(
     `;
     const membership = memberships[0];
     if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
-    if (membership.role === "VIEWER") throw new Error("WORKSPACE_WRITE_ACCESS_DENIED");
+    // Fail closed: only the explicitly write-capable roles may mutate product
+    // identity. A future role does not silently inherit write authority.
+    if (membership.role !== "OWNER" && membership.role !== "EDITOR") throw new Error("WORKSPACE_WRITE_ACCESS_DENIED");
     return promoteInTransaction(tx, { workspaceId: context.workspaceId, ...input });
   });
 }
