@@ -183,8 +183,7 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
   for (const item of directElementChildrenByLocalName(manifestElement, "item")) {
     const id = item.getAttribute("id");
     const href = item.getAttribute("href");
-    if (!id || !href) continue;
-    if (manifest.has(id)) throw new Error(SourceError.CORRUPTED);
+    if (!id || !href || manifest.has(id)) throw new Error(SourceError.CORRUPTED);
     manifest.set(id, {
       id,
       href,
@@ -194,6 +193,7 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
     });
   }
 
+  assertManifestUrlAuthority(manifest, opfPath);
   assertManifestFallbackGraph(manifest);
 
   const spine: SpineItemRef[] = [];
@@ -222,6 +222,27 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
     dcLanguage: dcElementText(opf, limits, "language"),
     dcIdentifier: dcElementText(opf, limits, "identifier"),
   };
+}
+
+function assertManifestUrlAuthority(manifest: Map<string, ManifestItem>, packagePath: string): void {
+  const seen = new Set<string>();
+  for (const item of manifest.values()) {
+    if (item.href.includes("#")) throw new Error(SourceError.CORRUPTED);
+
+    let key: string;
+    try {
+      key = `absolute:${new URL(item.href).href}`;
+    } catch {
+      const resolved = resolveArchiveHref(packagePath, item.href);
+      if (resolved.fragmentId || resolved.path === packagePath || resolved.path === "mimetype" || resolved.path.startsWith("META-INF/")) {
+        throw new Error(SourceError.CORRUPTED);
+      }
+      key = `container:${resolved.path}`;
+    }
+
+    if (seen.has(key)) throw new Error(SourceError.CORRUPTED);
+    seen.add(key);
+  }
 }
 
 function assertManifestFallbackGraph(manifest: Map<string, ManifestItem>): void {
@@ -1064,17 +1085,43 @@ function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserL
   }
 }
 
+type XmlByteEncoding = "utf-8" | "utf-16le" | "utf-16be";
+
 function entryXmlText(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): string {
   const data = entryBytes(entries, name, limits);
   try {
-    if (data.length >= 2 && data[0] === 0xff && data[1] === 0xfe) return new TextDecoder("utf-16le", { fatal: true }).decode(data);
-    if (data.length >= 2 && data[0] === 0xfe && data[1] === 0xff) return new TextDecoder("utf-16be", { fatal: true }).decode(data);
-    if (data.length >= 2 && data[0] === 0x3c && data[1] === 0x00) return new TextDecoder("utf-16le", { fatal: true }).decode(data);
-    if (data.length >= 2 && data[0] === 0x00 && data[1] === 0x3c) return new TextDecoder("utf-16be", { fatal: true }).decode(data);
-    return new TextDecoder("utf-8", { fatal: true }).decode(data);
-  } catch {
+    if (data.length >= 4 &&
+        ((data[0] === 0x00 && data[1] === 0x00 && data[2] === 0xfe && data[3] === 0xff) ||
+         (data[0] === 0xff && data[1] === 0xfe && data[2] === 0x00 && data[3] === 0x00) ||
+         (data[0] === 0x00 && data[1] === 0x00 && data[2] === 0x00 && data[3] === 0x3c) ||
+         (data[0] === 0x3c && data[1] === 0x00 && data[2] === 0x00 && data[3] === 0x00))) {
+      throw new Error(SourceError.CORRUPTED);
+    }
+
+    let encoding: XmlByteEncoding = "utf-8";
+    if (data.length >= 2 && data[0] === 0xff && data[1] === 0xfe) encoding = "utf-16le";
+    else if (data.length >= 2 && data[0] === 0xfe && data[1] === 0xff) encoding = "utf-16be";
+    else if (data.length >= 4 && data[0] === 0x3c && data[1] === 0x00 && data[2] === 0x3f && data[3] === 0x00) encoding = "utf-16le";
+    else if (data.length >= 4 && data[0] === 0x00 && data[1] === 0x3c && data[2] === 0x00 && data[3] === 0x3f) encoding = "utf-16be";
+
+    const text = new TextDecoder(encoding, { fatal: true }).decode(data);
+    assertXmlDeclarationEncoding(text, encoding);
+    return text;
+  } catch (error) {
+    if (error instanceof Error && error.message === SourceError.CORRUPTED) throw error;
     throw new Error(SourceError.CORRUPTED);
   }
+}
+
+function assertXmlDeclarationEncoding(xml: string, actual: XmlByteEncoding): void {
+  const declaration = /^<\?xml\s+[^?]*\bencoding\s*=\s*(["'])([^"']+)\1/i.exec(xml);
+  if (!declaration) return;
+  const declared = declaration[2]!.trim().toLowerCase().replace(/_/g, "-");
+  const matches =
+    (actual === "utf-8" && declared === "utf-8") ||
+    (actual === "utf-16le" && (declared === "utf-16" || declared === "utf-16le")) ||
+    (actual === "utf-16be" && (declared === "utf-16" || declared === "utf-16be"));
+  if (!matches) throw new Error(SourceError.CORRUPTED);
 }
 
 /** ZIP entry names stay strict: no traversal segments of any kind. */
@@ -1118,7 +1165,7 @@ function epubType(element: XmlElement): string | null {
 }
 
 function isHiddenFromCanonicalText(element: XmlElement): boolean {
-  if (element.hasAttribute("hidden")) return true;
+  if (element.hasAttribute("hidden") || element.hasAttribute("inert")) return true;
   return (element.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true";
 }
 

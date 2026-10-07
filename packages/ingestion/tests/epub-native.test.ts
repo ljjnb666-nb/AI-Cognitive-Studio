@@ -314,6 +314,20 @@ describe("epub-parser-v2 XML encodings", () => {
       { name: "OEBPS/text/le.xhtml", bytes: malformed },
     ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
+
+  it("rejects XML declarations that contradict the actual byte encoding", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/c1.xhtml", text: '<?xml version="1.0" encoding="UTF-16"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>wrong</p></body></html>' },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    await expect(parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/c1.xhtml", bytes: utf16leXml('<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>wrong</p></body></html>') },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -399,6 +413,32 @@ describe("epub-parser-v2 package and spine authority", () => {
     });
     await expect(parseDocument(book({ opf: duplicateSpine, files: [
       { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>One</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+
+  it("enforces parsed manifest URL identity and forbids fragments and package self-reference", async () => {
+    const duplicate = opfDocument({
+      manifest: '<item id="a" href="text/ch%201.xhtml" media-type="application/xhtml+xml"/><item id="b" href="text/ch 1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="a"/>',
+    });
+    await expect(parseDocument(book({ opf: duplicate, files: [
+      { name: "OEBPS/text/ch 1.xhtml", text: contentDocument("<p>One</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const fragment = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml#section" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: fragment, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument("<p>One</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const self = opfDocument({
+      manifest: '<item id="self" href="content.opf" media-type="application/oebps-package+xml"/><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: self, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument("<p>One</p>") },
     ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
 
@@ -501,8 +541,9 @@ describe("epub-parser-v2 semantic blocks", () => {
 
   it("excludes hidden and aria-hidden subtrees from canonical text", async () => {
     const parsed = await parse(
-      '<p>Visible <span hidden>secret</span> text <span aria-hidden="true">silent</span>.</p>' +
+      '<p>Visible <span hidden>secret</span> text <span aria-hidden="true">silent</span><span inert>inert</span>.</p>' +
       '<section hidden><p>Hidden section</p></section>' +
+      '<section inert><p>Inert section</p></section>' +
       '<p aria-hidden="true">ARIA hidden paragraph</p>' +
       '<p aria-hidden="false">Kept paragraph</p>',
     );
