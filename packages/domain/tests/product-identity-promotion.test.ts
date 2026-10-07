@@ -29,6 +29,8 @@ describe("controlled product identity promotion helpers", () => {
     expect(classifyProductIdentifierForPromotion("urn:isbn:9780306406158")).toEqual({ kind: "INVALID_EXPLICIT_ISBN" });
     // Valid EAN-13 checksum, but not an ISBN Bookland 978/979 prefix.
     expect(classifyProductIdentifierForPromotion("ISBN: 1234567890128")).toEqual({ kind: "INVALID_EXPLICIT_ISBN" });
+    expect(classifyProductIdentifierForPromotion("ISBN-13: 0-306-40615-2")).toEqual({ kind: "INVALID_EXPLICIT_ISBN" });
+    expect(classifyProductIdentifierForPromotion("ISBN-10: 978-0-306-40615-7")).toEqual({ kind: "INVALID_EXPLICIT_ISBN" });
   });
 
   it("normalizes only conventional ISBN presentation separators for comparison", () => {
