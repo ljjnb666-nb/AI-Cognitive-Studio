@@ -151,6 +151,7 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
   // Product identity is Source-level authority. A historical SourceDocument
   // may still have its own CurrentDocumentExtraction, so that marker alone is
   // insufficient: only the highest durable SourceDocument.version may promote.
+  // An older version's current extraction is therefore evidence, not Source-level authority.
   // Future code that creates a new version for an existing Source must take the
   // same Source row lock before inserting that version.
   const latestDocument = await tx.sourceDocument.findFirst({
