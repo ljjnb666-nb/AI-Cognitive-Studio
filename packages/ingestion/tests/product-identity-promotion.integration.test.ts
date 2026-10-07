@@ -294,6 +294,18 @@ describe("controlled product identity promotion authority", () => {
     expect(bound.editionId).not.toBeNull();
   });
 
+  it("treats whitespace-only candidate title as missing and creates no product identity", async () => {
+    const value = await fixture({ title: "   ", language: "en" });
+    const result = await promoteCurrentProductIdentityForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
+    );
+    expect(result.status).toBe("BLOCKED");
+    if (result.status !== "STALE") expect(result.promotion.reasonCode).toBe("MISSING_TITLE_FOR_UNBOUND_SOURCE");
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+    await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+  });
+
   it("blocks unbound promotion without a title and never guesses ISBN from bare digits", async () => {
     const value = await fixture({ language: "en", identifier: "9780306406157" });
     const result = await promoteCurrentProductIdentityForUser(
