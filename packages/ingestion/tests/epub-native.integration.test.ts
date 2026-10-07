@@ -47,7 +47,7 @@ function epubBytes(entries: ZipEntry[]): Uint8Array {
 
 const XHTML_NS = 'xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"';
 /** EPUB3 reflowable fixture: nav, heading-rich body, merged-cell table, footnotes. */
-function epub3Fixture(): Uint8Array {
+function epub3Fixture(extraEntries: ZipEntry[] = []): Uint8Array {
   return epubBytes([
     { name: "mimetype", text: "application/epub+zip" },
     { name: "META-INF/container.xml", text: '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>' },
@@ -57,6 +57,7 @@ function epub3Fixture(): Uint8Array {
     },
     { name: "OEBPS/nav.xhtml", text: `<?xml version="1.0"?><html ${XHTML_NS}><body><nav epub:type="toc"><ol><li><a href="text/ch1.xhtml">Chapter One</a><ol><li><a href="text/ch1.xhtml#s1">Section One</a></li></ol></li></ol></nav></body></html>` },
     { name: "OEBPS/text/ch1.xhtml", text: `<?xml version="1.0"?><html ${XHTML_NS}><body><h1 id="ch1">Chapter One</h1><section id="s1"><h2>Section One</h2><p>Body paragraph.</p></section><table><tr><td rowspan="2">A</td><td>1</td></tr><tr><td>2</td></tr></table><aside id="fn1" epub:type="footnote"><p>Note body.</p></aside></body></html>` },
+    ...extraEntries,
   ]);
 }
 
@@ -232,10 +233,10 @@ describe("EPUB native ingestion persistence", () => {
     const { user, workspace } = await createWorkspaceFixture();
     const service = createIngestionService(storage);
     const context = { userId: user.id, workspaceId: workspace.id };
-    const bytes = epubBytes([
-      { name: "mimetype", text: "application/epub+zip" },
-      { name: "META-INF/encryption.xml", text: "<encryption/>" },
-    ]);
+    const bytes = epub3Fixture([{
+      name: "META-INF/encryption.xml",
+      text: '<?xml version="1.0"?><encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:enc="http://www.w3.org/2001/04/xmlenc#"><enc:EncryptedData><enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes256-cbc"/><enc:CipherData><enc:CipherReference URI="OEBPS/text/ch1.xhtml"/></enc:CipherData></enc:EncryptedData></encryption>',
+    }]);
     const { session } = await service.createUploadIntent(context, { filename: "evil.epub", mediaType: "application/epub+zip", sizeBytes: bytes.length });
     storage.objects.set(session.temporaryStorageKey, bytes);
     const document = await service.completeUpload(context, session.id);

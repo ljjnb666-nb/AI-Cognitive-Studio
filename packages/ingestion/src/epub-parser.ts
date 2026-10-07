@@ -50,11 +50,24 @@ import { SourceError } from "./source-errors.js";
 
 const EPUB_OPS_NAMESPACE = "http://www.idpf.org/2007/ops";
 const EPUB_RENDITION_NAMESPACE = "http://www.idpf.org/2013/rendition";
+const OCF_CONTAINER_NAMESPACE = "urn:oasis:names:tc:opendocument:xmlns:container";
+const XML_ENCRYPTION_NAMESPACE = "http://www.w3.org/2001/04/xmlenc#";
+const IDPF_FONT_OBFUSCATION_ALGORITHM = "http://www.idpf.org/2008/embedding";
 const DC_ELEMENTS_NAMESPACE = "http://purl.org/dc/elements/1.1/";
 const OPF_MEDIA_TYPE = "application/oebps-package+xml";
 const NCX_MEDIA_TYPE = "application/x-dtbncx+xml";
 const CONTENT_MEDIA_TYPES = new Set(["application/xhtml+xml", "text/html", "application/x-dtbook+xml"]);
 const SVG_MEDIA_TYPE = "image/svg+xml";
+const FONT_MEDIA_TYPES = new Set([
+  "font/otf",
+  "font/ttf",
+  "font/woff",
+  "font/woff2",
+  // Legacy EPUB 2/early EPUB 3 aliases retained for backwards compatibility.
+  "application/font-sfnt",
+  "application/font-woff",
+  "application/vnd.ms-opentype",
+]);
 const FOOTNOTE_TYPES = new Set(["footnote", "endnote", "footnotes", "endnotes"]);
 const BLOCK_PRODUCERS = new Set(["p", "li", "blockquote", "pre", "table", "figcaption", "math", "svg", "img", "h1", "h2", "h3", "h4", "h5", "h6"]);
 const CONTAINER_TAGS = new Set(["html", "body", "main", "div", "section", "article", "aside", "nav", "header", "footer", "figure", "ul", "ol", "dl", "details", "center"]);
@@ -80,9 +93,9 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
   // ZIP layouts from being accepted as EPUB containers.
   if (!mimetype || mimetype.localOffset !== 0 || mimetype.method !== 0 || mimetype.localExtraLength !== 0 ||
       entryText(byName, "mimetype", limits) !== "application/epub+zip") throw new Error(SourceError.CORRUPTED);
-  if (byName.has("META-INF/encryption.xml")) throw new Error(SourceError.ARCHIVE_UNSAFE);
   const provenance: BlockExtractionProvenance = { sourceMethod: parser.sourceMethod, parserName: parser.name, parserVersion: parser.version };
   const opf = readPackage(byName, limits);
+  assertSupportedContainerEncryption(byName, opf, limits);
   const navigation = readNavigation(opf, byName, limits);
   const warnings = new Set<ExtractionQualityWarningCode>();
   const blocks: ParsedBlock[] = [];
@@ -217,6 +230,53 @@ function assertManifestFallbackGraph(manifest: Map<string, ManifestItem>): void 
       seen.add(next.id);
       current = next;
     }
+  }
+}
+
+function assertSupportedContainerEncryption(byName: Map<string, ZipEntry>, opf: EpubPackage, limits: ParserLimits): void {
+  if (!byName.has("META-INF/encryption.xml")) return;
+
+  const document = parseXmlDocument(safeXmlText(entryText(byName, "META-INF/encryption.xml", limits)), limits);
+  const root = document.documentElement;
+  if (!root || localName(root) !== "encryption" || root.namespaceURI !== OCF_CONTAINER_NAMESPACE) throw new Error(SourceError.CORRUPTED);
+
+  const children = directElementChildren(root);
+  if (!children.length) throw new Error(SourceError.CORRUPTED);
+  const encryptedData = children.filter((child) => localName(child) === "EncryptedData" && child.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+  const encryptedKeys = children.filter((child) => localName(child) === "EncryptedKey" && child.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+  if (children.length !== encryptedData.length + encryptedKeys.length) throw new Error(SourceError.CORRUPTED);
+
+  // This ingestion path never decrypts publication content. True XML
+  // Encryption therefore remains a security/compatibility hard stop.
+  if (encryptedKeys.length) throw new Error(SourceError.ARCHIVE_UNSAFE);
+
+  const seenUris = new Set<string>();
+  for (const encrypted of encryptedData) {
+    const methods = directElementChildrenByLocalName(encrypted, "EncryptionMethod").filter((element) => element.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+    const cipherData = directElementChildrenByLocalName(encrypted, "CipherData").filter((element) => element.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+    if (methods.length !== 1 || cipherData.length !== 1) throw new Error(SourceError.CORRUPTED);
+
+    const algorithm = methods[0]!.getAttribute("Algorithm");
+    if (algorithm !== IDPF_FONT_OBFUSCATION_ALGORITHM) throw new Error(SourceError.ARCHIVE_UNSAFE);
+
+    const references = directElementChildrenByLocalName(cipherData[0]!, "CipherReference").filter((element) => element.namespaceURI === XML_ENCRYPTION_NAMESPACE);
+    if (references.length !== 1) throw new Error(SourceError.CORRUPTED);
+    const uri = references[0]!.getAttribute("URI");
+    if (!uri || seenUris.has(uri)) throw new Error(SourceError.CORRUPTED);
+    seenUris.add(uri);
+
+    // META-INF URLs are parsed against the container root. Font obfuscation is
+    // legal only for a font core-media-type resource that is actually packaged.
+    const resolved = resolveArchiveHref("", uri);
+    if (resolved.fragmentId || !byName.has(resolved.path)) throw new Error(SourceError.CORRUPTED);
+    const manifestItem = [...opf.manifest.values()].find((item) => {
+      try {
+        return resolveArchiveHref(opf.path, item.href).path === resolved.path;
+      } catch {
+        return false;
+      }
+    });
+    if (!manifestItem || !manifestItem.mediaType || !FONT_MEDIA_TYPES.has(manifestItem.mediaType)) throw new Error(SourceError.CORRUPTED);
   }
 }
 

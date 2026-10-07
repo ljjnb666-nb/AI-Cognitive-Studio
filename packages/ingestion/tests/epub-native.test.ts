@@ -186,6 +186,45 @@ describe("epub-parser-v2 navigation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// OCF encryption / font-obfuscation authority (BOOK-INGESTION-04C-2)
+// ---------------------------------------------------------------------------
+
+describe("epub-parser-v2 OCF encryption authority", () => {
+  const encryptionXml = (algorithm: string, uri: string) =>
+    `<?xml version="1.0"?><encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:enc="http://www.w3.org/2001/04/xmlenc#"><enc:EncryptedData><enc:EncryptionMethod Algorithm="${algorithm}"/><enc:CipherData><enc:CipherReference URI="${uri}"/></enc:CipherData></enc:EncryptedData></encryption>`;
+
+  it("accepts standard IDPF font obfuscation metadata without reading the font bytes", async () => {
+    const opf = epub3Opf('<item id="font" href="fonts/book.woff2" media-type="font/woff2"/>');
+    const parsed = await parseDocument(book({ opf, files: [
+      ...basicFiles,
+      { name: "OEBPS/fonts/book.woff2", text: "obfuscated-font-bytes" },
+      { name: "META-INF/encryption.xml", text: encryptionXml("http://www.idpf.org/2008/embedding", "OEBPS/fonts/book.woff2") },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
+  });
+
+  it("rejects true XML Encryption algorithms because ingestion cannot decrypt publication content", async () => {
+    const xml = encryptionXml("http://www.w3.org/2001/04/xmlenc#aes256-cbc", "OEBPS/text/ch1.xhtml");
+    await expect(parseDocument(book({ opf: epub3Opf(), files: [
+      ...basicFiles,
+      { name: "META-INF/encryption.xml", text: xml },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+
+  it("rejects malformed or non-font uses of the IDPF obfuscation algorithm", async () => {
+    await expect(parseDocument(book({ opf: epub3Opf(), files: [
+      ...basicFiles,
+      { name: "META-INF/encryption.xml", text: '<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"/>' },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    await expect(parseDocument(book({ opf: epub3Opf(), files: [
+      ...basicFiles,
+      { name: "META-INF/encryption.xml", text: encryptionXml("http://www.idpf.org/2008/embedding", "OEBPS/text/ch1.xhtml") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Package / spine reading-order authority (BOOK-INGESTION-04C-2)
 // ---------------------------------------------------------------------------
 
