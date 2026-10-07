@@ -202,6 +202,57 @@ describe("controlled product identity promotion authority", () => {
     await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
   });
 
+  it("serializes promotion against a concurrent membership downgrade", async () => {
+    const value = await fixture({ title: "Race Protected Book" });
+
+    let releaseDowngrade!: () => void;
+    let downgradeLocked!: () => void;
+    const release = new Promise<void>((resolve) => { releaseDowngrade = resolve; });
+    const locked = new Promise<void>((resolve) => { downgradeLocked = resolve; });
+
+    const downgrade = prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT "userId"
+        FROM "WorkspaceMember"
+        WHERE "workspaceId" = ${value.workspace.id} AND "userId" = ${value.user.id}
+        FOR UPDATE
+      `;
+      await tx.workspaceMember.update({
+        where: { workspaceId_userId: { workspaceId: value.workspace.id, userId: value.user.id } },
+        data: { role: "VIEWER" },
+      });
+      downgradeLocked();
+      await release;
+    });
+
+    await locked;
+
+    let settled = false;
+    const promotion = promoteCurrentProductIdentityForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
+    ).then(
+      (result) => ({ kind: "resolved" as const, result }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    ).finally(() => { settled = true; });
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const settledBeforeDowngradeCommit = settled;
+    releaseDowngrade();
+    await downgrade;
+
+    expect(settledBeforeDowngradeCommit).toBe(false);
+    const outcome = await promotion;
+    expect(outcome.kind).toBe("rejected");
+    if (outcome.kind === "rejected") {
+      expect(outcome.error).toBeInstanceOf(Error);
+      expect((outcome.error as Error).message).toBe("WORKSPACE_WRITE_ACCESS_DENIED");
+    }
+    await expect(prisma.productIdentityPromotion.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+    await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+  });
+
   it("creates and binds one Work/Edition from the current candidate and is exact-extraction idempotent", async () => {
     const value = await fixture({ title: "Fixture Book", language: "en", identifier: "urn:isbn:978-0-306-40615-7" });
     const context = { userId: value.user.id, workspaceId: value.workspace.id };
@@ -264,6 +315,30 @@ describe("controlled product identity promotion authority", () => {
     const source = await prisma.source.findUniqueOrThrow({ where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } }, include: { edition: true } });
     expect(source.edition?.language).toBe("zh-CN");
     expect(source.edition?.isbn10).toBe("0306406152");
+  });
+
+  it("treats conventionally formatted existing ISBN as equal without rewriting it", async () => {
+    const value = await fixture({
+      title: "Same Book",
+      language: "zh-CN",
+      identifier: "urn:isbn:978-0-306-40615-7",
+      bind: { title: "Same Book", language: null, isbn13: "978-0-306-40615-7" },
+    });
+    const result = await promoteCurrentProductIdentityForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
+    );
+    expect(result.status).toBe("APPLIED");
+    if (result.status === "APPLIED") {
+      expect(result.promotion.conflicts).toEqual([]);
+      expect(result.promotion.appliedFields).toEqual(["edition.language"]);
+    }
+    const source = await prisma.source.findUniqueOrThrow({
+      where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } },
+      include: { edition: true },
+    });
+    expect(source.edition?.language).toBe("zh-CN");
+    expect(source.edition?.isbn13).toBe("978-0-306-40615-7");
   });
 
   it("refuses stale extraction promotion after CurrentDocumentExtraction moves", async () => {
