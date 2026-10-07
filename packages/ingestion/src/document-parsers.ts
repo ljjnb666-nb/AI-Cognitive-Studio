@@ -4,7 +4,8 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BlockExtractionProvenance, CanonicalSourceLocator, ExtractionQualityWarningCode, SourceBlockBbox } from "@ai-cognitive/domain";
+import { TextDecoder } from "node:util";
+import { parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, type BlockExtractionProvenance, type CanonicalSourceLocator, type ExtractionQualityWarningCode, type SourceBlockBbox } from "@ai-cognitive/domain";
 import { normalizeCanonicalText, splitCanonicalBlock } from "./canonical-text.js";
 import { inspectPdfPage, planPdfRouting, type PdfPageEvidence, type PdfPageInspection, type PdfRoutingPlan } from "./pdf-routing.js";
 import { SourceError, sourceErrorForParserResult } from "./source-errors.js";
@@ -27,6 +28,47 @@ const parsers = {
   epub: { name: "builtin-epub", version: "epub-parser-v2", sourceMethod: "STRUCTURED_MARKUP" },
 } as const;
 export type ParserDescriptor = (typeof parsers)[keyof typeof parsers];
+
+const EPUB_CHILD_BLOCK_KINDS = new Set<SourceBlockKind>(["HEADING", "PARAGRAPH", "LIST_ITEM", "QUOTE", "TABLE", "IMAGE", "CAPTION", "FOOTNOTE", "CODE", "EQUATION", "UNKNOWN"]);
+const STABLE_SOURCE_ERRORS = new Set<string>(Object.values(SourceError));
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The subprocess is an isolation boundary, not a trust boundary. Treat its
+ * JSON as untrusted IPC and re-assert the complete EPUB v2 contract before
+ * publication code can observe it. Any protocol drift is a deterministic
+ * parser failure, never a generic retryable exception.
+ */
+function validateEpubChildParsed(value: unknown): Parsed {
+  if (!isRecord(value) || !isRecord(value.parser) ||
+      value.parser.name !== parsers.epub.name || value.parser.version !== parsers.epub.version ||
+      !Array.isArray(value.pages) || value.pages.length !== 1) throw new Error("EPUB_CHILD_PROTOCOL");
+
+  const page = value.pages[0];
+  if (!isRecord(page) || page.physicalPageIndex !== null || !Array.isArray(page.blocks) || page.blocks.length === 0) throw new Error("EPUB_CHILD_PROTOCOL");
+
+  for (const block of page.blocks) {
+    if (!isRecord(block) || typeof block.kind !== "string" || !EPUB_CHILD_BLOCK_KINDS.has(block.kind as SourceBlockKind) ||
+        typeof block.text !== "string" || block.text.length === 0 ||
+        !isRecord(block.locator) || block.locator.kind !== "epub" ||
+        !isRecord(block.provenance) ||
+        block.provenance.sourceMethod !== "STRUCTURED_MARKUP" ||
+        block.provenance.parserName !== parsers.epub.name ||
+        block.provenance.parserVersion !== parsers.epub.version ||
+        block.bbox !== undefined) throw new Error("EPUB_CHILD_PROTOCOL");
+    const metadata = block.metadata === undefined ? {} : block.metadata;
+    if (!isRecord(metadata)) throw new Error("EPUB_CHILD_PROTOCOL");
+    parseCanonicalBlockMetadata({ ...metadata, locator: block.locator, provenance: block.provenance });
+  }
+
+  if (!Array.isArray(value.qualityWarnings)) throw new Error("EPUB_CHILD_PROTOCOL");
+  parseExtractionQualityMetadata({ warnings: value.qualityWarnings });
+  parseEpubExtractionMetadata(value.formatMetadata);
+  return value as unknown as Parsed;
+}
 
 /**
  * Block-level provenance for a parser run. Extracted as the single authority so
@@ -91,7 +133,11 @@ function epubChildLimits(limits: ParserLimits) {
 export function epubChildArgs(input: string, limits: ParserLimits): string[] {
   const childEntry = limits.epubChildEntry ?? fileURLToPath(new URL("./epub-parser-child.ts", import.meta.url));
   const encodedLimits = Buffer.from(JSON.stringify(epubChildLimits(limits)), "utf8").toString("base64url");
-  return [`--max-old-space-size=${limits.epubMemoryMb}`, "--import", "tsx", childEntry, input, encodedLimits];
+  // Resolve from THIS package, where tsx is a production dependency. A bare
+  // "tsx" preload would resolve from the worker launch CWD and could succeed
+  // in CI only because the monorepo root happens to have a devDependency.
+  const tsxRuntime = import.meta.resolve("tsx");
+  return [`--max-old-space-size=${limits.epubMemoryMb}`, "--import", tsxRuntime, childEntry, input, encodedLimits];
 }
 
 async function runEpubChild(input: string, limits: ParserLimits): Promise<Parsed> {
@@ -99,6 +145,8 @@ async function runEpubChild(input: string, limits: ParserLimits): Promise<Parsed
     const child = spawn(process.execPath, epubChildArgs(input, limits), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    const stdoutDecoder = new TextDecoder("utf-8", { fatal: true });
+    const stderrDecoder = new TextDecoder("utf-8", { fatal: true });
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
@@ -117,28 +165,32 @@ async function runEpubChild(input: string, limits: ParserLimits): Promise<Parsed
     };
     const timer = setTimeout(() => stop(SourceError.PARSE_TIMEOUT), limits.epubTimeoutMs);
     child.stdout.on("data", (data: Buffer) => {
+      if (settled) return;
       stdoutBytes += data.length;
-      if (stdoutBytes > limits.maxEpubIpcBytes) stop(SourceError.TOO_LARGE);
-      else stdout += data.toString("utf8");
+      if (stdoutBytes > limits.maxEpubIpcBytes) return stop(SourceError.TOO_LARGE);
+      try { stdout += stdoutDecoder.decode(data, { stream: true }); }
+      catch { stop(SourceError.PARSE); }
     });
     child.stderr.on("data", (data: Buffer) => {
+      if (settled) return;
       stderrBytes += data.length;
-      if (stderrBytes > limits.maxEpubStderrBytes) stop(SourceError.PARSE);
-      else stderr += data.toString("utf8");
+      if (stderrBytes > limits.maxEpubStderrBytes) return stop(SourceError.PARSE);
+      try { stderr += stderrDecoder.decode(data, { stream: true }); }
+      catch { stop(SourceError.PARSE); }
     });
     child.on("error", () => finish(() => reject(new Error(SourceError.PARSE))));
     child.on("close", (code, signal) => finish(() => {
       if (parentStop) return;
       if (signal || code !== 0) return reject(new Error(SourceError.PARSE));
       try {
+        stdout += stdoutDecoder.decode();
+        stderr += stderrDecoder.decode();
         const records = stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: unknown; code?: unknown; parsed?: unknown });
         if (records.length !== 1) throw new Error("EPUB_CHILD_PROTOCOL");
         const record = records[0]!;
-        if (record.type === "error" && typeof record.code === "string") return reject(new Error(record.code));
-        if (record.type !== "result" || !record.parsed || typeof record.parsed !== "object") throw new Error("EPUB_CHILD_PROTOCOL");
-        const parsed = record.parsed as Parsed;
-        if (parsed.parser?.name !== parsers.epub.name || parsed.parser?.version !== parsers.epub.version || !Array.isArray(parsed.pages)) throw new Error("EPUB_CHILD_PROTOCOL");
-        resolve(parsed);
+        if (record.type === "error" && typeof record.code === "string" && STABLE_SOURCE_ERRORS.has(record.code)) return reject(new Error(record.code));
+        if (record.type !== "result") throw new Error("EPUB_CHILD_PROTOCOL");
+        resolve(validateEpubChildParsed(record.parsed));
       } catch {
         // Stderr is intentionally not surfaced: untrusted source bytes or
         // parser-library diagnostics must never become durable/user-visible.

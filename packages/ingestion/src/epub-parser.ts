@@ -696,6 +696,7 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
     if (!hasZipRange(data, offset, 46) || data.readUInt32LE(offset) !== 0x02014b50) throw new Error(SourceError.CORRUPTED);
     const flags = data.readUInt16LE(offset + 8);
     const method = data.readUInt16LE(offset + 10);
+    const crc32 = data.readUInt32LE(offset + 16);
     const compressedSize = data.readUInt32LE(offset + 20);
     const uncompressedSize = data.readUInt32LE(offset + 24);
     const nameLength = data.readUInt16LE(offset + 28);
@@ -723,6 +724,7 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
     if (!hasZipRange(data, localOffset, 30) || localOffset >= directoryOffset || data.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(SourceError.CORRUPTED);
     const localFlags = data.readUInt16LE(localOffset + 6);
     const localMethod = data.readUInt16LE(localOffset + 8);
+    const localCrc32 = data.readUInt32LE(localOffset + 14);
     const localCompressedSize = data.readUInt32LE(localOffset + 18);
     const localUncompressedSize = data.readUInt32LE(localOffset + 22);
     const localNameLength = data.readUInt16LE(localOffset + 26);
@@ -732,16 +734,23 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
     const localName = decodeZipName(data.subarray(localOffset + 30, localOffset + 30 + localNameLength));
     if (localName !== name || localFlags !== flags || localMethod !== method) throw new Error(SourceError.CORRUPTED);
 
-    // With no data descriptor, local size fields are authoritative mirrors of
-    // the central record. With bit 3 set they may be zero and the central
-    // directory remains the size authority.
-    if ((flags & 0x08) === 0 && (localCompressedSize !== compressedSize || localUncompressedSize !== uncompressedSize)) throw new Error(SourceError.CORRUPTED);
+    // With no data descriptor, the local CRC/size fields mirror the central
+    // record exactly. With bit 3 set, local fields may be zero placeholders,
+    // but any populated field must still agree with the central authority.
+    if ((flags & 0x08) === 0) {
+      if (localCrc32 !== crc32 || localCompressedSize !== compressedSize || localUncompressedSize !== uncompressedSize) throw new Error(SourceError.CORRUPTED);
+    } else if ((localCrc32 !== 0 && localCrc32 !== crc32) ||
+               (localCompressedSize !== 0 && localCompressedSize !== compressedSize) ||
+               (localUncompressedSize !== 0 && localUncompressedSize !== uncompressedSize)) {
+      throw new Error(SourceError.CORRUPTED);
+    }
 
     const start = localOffset + localHeaderLength;
-    const end = start + compressedSize;
-    if (!hasZipRange(data, start, compressedSize) || end > directoryOffset) throw new Error(SourceError.CORRUPTED);
-    localRanges.push({ start: localOffset, end });
-    if (!isDirectory) entries.push({ name, method, flags, compressed: data.subarray(start, end), compressedSize, uncompressedSize, localOffset, localExtraLength });
+    const dataEnd = start + compressedSize;
+    if (!hasZipRange(data, start, compressedSize) || dataEnd > directoryOffset) throw new Error(SourceError.CORRUPTED);
+    const localEnd = (flags & 0x08) !== 0 ? readZipDataDescriptorEnd(data, dataEnd, directoryOffset, crc32, compressedSize, uncompressedSize) : dataEnd;
+    localRanges.push({ start: localOffset, end: localEnd });
+    if (!isDirectory) entries.push({ name, method, flags, compressed: data.subarray(start, dataEnd), compressedSize, uncompressedSize, localOffset, localExtraLength });
     offset += centralLength;
   }
 
@@ -768,6 +777,27 @@ function findEndOfCentralDirectory(data: Buffer): number {
 
 function hasZipRange(data: Buffer, offset: number, length: number): boolean {
   return Number.isSafeInteger(offset) && Number.isSafeInteger(length) && offset >= 0 && length >= 0 && offset <= data.length && length <= data.length - offset;
+}
+
+/**
+ * GPBF bit 3 moves CRC/sizes into a trailing data descriptor. The central
+ * directory remains the size authority, but the descriptor itself must be
+ * present, bounded, and identity-equal; otherwise bytes between local records
+ * can alias as unvalidated archive structure. ZIP64 descriptors are excluded
+ * by the archive's ZIP64 fail-closed policy.
+ */
+function readZipDataDescriptorEnd(data: Buffer, offset: number, directoryOffset: number, crc32: number, compressedSize: number, uncompressedSize: number): number {
+  const unsigned = hasZipRange(data, offset, 12) && offset + 12 <= directoryOffset &&
+    data.readUInt32LE(offset) === crc32 &&
+    data.readUInt32LE(offset + 4) === compressedSize &&
+    data.readUInt32LE(offset + 8) === uncompressedSize;
+  const signed = hasZipRange(data, offset, 16) && offset + 16 <= directoryOffset &&
+    data.readUInt32LE(offset) === 0x08074b50 &&
+    data.readUInt32LE(offset + 4) === crc32 &&
+    data.readUInt32LE(offset + 8) === compressedSize &&
+    data.readUInt32LE(offset + 12) === uncompressedSize;
+  if (unsigned === signed) throw new Error(SourceError.CORRUPTED);
+  return signed ? offset + 16 : offset + 12;
 }
 
 function decodeZipName(bytes: Uint8Array): string {

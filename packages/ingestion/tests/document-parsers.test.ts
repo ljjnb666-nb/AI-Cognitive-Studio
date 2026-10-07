@@ -3,15 +3,17 @@ import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import PDFDocument from "pdfkit";
 import { describe, expect, it } from "vitest";
-import { parseDocument, runNative } from "../src/document-parsers.js";
+import { DEFAULT_PARSER_LIMITS, epubChildArgs, parseDocument, runNative } from "../src/document-parsers.js";
 
-type Entry = { name: string; text: string; deflate?: boolean };
+type Entry = { name: string; text: string; deflate?: boolean; descriptor?: boolean; omitDescriptor?: boolean };
 function zip(entries: Entry[]): Uint8Array {
   const locals: Buffer[] = [], central: Buffer[] = []; let offset = 0;
   for (const entry of entries) {
-    const name = Buffer.from(entry.name), raw = Buffer.from(entry.text), body = entry.deflate ? deflateRawSync(raw) : raw, method = entry.deflate ? 8 : 0;
-    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(raw.length, 22); local.writeUInt16LE(name.length, 26); locals.push(local, name, body);
-    const record = Buffer.alloc(46); record.writeUInt32LE(0x02014b50, 0); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(method, 10); record.writeUInt32LE(body.length, 20); record.writeUInt32LE(raw.length, 24); record.writeUInt16LE(name.length, 28); record.writeUInt32LE(offset, 42); central.push(record, name); offset += local.length + name.length + body.length;
+    const name = Buffer.from(entry.name), raw = Buffer.from(entry.text), body = entry.deflate ? deflateRawSync(raw) : raw, method = entry.deflate ? 8 : 0, flags = entry.descriptor ? 0x08 : 0;
+    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(flags, 6); local.writeUInt16LE(method, 8); if (!entry.descriptor) { local.writeUInt32LE(body.length, 18); local.writeUInt32LE(raw.length, 22); } local.writeUInt16LE(name.length, 26);
+    const descriptor = entry.descriptor && !entry.omitDescriptor ? Buffer.alloc(16) : Buffer.alloc(0); if (descriptor.length) { descriptor.writeUInt32LE(0x08074b50, 0); descriptor.writeUInt32LE(body.length, 8); descriptor.writeUInt32LE(raw.length, 12); }
+    locals.push(local, name, body, descriptor);
+    const record = Buffer.alloc(46); record.writeUInt32LE(0x02014b50, 0); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(flags, 8); record.writeUInt16LE(method, 10); record.writeUInt32LE(body.length, 20); record.writeUInt32LE(raw.length, 24); record.writeUInt16LE(name.length, 28); record.writeUInt32LE(offset, 42); central.push(record, name); offset += local.length + name.length + body.length + descriptor.length;
   }
   const directory = Buffer.concat(central), end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16); return Buffer.concat([...locals, directory, end]);
 }
@@ -69,6 +71,35 @@ describe("safe EPUB parser", () => {
       { name: "OPS/a.xhtml", text: "<html><body><p>A</p></body></html>" },
     ]);
     await expect(parseDocument(input, "application/epub+zip")).rejects.toThrow("SOURCE_CORRUPTED");
+  });
+  it("resolves the tsx EPUB preloader from the ingestion runtime dependency", () => {
+    const args = epubChildArgs("source.epub", DEFAULT_PARSER_LIMITS);
+    expect(args[2]).toMatch(/^file:/);
+    expect(args[2]).not.toBe("tsx");
+  });
+  it("validates bit-3 data descriptors as part of the bounded local ZIP range", async () => {
+    const valid = epub([{ name: "OPS/empty.bin", text: "", descriptor: true }]);
+    await expect(parseDocument(valid, "application/epub+zip")).resolves.toMatchObject({ parser: { name: "builtin-epub" } });
+
+    const missing = epub([{ name: "OPS/empty.bin", text: "", descriptor: true, omitDescriptor: true }]);
+    await expect(parseDocument(missing, "application/epub+zip")).rejects.toThrow("SOURCE_CORRUPTED");
+
+    const mismatched = Buffer.from(valid);
+    const descriptor = mismatched.indexOf(Buffer.from([0x50, 0x4b, 0x07, 0x08]));
+    expect(descriptor).toBeGreaterThanOrEqual(0);
+    mismatched.writeUInt32LE(1, descriptor + 8);
+    await expect(parseDocument(mismatched, "application/epub+zip")).rejects.toThrow("SOURCE_CORRUPTED");
+  });
+  it("preserves split UTF-8 code points across child stdout chunks", async () => {
+    const fixture = fileURLToPath(new URL("./fixtures/epub-child-split-utf8.mjs", import.meta.url));
+    const parsed = await parseDocument(epub(), "application/epub+zip", { epubChildEntry: fixture });
+    expect(parsed.pages[0]?.blocks[0]?.text).toBe("中文");
+  });
+  it("rejects malformed result payloads and unknown child error codes as stable parser failures", async () => {
+    const malformed = fileURLToPath(new URL("./fixtures/epub-child-malformed-result.mjs", import.meta.url));
+    const unknownError = fileURLToPath(new URL("./fixtures/epub-child-unknown-error.mjs", import.meta.url));
+    await expect(parseDocument(epub(), "application/epub+zip", { epubChildEntry: malformed })).rejects.toThrow("SOURCE_PARSE_ERROR");
+    await expect(parseDocument(epub(), "application/epub+zip", { epubChildEntry: unknownError })).rejects.toThrow("SOURCE_PARSE_ERROR");
   });
   it("isolates EPUB parsing behind a memory-capped child with a hard deadline", async () => {
     const fixture = fileURLToPath(new URL("./fixtures/pdf-child-stall.mjs", import.meta.url));
