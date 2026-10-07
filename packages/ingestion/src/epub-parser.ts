@@ -64,7 +64,7 @@ const NAV_STRUCTURAL_FAILURE = "EPUB_NAV_STRUCTURAL_FAILURE";
 const MAX_WALK_DEPTH = 256;
 const MAX_NAVIGATION_DEPTH = 64;
 
-type ZipEntry = { name: string; method: number; flags: number; compressed: Buffer; compressedSize: number; uncompressedSize: number };
+type ZipEntry = { name: string; method: number; flags: number; compressed: Buffer; compressedSize: number; uncompressedSize: number; localOffset: number; localExtraLength: number };
 type ManifestItem = { id: string; href: string; mediaType: string | null; properties: string[] };
 type EpubPackage = { path: string; version: string | null; renditionLayout: EpubRenditionLayout; manifest: Map<string, ManifestItem>; spineIds: string[]; spineTocId: string | null; dcTitle: string | null; dcLanguage: string | null; dcIdentifier: string | null };
 type NavigationResult = { source: EpubNavigationSource; entries: EpubNavigationEntry[]; degraded: boolean };
@@ -73,7 +73,12 @@ type BlockContext = { spineIndex: number; docPath: string; provenance: BlockExtr
 export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: ParserDescriptor): Parsed {
   const entries = readZip(bytes, limits);
   const byName = new Map(entries.map((entry) => [entry.name, entry]));
-  if (entryText(byName, "mimetype", limits) !== "application/epub+zip") throw new Error(SourceError.CORRUPTED);
+  const mimetype = byName.get("mimetype");
+  // OCF authority: mimetype is the first local file, STORED (never deflated)
+  // and carries no local extra field. This prevents ambiguous/self-extracting
+  // ZIP layouts from being accepted as EPUB containers.
+  if (!mimetype || mimetype.localOffset !== 0 || mimetype.method !== 0 || mimetype.localExtraLength !== 0 ||
+      entryText(byName, "mimetype", limits) !== "application/epub+zip") throw new Error(SourceError.CORRUPTED);
   if (byName.has("META-INF/encryption.xml")) throw new Error(SourceError.ARCHIVE_UNSAFE);
   const provenance: BlockExtractionProvenance = { sourceMethod: parser.sourceMethod, parserName: parser.name, parserVersion: parser.version };
   const opf = readPackage(byName, limits);
@@ -662,8 +667,8 @@ function safeXmlText(xml: string): string {
 
 function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
   const data = Buffer.from(bytes);
-  const eocd = data.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-  if (eocd < 0 || !hasZipRange(data, eocd, 22)) throw new Error(SourceError.CORRUPTED);
+  const eocd = findEndOfCentralDirectory(data);
+  if (eocd < 0) throw new Error(SourceError.CORRUPTED);
 
   const diskNumber = data.readUInt16LE(eocd + 4);
   const directoryDisk = data.readUInt16LE(eocd + 6);
@@ -701,12 +706,15 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
     if (!hasZipRange(data, offset, centralLength) || offset + centralLength > eocd) throw new Error(SourceError.CORRUPTED);
 
     const name = decodeZipName(data.subarray(offset + 46, offset + 46 + nameLength));
+    const isDirectory = name.endsWith("/");
+    const authorityPath = isDirectory ? name.slice(0, -1) : name;
     if (seenNames.has(name)) throw new Error(SourceError.ARCHIVE_UNSAFE);
     seenNames.add(name);
-    if ((flags & 1) || (method !== 0 && method !== 8) || !isSafePath(name) ||
+    if ((flags & 1) || (method !== 0 && method !== 8) || !isSafePath(authorityPath) ||
         uncompressedSize > limits.maxArchiveEntryBytes ||
         (compressedSize === 0 && uncompressedSize !== 0) ||
         (compressedSize > 0 && uncompressedSize / compressedSize > limits.maxArchiveCompressionRatio)) throw new Error(SourceError.ARCHIVE_UNSAFE);
+    if (isDirectory && uncompressedSize !== 0) throw new Error(SourceError.CORRUPTED);
     if (method === 0 && compressedSize !== uncompressedSize) throw new Error(SourceError.CORRUPTED);
 
     total += uncompressedSize;
@@ -733,7 +741,7 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
     const end = start + compressedSize;
     if (!hasZipRange(data, start, compressedSize) || end > directoryOffset) throw new Error(SourceError.CORRUPTED);
     localRanges.push({ start: localOffset, end });
-    entries.push({ name, method, flags, compressed: data.subarray(start, end), compressedSize, uncompressedSize });
+    if (!isDirectory) entries.push({ name, method, flags, compressed: data.subarray(start, end), compressedSize, uncompressedSize, localOffset, localExtraLength });
     offset += centralLength;
   }
 
@@ -743,6 +751,19 @@ function readZip(bytes: Uint8Array, limits: ParserLimits): ZipEntry[] {
     if (localRanges[index - 1]!.end > localRanges[index]!.start) throw new Error(SourceError.CORRUPTED);
   }
   return entries;
+}
+
+function findEndOfCentralDirectory(data: Buffer): number {
+  // EOCD may be followed by up to 65,535 comment bytes, and the comment itself
+  // may contain the EOCD signature. Scan for a candidate whose own declared
+  // comment length reaches EOF instead of trusting lastIndexOf(signature).
+  const minimum = Math.max(0, data.length - 22 - 0xffff);
+  for (let offset = data.length - 22; offset >= minimum; offset--) {
+    if (data.readUInt32LE(offset) !== 0x06054b50) continue;
+    const commentLength = data.readUInt16LE(offset + 20);
+    if (offset + 22 + commentLength === data.length) return offset;
+  }
+  return -1;
 }
 
 function hasZipRange(data: Buffer, offset: number, length: number): boolean {
@@ -770,7 +791,7 @@ function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserL
 
 /** ZIP entry names stay strict: no traversal segments of any kind. */
 function isSafePath(path: string): boolean {
-  return !!path && !/^(?:[\\/]|[a-zA-Z]:|\\\\)/.test(path) && !path.split(/[\\/]/).some((part) => part === ".." || !part) && !/%2e|%2f|%5c/i.test(path);
+  return !!path && !path.includes("\\") && !/^(?:[\\/]|[a-zA-Z]:|\\\\)/.test(path) && !path.split("/").some((part) => part === ".." || !part) && !/%2e|%2f|%5c/i.test(path);
 }
 
 // ---------------------------------------------------------------------------

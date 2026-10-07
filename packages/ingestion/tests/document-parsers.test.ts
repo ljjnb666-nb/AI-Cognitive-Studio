@@ -38,6 +38,35 @@ describe("safe EPUB parser", () => {
     input.writeUInt16LE(8, 8);
     await expect(parseDocument(input, "application/epub+zip")).rejects.toThrow("SOURCE_CORRUPTED");
   });
+  it("accepts safe directory records after the mandatory first mimetype entry", async () => {
+    const input = zip([
+      { name: "mimetype", text: "application/epub+zip" },
+      { name: "META-INF/", text: "" },
+      { name: "META-INF/container.xml", text: '<container><rootfile full-path="OPS/book.opf"/></container>' },
+      { name: "OPS/", text: "" },
+      { name: "OPS/book.opf", text: '<package><manifest><item id="a" href="a.xhtml"/></manifest><spine><itemref idref="a"/></spine></package>' },
+      { name: "OPS/a.xhtml", text: "<html><body><p>A</p></body></html>" },
+    ]);
+    await expect(parseDocument(input, "application/epub+zip")).resolves.toMatchObject({ parser: { name: "builtin-epub" } });
+  });
+  it("finds the real EOCD when an archive comment contains a fake EOCD signature", async () => {
+    const original = Buffer.from(epub());
+    const eocd = original.length - 22;
+    const comment = Buffer.from([0x41, 0x50, 0x4b, 0x05, 0x06, 0x42]);
+    const input = Buffer.concat([original, comment]);
+    input.writeUInt16LE(comment.length, eocd + 20);
+    await expect(parseDocument(input, "application/epub+zip")).resolves.toMatchObject({ parser: { name: "builtin-epub" } });
+  });
+  it("enforces OCF mimetype as the first local stored file", async () => {
+    const input = zip([
+      { name: "META-INF/", text: "" },
+      { name: "mimetype", text: "application/epub+zip" },
+      { name: "META-INF/container.xml", text: '<container><rootfile full-path="OPS/book.opf"/></container>' },
+      { name: "OPS/book.opf", text: '<package><manifest><item id="a" href="a.xhtml"/></manifest><spine><itemref idref="a"/></spine></package>' },
+      { name: "OPS/a.xhtml", text: "<html><body><p>A</p></body></html>" },
+    ]);
+    await expect(parseDocument(input, "application/epub+zip")).rejects.toThrow("SOURCE_CORRUPTED");
+  });
   it("isolates EPUB parsing behind a memory-capped child with a hard deadline", async () => {
     const fixture = fileURLToPath(new URL("./fixtures/pdf-child-stall.mjs", import.meta.url));
     await expect(parseDocument(epub(), "application/epub+zip", { epubChildEntry: fixture, epubTimeoutMs: 5 })).rejects.toThrow("SOURCE_PARSE_TIMEOUT");
