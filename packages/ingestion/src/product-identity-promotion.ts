@@ -2,6 +2,7 @@ import { Prisma, prisma } from "@ai-cognitive/db";
 import {
   classifyProductIdentifierForPromotion,
   isPromotableProductLanguage,
+  normalizeIsbnForComparison,
   normalizeProductIdentityTitleForComparison,
   parseProductIdentityCandidate,
 } from "@ai-cognitive/domain";
@@ -54,6 +55,10 @@ function sameTitle(left: string, right: string): boolean {
 
 function sameLanguage(left: string, right: string): boolean {
   return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+function sameIsbn(left: string, right: string): boolean {
+  return normalizeIsbnForComparison(left) === normalizeIsbnForComparison(right);
 }
 
 async function createPromotion(
@@ -259,10 +264,10 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
   if (language && edition.language && !sameLanguage(edition.language, language)) {
     conflicts.push({ field: "edition.language", existing: edition.language, candidate: language });
   }
-  if (isbn10 && edition.isbn10 && edition.isbn10 !== isbn10) {
+  if (isbn10 && edition.isbn10 && !sameIsbn(edition.isbn10, isbn10)) {
     conflicts.push({ field: "edition.isbn10", existing: edition.isbn10, candidate: isbn10 });
   }
-  if (isbn13 && edition.isbn13 && edition.isbn13 !== isbn13) {
+  if (isbn13 && edition.isbn13 && !sameIsbn(edition.isbn13, isbn13)) {
     conflicts.push({ field: "edition.isbn13", existing: edition.isbn13, candidate: isbn13 });
   }
 
@@ -318,10 +323,17 @@ export async function promoteCurrentProductIdentityForUser(
   input: { sourceDocumentId: string; expectedExtractionId: string },
 ): Promise<ProductIdentityPromotionOutcome> {
   return prisma.$transaction(async (tx) => {
-    const membership = await tx.workspaceMember.findUnique({
-      where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } },
-      select: { userId: true, role: true },
-    });
+    // Authorization is part of the same write transaction. Lock the membership
+    // row so concurrent role downgrade/removal serializes with identity writes:
+    // either promotion finishes first under the still-valid role, or promotion
+    // waits and observes the new role / missing membership before any mutation.
+    const memberships = await tx.$queryRaw<Array<{ userId: string; role: "OWNER" | "EDITOR" | "VIEWER" }>>`
+      SELECT "userId", "role"
+      FROM "WorkspaceMember"
+      WHERE "workspaceId" = ${context.workspaceId} AND "userId" = ${context.userId}
+      FOR UPDATE
+    `;
+    const membership = memberships[0];
     if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
     if (membership.role === "VIEWER") throw new Error("WORKSPACE_WRITE_ACCESS_DENIED");
     return promoteInTransaction(tx, { workspaceId: context.workspaceId, ...input });
