@@ -174,6 +174,8 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
     });
   }
 
+  assertManifestFallbackGraph(manifest);
+
   const spine: SpineItemRef[] = [];
   const seenSpineIds = new Set<string>();
   for (const itemref of directElementChildrenByLocalName(spineElement, "itemref")) {
@@ -184,8 +186,10 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
     seenSpineIds.add(idref);
     spine.push({ idref, linear: !hasLinear || linearValue === "yes" });
   }
-  // EPUB requires at least one primary item; omitted linear means "yes".
+  // Every spine IDREF is package authority, not something to discover lazily
+  // only when canonical extraction reaches that item.
   if (!spine.length || !spine.some((itemref) => itemref.linear)) throw new Error(SourceError.CORRUPTED);
+  if (spine.some((itemref) => !manifest.has(itemref.idref))) throw new Error(SourceError.CORRUPTED);
 
   return {
     path: opfPath,
@@ -198,6 +202,22 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
     dcLanguage: dcElementText(opf, limits, "language"),
     dcIdentifier: dcElementText(opf, limits, "identifier"),
   };
+}
+
+function assertManifestFallbackGraph(manifest: Map<string, ManifestItem>): void {
+  // EPUB fallback IDREFs are package-global authority: every declared edge
+  // must resolve, and no chain may contain self/circular references, even if
+  // the item is not selected by this parser for the canonical reading stream.
+  for (const start of manifest.values()) {
+    const seen = new Set<string>([start.id]);
+    let current = start;
+    while (current.fallback) {
+      const next = manifest.get(current.fallback);
+      if (!next || seen.has(next.id)) throw new Error(SourceError.CORRUPTED);
+      seen.add(next.id);
+      current = next;
+    }
+  }
 }
 
 function isProcessableSpineContent(item: ManifestItem): boolean {

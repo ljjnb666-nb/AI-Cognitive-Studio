@@ -232,6 +232,36 @@ describe("epub-parser-v2 package and spine authority", () => {
     ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
 
+  it("validates every declared manifest fallback edge even when the item is not in the spine", async () => {
+    const missing = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/><item id="unused" href="data/unused.bin" media-type="application/x-example" fallback="missing"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: missing, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Primary</p>") },
+      { name: "OEBPS/data/unused.bin", text: "unused" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const cycle = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/><item id="a" href="data/a.bin" media-type="application/x-a" fallback="b"/><item id="b" href="data/b.bin" media-type="application/x-b" fallback="a"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: cycle, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Primary</p>") },
+      { name: "OEBPS/data/a.bin", text: "a" },
+      { name: "OEBPS/data/b.bin", text: "b" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+
+    const self = opfDocument({
+      manifest: '<item id="c1" href="text/c1.xhtml" media-type="application/xhtml+xml"/><item id="unused" href="data/unused.bin" media-type="application/x-example" fallback="unused"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: self, files: [
+      { name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Primary</p>") },
+      { name: "OEBPS/data/unused.bin", text: "unused" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+  });
+
   it("uses the manifest fallback chain for a foreign top-level spine resource", async () => {
     const opf = opfDocument({
       manifest: '<item id="foreign" href="data/ch1.bin" media-type="application/x-example" fallback="fallback"/><item id="fallback" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>',
