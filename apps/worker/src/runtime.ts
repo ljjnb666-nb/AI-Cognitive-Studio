@@ -7,8 +7,8 @@ import { createBookAnalysisWorker, createBookAnalysisQueue, dispatchBookAnalysis
 import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPodcastGenerationWithQueue } from "./podcast-generation.js";
 import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudioGenerationWithQueue } from "./audio-generation.js";
 import { createShortVideoGenerationWorker, createShortVideoGenerationQueue, dispatchShortVideoGenerationWithQueue, type ShortVideoRuntimeAdapter } from "./short-video-generation.js";
-import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue, INGESTION_JOB } from "./source-ingestion.js";
-import { reconcileIngestionDeliveries, type IngestionReconciliationQueuePort } from "@ai-cognitive/ingestion";
+import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue, resolveSourceIngestionOcrExecutor, INGESTION_JOB } from "./source-ingestion.js";
+import { reconcileIngestionDeliveries, reconcileOcrServerInstances, type IngestionReconciliationQueuePort } from "@ai-cognitive/ingestion";
 import { createBookAnalysisBootstrapWorker, createBookAnalysisBootstrapQueue, dispatchBookAnalysisBootstrapWithQueue, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "./book-analysis-bootstrap.js";
 import { createHealthCheckWorker } from "./worker.js";
 import { createBookProductionGatewayRuntime, createPodcastAudioProductionGatewayRuntime, createPodcastProductionGatewayRuntime, createShortVideoProductionGatewayRuntime, type BookGatewayRuntime, type BookProductionGatewayRuntimeOverrides, type PodcastAudioGatewayRuntime, type PodcastGatewayRuntime, type ShortVideoGatewayRuntime } from "./provider-gateway-runtime.js";
@@ -63,7 +63,23 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const gatewayConfigured = resolveBookWorkerCapability(source);
   const bookEnabled = Boolean(options.bookDependencies || bookConfigured || gatewayConfigured);
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
+  let sourceIngestionOcrRuntime: Awaited<ReturnType<typeof resolveSourceIngestionOcrExecutor>>;
   try {
+  // Real OCR runtime (04B-3/RF01): resolved + version-verified FIRST, before
+  // any worker or connection is constructed — malformed explicit MinerU
+  // configuration AND a runtime not reporting the pinned 4.0.3 fail fast at
+  // startup. undefined keeps the no-OCR behavior.
+  sourceIngestionOcrRuntime = await resolveSourceIngestionOcrExecutor(environment);
+  // RF03 P1-01 STARTUP BARRIER: with the OCR runtime enabled, ONE bounded
+  // same-host crash-reconciliation sweep runs BEFORE the source-ingestion
+  // Worker is constructed and before any dispatch can enqueue new OCR work.
+  // Otherwise a fresh worker could consume a stale OCR job, acquire the
+  // expired host lease, and spawn a SECOND claim-scoped MinerU server while
+  // the crashed worker's server was still (possibly) alive. This is a real
+  // await barrier, not an earlier entry in Promise.all.
+  if (sourceIngestionOcrRuntime) {
+    await reconcileOcrServerInstances({ hostId: sourceIngestionOcrRuntime.config.hostId, executable: sourceIngestionOcrRuntime.config.executable, executableArgs: sourceIngestionOcrRuntime.config.executableArgs, stopTimeoutMs: sourceIngestionOcrRuntime.config.serverStopTimeoutMs, homeRoot: sourceIngestionOcrRuntime.config.homeRoot });
+  }
   if (!podcastAdapter && source.PODCAST_GENERATION_PROVIDER?.trim()) {
     const runtime = productionPodcastGatewayRuntime = createPodcastProductionGatewayRuntime(source, options.bookProductionGatewayOverrides);
     podcastAdapter = { providerForRun: input => runtime.createProviderForRun(input), embeddingProviderForRun: input => runtime.createEmbeddingProviderForRun(input) };
@@ -73,7 +89,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const bookWorker = bookEnabled ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY)) : undefined;
   const bookBootstrapWorker = createBookAnalysisBootstrapWorker(environment, { ...workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY), source });
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);
-  const ingestionWorker = createSourceIngestionWorker(environment, workerOptions(environment.WORKER_INGESTION_CONCURRENCY));
+  const ingestionWorker = createSourceIngestionWorker(environment, { ...workerOptions(environment.WORKER_INGESTION_CONCURRENCY), ...(sourceIngestionOcrRuntime ? { pdfOcrExecutor: sourceIngestionOcrRuntime.pdfOcrExecutor } : {}) });
   if (!bookWorker) logger.info("worker.book_analysis.disabled", { reason: "BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED" });
   const podcastWorker = podcastAdapter ? createPodcastGenerationWorker(environment, podcastAdapter, workerOptions(environment.WORKER_PODCAST_GENERATION_CONCURRENCY)) : undefined;
   const audioWorker = audioConfigured ? createPodcastAudioWorker(environment, audioAdapter, workerOptions(environment.WORKER_AUDIO_CONCURRENCY)) : undefined;
@@ -128,9 +144,15 @@ export async function startWorkerRuntime(environment: Environment, options: Work
     add: async (jobId) => { await ingestionQueue.add(INGESTION_JOB, { ingestionRunId: jobId }, { jobId }); },
   };
   const reconcileIngestionDeliveriesSweep = dispatch("source-ingestion-reconciliation", () => reconcileIngestionDeliveries({ queue: ingestionReconciliationQueue, maxAttempts: environment.SOURCE_INGESTION_PROCESS_MAX_ATTEMPTS }), 60_000);
+  // Same-host OCR server reconciliation (RF01 P1-06): converges OcrServerInstance
+  // rows left by hard crashes, cleaning ONLY this configured host's rows and
+  // ONLY processes whose identity can be proven. One bounded startup sweep plus
+  // a periodic bounded sweep; never cross-host, never process-name based.
+  const reconcileOcrServersSweep = sourceIngestionOcrRuntime ? (() => { const ocrRuntime = sourceIngestionOcrRuntime; return dispatch("ocr-server-reconciliation", () => reconcileOcrServerInstances({ hostId: ocrRuntime.config.hostId, executable: ocrRuntime.config.executable, executableArgs: ocrRuntime.config.executableArgs, stopTimeoutMs: ocrRuntime.config.serverStopTimeoutMs, homeRoot: ocrRuntime.config.homeRoot }), 60_000); })() : undefined;
   const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); }];
   initial.push(reconcileBookAnalysisStale);
   initial.push(reconcileIngestionDeliveriesSweep);
+  if (reconcileOcrServersSweep) initial.push(reconcileOcrServersSweep);
   if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (podcastQueue) initial.push(dispatch("podcast-generation", () => dispatchPodcastGenerationWithQueue(podcastQueue, { ...(options.outboxTopics?.podcastGeneration ? { topic: options.outboxTopics.podcastGeneration } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (audioQueue) initial.push(dispatch("podcast-audio", () => dispatchPodcastAudioGenerationWithQueue(audioQueue, { ...(options.outboxTopics?.podcastAudio ? { topic: options.outboxTopics.podcastAudio } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
@@ -163,8 +185,16 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   void reconcileDurableOperations();
   logger.info("worker.started", { queue: "system.health-check", podcastGenerationEnabled: Boolean(podcastWorker) });
   let closePromise: Promise<void> | undefined;
-  return { healthWorker, ingestionWorker, bookBootstrapWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.close().catch(() => undefined); await ingestionQueue.close(); await bookBootstrapQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); await ingestionWorker.close(); await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+  return { healthWorker, ingestionWorker, bookBootstrapWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.close().catch(() => undefined); await ingestionQueue.close(); await bookBootstrapQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); // RF01 P1-02 shutdown order: BullMQ's close() first stops the worker from
+// fetching NEW jobs and only then waits for the active job, so beginning it
+// before aborting the OCR runtime closes the claim-start window; aborting the
+// executor next interrupts the ACTIVE MinerU work; awaiting the worker close
+// last waits for the interrupted job to finish its bounded unwind. No new OCR
+// claim can start after the executor entered closing, and no owned server,
+// host lease or claim temp tree survives the runtime close.
+const ingestionWorkerClose = ingestionWorker.close(); await sourceIngestionOcrRuntime?.close(); await ingestionWorkerClose; await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
+    await sourceIngestionOcrRuntime?.close();
     await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close();
     throw error;
   }

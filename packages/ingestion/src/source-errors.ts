@@ -42,6 +42,40 @@ export const SourceError = {
   // it is never accepted as usable fallback content. PAGE-level code — the run
   // itself ends through the ordinary REQUIRES_FALLBACK / OCR_REQUIRED path.
   OCR_NO_USABLE_TEXT: "SOURCE_OCR_NO_USABLE_TEXT",
+  // ---------------------------------------------------------------------------
+  // Real OCR executor failure classes (BOOK-INGESTION-04B-3). Stable, typed,
+  // PAGE-level durable codes: they are recorded on OcrPageAttempt.errorCode and
+  // never become run-level error codes (the run ends through the ordinary
+  // OCR_REQUIRED/REQUIRES_FALLBACK authority of 04B-2).
+  // ---------------------------------------------------------------------------
+  // The OCR provider was requested but the executor could not be constructed:
+  // malformed explicit configuration. Startup fails fast instead; this exists
+  // so a constructed executor can never run without its full contract.
+  OCR_MINERU_NOT_CONFIGURED: "SOURCE_OCR_MINERU_NOT_CONFIGURED",
+  // The configured MinerU executable does not exist / could not be spawned.
+  OCR_MINERU_NOT_FOUND: "SOURCE_OCR_MINERU_NOT_FOUND",
+  // MINERU_MODEL_SOURCE=local and the local model repo is not ready. MinerU's
+  // own deterministic evidence ("Model repo ... is not ready"); zero downloads
+  // by contract. Terminal: retrying cannot create the model.
+  OCR_MODEL_NOT_FOUND: "SOURCE_OCR_MODEL_NOT_FOUND",
+  // A bounded MinerU process (parse / server start / server stop) exceeded its
+  // hard timeout and was terminated by recorded identity.
+  OCR_TIMEOUT: "SOURCE_OCR_TIMEOUT",
+  // MinerU exited nonzero / unpredictably without more specific evidence.
+  OCR_PROCESS_FAILED: "SOURCE_OCR_PROCESS_FAILED",
+  // MinerU's output violated the output contract (not written, malformed
+  // envelope, exceeds the bounded output cap, outside the requested location).
+  OCR_OUTPUT_INVALID: "SOURCE_OCR_OUTPUT_INVALID",
+  // The executor's application-generated per-claim temp IO failed (input
+  // write, output read, cleanup). Infrastructure-class, retryable.
+  OCR_TEMP_IO_ERROR: "SOURCE_OCR_TEMP_IO_ERROR",
+  // The configured host OCR capacity slot is owned by another live claim.
+  // Transient with a bounded nextAttemptAt; never a busy-wait.
+  OCR_HOST_CAPACITY: "SOURCE_OCR_HOST_CAPACITY",
+  // The executor lost its OcrHostLease ownership mid-execution (renewal
+  // failed): infrastructure authority is gone, so execution stops and the
+  // result is a stable transient failure. Never releases a newer owner's lease.
+  OCR_HOST_LEASE_LOST: "SOURCE_OCR_HOST_LEASE_LOST",
 } as const;
 
 export type SourceErrorCode = (typeof SourceError)[keyof typeof SourceError];

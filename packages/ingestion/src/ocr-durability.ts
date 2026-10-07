@@ -17,23 +17,57 @@ export const OCR_PAGE_MAX_ATTEMPTS = 3;
 export type OcrHostLeaseGrant = { claimToken: string; leaseUntil: Date };
 
 /**
- * Atomically acquires the per-host OCR capacity slot. INSERT with a
- * conditional ON CONFLICT UPDATE: a live lease held by another token refuses
- * the takeover (0 rows), an expired lease is claimable. Advisory locks are
- * deliberately avoided — the row lease survives pool reconnects.
+ * Host OCR capacity invariant (RF03 P1-02 + RF05 P1-01): acquisition and
+ * handoff serialize through THE SAME OcrHostLease row with ONE lock ordering
+ * (lease row first, then OcrServerInstance state). The sequence runs in ONE
+ * transaction:
+ *  1. the host-capacity row is ensured to exist (idempotent, no grant);
+ *  2. that row is SELECTed FOR UPDATE — the serialization point;
+ *  3. only AFTER the lock is held, in a fresh READ-COMMITTED statement, the
+ *     unresolved OcrServerInstance set is queried, so a concurrent handoff
+ *     that committed a STARTING row while this claim waited on the lock is
+ *     always visible;
+ *  4. the CURRENT locked lease is inspected: a live claim refuses; free/
+ *     expired with an unresolved instance refuses; free/expired with no
+ *     unresolved instance grants.
+ *  5. the SAME row is updated with the new token + leaseUntil and committed.
+ * No read-before-lock race exists: the grant decision and the write share the
+ * lock's serialization authority.
  */
 export async function acquireOcrHostLease(hostId: string, leaseMs = OCR_HOST_LEASE_TTL_MS, hostMetadata?: Record<string, unknown>): Promise<OcrHostLeaseGrant | null> {
   const claimToken = randomUUID();
-  const rows = await prisma.$queryRaw<Array<{ claimToken: string; leaseUntil: Date }>>`
-    INSERT INTO "OcrHostLease" ("hostId", "claimToken", "claimedAt", "leaseUntil", "hostMetadata", "updatedAt")
-    VALUES (${hostId}, ${claimToken}, NOW(), NOW() + (${leaseMs} * INTERVAL '1 millisecond'), ${hostMetadata ? JSON.stringify(hostMetadata) : null}::jsonb, NOW())
-    ON CONFLICT ("hostId") DO UPDATE SET
-      "claimToken" = EXCLUDED."claimToken", "claimedAt" = EXCLUDED."claimedAt", "leaseUntil" = EXCLUDED."leaseUntil",
-      "hostMetadata" = EXCLUDED."hostMetadata", "updatedAt" = NOW()
-    WHERE "OcrHostLease"."leaseUntil" IS NULL OR "OcrHostLease"."leaseUntil" < NOW()
-    RETURNING "claimToken", "leaseUntil"`;
-  return rows.length === 1 ? { claimToken: rows[0]!.claimToken, leaseUntil: rows[0]!.leaseUntil } : null;
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      INSERT INTO "OcrHostLease" ("hostId", "updatedAt")
+      VALUES (${hostId}, NOW())
+      ON CONFLICT ("hostId") DO NOTHING`;
+    await tx.$queryRaw`
+      SELECT "claimToken" FROM "OcrHostLease"
+      WHERE "hostId" = ${hostId}
+      FOR UPDATE`;
+    // Fresh READ-COMMITTED statement AFTER the row lock: a STARTING row
+    // committed by a handoff that held this lock is always observed here.
+    const unresolved = await tx.$queryRaw<Array<{ one: number }>>`
+      SELECT 1 AS one FROM "OcrServerInstance"
+      WHERE "hostId" = ${hostId} AND "status" IN ('STARTING', 'RUNNING', 'STOPPING', 'ORPHANED')
+      LIMIT 1`;
+    if (unresolved.length > 0) return null;
+    const rows = await tx.$queryRaw<Array<{ claimToken: string; leaseUntil: Date }>>`
+      UPDATE "OcrHostLease" SET
+        "claimToken" = ${claimToken}, "claimedAt" = NOW(),
+        "leaseUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond'),
+        "hostMetadata" = ${hostMetadata ? JSON.stringify(hostMetadata) : null}::jsonb, "updatedAt" = NOW()
+      WHERE "hostId" = ${hostId}
+        AND ("claimToken" IS NULL OR "leaseUntil" IS NULL OR "leaseUntil" < NOW())
+      RETURNING "claimToken", "leaseUntil"`;
+    // The serialization wait is bounded (the owned operation self-caps): this
+    // transaction may legitimately sit on the OcrHostLease row lock while an
+    // in-flight handoff commits; 15s covers that, then the fresh-snapshot
+    // unresolved check returns null.
+    return rows.length === 1 ? { claimToken: rows[0]!.claimToken, leaseUntil: rows[0]!.leaseUntil } : null;
+  }, { timeout: 15_000, maxWait: 5_000 });
 }
+
 
 /** Renewal requires hostId + claimToken + still-live lease; stale renewals are no-ops. */
 export async function renewOcrHostLease(hostId: string, claimToken: string, leaseMs = OCR_HOST_LEASE_TTL_MS): Promise<boolean> {
@@ -120,6 +154,7 @@ export async function completeOcrPageAttempt(input: { workspaceId: string; inges
 
 export type OcrPageFailureKind = "transient" | "terminal";
 
+
 /**
  * Records a page failure under live ownership. Transient failures requeue to
  * PENDING while attempt budget remains and become FAILED when exhausted;
@@ -151,13 +186,38 @@ export async function failOcrPageAttempt(input: { workspaceId: string; ingestion
 export type OcrServerEndpoint = { pid: number; serverId: string; transports: Array<Record<string, unknown>> };
 
 /** Persists the pre-launch STARTING row (endpoint identity intentionally absent). */
-export async function createOcrServerInstance(input: { workspaceId: string; sourceDocumentId: string; ingestionRunId: string; hostId: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string }): Promise<string | null> {
+export async function createOcrServerInstance(input: { workspaceId: string; sourceDocumentId: string; ingestionRunId: string; hostId: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; /** RF05 deterministic test barrier: invoked inside the transaction right after the lease-row lock is held, before the STARTING insert commits. Never supplied in production. */ afterLeaseLock?: () => Promise<void> }): Promise<string | null> {
+  // RF04 P1-01 lease-to-server handoff fence: STARTING ownership becomes
+  // durable ONLY inside the same transaction that locks the OcrHostLease row
+  // and proves it is STILL ours (hostId + claimToken + leaseUntil > NOW()).
+  // The row lock also serializes against acquireOcrHostLease's own row write,
+  // so a reclaim cannot interleave between a stale owner's check and insert —
+  // exactly one ordering wins and two authoritative server claims can never
+  // coexist for the slot. Stale owners (lease expired/reclaimed) create
+  // NOTHING and must abort toward their orphan/cleanup paths.
   try {
-    const row = await prisma.ocrServerInstance.create({
-      data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, ingestionRunId: input.ingestionRunId, hostId: input.hostId, hostClaimToken: input.hostClaimToken, runExecutionToken: input.runExecutionToken, mineruHome: input.mineruHome, status: "STARTING" },
-      select: { id: true },
-    });
-    return row.id;
+    // The handoff may legitimately wait on the lease-row lock while another
+    // claim's transaction finishes; 15s is bounded and well above any
+    // production handoff duration (the barrier seam's hold is 5s in tests).
+    return await prisma.$transaction(async (tx) => {
+      const leases = await tx.$queryRaw<Array<{ claimToken: string }>>`
+        SELECT "claimToken" FROM "OcrHostLease"
+        WHERE "hostId" = ${input.hostId} AND "claimToken" = ${input.hostClaimToken} AND "leaseUntil" > NOW()
+        FOR UPDATE`;
+      if (leases.length !== 1) return null;
+      if (input.afterLeaseLock) await input.afterLeaseLock();
+      // RF05 handoff hardening: refresh the lease TTL inside the SAME
+      // transaction so a lease with only milliseconds remaining cannot become
+      // immediately stale right after the STARTING row commits.
+      await tx.$executeRaw`
+        UPDATE "OcrHostLease" SET "leaseUntil" = NOW() + (${OCR_HOST_LEASE_TTL_MS} * INTERVAL '1 millisecond'), "updatedAt" = NOW()
+        WHERE "hostId" = ${input.hostId} AND "claimToken" = ${input.hostClaimToken}`;
+      const row = await tx.ocrServerInstance.create({
+        data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, ingestionRunId: input.ingestionRunId, hostId: input.hostId, hostClaimToken: input.hostClaimToken, runExecutionToken: input.runExecutionToken, mineruHome: input.mineruHome, status: "STARTING" },
+        select: { id: true },
+      });
+      return row.id;
+    }, { timeout: 15_000, maxWait: 5_000 });
   } catch (error) {
     // Only an explicit hostClaimToken unique-conflict maps to "already exists";
     // every other database failure (outage, FK/tenant-lineage violation) must
@@ -176,11 +236,77 @@ export async function recordOcrServerEndpoint(input: { hostClaimToken: string; e
   return changed.count === 1;
 }
 
-/** Late owners may transition only their own instance row (hostClaimToken-scoped). */
-export async function markOcrServerStatus(hostClaimToken: string, status: "STOPPING" | "STOPPED" | "ORPHANED", terminationReason?: string): Promise<boolean> {
+/**
+ * Explicit, state-machine-closed transitions (RF01 P1-07). The lifecycle is
+ * STARTING → RUNNING → STOPPING → STOPPED, with ORPHANED reachable from every
+ * non-terminal state when recovery evidence warrants it. Each helper enforces
+ * its legal previous-state predicate in PostgreSQL — arbitrary mutation
+ * ("anything but STOPPED") is no longer expressible:
+ *  - STOPPING: only from RUNNING (the owner is deliberately tearing down a
+ *    server whose identity it recorded).
+ *  - STOPPED: only from STOPPING, or from STARTING when cleanup can prove the
+ *    server never became usable (no endpoint identity ever existed).
+ *  - ORPHANED: from STARTING/RUNNING/STOPPING — a handled failure or a
+ *    reconciler with evidence that the row's process can no longer be
+ *    accounted for.
+ * All writes are hostClaimToken-scoped: a stale owner can never mutate a
+ * newer claim's row.
+ */
+
+export async function markOcrServerStopping(hostClaimToken: string, terminationReason?: string): Promise<boolean> {
   const changed = await prisma.ocrServerInstance.updateMany({
-    where: { hostClaimToken, status: { not: "STOPPED" } },
-    data: { status, ...(status === "STOPPED" ? { stoppedAt: new Date() } : {}), lastObservedAt: new Date(), ...(terminationReason ? { terminationReason } : {}) },
+    where: { hostClaimToken, status: "RUNNING" },
+    data: { status: "STOPPING", lastObservedAt: new Date(), ...(terminationReason ? { terminationReason } : {}) },
+  });
+  return changed.count === 1;
+}
+
+export async function markOcrServerStopped(hostClaimToken: string, terminationReason?: string): Promise<boolean> {
+  const changed = await prisma.ocrServerInstance.updateMany({
+    where: { hostClaimToken, status: "STOPPING" },
+    data: { status: "STOPPED", stoppedAt: new Date(), lastObservedAt: new Date(), ...(terminationReason ? { terminationReason } : {}) },
+  });
+  return changed.count === 1;
+}
+
+/**
+ * The ONLY STARTING -> STOPPED path (RF02 state-machine boundary). The proof
+ * condition is encoded in the PostgreSQL predicate, never in a caller-supplied
+ * reason string: the row must STILL carry no endpoint identity (pid and
+ * serverId both NULL), which is durable evidence that recordOcrServerEndpoint
+ * never committed for this claim. Callers must additionally hold process-tree
+ * proof that nothing survived (spawn ENOENT, or a confirmed owned-tree
+ * termination) — this helper deliberately cannot express any other case.
+ */
+export async function markOcrServerStartNeverStarted(hostClaimToken: string): Promise<boolean> {
+  const changed = await prisma.ocrServerInstance.updateMany({
+    where: { hostClaimToken, status: "STARTING", pid: null, serverId: null },
+    data: { status: "STOPPED", stoppedAt: new Date(), lastObservedAt: new Date(), terminationReason: "NEVER_STARTED_NO_ENDPOINT_IDENTITY" },
+  });
+  return changed.count === 1;
+}
+
+/**
+ * The reconciler's proven-gone convergence (RF02 P1-03/state-machine
+ * boundary): a STARTING/RUNNING/STOPPING row whose durable endpoint identity
+ * WAS recorded may converge to STOPPED only through this explicitly named
+ * proof API, and only after the shared repeated-negative liveness rule has
+ * confirmed the recorded process gone. The predicate encodes the proof
+ * precondition in PostgreSQL — a row without durable identity (pid/serverId)
+ * can never pass, so endpoint-file-only evidence can never converge a row.
+ */
+export async function markOcrServerStoppedProcessGone(hostClaimToken: string, terminationReason: string): Promise<boolean> {
+  const changed = await prisma.ocrServerInstance.updateMany({
+    where: { hostClaimToken, status: { in: ["STARTING", "RUNNING", "STOPPING"] }, pid: { not: null }, serverId: { not: null } },
+    data: { status: "STOPPED", stoppedAt: new Date(), lastObservedAt: new Date(), terminationReason },
+  });
+  return changed.count === 1;
+}
+
+export async function markOcrServerOrphaned(hostClaimToken: string, terminationReason: string): Promise<boolean> {
+  const changed = await prisma.ocrServerInstance.updateMany({
+    where: { hostClaimToken, status: { in: ["STARTING", "RUNNING", "STOPPING"] } },
+    data: { status: "ORPHANED", lastObservedAt: new Date(), terminationReason },
   });
   return changed.count === 1;
 }
@@ -197,12 +323,19 @@ export function validateOcrServerInstanceContract(row: { status: string; pid: nu
   return errors;
 }
 
-/** Same-host reconciler discovery for 04B-3 (durable evidence, not live handles). */
-export async function listReconcilableOcrServerInstances(hostId: string): Promise<Array<{ id: string; hostClaimToken: string; mineruHome: string; pid: number | null; serverId: string | null; status: string }>> {
+/**
+ * Same-host reconciler discovery (RF02 P1-01). ORPHANED is a TERMINAL,
+ * manual-intervention state: it is deliberately EXCLUDED from automatic
+ * discovery so old orphan rows can never consume the bounded batch and starve
+ * newer actionable STARTING/RUNNING/STOPPING rows. Batching is pushed into
+ * the database query (orderBy + take) — never fetch-unbounded-then-slice.
+ */
+export async function listReconcilableOcrServerInstances(hostId: string, batchSize = 20): Promise<Array<{ id: string; hostClaimToken: string; runExecutionToken: string; mineruHome: string; pid: number | null; serverId: string | null; status: string }>> {
   return prisma.ocrServerInstance.findMany({
-    where: { hostId, status: { in: ["STARTING", "RUNNING", "STOPPING", "ORPHANED"] } },
-    select: { id: true, hostClaimToken: true, mineruHome: true, pid: true, serverId: true, status: true },
+    where: { hostId, status: { in: ["STARTING", "RUNNING", "STOPPING"] } },
+    select: { id: true, hostClaimToken: true, runExecutionToken: true, mineruHome: true, pid: true, serverId: true, status: true },
     orderBy: { createdAt: "asc" },
+    take: batchSize,
   });
 }
 

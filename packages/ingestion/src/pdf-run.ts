@@ -5,30 +5,8 @@ import { extractNativePdf, pdfTextToBlocks, type Parsed, type ParsedBlock, type 
 import { INGESTION_EXECUTION_OWNERSHIP_LOST } from "./ingestion-run-claim.js";
 import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, failOcrPageAttempt, writeRoutingPlan } from "./ocr-durability.js";
 import { PDF_EXTRACTION_PARSER, PDF_ROUTING_GENERATION, assertRoutingPlanReplay, evaluatePdfExtractionQuality, parseRoutingPlan, type PdfExtractionQualityDecision, type PdfOcrExecutor, type PdfOcrPageResult, type PdfPageExtractionOutcome, type PdfRoutingPlan } from "./pdf-routing.js";
+import { OcrCapacityDeferralError } from "./ocr-capacity-errors.js";
 import { SourceError } from "./source-errors.js";
-
-/**
- * PDF run extraction pipeline (BOOK-INGESTION-04B-2, hardened in RF01).
- *
- * Orchestrates one execution claim over the durable routing primitives:
- * native inspection → write-once routing plan (or replay-validated reuse) →
- * durable OCR page intents/attempts through the PdfOcrExecutor seam → merged
- * page-level canonical result → deterministic quality decision. It NEVER
- * publishes by itself: the ingestion service owns the publication transaction.
- *
- * Durability invariants (RF01):
- *  - P1-01 a SUCCEEDED OcrPageAttempt is authoritative: its immutable artifact
- *    is reused on resume and a null claim is re-checked against a concurrent
- *    completion before any page may be called unresolved.
- *  - P1-02 page claims carry the caller's run-execution token, so the
- *    authoritative run owner can reclaim a superseded execution's live page
- *    claim; page token fencing itself is unchanged.
- *  - P1-04 executor success means nothing by itself: output must canonicalize
- *    to at least one usable block before the checkpoint may succeed.
- * Production default in 04B-2 has no OCR executor: OCR-required pages then end
- * in the existing OCR_REQUIRED terminal semantics with the durable routing
- * intent persisted. The real MinerU executor (04B-3) plugs in unchanged.
- */
 
 export type PdfRunExtractionInput = {
   runId: string;
@@ -157,7 +135,7 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
     const startedAt = Date.now();
     let result: PdfOcrPageResult;
     try {
-      result = await executor.extractPage({ ...key, pdfBytes: input.pdfBytes });
+      result = await executor.extractPage({ ...key, runExecutionToken: input.runExecutionToken, pdfBytes: input.pdfBytes });
     } catch {
       result = { status: "FAILED", errorCode: SourceError.PARSE, kind: "transient" };
     }
@@ -176,6 +154,15 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
       await input.storage.putObject({ key: authoritativeArtifactKey, body: Buffer.from(result.text, "utf8"), contentType: "text/plain; charset=utf-8" });
       if (!await completeOcrPageAttempt({ ...key, claimToken: claim.claimToken, authoritativeArtifactKey, textSha256, durationMs: Date.now() - startedAt })) return null;
       return await loadAuthoritativeOcrPage(input, physicalPageIndex, generation);
+    }
+    // RF04 P1-02: HOST CAPACITY unavailable is a DEFERRAL, not a processing
+    // failure. NO durable mutation happens here — the page claim identity is
+    // carried by a TYPED error to the ingestion service boundary, where ONE
+    // PostgreSQL transaction atomically releases page + run + Job budgets
+    // (transitionOcrCapacityDeferred). CONTENT and PROCESS failures below
+    // still consume attempts exactly as before.
+    if (result.errorCode === SourceError.OCR_HOST_CAPACITY && result.kind === "transient") {
+      throw new OcrCapacityDeferralError({ ...key, pageClaimToken: claim.claimToken, runExecutionToken: input.runExecutionToken });
     }
     if (!await failOcrPageAttempt({ ...key, claimToken: claim.claimToken, errorCode: result.errorCode, kind: result.kind, nextAttemptAt: result.nextAttemptAt })) return null;
     if (result.kind === "terminal") return null;

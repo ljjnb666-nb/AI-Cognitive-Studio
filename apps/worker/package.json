@@ -9,17 +9,17 @@
     "lint": "eslint src tests",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test:unit": "vitest run tests/book-analysis-bootstrap.test.ts",
+    "test:unit": "vitest run tests/book-analysis-bootstrap.test.ts tests/source-ingestion-ocr-runtime.test.ts tests/source-ingestion-scheduler-authority.test.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:phase1:e2e": "vitest run --config vitest.phase1-e2e.config.ts",
     "test:phase2:e2e": "vitest run --config vitest.phase2-e2e.config.ts",
-    "test:phase3:e2e": "vitest run --config vitest.phase3-e2e.config.ts"
-    ,"test:phase4:e2e": "vitest run --config vitest.phase4-e2e.config.ts",
+    "test:phase3:e2e": "vitest run --config vitest.phase3-e2e.config.ts",
+    "test:phase4:e2e": "vitest run --config vitest.phase4-e2e.config.ts",
     "test:phase5:e2e": "vitest run --config vitest.phase5-e2e.config.ts",
     "test:phase8c:production": "vitest run --config vitest.integration.config.ts tests/phase8c-production-runtime.test.ts",
     "test:phase8c:podcast-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-gateway-runtime.test.ts",
-    "test:phase8c:podcast-autonomy": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-gateway-runtime.test.ts"
-    ,"test:phase8c:podcast-speech": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-speech-gateway-runtime.test.ts",
+    "test:phase8c:podcast-autonomy": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-gateway-runtime.test.ts",
+    "test:phase8c:podcast-speech": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-speech-gateway-runtime.test.ts",
     "test:phase8c:short-video-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-short-video-gateway-runtime.test.ts"
   },
   "dependencies": {
