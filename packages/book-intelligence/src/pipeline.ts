@@ -156,11 +156,11 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   }
 }
 
-async function loadStageContext(run: any): Promise<StageContext> {
+async function loadStageContext(run: any, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<StageContext> {
   const [blocksRaw, chunks, nodes] = await Promise.all([
-    prisma.sourceBlock.findMany({ where: { extractionId: run.extractionId }, orderBy: { ordinal: "asc" } }),
-    prisma.documentChunk.findMany({ where: { chunkSetId: run.chunkSetId }, include: { sourceSpans: true }, orderBy: { ordinal: "asc" } }),
-    prisma.documentStructureNode.findMany({ where: { extractionId: run.extractionId }, orderBy: { ordinal: "asc" } }),
+    db.sourceBlock.findMany({ where: { extractionId: run.extractionId }, orderBy: { ordinal: "asc" } }),
+    db.documentChunk.findMany({ where: { chunkSetId: run.chunkSetId }, include: { sourceSpans: true }, orderBy: { ordinal: "asc" } }),
+    db.documentStructureNode.findMany({ where: { extractionId: run.extractionId }, orderBy: { ordinal: "asc" } }),
   ]);
   if (!chunks.length) throw new Error("ANALYSIS_LINEAGE_INVALID");
   const blocks = asBlocks(blocksRaw);
@@ -354,8 +354,8 @@ const chunkMemoryTypes = new Set(["QUOTE", "CLAIM", "EXAMPLE", "STORY", "PERSON"
 const bookMemoryTypes = new Set(["SUMMARY", "CONCEPT", "ARGUMENT", "COUNTERPOINT", "QUESTION"]);
 type MemoryPlan = { artifact: any; response: AnalysisResponse; candidate: MemoryCandidate; candidateOrdinal: number; ordinal: number; memoryKey: string; validSpans: EvidenceCandidate[] };
 
-async function buildMemoryPlans(run: any): Promise<MemoryPlan[]> {
-  const artifacts = await prisma.analysisArtifact.findMany({ where: { analysisRunId: run.id, scope: { in: ["CHUNK", "BOOK"] } }, include: { chunk: { include: { sourceSpans: true } } }, orderBy: [{ scope: "asc" }, { ordinal: "asc" }, { id: "asc" }] });
+async function buildMemoryPlans(run: any, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<MemoryPlan[]> {
+  const artifacts = await db.analysisArtifact.findMany({ where: { analysisRunId: run.id, scope: { in: ["CHUNK", "BOOK"] } }, include: { chunk: { include: { sourceSpans: true } } }, orderBy: [{ scope: "asc" }, { ordinal: "asc" }, { id: "asc" }] });
   const ordered = [...artifacts.filter((artifact) => artifact.scope === "CHUNK"), ...artifacts.filter((artifact) => artifact.scope === "BOOK")];
   const plans: MemoryPlan[] = [];
   for (const artifact of ordered) {
@@ -496,7 +496,7 @@ async function assertCurrentIntelligenceEligible(tx: any, run: any, context: Sta
   const sectionArtifacts = await tx.analysisArtifact.findMany({ where: { analysisRunId: run.id, scope: "SECTION" } });
   const nodeById = new Map(context.nodes.map((node) => [node.id, node]));
   const chapterNodes = context.nodes.filter((node) => node.kind === "CHAPTER" && (sectionArtifacts.some((section: any) => { const sectionNode = nodeById.get(section.structureNodeId ?? ""); return sectionNode && sectionNode.startBlockOrdinal >= node.startBlockOrdinal && sectionNode.endBlockOrdinal <= node.endBlockOrdinal; }) || context.chunks.some((chunk) => { const range = (chunk.metadata as { blockOrdinalRange?: [number, number] } | null)?.blockOrdinalRange; return range && range[0] >= node.startBlockOrdinal && range[1] <= node.endBlockOrdinal; })));
-  const memoryPlans = await buildMemoryPlans(run);
+  const memoryPlans = await buildMemoryPlans(run, tx);
   const requiredMemoryKeys = memoryPlans.filter((plan) => plan.candidate.type !== "QUOTE" || acceptedEvidence(plan, context).some((span) => { try { validateQuote(context.blockMap.get(span.sourceBlockId)!, span); return true; } catch { return false; } })).map((plan) => plan.memoryKey);
   const [chunks, sections, chapters, books, artifacts, memories, chunkEmbeddings, memoryEmbeddings] = await Promise.all([
     tx.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "CHUNK", chunkId: { in: context.chunks.map((chunk) => chunk.id) } } }),
@@ -541,7 +541,12 @@ export async function recoverBookAnalysisForUser(context: TrustedBookAnalysisReq
       if (current) return { run, action: "REPAIR_CURRENT_INTELLIGENCE" as const, repaired: false, created: false };
       const embeddingIdentityHash = (run.job.result as { embeddingIdentityHash?: unknown } | null)?.embeddingIdentityHash;
       if (typeof embeddingIdentityHash !== "string") throw new Error("BOOK_ANALYSIS_FINALIZATION_INCOMPLETE");
-      await assertCurrentIntelligenceEligible(tx, run, await loadStageContext(run), embeddingIdentityHash);
+      // All lineage reads after acquiring the source-document lock MUST use
+      // this interactive transaction. Five concurrent recoveries can occupy
+      // the whole pool while four wait on the same row lock; reaching back to
+      // the global Prisma client here self-starves the lock owner until the
+      // transaction expires (P2028).
+      await assertCurrentIntelligenceEligible(tx, run, await loadStageContext(run, tx), embeddingIdentityHash);
       await tx.currentBookIntelligence.create({ data: { workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, extractionId: run.extractionId, chunkSetId: run.chunkSetId, analysisRunId: run.id } });
       return { run, action: "REPAIR_CURRENT_INTELLIGENCE" as const, repaired: true, created: false };
     }
