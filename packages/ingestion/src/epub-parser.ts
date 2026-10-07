@@ -178,10 +178,11 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
   const seenSpineIds = new Set<string>();
   for (const itemref of directElementChildrenByLocalName(spineElement, "itemref")) {
     const idref = itemref.getAttribute("idref");
+    const hasLinear = itemref.hasAttribute("linear");
     const linearValue = itemref.getAttribute("linear");
-    if (!idref || seenSpineIds.has(idref) || (linearValue && linearValue !== "yes" && linearValue !== "no")) throw new Error(SourceError.CORRUPTED);
+    if (!idref || seenSpineIds.has(idref) || (hasLinear && linearValue !== "yes" && linearValue !== "no")) throw new Error(SourceError.CORRUPTED);
     seenSpineIds.add(idref);
-    spine.push({ idref, linear: linearValue !== "no" });
+    spine.push({ idref, linear: !hasLinear || linearValue === "yes" });
   }
   // EPUB requires at least one primary item; omitted linear means "yes".
   if (!spine.length || !spine.some((itemref) => itemref.linear)) throw new Error(SourceError.CORRUPTED);

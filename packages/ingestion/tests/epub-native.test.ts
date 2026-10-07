@@ -96,12 +96,14 @@ describe("epub-parser-v2 navigation", () => {
       { name: "OEBPS/toc.ncx", text: '<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap><navPoint id="n1"><navLabel><text>NCX Entry</text></navLabel><content src="text/ch1.xhtml"/></navPoint></navMap></ncx>' },
       { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
     ];
-    const parsed = await parseDocument(book({ opf: epub3Opf(' extra', ' <itemref idref="ncx"/>').replace('<item id="c1"', '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="c1"'), files }), "application/epub+zip");
+    const parsed = await parseDocument(book({
+      opf: epub3Opf('<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'),
+      files,
+    }), "application/epub+zip");
     const metadata = parseEpubExtractionMetadata(parsed.formatMetadata);
     expect(metadata.navigationSource).toBe("EPUB3_NAV");
     expect(metadata.navigation.map((entry) => entry.label)).toEqual(["Nav Entry"]);
   });
-
   it("still parses the body when no navigation exists, without a fabricated warning", async () => {
     const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>', spine: '<itemref idref="c1"/>' });
     const parsed = await parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }] }), "application/epub+zip");
@@ -208,6 +210,7 @@ describe("epub-parser-v2 package and spine authority", () => {
     const files = [{ name: "OEBPS/text/c1.xhtml", text: contentDocument("<p>Aux</p>") }];
     await expect(parseDocument(book({ opf: opfDocument({ manifest, spine: '<itemref idref="c1" linear="no"/>' }), files }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
     await expect(parseDocument(book({ opf: opfDocument({ manifest, spine: '<itemref idref="c1" linear="maybe"/>' }), files }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+    await expect(parseDocument(book({ opf: opfDocument({ manifest, spine: '<itemref idref="c1" linear=""/>' }), files }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
 
   it("rejects duplicate manifest ids and duplicate spine itemrefs deterministically", async () => {
@@ -381,8 +384,11 @@ describe("epub-parser-v2 semantic blocks", () => {
     expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Visible"]);
   });
 
-  it("emits PARTIAL_EXTRACTION when a text spine document yields nothing", async () => {
-    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/empty.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/cover.png" media-type="image/png"/>', spine: '<itemref idref="c1"/><itemref idref="c2"/><itemref idref="img"/>' });
+  it("emits PARTIAL_EXTRACTION when a primary text spine document yields nothing", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/empty.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/cover.png" media-type="image/png" fallback="c1"/>',
+      spine: '<itemref idref="c1"/><itemref idref="c2"/><itemref idref="img" linear="no"/>',
+    });
     const parsed = await parseDocument(book({ opf, files: [
       { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
       { name: "OEBPS/text/empty.xhtml", text: contentDocument("<div></div>") },
@@ -409,10 +415,13 @@ describe("epub-parser-v2 fixed layout", () => {
     for (const block of blocksOf(parsed)) expect(block.locator?.kind).toBe("epub");
   });
 
-  it("fails explicitly when a fixed-layout book has no usable textual evidence", async () => {
-    await expect(parseDocument(book({ opf: fixedOpf('<item id="img" href="media/page1.png" media-type="image/png"/>', '<itemref idref="img"/>'), files: [{ name: "OEBPS/media/page1.png", text: "PNG" }] }), "application/epub+zip")).rejects.toThrow(SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED);
+  it("fails explicitly when a fixed-layout EPUB content document has no usable textual evidence", async () => {
+    const svg = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>';
+    await expect(parseDocument(book({
+      opf: fixedOpf('<item id="page" href="pages/page1.svg" media-type="image/svg+xml"/>', '<itemref idref="page"/>'),
+      files: [{ name: "OEBPS/pages/page1.svg", text: svg }],
+    }), "application/epub+zip")).rejects.toThrow(SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED);
   });
-
   it("marks reflowable renditions without a rendition signal as UNKNOWN", async () => {
     const parsed = await parseDocument(book({ opf: epub3Opf(), files: basicFiles }), "application/epub+zip");
     expect(parseEpubExtractionMetadata(parsed.formatMetadata).renditionLayout).toBe("UNKNOWN");
@@ -473,14 +482,20 @@ describe("epub-parser-v2 invariants and limits", () => {
     expect(parseEpubExtractionMetadata(parsed.formatMetadata).navigationSource).toBe("NONE");
   });
 
-  it("never inflates non-required archive resources and flags the unsupported spine item", async () => {
-    // Pseudo-random bytes: poor compression (passes the archive ratio limit)
-    // and invalid UTF-8, so if the parser ever read this entry it would fail.
+  it("never inflates manifest-only non-required archive resources", async () => {
+    // Pseudo-random bytes: poor compression and invalid UTF-8. If the parser
+    // inflates/decodes this unreferenced resource, the parse would fail.
     const bomb = String.fromCharCode(...Array.from({ length: 8192 }, (_, index) => ((index * 31 + 17) % 251) + 1));
-    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="big" href="media/big.bin" media-type="application/octet-stream"/>', spine: '<itemref idref="c1"/><itemref idref="big"/>' });
-    const parsed = await parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }, { name: "OEBPS/media/big.bin", text: bomb }] }), "application/epub+zip");
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="big" href="media/big.bin" media-type="application/octet-stream"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+      { name: "OEBPS/media/big.bin", text: bomb },
+    ] }), "application/epub+zip");
     expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
-    expect(parsed.qualityWarnings).toContain("PARTIAL_EXTRACTION");
+    expect(parsed.qualityWarnings).toEqual([]);
   });
 });
 
@@ -635,26 +650,38 @@ describe("RF01 namespace-prefixed documents", () => {
 // ---------------------------------------------------------------------------
 
 describe("RF01 unsupported spine content", () => {
-  it("fails a reflowable book with no usable textual evidence on SOURCE_EPUB_NO_USABLE_TEXT", async () => {
-    const opf = opfDocument({ manifest: '<item id="img" href="media/cover.png" media-type="image/png"/>', spine: '<itemref idref="img"/>' });
-    await expect(parseDocument(book({ opf, files: [{ name: "OEBPS/media/cover.png", text: "PNGDATA" }] }), "application/epub+zip")).rejects.toThrow(SourceError.EPUB_NO_USABLE_TEXT);
+  it("fails a reflowable EPUB content document with no usable textual evidence on SOURCE_EPUB_NO_USABLE_TEXT", async () => {
+    const svg = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>';
+    const opf = opfDocument({ manifest: '<item id="page" href="pages/page1.svg" media-type="image/svg+xml"/>', spine: '<itemref idref="page"/>' });
+    await expect(parseDocument(book({ opf, files: [{ name: "OEBPS/pages/page1.svg", text: svg }] }), "application/epub+zip")).rejects.toThrow(SourceError.EPUB_NO_USABLE_TEXT);
   });
-
-  it("counts unsupported media-type spine items as unusable text without inflation", async () => {
-    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="f1" href="media/font.woff" media-type="application/font-woff"/><item id="a1" href="media/audio.mp3" media-type="audio/mpeg"/>', spine: '<itemref idref="f1"/><itemref idref="c1"/><itemref idref="a1"/>' });
-    const parsed = await parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }, { name: "OEBPS/media/font.woff", text: "WWOFFDATA" }, { name: "OEBPS/media/audio.mp3", text: "MP3DATA" }] }), "application/epub+zip");
+  it("validates auxiliary foreign spine items through fallback without inflating them", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="f1" href="media/font.woff" media-type="application/font-woff" fallback="c1"/><item id="a1" href="media/audio.mp3" media-type="audio/mpeg" fallback="c1"/>',
+      spine: '<itemref idref="f1" linear="no"/><itemref idref="c1"/><itemref idref="a1" linear="no"/>',
+    });
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+      { name: "OEBPS/media/font.woff", text: "WWOFFDATA" },
+      { name: "OEBPS/media/audio.mp3", text: "MP3DATA" },
+    ] }), "application/epub+zip");
     expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
-    expect(parsed.qualityWarnings).toEqual(["PARTIAL_EXTRACTION"]);
+    expect(parsed.qualityWarnings).toEqual([]);
   });
-
   it("fails a missing unsupported spine item as corrupted before media-type classification", async () => {
-    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/missing.png" media-type="image/png"/>', spine: '<itemref idref="c1"/><itemref idref="img"/>' });
+    const opf = opfDocument({ manifest: '<item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/missing.png" media-type="image/png" fallback="c1"/>', spine: '<itemref idref="c1"/><itemref idref="img"/>' });
     await expect(parseDocument(book({ opf, files: [{ name: "OEBPS/text/ch1.xhtml", text: chapterOne }] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
 
   it("fails an all-binary spine with one missing item as corrupted, not no-usable-text", async () => {
-    const opf = opfDocument({ manifest: '<item id="img1" href="media/cover.png" media-type="image/png"/><item id="img2" href="media/missing.png" media-type="image/png"/>', spine: '<itemref idref="img1"/><itemref idref="img2"/>' });
-    await expect(parseDocument(book({ opf, files: [{ name: "OEBPS/media/cover.png", text: "PNGDATA" }] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
+    const opf = opfDocument({
+      manifest: '<item id="fallback" href="text/fallback.xhtml" media-type="application/xhtml+xml"/><item id="img1" href="media/cover.png" media-type="image/png" fallback="fallback"/><item id="img2" href="media/missing.png" media-type="image/png" fallback="fallback"/>',
+      spine: '<itemref idref="img1"/><itemref idref="img2" linear="no"/>',
+    });
+    await expect(parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/fallback.xhtml", text: contentDocument("<p>Fallback</p>") },
+      { name: "OEBPS/media/cover.png", text: "PNGDATA" },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
 });
 

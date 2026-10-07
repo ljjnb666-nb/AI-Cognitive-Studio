@@ -272,14 +272,15 @@ describe("EPUB unsupported content failure model", () => {
     return { service, document, run, process: () => service.processIngestionRun(run.id) };
   }
 
-  it("succeeds with PARTIAL_EXTRACTION when unsupported spine items coexist with usable text", async () => {
+  it("succeeds with PARTIAL_EXTRACTION when a primary text item is empty", async () => {
     const storage = new FakeStorageProvider();
     const { user, workspace } = await createWorkspaceFixture();
     const entries = [
       { name: "mimetype", text: "application/epub+zip" },
       { name: "META-INF/container.xml", text: '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>' },
-      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier></metadata><manifest><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/cover.png" media-type="image/png"/></manifest><spine><itemref idref="c1"/><itemref idref="img"/></spine></package>' },
+      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier></metadata><manifest><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="text/empty.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/cover.png" media-type="image/png" fallback="c1"/></manifest><spine><itemref idref="c1"/><itemref idref="c2"/><itemref idref="img" linear="no"/></spine></package>' },
       { name: "OEBPS/text/ch1.xhtml", text: textDoc },
+      { name: "OEBPS/text/empty.xhtml", text: '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><div/></body></html>' },
       { name: "OEBPS/media/cover.png", text: "PNGDATA" },
     ];
     const { process, document } = await ingestEpub(storage, user, workspace, "partial.epub", () => epubBytes(entries));
@@ -291,15 +292,14 @@ describe("EPUB unsupported content failure model", () => {
     const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
     expect(current.extractionId).toBe(extraction.id);
   });
-
-  it("rejects an all-binary reflowable spine with SOURCE_EPUB_NO_USABLE_TEXT and leaves no current pointer", async () => {
+  it("rejects a text-less reflowable EPUB content document with SOURCE_EPUB_NO_USABLE_TEXT and leaves no current pointer", async () => {
     const storage = new FakeStorageProvider();
     const { user, workspace } = await createWorkspaceFixture();
     const entries = [
       { name: "mimetype", text: "application/epub+zip" },
       { name: "META-INF/container.xml", text: '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>' },
-      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier></metadata><manifest><item id="img" href="media/cover.png" media-type="image/png"/></manifest><spine><itemref idref="img"/></spine></package>' },
-      { name: "OEBPS/media/cover.png", text: "PNGDATA" },
+      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier></metadata><manifest><item id="page" href="pages/page1.svg" media-type="image/svg+xml"/></manifest><spine><itemref idref="page"/></spine></package>' },
+      { name: "OEBPS/pages/page1.svg", text: '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>' },
     ];
     const { process, document, run } = await ingestEpub(storage, user, workspace, "images-only.epub", () => epubBytes(entries));
     await expect(process()).rejects.toThrow(SourceError.EPUB_NO_USABLE_TEXT);
@@ -309,15 +309,14 @@ describe("EPUB unsupported content failure model", () => {
     expect(await prisma.documentExtraction.findFirst({ where: { sourceDocumentId: document.id } })).toBeNull();
     expect(await prisma.currentDocumentExtraction.findFirst({ where: { sourceDocumentId: document.id } })).toBeNull();
   });
-
-  it("classifies a text-less fixed-layout EPUB as REJECTED with the fixed-layout code, not FAILED", async () => {
+  it("classifies a text-less fixed-layout EPUB content document as REJECTED with the fixed-layout code, not FAILED", async () => {
     const storage = new FakeStorageProvider();
     const { user, workspace } = await createWorkspaceFixture();
     const entries = [
       { name: "mimetype", text: "application/epub+zip" },
       { name: "META-INF/container.xml", text: '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>' },
-      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id" xmlns:rendition="http://www.idpf.org/2013/rendition"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier><meta property="rendition:layout">pre-paginated</meta></metadata><manifest><item id="img" href="media/page1.png" media-type="image/png"/></manifest><spine><itemref idref="img"/></spine></package>' },
-      { name: "OEBPS/media/page1.png", text: "PNGDATA" },
+      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id" xmlns:rendition="http://www.idpf.org/2013/rendition"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier><meta property="rendition:layout">pre-paginated</meta></metadata><manifest><item id="page" href="pages/page1.svg" media-type="image/svg+xml"/></manifest><spine><itemref idref="page"/></spine></package>' },
+      { name: "OEBPS/pages/page1.svg", text: '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>' },
     ];
     const { process, document, run } = await ingestEpub(storage, user, workspace, "fixed-empty.epub", () => epubBytes(entries));
     await expect(process()).rejects.toThrow(SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED);
@@ -326,21 +325,18 @@ describe("EPUB unsupported content failure model", () => {
     expect(rejected.errorCode).toBe(SourceError.EPUB_FIXED_LAYOUT_UNSUPPORTED);
     expect(await prisma.currentDocumentExtraction.findFirst({ where: { sourceDocumentId: document.id } })).toBeNull();
   });
-
-  it("keeps the prior current extraction when an unsupported-content re-ingest fails", async () => {
+  it("keeps the prior current extraction when a text-less re-ingest fails", async () => {
     const storage = new FakeStorageProvider();
     const { user, workspace } = await createWorkspaceFixture();
     const { process, document } = await ingestEpub(storage, user, workspace, "good.epub", () => epub3Fixture());
     await process();
     const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
 
-    // Replace the canonical blob with an all-binary reflowable EPUB; the
-    // recovery run must fail as REJECTED and never displace the pointer.
     const entries = [
       { name: "mimetype", text: "application/epub+zip" },
       { name: "META-INF/container.xml", text: '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>' },
-      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier></metadata><manifest><item id="img" href="media/cover.png" media-type="image/png"/></manifest><spine><itemref idref="img"/></spine></package>' },
-      { name: "OEBPS/media/cover.png", text: "PNGDATA" },
+      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier></metadata><manifest><item id="page" href="pages/page1.svg" media-type="image/svg+xml"/></manifest><spine><itemref idref="page"/></spine></package>' },
+      { name: "OEBPS/pages/page1.svg", text: '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>' },
     ];
     storage.objects.set(document.storageKey, epubBytes(entries));
     const service = createIngestionService(storage);
@@ -353,21 +349,18 @@ describe("EPUB unsupported content failure model", () => {
     const stillCurrent = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
     expect(stillCurrent.extractionId).toBe(current.extractionId);
   });
-
-  it("rejects a missing unsupported spine item as corrupted while the prior current survives", async () => {
+  it("rejects a missing foreign spine resource as corrupted while the prior current survives", async () => {
     const storage = new FakeStorageProvider();
     const { user, workspace } = await createWorkspaceFixture();
     const { process, document } = await ingestEpub(storage, user, workspace, "good.epub", () => epub3Fixture());
     await process();
     const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
 
-    // RF02-01: a referenced-but-missing spine item is fatal even when its
-    // media type is unsupported binary — never a silent skip, never
-    // SOURCE_EPUB_NO_USABLE_TEXT.
     const entries = [
       { name: "mimetype", text: "application/epub+zip" },
       { name: "META-INF/container.xml", text: '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>' },
-      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier></metadata><manifest><item id="img" href="media/missing.png" media-type="image/png"/></manifest><spine><itemref idref="img"/></spine></package>' },
+      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="pub-id">urn:uuid:x</dc:identifier></metadata><manifest><item id="fallback" href="text/fallback.xhtml" media-type="application/xhtml+xml"/><item id="img" href="media/missing.png" media-type="image/png" fallback="fallback"/></manifest><spine><itemref idref="img"/></spine></package>' },
+      { name: "OEBPS/text/fallback.xhtml", text: textDoc },
     ];
     storage.objects.set(document.storageKey, epubBytes(entries));
     const service = createIngestionService(storage);
