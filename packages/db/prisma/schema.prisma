@@ -154,6 +154,14 @@ enum ExtractionQualityStatus {
   REJECTED
 }
 
+/// Durable result of a controlled product-identity promotion attempt.
+enum ProductIdentityPromotionStatus {
+  APPLIED
+  NOOP
+  CONFLICT
+  BLOCKED
+}
+
 enum OutboxStatus {
   PENDING
   PROCESSING
@@ -1244,9 +1252,31 @@ model DocumentExtraction {
   chunkSets              ChunkSet[]
   analysisRuns           BookAnalysisRun[]
   bookAnalysisBootstraps BookAnalysisBootstrap[]
+  productIdentityPromotion ProductIdentityPromotion?
 
   @@unique([id, sourceDocumentId, workspaceId])
   @@unique([ingestionRunId, sourceDocumentId, workspaceId])
+}
+
+model ProductIdentityPromotion {
+  id               String                         @id @default(cuid())
+  workspaceId      String
+  sourceDocumentId String
+  extractionId     String                         @unique
+  status           ProductIdentityPromotionStatus
+  reasonCode       String?
+  workId           String?
+  editionId        String?
+  appliedFields    Json                           @default("[]")
+  conflicts        Json                           @default("[]")
+  ignoredFields    Json                           @default("[]")
+  createdAt        DateTime                       @default(now())
+  extraction       DocumentExtraction             @relation(fields: [extractionId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  // Prisma requires the complete defining-side field tuple to be unique for a
+  // one-to-one composite relation, even though extractionId alone is unique.
+  @@unique([extractionId, sourceDocumentId, workspaceId])
+  @@index([sourceDocumentId, workspaceId, createdAt])
 }
 
 model CurrentDocumentExtraction {
