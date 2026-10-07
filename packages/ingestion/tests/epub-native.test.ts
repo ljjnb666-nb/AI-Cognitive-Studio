@@ -552,7 +552,7 @@ describe("epub-parser-v2 semantic blocks", () => {
 
   it("keeps hidden descendants out of PRE and TABLE evidence", async () => {
     const parsed = await parse(
-      '<pre>line 1<span hidden>SECRET</span>\nline 2</pre>' +
+      '<pre>line 1<span hidden="hidden">SECRET</span>\nline 2</pre>' +
       '<table><tr><td>A<span aria-hidden="true">X</span></td><td>B</td></tr></table>',
     );
     expect(blocksOf(parsed).map((block) => [block.kind, block.text])).toEqual([
@@ -926,7 +926,7 @@ describe("RF01 namespace-prefixed documents", () => {
   });
 
   it("keeps outbound hyperlinks inert inside prefixed documents", async () => {
-    const linkedXhtml = prefixedXhtml.replace('<xhtml:p id="s1">Prefixed para</xhtml:p>', '<xhtml:p><xhtml:a href="https://example.test/x">Outbound</xhtml:a></xhtml:p>');
+    const linkedXhtml = prefixedXhtml.replace('<xhtml:p id="s1">Prefixed para</xhtml:p>', '<xhtml:p id="s1"><xhtml:a href="https://example.test/x">Outbound</xhtml:a></xhtml:p>');
     const parsed = await parseDocument(prefixedBook(linkedXhtml), "application/epub+zip");
     expect(blocksOf(parsed).map((block) => block.text)).toContain("Outbound");
   });
