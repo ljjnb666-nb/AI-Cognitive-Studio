@@ -1226,8 +1226,12 @@ model DocumentExtraction {
   /// Format-native extraction metadata (canonical-book-v1, additive). NULL =
   /// legacy rows and non-EPUB formats (PDF/TXT/Markdown); EPUB extractions
   /// persist the validated EpubExtractionMetadata contract. Never backfilled.
-  formatMetadata         Json?
-  textStorageKey         String?
+  formatMetadata           Json?
+  /// Immutable product-identity candidate evidence derived from this exact
+  /// extraction. NULL = legacy/non-EPUB. This is evidence-only and never
+  /// authorizes ingestion to overwrite Work/Edition product identity.
+  productIdentityCandidate Json?
+  textStorageKey           String?
   textSha256             String?
   characterCount         Int?
   createdAt              DateTime                   @default(now())

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "@ai-cognitive/db";
-import { parseEpubExtractionMetadata } from "@ai-cognitive/domain";
+import { parseEpubExtractionMetadata, parseProductIdentityCandidate } from "@ai-cognitive/domain";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { createIngestionService, canonicalFormatMetadata, SourceError } from "../src/index.js";
 import { SourceError as ParserSourceError } from "../src/source-errors.js";
@@ -141,8 +141,23 @@ describe("format metadata persistence gate", () => {
     await service.processIngestionRun(run.id);
     const extraction = await prisma.documentExtraction.findFirstOrThrow({ where: { sourceDocumentId: document.id } });
     expect(extraction.status).toBe("SUCCEEDED");
-    // The persisted value is the schema-normalized contract output.
+    // The persisted format metadata remains the schema-normalized evidence.
     expect(parseEpubExtractionMetadata(extraction.formatMetadata)).toEqual(validMetadata);
+    // 04C-4A projects product-identity evidence onto this exact immutable
+    // extraction without promoting anything into Work/Edition.
+    expect(parseProductIdentityCandidate(extraction.productIdentityCandidate)).toEqual({
+      kind: "epub",
+      schemaVersion: "product-identity-candidate-v1",
+      source: "EPUB_PACKAGE_METADATA",
+      authority: "EVIDENCE_ONLY",
+      title: null,
+      language: null,
+      identifier: { sourceField: "dc:identifier", value: "urn:uuid:fixture", classification: "UNCLASSIFIED" },
+    });
+    const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({
+      where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } },
+    });
+    expect(current.extractionId).toBe(extraction.id);
   });
 
   it("enforces the gate contract directly on both sides of the media-type split", () => {

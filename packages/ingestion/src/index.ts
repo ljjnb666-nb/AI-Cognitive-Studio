@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
-import { CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
+import { buildEpubProductIdentityCandidate, CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
 import type { EpubExtractionMetadata } from "@ai-cognitive/domain";
 import { logger } from "@ai-cognitive/shared";
 import type { StorageProvider } from "@ai-cognitive/storage";
@@ -268,6 +268,8 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
           // here with one is an internal contract bug and must abort the write.
           if (pdfRouting && (pdfRouting.decision.status === "REQUIRES_FALLBACK" || pdfRouting.decision.status === "REJECTED")) throw new Error(SourceError.QUALITY_GATE_BLOCKED);
           if (epubQuality && epubQuality.status !== "ACCEPTED" && epubQuality.status !== "DEGRADED") throw new Error(SourceError.QUALITY_GATE_BLOCKED);
+          const formatMetadata = canonicalFormatMetadata(run.sourceDocument.mediaType, parsed.formatMetadata);
+          const productIdentityCandidate = formatMetadata ? buildEpubProductIdentityCandidate(formatMetadata) : undefined;
           const extraction = await tx.documentExtraction.create({
             data: {
               ingestionRunId: run.id,
@@ -292,7 +294,11 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
               // gated by canonicalFormatMetadata: EPUB requires schema-valid
               // metadata, non-EPUB formats must stay NULL. A violation is an
               // internal parser contract bug and aborts the write (FAILED).
-              formatMetadata: canonicalFormatMetadata(run.sourceDocument.mediaType, parsed.formatMetadata),
+              formatMetadata,
+              // 04C-4A: candidate evidence is bound to this immutable extraction.
+              // It is not Work/Edition authority; 04C-4B must read it only through
+              // the current-extraction fence before considering any promotion.
+              productIdentityCandidate,
               textStorageKey: textKey,
               textSha256,
               characterCount: text.length,
