@@ -478,6 +478,27 @@ describe("epub-parser-v2 DOM locators", () => {
 describe("epub-parser-v2 semantic blocks", () => {
   const parse = async (body: string) => parseDocument(book({ opf: epub3Opf(), files: [...basicFiles.slice(0, 1), { name: "OEBPS/text/ch1.xhtml", text: contentDocument(body) }] }), "application/epub+zip");
 
+  it("excludes hidden and aria-hidden subtrees from canonical text", async () => {
+    const parsed = await parse(
+      '<p>Visible <span hidden>secret</span> text <span aria-hidden="true">silent</span>.</p>' +
+      '<section hidden><p>Hidden section</p></section>' +
+      '<p aria-hidden="true">ARIA hidden paragraph</p>' +
+      '<p aria-hidden="false">Kept paragraph</p>',
+    );
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["Visible text .", "Kept paragraph"]);
+  });
+
+  it("keeps hidden descendants out of PRE and TABLE evidence", async () => {
+    const parsed = await parse(
+      '<pre>line 1<span hidden>SECRET</span>\nline 2</pre>' +
+      '<table><tr><td>A<span aria-hidden="true">X</span></td><td>B</td></tr></table>',
+    );
+    expect(blocksOf(parsed).map((block) => [block.kind, block.text])).toEqual([
+      ["CODE", "line 1\nline 2"],
+      ["TABLE", "A\tB"],
+    ]);
+  });
+
   it("extracts nested lists without duplicating text", async () => {
     const parsed = await parse("<ul><li><p>Outer item</p><ol><li>Inner item</li></ol></li></ul>");
     expect(blocksOf(parsed).map((block) => [block.kind, block.text])).toEqual([["LIST_ITEM", "Outer item"], ["LIST_ITEM", "Inner item"]]);

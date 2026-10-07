@@ -498,6 +498,7 @@ function decodeUrlFragment(hash: string): string | null {
 
 function emitBlocksFor(element: XmlElement, context: BlockContext, blocks: ParsedBlock[], depth: number): void {
   if (depth > MAX_WALK_DEPTH) throw new Error(SourceError.CORRUPTED);
+  if (isHiddenFromCanonicalText(element)) return;
   const tag = localName(element);
   // EPUB3 semantic footnotes/endnotes: the whole note subtree becomes FOOTNOTE.
   const footnoteTypes = (epubType(element) || "").split(/\s+/).filter(Boolean);
@@ -510,7 +511,7 @@ function emitBlocksFor(element: XmlElement, context: BlockContext, blocks: Parse
   // never extracted twice.
   if (tag === "blockquote") return emitInlineBlock(element, inner, blocks, "QUOTE", { flatten: true });
   if (tag === "figcaption") return emitInlineBlock(element, inner, blocks, "CAPTION", { flatten: true });
-  if (tag === "pre") return emitTextBlock("CODE", normalizeCanonicalText((element.textContent ?? "").replace(/\u00a0/g, " ")), element, inner, blocks);
+  if (tag === "pre") return emitTextBlock("CODE", normalizeCanonicalText(visibleTextContent(element).replace(/\u00a0/g, " ")), element, inner, blocks);
   if (tag === "table") return emitTableBlock(element, inner, blocks);
   if (tag === "math") return emitEquation(element, inner, blocks);
   if (tag === "svg") return emitSvgEvidence(element, inner, blocks);
@@ -539,7 +540,7 @@ function walkInline(element: XmlElement, walk: { buffer: string }, context: Bloc
     if (child.nodeType !== 1) continue;
     const elementChild = child as XmlElement;
     const tag = localName(elementChild);
-    if (SKIPPED_TAGS.has(tag)) continue;
+    if (SKIPPED_TAGS.has(tag) || isHiddenFromCanonicalText(elementChild)) continue;
     if (options.flatten) {
       // Flattened mode: nested block markup contributes text to the owning
       // block, only real evidence objects (img/math/svg) split out.
@@ -595,7 +596,7 @@ function emitTableBlock(table: XmlElement, context: BlockContext, blocks: Parsed
       // v1 keeps readable text and flags the loss of merged-cell geometry
       // instead of reconstructing a 2D grid.
       if (cell.getAttribute("rowspan") || cell.getAttribute("colspan")) flattened = true;
-      cells.push(collapsedText(cell));
+      cells.push(visibleCollapsedText(cell));
     }
     const rowText = cells.join("\t");
     if (rowText) rows.push(rowText);
@@ -610,16 +611,18 @@ function emitEquation(math: XmlElement, context: BlockContext, blocks: ParsedBlo
   // Evidence priority: TeX annotation > accessible alttext > normalized
   // MathML text content. No LLM guessing, no raw markup dumps.
   const annotations = [...elementsByLocalName(math, "annotation", context.limits), ...elementsByLocalName(math, "annotation-xml", context.limits)];
-  const tex = annotations.find((annotation) => (annotation.getAttribute("encoding") || "").trim() === "application/x-tex");
+  const tex = annotations.find((annotation) => !isHiddenFromCanonicalText(annotation) && (annotation.getAttribute("encoding") || "").trim() === "application/x-tex");
   const alttext = (math.getAttribute("alttext") || "").trim();
-  const text = (tex && collapsedText(tex)) || (alttext && alttext.replace(/\s+/g, " ")) || collapsedText(math);
+  const text = (tex && visibleCollapsedText(tex)) || (alttext && alttext.replace(/\s+/g, " ")) || visibleCollapsedText(math);
   if (!text) return;
   emitOwnedBlocks(context.footnote ? "FOOTNOTE" : "EQUATION", text, math, context, blocks, null);
 }
 
 function emitSvgEvidence(svg: XmlElement, context: BlockContext, blocks: ParsedBlock[]): void {
   // SVG is never rendered or executed: only deterministic accessibility text.
-  const text = collapsedText(elementsByLocalName(svg, "title", context.limits)[0]) || collapsedText(elementsByLocalName(svg, "desc", context.limits)[0]);
+  const title = elementsByLocalName(svg, "title", context.limits).find((element) => !isHiddenFromCanonicalText(element));
+  const desc = elementsByLocalName(svg, "desc", context.limits).find((element) => !isHiddenFromCanonicalText(element));
+  const text = visibleCollapsedText(title) || visibleCollapsedText(desc);
   if (!text) return;
   emitOwnedBlocks(context.footnote ? "FOOTNOTE" : "IMAGE", text, svg, context, blocks, null);
 }
@@ -1079,6 +1082,30 @@ function epubType(element: XmlElement): string | null {
     if (attribute.localName === "type" && attribute.namespaceURI === EPUB_OPS_NAMESPACE) return attribute.value || null;
   }
   return element.getAttribute("epub:type") || null;
+}
+
+function isHiddenFromCanonicalText(element: XmlElement): boolean {
+  if (element.hasAttribute("hidden")) return true;
+  return (element.getAttribute("aria-hidden") || "").trim().toLowerCase() === "true";
+}
+
+function visibleTextContent(element: XmlElement): string {
+  let result = "";
+  for (const child of Array.from(element.childNodes)) {
+    if (child.nodeType === 3 || child.nodeType === 4) {
+      result += child.nodeValue ?? "";
+      continue;
+    }
+    if (child.nodeType !== 1) continue;
+    const childElement = child as XmlElement;
+    if (SKIPPED_TAGS.has(localName(childElement)) || isHiddenFromCanonicalText(childElement)) continue;
+    result += visibleTextContent(childElement);
+  }
+  return result;
+}
+
+function visibleCollapsedText(element: XmlElement | null | undefined): string {
+  return element ? visibleTextContent(element).replace(/\s+/g, " ").trim() : "";
 }
 
 function collapsedText(element: XmlElement | null | undefined): string {
