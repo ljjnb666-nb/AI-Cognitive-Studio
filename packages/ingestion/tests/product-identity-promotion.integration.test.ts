@@ -278,20 +278,30 @@ describe("controlled product identity promotion authority", () => {
     await expect(prisma.source.findUniqueOrThrow({ where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } } })).resolves.toMatchObject({ editionId: null });
   });
 
-  it("serializes concurrent promotions across two SourceDocument versions of the same Source", async () => {
+  it("allows only the latest SourceDocument version to promote product identity", async () => {
     const value = await fixture({ title: "Version One" });
     const second = await addDocumentVersion(value, { title: "Version Two" });
     const context = { userId: value.user.id, workspaceId: value.workspace.id };
 
-    const results = await Promise.all([
+    const [oldResult, latestResult] = await Promise.all([
       promoteCurrentProductIdentityForUser(context, { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id }),
       promoteCurrentProductIdentityForUser(context, { sourceDocumentId: second.document.id, expectedExtractionId: second.extraction.id }),
     ]);
-    expect(results.map((result) => result.status).sort()).toEqual(["APPLIED", "CONFLICT"]);
+    expect(oldResult).toEqual({
+      status: "SUPERSEDED",
+      expectedSourceDocumentId: value.document.id,
+      latestSourceDocumentId: second.document.id,
+    });
+    expect(latestResult.status).toBe("APPLIED");
     await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
     await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
-    const bound = await prisma.source.findUniqueOrThrow({ where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } } });
-    expect(bound.editionId).not.toBeNull();
+    const bound = await prisma.source.findUniqueOrThrow({
+      where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } },
+      include: { edition: { include: { work: true } } },
+    });
+    expect(bound.edition?.work.title).toBe("Version Two");
+    await expect(prisma.productIdentityPromotion.count({ where: { extractionId: value.extraction.id } })).resolves.toBe(0);
+    await expect(prisma.productIdentityPromotion.count({ where: { extractionId: second.extraction.id } })).resolves.toBe(1);
   });
 
   it("treats whitespace-only candidate title as missing and creates no product identity", async () => {
