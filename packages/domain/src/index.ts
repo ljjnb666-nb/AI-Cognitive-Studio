@@ -37,6 +37,12 @@ export {
   type ProductIdentityEvidence,
 } from "./product-identity-candidate.js";
 export {
+  classifyProductIdentifierForPromotion,
+  isPromotableProductLanguage,
+  normalizeProductIdentityTitleForComparison,
+  type ProductIdentifierPromotionClassification,
+} from "./product-identity-promotion.js";
+export {
   blockExtractionProvenanceSchema,
   canonicalBlockMetadataSchema,
   CANONICAL_SCHEMA_VERSION,
