@@ -791,7 +791,7 @@ function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserL
 
 /** ZIP entry names stay strict: no traversal segments of any kind. */
 function isSafePath(path: string): boolean {
-  return !!path && !path.includes("\\") && !/^(?:[\\/]|[a-zA-Z]:|\\\\)/.test(path) && !path.split("/").some((part) => part === ".." || !part) && !/%2e|%2f|%5c/i.test(path);
+  return !!path && !path.includes("\\") && !/^(?:[\\/]|[a-zA-Z]:|\\\\)/.test(path) && !path.split("/").some((part) => part === "." || part === ".." || !part) && !/%2e|%2f|%5c/i.test(path);
 }
 
 // ---------------------------------------------------------------------------

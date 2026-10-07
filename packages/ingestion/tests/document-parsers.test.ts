@@ -31,6 +31,9 @@ describe("safe EPUB parser", () => {
   it("rejects duplicate central-directory names before Map materialization", async () => {
     await expect(parseDocument(epub([{ name: "OPS/a.xhtml", text: "<html><body><p>shadow</p></body></html>" }]), "application/epub+zip")).rejects.toThrow("SOURCE_ARCHIVE_UNSAFE");
   });
+  it("rejects dot-segment ZIP entry aliases before archive lookup", async () => {
+    await expect(parseDocument(epub([{ name: "OPS/./shadow.xhtml", text: "<html><body><p>shadow</p></body></html>" }]), "application/epub+zip")).rejects.toThrow("SOURCE_ARCHIVE_UNSAFE");
+  });
   it("rejects central/local header identity mismatches deterministically", async () => {
     const input = Buffer.from(epub());
     // First local header belongs to mimetype. Central says STORE (0); mutate
