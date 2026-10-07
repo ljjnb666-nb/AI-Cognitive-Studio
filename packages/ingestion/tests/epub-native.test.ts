@@ -8,12 +8,12 @@ import { SourceError } from "../src/source-errors.js";
 // Deterministic, repo-local EPUB fixtures (synthetic but structurally real).
 // ---------------------------------------------------------------------------
 
-type Entry = { name: string; text: string };
+type Entry = { name: string; text?: string; bytes?: Buffer };
 
 function zip(entries: Entry[]): Uint8Array {
   const locals: Buffer[] = [], central: Buffer[] = []; let offset = 0;
   for (const entry of entries) {
-    const name = Buffer.from(entry.name), raw = Buffer.from(entry.text), stored = entry.name === "mimetype", body = stored ? raw : deflateRawSync(raw), method = stored ? 0 : 8;
+    const name = Buffer.from(entry.name), raw = entry.bytes ?? Buffer.from(entry.text ?? ""), stored = entry.name === "mimetype", body = stored ? raw : deflateRawSync(raw), method = stored ? 0 : 8;
     const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8); local.writeUInt32LE(body.length, 18); local.writeUInt32LE(raw.length, 22); local.writeUInt16LE(name.length, 26); locals.push(local, name, body);
     const record = Buffer.alloc(46); record.writeUInt32LE(0x02014b50, 0); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(method, 10); record.writeUInt32LE(body.length, 20); record.writeUInt32LE(raw.length, 24); record.writeUInt16LE(name.length, 28); record.writeUInt32LE(offset, 42); central.push(record, name); offset += local.length + name.length + body.length;
   }
@@ -240,6 +240,58 @@ describe("epub-parser-v2 navigation", () => {
     const second = await parseDocument(bytes, "application/epub+zip");
     expect(second).toEqual(first);
     expect(first.qualityWarnings).toEqual(["TABLE_FLATTENED"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// XML encoding correctness (BOOK-INGESTION-04C-2)
+// ---------------------------------------------------------------------------
+
+function utf16leXml(xml: string, bom = true): Buffer {
+  const body = Buffer.from(xml, "utf16le");
+  return bom ? Buffer.concat([Buffer.from([0xff, 0xfe]), body]) : body;
+}
+
+function utf16beXml(xml: string, bom = true): Buffer {
+  const le = Buffer.from(xml, "utf16le");
+  const be = Buffer.alloc(le.length);
+  for (let index = 0; index < le.length; index += 2) {
+    be[index] = le[index + 1]!;
+    be[index + 1] = le[index]!;
+  }
+  return bom ? Buffer.concat([Buffer.from([0xfe, 0xff]), be]) : be;
+}
+
+describe("epub-parser-v2 XML encodings", () => {
+  it("parses UTF-16LE and UTF-16BE content documents with BOMs", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="le" href="text/le.xhtml" media-type="application/xhtml+xml"/><item id="be" href="text/be.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="le"/><itemref idref="be"/>',
+    });
+    const le = '<?xml version="1.0" encoding="UTF-16"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>LE 世界</p></body></html>';
+    const be = '<?xml version="1.0" encoding="UTF-16"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>BE 世界</p></body></html>';
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/le.xhtml", bytes: utf16leXml(le) },
+      { name: "OEBPS/text/be.xhtml", bytes: utf16beXml(be) },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["LE 世界", "BE 世界"]);
+  });
+
+  it("autodetects BOM-less UTF-16 XML signatures and rejects malformed UTF-16", async () => {
+    const opf = opfDocument({
+      manifest: '<item id="le" href="text/le.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="le"/>',
+    });
+    const xml = '<?xml version="1.0" encoding="UTF-16"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>No BOM</p></body></html>';
+    const parsed = await parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/le.xhtml", bytes: utf16leXml(xml, false) },
+    ] }), "application/epub+zip");
+    expect(blocksOf(parsed).map((block) => block.text)).toEqual(["No BOM"]);
+
+    const malformed = Buffer.from([0xff, 0xfe, 0x3c]);
+    await expect(parseDocument(book({ opf, files: [
+      { name: "OEBPS/text/le.xhtml", bytes: malformed },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.CORRUPTED);
   });
 });
 

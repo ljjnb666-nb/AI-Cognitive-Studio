@@ -123,7 +123,7 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
 
     const mediaType = contentItem.mediaType ?? "";
     const document = parseXmlResource(
-      entryText(byName, resource.path, limits),
+      entryXmlText(byName, resource.path, limits),
       limits,
       resource.path,
       { kind: "content", allowRemoteResources: contentItem.properties.includes("remote-resources") },
@@ -161,7 +161,7 @@ export function parseEpub(bytes: Uint8Array, limits: ParserLimits, parser: Parse
 // ---------------------------------------------------------------------------
 
 function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubPackage {
-  const container = parseXmlResource(entryText(byName, "META-INF/container.xml", limits), limits, "", { kind: "container" });
+  const container = parseXmlResource(entryXmlText(byName, "META-INF/container.xml", limits), limits, "", { kind: "container" });
   let opfPath: string | null = null;
   for (const rootfile of elementsByLocalName(container, "rootfile", limits)) {
     const mediaType = rootfile.getAttribute("media-type");
@@ -173,7 +173,7 @@ function readPackage(byName: Map<string, ZipEntry>, limits: ParserLimits): EpubP
     if (byName.has(resolved.path)) { opfPath = resolved.path; break; }
   }
   if (!opfPath) throw new Error(SourceError.CORRUPTED);
-  const opf = parseXmlResource(entryText(byName, opfPath, limits), limits, opfPath, { kind: "package" });
+  const opf = parseXmlResource(entryXmlText(byName, opfPath, limits), limits, opfPath, { kind: "package" });
   const packageElement = opf.documentElement;
   if (!packageElement || localName(packageElement) !== "package") throw new Error(SourceError.CORRUPTED);
   const manifestElement = elementsByLocalName(opf, "manifest", limits)[0];
@@ -243,7 +243,7 @@ function assertManifestFallbackGraph(manifest: Map<string, ManifestItem>): void 
 function assertSupportedContainerEncryption(byName: Map<string, ZipEntry>, opf: EpubPackage, limits: ParserLimits): void {
   if (!byName.has("META-INF/encryption.xml")) return;
 
-  const document = parseXmlDocument(safeXmlText(entryText(byName, "META-INF/encryption.xml", limits)), limits);
+  const document = parseXmlDocument(safeXmlText(entryXmlText(byName, "META-INF/encryption.xml", limits)), limits);
   const root = document.documentElement;
   if (!root || localName(root) !== "encryption" || root.namespaceURI !== OCF_CONTAINER_NAMESPACE) throw new Error(SourceError.CORRUPTED);
 
@@ -337,7 +337,7 @@ function readNavigation(opf: EpubPackage, byName: Map<string, ZipEntry>, limits:
     const navItem = [...opf.manifest.values()].find((item) => item.properties.includes("nav"));
     if (navItem) {
       const navPath = resolveNavDocumentPath(navItem, opf, byName);
-      const document = parseXmlResource(entryText(byName, navPath, limits), limits, navPath, { kind: "navigation" });
+      const document = parseXmlResource(entryXmlText(byName, navPath, limits), limits, navPath, { kind: "navigation" });
       const entries = flattenEpub3Nav(document, navPath, limits);
       return entries.length ? { source: "EPUB3_NAV", entries, degraded: false } : { source: "NONE", entries: [], degraded: true };
     }
@@ -345,7 +345,7 @@ function readNavigation(opf: EpubPackage, byName: Map<string, ZipEntry>, limits:
     const ncxItem = (opf.spineTocId ? opf.manifest.get(opf.spineTocId) : undefined) ?? [...opf.manifest.values()].find((item) => item.mediaType === NCX_MEDIA_TYPE);
     if (ncxItem) {
       const ncxPath = resolveNavDocumentPath(ncxItem, opf, byName);
-      const document = parseXmlResource(entryText(byName, ncxPath, limits), limits, ncxPath, { kind: "navigation" });
+      const document = parseXmlResource(entryXmlText(byName, ncxPath, limits), limits, ncxPath, { kind: "navigation" });
       const entries = flattenNcx(document, ncxPath, limits);
       return entries.length ? { source: "EPUB2_NCX", entries, degraded: false } : { source: "NONE", entries: [], degraded: true };
     }
@@ -1009,7 +1009,7 @@ function decodeZipName(bytes: Uint8Array): string {
   }
 }
 
-function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): string {
+function entryBytes(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): Buffer {
   const entry = entries.get(name);
   if (!entry) throw new Error(SourceError.CORRUPTED);
   let data: Buffer;
@@ -1017,7 +1017,28 @@ function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserL
     data = entry.method === 0 ? entry.compressed : entry.method === 8 ? inflateRawSync(entry.compressed, { maxOutputLength: limits.maxArchiveEntryBytes }) : (() => { throw new Error("unsupported"); })();
   } catch { throw new Error(SourceError.ARCHIVE_UNSAFE); }
   if (data.length !== entry.uncompressedSize) throw new Error(SourceError.CORRUPTED);
-  try { return new TextDecoder("utf-8", { fatal: true }).decode(data); } catch { throw new Error(SourceError.CORRUPTED); }
+  return data;
+}
+
+function entryText(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(entryBytes(entries, name, limits));
+  } catch {
+    throw new Error(SourceError.CORRUPTED);
+  }
+}
+
+function entryXmlText(entries: Map<string, ZipEntry>, name: string, limits: ParserLimits): string {
+  const data = entryBytes(entries, name, limits);
+  try {
+    if (data.length >= 2 && data[0] === 0xff && data[1] === 0xfe) return new TextDecoder("utf-16le", { fatal: true }).decode(data);
+    if (data.length >= 2 && data[0] === 0xfe && data[1] === 0xff) return new TextDecoder("utf-16be", { fatal: true }).decode(data);
+    if (data.length >= 2 && data[0] === 0x3c && data[1] === 0x00) return new TextDecoder("utf-16le", { fatal: true }).decode(data);
+    if (data.length >= 2 && data[0] === 0x00 && data[1] === 0x3c) return new TextDecoder("utf-16be", { fatal: true }).decode(data);
+    return new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    throw new Error(SourceError.CORRUPTED);
+  }
 }
 
 /** ZIP entry names stay strict: no traversal segments of any kind. */
