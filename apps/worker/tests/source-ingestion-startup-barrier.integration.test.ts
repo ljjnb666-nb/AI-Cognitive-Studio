@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,7 +48,11 @@ afterAll(async () => {
   if (cleanup.userIds.length) await prisma.user.deleteMany({ where: { id: { in: cleanup.userIds } } });
   if (cleanup.workspaceIds.length) await prisma.workspace.deleteMany({ where: { id: { in: cleanup.workspaceIds } } });
   for (const pid of spawnedPids) {
-    try { spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }); } catch { /* gone */ }
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    } else {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
   }
   if (tempRoot) rmSync(tempRoot, { recursive: true, force: true });
   delete process.env.MINERU_FAKE_MODE;
