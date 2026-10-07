@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { spawn, spawnSync } from "node:child_process";
 import PDFDocument from "pdfkit";
 import { prisma } from "@ai-cognitive/db";
 import { parseCanonicalBlockMetadata, parseExtractionQualityMetadata } from "@ai-cognitive/domain";
@@ -30,6 +31,15 @@ const workspaceIds: string[] = [];
 const userIds: string[] = [];
 const runIds: string[] = [];
 const tempRoots: string[] = [];
+
+function killTestProcess(pid: number | undefined): void {
+  if (!pid) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    return;
+  }
+  try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+}
 
 class FakeStorageProvider implements StorageProvider {
   readonly objects = new Map<string, Uint8Array>();
@@ -397,7 +407,6 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
     const config = fakeMineruConfig();
     const handle = createMineruPdfOcrExecutor(config);
     // A live same-image substitute the tampered endpoint will lure with.
-    const { spawn } = await import("node:child_process");
     const substitute = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { detached: true, stdio: "ignore", windowsHide: true });
     substitute.unref();
     let originalPid: number | undefined;
@@ -424,8 +433,8 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
       // The substitute was never killed by the mismatched cleanup.
       expect(await recordedProcessAlive(substitute.pid!, /node|python/i)).toBe(true);
     } finally {
-      try { spawn("taskkill", ["/PID", String(substitute.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }); } catch { /* gone */ }
-      try { spawn("taskkill", ["/PID", String(originalPid!), "/T", "/F"], { stdio: "ignore", windowsHide: true }); } catch { /* gone */ }
+      killTestProcess(substitute.pid);
+      killTestProcess(originalPid);
       // Wait until the original dummy released its home CWD so the suite's
       // temp-root cleanup cannot hit EPERM.
       const deadline = Date.now() + 10_000;

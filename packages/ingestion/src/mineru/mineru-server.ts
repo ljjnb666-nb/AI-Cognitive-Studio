@@ -202,13 +202,17 @@ export async function createMineruServerSession(input: MineruServerSessionInput)
     return { kind: "KILLED_BY_RECORDED_IDENTITY" };
   }
 
-  /** Post-kill liveness check: only the raw pid/image check applies here (the kill just happened; a recycle within this window is not survivable evidence). */
+  /** Post-kill liveness check: once teardown owns a kill, confirmation must
+   *  outlive the work abort signal. Otherwise lease-loss/shutdown aborts can
+   *  turn a successfully initiated kill into a false ORPHAN_SUSPECT before
+   *  the OS has had time to reap the process. The loop remains hard-bounded
+   *  by STOP_VERIFY_TIMEOUT_MS and performs no new work. */
   async function awaitPidExit(pid: number, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       if (!(await recordedProcessAlive(pid, input.processImagePattern ?? /python/i))) return true;
-      if (Date.now() >= deadline || input.abortSignal?.aborted) return false;
-      await sleep(STOP_VERIFY_POLL_MS, input.abortSignal);
+      if (Date.now() >= deadline) return false;
+      await sleep(STOP_VERIFY_POLL_MS);
     }
   }
 }
