@@ -15,6 +15,17 @@ export function normalizeProductIdentityTitleForComparison(value: string): strin
   return value.normalize("NFKC").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Comparison-only ISBN normalization for existing product identity.
+ *
+ * Existing user/legacy values remain authoritative and are never rewritten by
+ * this helper. We only ignore conventional presentation separators so a stored
+ * value such as 978-0-306-40615-7 compares equal to canonical 9780306406157.
+ */
+export function normalizeIsbnForComparison(value: string): string {
+  return value.replace(/[\s-]+/g, "").toUpperCase();
+}
+
 export function isPromotableProductLanguage(value: string): boolean {
   const normalized = value.trim();
   return normalized.length <= 64 && /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(normalized);
@@ -32,7 +43,9 @@ function validIsbn10(value: string): boolean {
 }
 
 function validIsbn13(value: string): boolean {
-  if (!/^\d{13}$/.test(value)) return false;
+  // ISBN-13 is an EAN-13 restricted to the Bookland prefixes assigned to ISBN.
+  // A generic 13-digit EAN with a valid checksum is not automatically an ISBN.
+  if (!/^(?:978|979)\d{10}$/.test(value)) return false;
   let sum = 0;
   for (let index = 0; index < 12; index++) {
     sum += Number(value[index]!) * (index % 2 === 0 ? 1 : 3);
