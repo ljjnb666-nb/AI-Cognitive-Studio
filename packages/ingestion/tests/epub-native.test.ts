@@ -179,6 +179,16 @@ describe("epub-parser-v2 navigation", () => {
     });
   });
 
+  it("rejects OCF test-root collision escapes that a single sentinel would accept", async () => {
+    const collision = opfDocument({
+      manifest: '<item id="c1" href="../../A/evil.xhtml" media-type="application/xhtml+xml"/>',
+      spine: '<itemref idref="c1"/>',
+    });
+    await expect(parseDocument(book({ opf: collision, files: [
+      { name: "A/evil.xhtml", text: contentDocument("<p>escaped</p>") },
+    ] }), "application/epub+zip")).rejects.toThrow(SourceError.ARCHIVE_UNSAFE);
+  });
+
   it("normalizes legal percent-encoded dot segments but rejects root escape and encoded slash aliases", async () => {
     const legal = opfDocument({
       manifest: '<item id="c1" href="sub/%2e%2e/text/ch1.xhtml" media-type="application/xhtml+xml"/>',

@@ -429,28 +429,37 @@ function assertNavigationCapacity(entries: EpubNavigationEntry[], limits: Parser
  * fragment is separated here and never participates in archive lookup. Pure
  * string semantics: nothing is fetched, nothing is read from disk.
  */
-const OCF_TEST_ROOT = new URL("https://epub.invalid/__ocf__/");
+// OCF's leak-detection algorithm deliberately resolves each relative URL
+// against two different artificial container roots. A single sentinel is not
+// sufficient: an attacker can escape with ".." and then navigate back into the
+// sentinel's literal path, making a leaked URL look internal again.
+const OCF_TEST_ROOTS = [
+  new URL("https://a.example.org/A/"),
+  new URL("https://b.example.org/B/"),
+] as const;
 
 function resolveArchiveHref(basePath: string, href: string): { path: string; fragmentId: string | null } {
   if (!href || href.includes("\0") || href.includes("\\")) throw new Error(SourceError.ARCHIVE_UNSAFE);
 
-  let resolved: URL;
-  try {
-    const base = basePath ? new URL(archivePathToUrlPath(basePath), OCF_TEST_ROOT) : OCF_TEST_ROOT;
-    resolved = new URL(href, base);
-  } catch {
-    throw new Error(SourceError.ARCHIVE_UNSAFE);
-  }
+  const resolved = OCF_TEST_ROOTS.map((root) => {
+    try {
+      const base = basePath ? new URL(archivePathToUrlPath(basePath), root) : root;
+      const candidate = new URL(href, base);
+      const rootPath = root.pathname;
+      if (candidate.origin !== root.origin || !candidate.pathname.startsWith(rootPath) || candidate.search) throw new Error(SourceError.ARCHIVE_UNSAFE);
+      return { candidate, encodedPath: candidate.pathname.slice(rootPath.length) };
+    } catch {
+      throw new Error(SourceError.ARCHIVE_UNSAFE);
+    }
+  });
 
-  // Internal EPUB references must remain under the artificial container-root
-  // sentinel. This mirrors the OCF "cannot leak above root" URL algorithm and
-  // catches literal or percent-encoded dot-segment escapes.
-  const rootPath = OCF_TEST_ROOT.pathname;
-  if (resolved.origin !== OCF_TEST_ROOT.origin || !resolved.pathname.startsWith(rootPath) || resolved.search) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  const encodedPath = resolved.pathname.slice(rootPath.length);
+  // Both artificial roots must produce the same in-container relative path.
+  // This is the collision guard required by the OCF algorithm.
+  if (resolved[0]!.encodedPath !== resolved[1]!.encodedPath) throw new Error(SourceError.ARCHIVE_UNSAFE);
+  const encodedPath = resolved[0]!.encodedPath;
   if (!encodedPath) {
     if (!basePath) throw new Error(SourceError.ARCHIVE_UNSAFE);
-    return { path: basePath, fragmentId: decodeUrlFragment(resolved.hash) };
+    return { path: basePath, fragmentId: decodeUrlFragment(resolved[0]!.candidate.hash) };
   }
 
   const segments = encodedPath.split("/").map((segment) => decodeUrlPathSegment(segment));
@@ -459,7 +468,7 @@ function resolveArchiveHref(basePath: string, href: string): { path: string; fra
   }
   const path = segments.join("/");
   if (!isSafePath(path)) throw new Error(SourceError.ARCHIVE_UNSAFE);
-  return { path, fragmentId: decodeUrlFragment(resolved.hash) };
+  return { path, fragmentId: decodeUrlFragment(resolved[0]!.candidate.hash) };
 }
 
 function archivePathToUrlPath(path: string): string {
