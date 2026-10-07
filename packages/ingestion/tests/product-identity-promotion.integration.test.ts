@@ -218,7 +218,7 @@ describe("controlled product identity promotion authority", () => {
 
     const second = await promoteCurrentProductIdentityForUser(context, input);
     expect(second.status).toBe("APPLIED");
-    if (first.status !== "STALE" && second.status !== "STALE") expect(second.promotion.id).toBe(first.promotion.id);
+    if (first.status === "APPLIED" && second.status === "APPLIED") expect(second.promotion.id).toBe(first.promotion.id);
     await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
     await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
     await expect(prisma.productIdentityPromotion.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
@@ -236,7 +236,7 @@ describe("controlled product identity promotion authority", () => {
       { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
     );
     expect(result.status).toBe("CONFLICT");
-    if (result.status !== "STALE") {
+    if (result.status === "CONFLICT") {
       expect(result.promotion.conflicts).toEqual([
         { field: "work.title", existing: "Protected Title", candidate: "Candidate Title" },
         { field: "edition.language", existing: "en", candidate: "fr" },
@@ -311,7 +311,7 @@ describe("controlled product identity promotion authority", () => {
       { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
     );
     expect(result.status).toBe("BLOCKED");
-    if (result.status !== "STALE") expect(result.promotion.reasonCode).toBe("MISSING_TITLE_FOR_UNBOUND_SOURCE");
+    if (result.status === "BLOCKED") expect(result.promotion.reasonCode).toBe("MISSING_TITLE_FOR_UNBOUND_SOURCE");
     await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
     await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
   });
@@ -323,7 +323,7 @@ describe("controlled product identity promotion authority", () => {
       { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
     );
     expect(result.status).toBe("BLOCKED");
-    if (result.status !== "STALE") {
+    if (result.status === "BLOCKED") {
       expect(result.promotion.reasonCode).toBe("MISSING_TITLE_FOR_UNBOUND_SOURCE");
       expect(result.promotion.ignoredFields).toContainEqual({ field: "identifier", reason: "UNCLASSIFIED_IDENTIFIER" });
     }
