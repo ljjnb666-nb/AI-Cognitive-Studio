@@ -339,6 +339,7 @@ function readNavigation(opf: EpubPackage, byName: Map<string, ZipEntry>, limits:
       const navPath = resolveNavDocumentPath(navItem, opf, byName);
       const document = parseXmlResource(entryXmlText(byName, navPath, limits), limits, navPath, { kind: "navigation" });
       const entries = flattenEpub3Nav(document, navPath, limits);
+      if (entries.length) assertNavigationTargets(entries, opf, byName, limits);
       return entries.length ? { source: "EPUB3_NAV", entries, degraded: false } : { source: "NONE", entries: [], degraded: true };
     }
     // No EPUB3 nav: EPUB2 NCX via spine toc, then any declared NCX manifest item.
@@ -347,6 +348,7 @@ function readNavigation(opf: EpubPackage, byName: Map<string, ZipEntry>, limits:
       const ncxPath = resolveNavDocumentPath(ncxItem, opf, byName);
       const document = parseXmlResource(entryXmlText(byName, ncxPath, limits), limits, ncxPath, { kind: "navigation" });
       const entries = flattenNcx(document, ncxPath, limits);
+      if (entries.length) assertNavigationTargets(entries, opf, byName, limits);
       return entries.length ? { source: "EPUB2_NCX", entries, degraded: false } : { source: "NONE", entries: [], degraded: true };
     }
     // A legal EPUB may ship without any TOC: no warning without evidence.
@@ -356,6 +358,37 @@ function readNavigation(opf: EpubPackage, byName: Map<string, ZipEntry>, limits:
     // other primary-navigation failure degrades to a deterministic warning.
     if (error instanceof Error && (error.message === SourceError.ARCHIVE_UNSAFE || error.message === SourceError.TOO_LARGE)) throw error;
     return { source: "NONE", entries: [], degraded: true };
+  }
+}
+
+function assertNavigationTargets(entries: EpubNavigationEntry[], opf: EpubPackage, byName: Map<string, ZipEntry>, limits: ParserLimits): void {
+  // toc/NCX navigation must resolve into the top-level content plane, i.e. a
+  // spine content document (or its selected EPUB-content fallback), not merely
+  // any arbitrary file that happens to exist in the ZIP.
+  const topLevelPaths = new Set<string>();
+  for (const ref of opf.spine) {
+    const declared = opf.manifest.get(ref.idref);
+    if (!declared) throw new Error(NAV_STRUCTURAL_FAILURE);
+    const content = resolveSpineContentItem(opf.manifest, declared);
+    const target = resolveArchiveHref(opf.path, content.href);
+    if (!byName.has(target.path)) throw new Error(NAV_STRUCTURAL_FAILURE);
+    topLevelPaths.add(target.path);
+  }
+
+  const parsedTargets = new Map<string, XmlDocument>();
+  for (const entry of entries) {
+    if (!topLevelPaths.has(entry.href) || !byName.has(entry.href)) throw new Error(NAV_STRUCTURAL_FAILURE);
+    if (!entry.fragmentId) continue;
+
+    let document = parsedTargets.get(entry.href);
+    if (!document) {
+      document = parseXmlDocument(safeXmlText(entryXmlText(byName, entry.href, limits)), limits);
+      parsedTargets.set(entry.href, document);
+    }
+    const root = document.documentElement;
+    if (!root) throw new Error(NAV_STRUCTURAL_FAILURE);
+    const exists = iterXmlElements(root, limits).some((element) => element.getAttribute("id") === entry.fragmentId);
+    if (!exists) throw new Error(NAV_STRUCTURAL_FAILURE);
   }
 }
 

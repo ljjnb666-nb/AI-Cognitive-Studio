@@ -59,7 +59,7 @@ describe("epub-parser-v2 navigation", () => {
   it("detects a valid EPUB3 nav and flattens nested order and depth deterministically", async () => {
     const parsed = await parseDocument(book({ opf: epub3Opf(), files: [
       { name: "OEBPS/nav.xhtml", text: navDocument('<li><a href="text/ch1.xhtml">Part One</a><ol><li><a href="text/ch1.xhtml#s1">Section 1</a></li><li><a href="text/ch1.xhtml#s2">Section 2</a></li></ol></li><li><a href="text/ch1.xhtml#s3">Part Two</a></li>') },
-      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<h1>Alpha</h1><p id="s1">First paragraph.</p><p id="s2">Second paragraph.</p><p id="s3">Third paragraph.</p>') },
     ] }), "application/epub+zip");
     const metadata = parseEpubExtractionMetadata(parsed.formatMetadata);
     expect(metadata.navigationSource).toBe("EPUB3_NAV");
@@ -79,7 +79,7 @@ describe("epub-parser-v2 navigation", () => {
     const opf = opfDocument({ version: "2.0", manifest: '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>', spine: '<itemref idref="c1"/>' }).replace("<spine>", '<spine toc="ncx">');
     const parsed = await parseDocument(book({ opf, files: [
       { name: "OEBPS/toc.ncx", text: ncx },
-      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+      { name: "OEBPS/text/ch1.xhtml", text: contentDocument('<h1>Alpha</h1><p id="s1">First paragraph.</p>') },
     ] }), "application/epub+zip");
     const metadata = parseEpubExtractionMetadata(parsed.formatMetadata);
     expect(metadata.navigationSource).toBe("EPUB2_NCX");
@@ -122,6 +122,27 @@ describe("epub-parser-v2 navigation", () => {
     expect(parseEpubExtractionMetadata(parsed.formatMetadata).navigationSource).toBe("NONE");
     expect(parsed.qualityWarnings).toEqual(["EPUB_NAVIGATION_DEGRADED"]);
     expect(blocksOf(parsed).map((block) => block.text)).toContain("Alpha");
+  });
+
+  it("degrades navigation whose top-level target or fragment does not exist", async () => {
+    const missingFragment = await parseDocument(book({ opf: epub3Opf(), files: [
+      { name: "OEBPS/nav.xhtml", text: navDocument('<li><a href="text/ch1.xhtml#missing">Missing fragment</a></li>') },
+      { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+    ] }), "application/epub+zip");
+    expect(parseEpubExtractionMetadata(missingFragment.formatMetadata).navigationSource).toBe("NONE");
+    expect(missingFragment.qualityWarnings).toContain("EPUB_NAVIGATION_DEGRADED");
+    expect(blocksOf(missingFragment).map((block) => block.text)).toContain("Alpha");
+
+    const nonSpineTarget = await parseDocument(book({
+      opf: epub3Opf('<item id="appendix" href="text/appendix.xhtml" media-type="application/xhtml+xml"/>'),
+      files: [
+        { name: "OEBPS/nav.xhtml", text: navDocument('<li><a href="text/appendix.xhtml">Not top level</a></li>') },
+        { name: "OEBPS/text/ch1.xhtml", text: chapterOne },
+        { name: "OEBPS/text/appendix.xhtml", text: contentDocument("<p>Appendix</p>") },
+      ],
+    }), "application/epub+zip");
+    expect(parseEpubExtractionMetadata(nonSpineTarget.formatMetadata).navigationSource).toBe("NONE");
+    expect(nonSpineTarget.qualityWarnings).toContain("EPUB_NAVIGATION_DEGRADED");
   });
 
   it("fails closed on unsafe nav targets: external URL and archive-root escape", async () => {
@@ -815,7 +836,7 @@ describe("RF01 namespace-prefixed documents", () => {
   const prefixedContainer = '<?xml version="1.0"?><c:container xmlns:c="urn:oasis:names:tc:opendocument:xmlns:container"><c:rootfiles><c:rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></c:rootfiles></c:container>';
   const prefixedOpf = '<?xml version="1.0"?><opf:package xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0" unique-identifier="pub-id"><opf:metadata><dc:identifier id="pub-id">urn:uuid:prefixed</dc:identifier><dc:title>Prefixed Book</dc:title><dc:language>en</dc:language></opf:metadata><opf:manifest><opf:item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><opf:item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/></opf:manifest><opf:spine><opf:itemref idref="c1"/></opf:spine></opf:package>';
   const prefixedNav = '<?xml version="1.0"?><xhtml:html xmlns:xhtml="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><xhtml:body><xhtml:nav epub:type="toc"><xhtml:ol><xhtml:li><xhtml:a href="text/ch1.xhtml">Prefixed Chapter</xhtml:a><xhtml:ol><xhtml:li><xhtml:a href="text/ch1.xhtml#s1">Prefixed Section</xhtml:a></xhtml:li></xhtml:ol></xhtml:li></xhtml:ol></xhtml:nav></xhtml:body></xhtml:html>';
-  const prefixedXhtml = '<?xml version="1.0"?><xhtml:html xmlns:xhtml="http://www.w3.org/1999/xhtml"><xhtml:body><xhtml:h1 id="px">Prefixed Head</xhtml:h1><xhtml:p>Prefixed para</xhtml:p><xhtml:table><xhtml:tr><xhtml:td>A</xhtml:td><xhtml:td>1</xhtml:td></xhtml:tr></xhtml:table></xhtml:body></xhtml:html>';
+  const prefixedXhtml = '<?xml version="1.0"?><xhtml:html xmlns:xhtml="http://www.w3.org/1999/xhtml"><xhtml:body><xhtml:h1 id="px">Prefixed Head</xhtml:h1><xhtml:p id="s1">Prefixed para</xhtml:p><xhtml:table><xhtml:tr><xhtml:td>A</xhtml:td><xhtml:td>1</xhtml:td></xhtml:tr></xhtml:table></xhtml:body></xhtml:html>';
 
   const prefixedBook = (contentXhtml: string) => zip([
     { name: "mimetype", text: "application/epub+zip" },
