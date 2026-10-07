@@ -60,10 +60,19 @@ function validIsbn13(value: string): boolean {
  */
 export function classifyProductIdentifierForPromotion(value: string): ProductIdentifierPromotionClassification {
   const trimmed = value.trim();
-  const explicit = /^(?:urn:isbn:|isbn(?:-1[03])?(?::|\s+))\s*(.+)$/i.exec(trimmed);
-  if (!explicit) return { kind: "UNCLASSIFIED" };
+  const urn = /^urn:isbn:\s*(.+)$/i.exec(trimmed);
+  const labeled = /^isbn(?:-(10|13))?(?::|\s+)\s*(.+)$/i.exec(trimmed);
+  const raw = urn?.[1] ?? labeled?.[2];
+  if (!raw) return { kind: "UNCLASSIFIED" };
 
-  const compact = explicit[1]!.replace(/[\s-]+/g, "").toUpperCase();
+  const compact = raw.replace(/[\s-]+/g, "").toUpperCase();
+  const declaredScheme = labeled?.[1] ?? null;
+  if (declaredScheme === "10") {
+    return validIsbn10(compact) ? { kind: "ISBN10", value: compact } : { kind: "INVALID_EXPLICIT_ISBN" };
+  }
+  if (declaredScheme === "13") {
+    return validIsbn13(compact) ? { kind: "ISBN13", value: compact } : { kind: "INVALID_EXPLICIT_ISBN" };
+  }
   if (validIsbn10(compact)) return { kind: "ISBN10", value: compact };
   if (validIsbn13(compact)) return { kind: "ISBN13", value: compact };
   return { kind: "INVALID_EXPLICIT_ISBN" };
