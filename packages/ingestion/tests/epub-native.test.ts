@@ -541,9 +541,9 @@ describe("epub-parser-v2 semantic blocks", () => {
 
   it("excludes hidden and aria-hidden subtrees from canonical text", async () => {
     const parsed = await parse(
-      '<p>Visible <span hidden>secret</span> text <span aria-hidden="true">silent</span><span inert>inert</span>.</p>' +
-      '<section hidden><p>Hidden section</p></section>' +
-      '<section inert><p>Inert section</p></section>' +
+      '<p>Visible <span hidden="hidden">secret</span> text <span aria-hidden="true">silent</span><span inert="inert">inert</span>.</p>' +
+      '<section hidden="hidden"><p>Hidden section</p></section>' +
+      '<section inert="inert"><p>Inert section</p></section>' +
       '<p aria-hidden="true">ARIA hidden paragraph</p>' +
       '<p aria-hidden="false">Kept paragraph</p>',
     );
@@ -926,7 +926,7 @@ describe("RF01 namespace-prefixed documents", () => {
   });
 
   it("keeps outbound hyperlinks inert inside prefixed documents", async () => {
-    const linkedXhtml = prefixedXhtml.replace("<xhtml:p>Prefixed para</xhtml:p>", '<xhtml:p><xhtml:a href="https://example.test/x">Outbound</xhtml:a></xhtml:p>');
+    const linkedXhtml = prefixedXhtml.replace('<xhtml:p id="s1">Prefixed para</xhtml:p>', '<xhtml:p><xhtml:a href="https://example.test/x">Outbound</xhtml:a></xhtml:p>');
     const parsed = await parseDocument(prefixedBook(linkedXhtml), "application/epub+zip");
     expect(blocksOf(parsed).map((block) => block.text)).toContain("Outbound");
   });
