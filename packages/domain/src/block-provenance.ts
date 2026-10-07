@@ -83,12 +83,11 @@ export function tryParseCanonicalBlockMetadata(value: unknown): CanonicalBlockMe
  * Durable quality state for an extraction. Historical rows keep NULL.
  *
  * - NULL: legacy extraction, predating the canonical quality contract.
- * - UNKNOWN: canonical-book-v1 extraction whose contract is valid but which
- *   has not been assessed by a production quality gate yet. Parser success is
- *   NEVER equated with acceptance — current parsers must self-assign UNKNOWN
- *   and nothing stronger.
- * - ACCEPTED / DEGRADED / REQUIRES_FALLBACK / REJECTED: reserved for a future
- *   production quality gate; the parser path must not emit them.
+ * - UNKNOWN: canonical-book-v1 extraction whose format does not yet have a
+ *   production quality gate. Parser success is never equated with acceptance.
+ * - ACCEPTED / DEGRADED / REQUIRES_FALLBACK / REJECTED: deterministic
+ *   production quality-gate decisions. PDF (04B-2) and EPUB (04C-3) are
+ *   authoritative; parsers emit evidence, while the quality gate assigns status.
  */
 export const EXTRACTION_QUALITY_STATUSES = [
   "UNKNOWN",
@@ -112,10 +111,10 @@ export const EXTRACTION_QUALITY_WARNING_CODES = [
   "OCR_USED",
   "PARTIAL_EXTRACTION",
   "HEADER_FOOTER_CONTAMINATION",
-  // EPUB native ingestion (additive): navigation was declared but structurally
-  // unusable for non-security reasons, and a pre-paginated (fixed-layout)
-  // rendition was detected. Both are evidence-backed parser observations only;
-  // they never move qualityStatus off UNKNOWN.
+  // EPUB native ingestion: navigation was declared but structurally unusable
+  // for non-security reasons, and a pre-paginated (fixed-layout) rendition was
+  // detected. These are evidence-backed parser observations; 04C-3's quality
+  // gate deterministically maps successful warned EPUBs to DEGRADED.
   "EPUB_NAVIGATION_DEGRADED",
   "EPUB_FIXED_LAYOUT",
 ] as const;

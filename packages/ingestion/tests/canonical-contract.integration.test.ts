@@ -180,7 +180,8 @@ describe("canonical contract persistence", () => {
       { locator: { kind: "epub", spineIndex: 1, href: "OPS/a.xhtml", fragmentId: null, elementPath: "/html[1]/body[1]/p[1]" }, provenance: { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" } },
     ]);
     expect(extraction.canonicalSchemaVersion).toBe(CANONICAL_SCHEMA_VERSION);
-    expect(extraction.qualityStatus).toBe("UNKNOWN");
+    expect(extraction.qualityStatus).toBe("ACCEPTED");
+    expect(parseExtractionQualityMetadata(extraction.qualityMetadata)).toEqual({ warnings: [] });
   });
 
   it("keeps citation compatibility: content hash and authoritative UTF-16 source spans", async () => {

@@ -124,6 +124,28 @@ afterEach(async () => {
 afterAll(async () => { await prisma.$disconnect(); });
 
 describe("EPUB native ingestion persistence", () => {
+  it("publishes a clean EPUB as ACCEPTED and bootstraps the exact extraction", async () => {
+    const storage = new FakeStorageProvider();
+    const { user, workspace } = await createWorkspaceFixture();
+    const bytes = epubBytes([
+      { name: "mimetype", text: "application/epub+zip" },
+      { name: "META-INF/container.xml", text: '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>' },
+      { name: "OEBPS/content.opf", text: '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest><item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>' },
+      { name: "OEBPS/text/ch1.xhtml", text: '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Clean</h1><p>Complete body.</p></body></html>' },
+    ]);
+    const { document, run } = await ingest(storage, user, workspace, "application/epub+zip", "clean.epub", bytes);
+    const extraction = await prisma.documentExtraction.findFirstOrThrow({ where: { sourceDocumentId: document.id } });
+    expect(extraction.qualityStatus).toBe("ACCEPTED");
+    expect(parseExtractionQualityMetadata(extraction.qualityMetadata)).toEqual({ warnings: [] });
+
+    const [current, bootstrap] = await Promise.all([
+      prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } }),
+      prisma.bookAnalysisBootstrap.findUniqueOrThrow({ where: { ingestionRunId: run.id } }),
+    ]);
+    expect(current.extractionId).toBe(extraction.id);
+    expect(bootstrap.extractionId).toBe(extraction.id);
+  });
+
   it("persists epub-parser-v2 extractions with format metadata, typed warnings, and no synthetic pages", async () => {
     const storage = new FakeStorageProvider();
     const { user, workspace } = await createWorkspaceFixture();
@@ -140,7 +162,7 @@ describe("EPUB native ingestion persistence", () => {
     expect(extraction.parserVersion).toBe("epub-parser-v2");
     expect(extraction.parserName).toBe("builtin-epub");
     expect(extraction.canonicalSchemaVersion).toBe(CANONICAL_SCHEMA_VERSION);
-    expect(extraction.qualityStatus).toBe("UNKNOWN");
+    expect(extraction.qualityStatus).toBe("DEGRADED");
     expect(pageCount).toBe(0);
     expect(current.extractionId).toBe(extraction.id);
 
@@ -159,9 +181,11 @@ describe("EPUB native ingestion persistence", () => {
       { ordinal: 1, depth: 1, label: "Section One", href: "OEBPS/text/ch1.xhtml", fragmentId: "s1" },
     ]);
 
-    // Evidence-backed typed warnings survive persistence; the merged-cell
-    // table is flagged TABLE_FLATTENED, quality stays UNKNOWN.
+    // Evidence-backed typed warnings survive persistence; TABLE_FLATTENED
+    // makes this successful EPUB publication DEGRADED.
     expect(parseExtractionQualityMetadata(extraction.qualityMetadata)).toEqual({ warnings: ["TABLE_FLATTENED"] });
+    const bootstrap = await prisma.bookAnalysisBootstrap.findUniqueOrThrow({ where: { ingestionRunId: run.id } });
+    expect(bootstrap.extractionId).toBe(extraction.id);
 
     // Every persisted EPUB block: v2 provenance, epub locator, valid contract.
     expect(blocks.length).toBeGreaterThan(4);
@@ -288,7 +312,7 @@ describe("EPUB unsupported content failure model", () => {
     await process();
     const extraction = await prisma.documentExtraction.findFirstOrThrow({ where: { sourceDocumentId: document.id } });
     expect(extraction.status).toBe("SUCCEEDED");
-    expect(extraction.qualityStatus).toBe("UNKNOWN");
+    expect(extraction.qualityStatus).toBe("DEGRADED");
     expect(parseExtractionQualityMetadata(extraction.qualityMetadata)).toEqual({ warnings: ["PARTIAL_EXTRACTION"] });
     const current = await prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: document.id, workspaceId: workspace.id } } });
     expect(current.extractionId).toBe(extraction.id);
