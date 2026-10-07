@@ -41,11 +41,11 @@ afterEach(() => {
 });
 
 describe("recordedProcessAlive POSIX contract", () => {
-  it("uses header-free ps output and enforces the expected image class", async () => {
+  it("uses kill(0) existence semantics without depending on mutable process titles", async () => {
     if (process.platform === "win32") return;
-    expect(await recordedProcessAlive(process.pid, /node/i)).toBe(true);
-    expect(await recordedProcessAlive(process.pid, /definitely-not-node-runtime/i)).toBe(false);
+    expect(await recordedProcessAlive(process.pid, /definitely-not-this-runtime/i)).toBe(true);
     expect(await recordedProcessAlive(2_147_483_647, /node/i)).toBe(false);
+    expect(await recordedProcessAlive(0, /node/i)).toBe(false);
   });
 });
 

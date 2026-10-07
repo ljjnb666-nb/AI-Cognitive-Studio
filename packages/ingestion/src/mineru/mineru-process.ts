@@ -304,12 +304,24 @@ const taskListCommand = isWindows ? "tasklist" : "ps";
  * creation-time fingerprint).
  */
 export async function recordedProcessAlive(pid: number, expectedImagePattern: RegExp = /python/i): Promise<boolean> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  if (!isWindows) {
+    // POSIX liveness is an existence question. `ps -o comm=` is not a
+    // reliable executable-image oracle for runtimes such as Node because the
+    // kernel comm/thread name may be rewritten (for example "MainThread").
+    // kill(pid, 0) performs no signal delivery: ESRCH proves absence; EPERM or
+    // any other ambiguous error must fail closed as "possibly alive".
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  }
   return await new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = isWindows
-        ? spawn(taskListCommand, ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })
-        : spawn(taskListCommand, ["-o", "comm=", "-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"] });
+      child = spawn(taskListCommand, ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
     } catch {
       resolve(false);
       return;
@@ -320,19 +332,10 @@ export async function recordedProcessAlive(pid: number, expectedImagePattern: Re
     child.on("error", () => { clearTimeout(timer); resolve(false); });
     child.on("close", () => {
       clearTimeout(timer);
-      if (isWindows) {
-        const line = out.split(/\r?\n/).find((candidate) => candidate.includes(String(pid)));
-        if (!line) return resolve(false);
-        const image = line.split(",")[0]?.replace(/"/g, "") ?? "";
-        resolve(expectedImagePattern.test(image));
-        return;
-      }
-      // POSIX `ps -p <pid>` prints a header even when the pid does not
-      // exist, so a non-empty stdout check is a false-positive liveness
-      // oracle. `comm=` suppresses the header and gives us the executable
-      // image name directly; apply the same image-class fence as Windows.
-      const image = out.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
-      resolve(image.length > 0 && expectedImagePattern.test(image));
+      const line = out.split(/\r?\n/).find((candidate) => candidate.includes(String(pid)));
+      if (!line) return resolve(false);
+      const image = line.split(",")[0]?.replace(/"/g, "") ?? "";
+      resolve(expectedImagePattern.test(image));
     });
   });
 }
