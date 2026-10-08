@@ -36,7 +36,16 @@ export type ProductIdentityPreview = {
     language: string | null;
     isbn10: string | null;
     isbn13: string | null;
+    workUpdatedAt: string;
+    editionUpdatedAt: string;
   } | null;
+  recentCorrections: Array<{
+    id: string;
+    actorUserId: string;
+    reason: string;
+    changes: unknown;
+    createdAt: string;
+  }>;
   promotion: {
     status: "APPLIED" | "NOOP" | "CONFLICT" | "BLOCKED";
     reasonCode: string | null;
@@ -123,4 +132,77 @@ export function identityIgnoredReason(reason: string): string {
     INVALID_EXPLICIT_ISBN: "ISBN 格式、标签或校验位不合法",
   };
   return reasons[reason] ?? "未满足自动写入规则";
+}
+
+
+/** Advisory only: the server enforces all membership, ownership and revision fences. */
+export const manualIdentityFields = [
+  { field: "title", label: "正式书名" },
+  { field: "language", label: "语言" },
+  { field: "isbn10", label: "ISBN-10" },
+  { field: "isbn13", label: "ISBN-13" },
+] as const;
+export type ManualIdentityField = typeof manualIdentityFields[number]["field"];
+export type ManualIdentityDraft = Record<ManualIdentityField, string>;
+type SavedProduct = NonNullable<ProductIdentityPreview["product"]>;
+
+export function canEditProductIdentity(preview: ProductIdentityPreview): boolean {
+  return preview.canWrite && preview.product !== null && !!preview.currentExtractionId &&
+    preview.sourceDocumentId === preview.latestSourceDocumentId &&
+    preview.state !== "UNSUPPORTED_FORMAT" && preview.state !== "SUPERSEDED" &&
+    preview.state !== "NO_CURRENT_EXTRACTION" &&
+    !!preview.product.workUpdatedAt && !!preview.product.editionUpdatedAt;
+}
+
+export function identityDraft(product: SavedProduct): ManualIdentityDraft {
+  return {
+    title: product.title,
+    language: product.language ?? "",
+    isbn10: product.isbn10 ?? "",
+    isbn13: product.isbn13 ?? "",
+  };
+}
+
+/** Diff only: never send untouched fields, and never translate an empty input into a clearing operation. */
+export function manualIdentityChanges(product: SavedProduct, draft: ManualIdentityDraft):
+  Partial<Record<ManualIdentityField, string>> {
+  const before = identityDraft(product);
+  const result: Partial<Record<ManualIdentityField, string>> = {};
+  for (const { field } of manualIdentityFields) {
+    const value = draft[field].trim();
+    if (value !== before[field]) result[field] = value;
+  }
+  return result;
+}
+
+export function manualIdentityFormError(changes: Partial<Record<ManualIdentityField, string>>, reason: string): string | null {
+  if (Object.keys(changes).length === 0) return "未修改任何字段，无需提交。";
+  if (Object.values(changes).some((value) => !value)) return "不能将正式身份字段清空，请填写非空内容。";
+  if (changes.title && changes.title.length > 255) return "正式书名不能超过 255 个字符。";
+  if (reason.trim().length < 3 || reason.trim().length > 500) return "请填写 3 至 500 个字符的修正原因。";
+  return null;
+}
+
+export function manualIdentityOutcomeMessage(status: unknown, httpStatus: number): string {
+  if (status === "APPLIED" && httpStatus >= 200 && httpStatus < 300) return "人工修正已保存，正在重新读取正式书名和审计记录。";
+  if (status === "NOOP" && httpStatus >= 200 && httpStatus < 300) return "保存结果无变更，已重新检查正式信息。";
+  if (status === "CONFLICT") return "正式书籍信息已被其他操作修改；本次没有覆盖。已重新读取最新数据，请重新核对。";
+  if (status === "STALE") return "当前解析已更新，旧版本修正未写入。请重新核对。";
+  if (status === "SUPERSEDED") return "源文件已出现新版本，旧版本修正未写入。请切换到最新文件。";
+  if (httpStatus === 400 || httpStatus === 422) return "输入不符合服务端校验要求，本次没有保存。请检查书名、语言、ISBN 和修正原因。";
+  return productIdentityHttpMessage(httpStatus);
+}
+
+export type ManualIdentityAuditChange = { field: string; before: string | null; after: string };
+export function manualIdentityAuditChanges(raw: unknown): ManualIdentityAuditChange[] {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  const permitted = ["work.title", "edition.language", "edition.isbn10", "edition.isbn13"];
+  const record = raw as Record<string, unknown>;
+  return permitted.flatMap((field) => {
+    const item = record[field];
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const pair = item as Record<string, unknown>;
+    if ((pair.before !== null && typeof pair.before !== "string") || typeof pair.after !== "string") return [];
+    return [{ field, before: pair.before as string | null, after: pair.after }];
+  });
 }
