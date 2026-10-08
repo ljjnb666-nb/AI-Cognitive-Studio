@@ -8,6 +8,12 @@ import {
   previewStateCopy,
   productIdentityHttpMessage,
   type ProductIdentityPreview,
+  canEditProductIdentity,
+  identityDraft,
+  manualIdentityChanges,
+  manualIdentityFormError,
+  manualIdentityOutcomeMessage,
+  manualIdentityAuditChanges,
 } from "../lib/product-identity-view-model";
 
 function preview(overrides: Partial<ProductIdentityPreview> = {}): ProductIdentityPreview {
@@ -25,6 +31,7 @@ function preview(overrides: Partial<ProductIdentityPreview> = {}): ProductIdenti
       identifier: { value: "urn:isbn:978-0-306-40615-7", sourceField: "dc:identifier", classification: "UNCLASSIFIED" },
     },
     product: null,
+    recentCorrections: [],
     promotion: null,
     ...overrides,
   };
@@ -56,7 +63,7 @@ describe("04C-4C2 product identity UI presentation policy", () => {
 
   it("never advertises overwriting existing product identity", () => {
     const changes = plannedIdentityChanges(preview({
-      product: { workId: "w", editionId: "e", title: "原始书名", language: "en", isbn10: "0306406152", isbn13: "9780306406157" },
+      product: { workId: "w", editionId: "e", title: "原始书名", language: "en", isbn10: "0306406152", isbn13: "9780306406157", workUpdatedAt: "2026-10-08T00:00:00.000Z", editionUpdatedAt: "2026-10-08T00:00:00.000Z" },
     }));
     expect(changes.join(" ")).toContain("不会被自动覆盖");
     expect(changes.join(" ")).not.toContain("创建一条书籍");
@@ -79,5 +86,53 @@ describe("04C-4C2 product identity UI presentation policy", () => {
     expect(isProductIdentityOutcome("not-real")).toBe(false);
     expect(isProductIdentityOutcome({ status: "APPLIED" })).toBe(false);
     expect(identityFieldLabel("edition.isbn13")).toBe("ISBN-13");
+  });
+});
+
+
+describe("04C-4C4B manual correction browser-only presentation model", () => {
+  const saved = {
+    workId: "work-1", editionId: "edition-1", title: "正式旧书名",
+    language: "zh-CN", isbn10: null, isbn13: "9780306406157",
+    workUpdatedAt: "2026-10-08T00:00:00.000Z",
+    editionUpdatedAt: "2026-10-08T00:00:00.000Z",
+  };
+  it("allows editing bound current authoritative identity even when EPUB promotion is already recorded", () => {
+    expect(canEditProductIdentity(preview({ product: saved, state: "ALREADY_RECORDED", canPromote: false }))).toBe(true);
+    expect(canEditProductIdentity(preview({ product: saved, canWrite: false }))).toBe(false);
+    expect(canEditProductIdentity(preview({ product: saved, latestSourceDocumentId: "other" }))).toBe(false);
+    expect(canEditProductIdentity(preview({ product: saved, currentExtractionId: null }))).toBe(false);
+    expect(canEditProductIdentity(preview({ product: saved, state: "UNSUPPORTED_FORMAT" }))).toBe(false);
+    expect(canEditProductIdentity(preview())).toBe(false);
+  });
+  it("sends only actual changed fields with no implicit clearing and keeps the full snapshot available", () => {
+    const draft = { ...identityDraft(saved), title: " 新书名 ", isbn10: "0306406152" };
+    const changes = manualIdentityChanges(saved, draft);
+    expect(changes).toEqual({ title: "新书名", isbn10: "0306406152" });
+    expect(manualIdentityFormError(changes, "对照出版社版权页")).toBeNull();
+    expect(manualIdentityChanges(saved, identityDraft(saved))).toEqual({});
+    expect(manualIdentityFormError({}, "对照出版社版权页")).toContain("未修改");
+    expect(manualIdentityFormError({ title: "" }, "对照出版社版权页")).toContain("不能");
+    expect(manualIdentityFormError({ title: "新书名" }, "x")).toContain("原因");
+  });
+  it("never claims success for inconsistent response statuses or unknown transport outcomes", () => {
+    expect(manualIdentityOutcomeMessage("APPLIED", 409)).not.toContain("已保存");
+    expect(manualIdentityOutcomeMessage("APPLIED", 200)).toContain("已保存");
+    expect(manualIdentityOutcomeMessage("CONFLICT", 409)).toContain("不会覆盖");
+    expect(manualIdentityOutcomeMessage("STALE", 409)).toContain("解析");
+    expect(manualIdentityOutcomeMessage("SUPERSEDED", 409)).toContain("新版本");
+    expect(manualIdentityOutcomeMessage(undefined, 400)).toContain("输入");
+  });
+  it("shows only known database audit field pairs, never raw JSON blobs", () => {
+    expect(manualIdentityAuditChanges({
+      "work.title": { before: "旧", after: "新" },
+      "edition.isbn10": { before: null, after: "0306406152" },
+      invalid: { before: "secret", after: "secret" },
+      "edition.isbn13": { before: 123, after: "invalid" },
+    })).toEqual([
+      { field: "work.title", before: "旧", after: "新" },
+      { field: "edition.isbn10", before: null, after: "0306406152" },
+    ]);
+    expect(manualIdentityAuditChanges(null)).toEqual([]);
   });
 });
