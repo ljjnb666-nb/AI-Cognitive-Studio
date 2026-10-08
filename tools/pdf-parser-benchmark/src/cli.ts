@@ -2,6 +2,7 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CACHE_ROOT, DATA_ROOT, FIXTURES_ROOT, REPORTS_ROOT, TEMP_ROOT } from "./filesystem-guard.js";
 import { preflight, runParser, ADAPTERS, writeReportFile, type ParserId } from "./harness.js";
+import { isSuccessfulRun } from "./outcome-gate.js";
 import { Runner } from "./runner.js";
 import { diskFreeBytes, gpuState, ramAvailableBytes, ramTotalBytes } from "./resource-monitor.js";
 
@@ -210,6 +211,12 @@ async function main(): Promise<void> {
           pageCapOverride: arg("--page-cap") ? (arg("--page-cap") === "all" ? null : Number(arg("--page-cap"))) : undefined,
         });
         console.log(JSON.stringify(outcome.result ?? { status: outcome.status, warnings: outcome.warnings }, null, 2));
+        // A parsable result.json is an evidence artifact, NOT proof of success.
+        // Fail-closed for shell/automation consumers on parser, preflight or cleanup failure.
+        if (!isSuccessfulRun(outcome)) {
+          console.error(`BENCHMARK_RUN_NOT_OK: ${outcome.status} fixture=${fixture} parser=${parser} mode=${mode}`);
+          process.exitCode = 1;
+        }
       }
       break;
     }

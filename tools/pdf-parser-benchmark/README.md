@@ -235,3 +235,67 @@ ground truth for text recall, structural recovery and source locators.
 A locally installed Tesseract probe is only an independent baseline; it is
 not a Docling/MinerU result. Always report unavailable metrics as
 `NOT_MEASURED` instead of zero. Keep private run outputs outside Git.
+
+
+## REAL-BOOK-BENCHMARK-01C — serial execution, not a model-quality pass
+
+Use this **only on the actual Windows 11 benchmark host**. This code is not
+an OCR model installer, GPU driver installer, or a bypass for the original
+C:/D:/RAM preflight thresholds. Check installed runtime and resources before
+executing; the parser adapters enforce those gates on each call.
+
+Prerequisites in an isolated benchmark worktree:
+
+1. Node.js at the pinned runtime location and PDF Benchmark's own `npm ci`
+   / `npm run setup` completed; required parser bindings are installed.
+2. Private `RB-PDF-01/02/03` source files verified with 01A import, and
+   `RB-PDF-11/12/13` three-page subsets generated with 01B script.
+3. `BENCH_DATA_ROOT` points outside the Git checkout to the existing
+   `D:\ai-cognitive-pdf-benchmark-data` root, containing `fixtures` and
+   `reports`. The script re-hashes each subset and its parent source before
+   launching any parser. If the data root or expected hashes do not match,
+   the run is rejected rather than silently using another edition.
+
+From `tools/pdf-parser-benchmark`:
+
+```powershell
+npm ci
+npm run setup
+npx --no-install tsx src/cli.ts preflight
+python scripts/run_real_book_matrix.py
+```
+
+Native/default matrix = PDF.js and LiteParse on each of the three private
+subsets, one at a time, cold-only. Model matrix is **opt in**:
+
+```powershell
+# Only after you have separately installed the pinned runtimes and models,
+# confirmed sufficient free disk/RAM/VRAM, and approved their local execution:
+python scripts/run_real_book_matrix.py --include-models --models-ready
+```
+
+This **additional** matrix includes Docling OCR and MinerU flash on RB-PDF-12
+and RB-PDF-13. The script verifies the expected local model executables and
+the model root, but **does not prove every model weight is cached or that an
+upstream model loader cannot fetch data**. Keep the machine offline if the
+model installation has been completely verified for offline execution.
+The script does not invoke `setup-models` or request downloads. Do not
+run on a low-memory host by overriding preflight; stop and report its blocker.
+
+An individual `run` CLI execution now exits nonzero on failed/partial
+parser results, resource-stop or cleanup failure, even when `result.json`
+was written. The serial runner aborts at the first non-accepted execution,
+and places summary files under private `reports` only, never in Git.
+Outcomes are `EXECUTION_PASS_ONLY` versus `INCOMPLETE_OR_FAILED`;
+**accuracy/structural quality remains NOT_MEASURED** until page-specific,
+human-curated reference answers and source-locator checks are completed.
+
+For reproducibility: the original physical book page number comes from
+the `sourcePages1Based` manifest field, not the subset-local `pageIndex`.
+A complete execution does not prove a scanned-page OCR success: empty-text
+PDF.js output can be an expected negative control. Never use relative
+character counts or OCR engine confidence as a substitute for GT accuracy.
+
+The private runner test and exit contract regression are CI-gated using
+synthetic-only data; the GitHub runner must not fetch, render, or upload
+copyrighted real-book pages, text, or model artifacts.
