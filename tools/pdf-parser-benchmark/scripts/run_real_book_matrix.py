@@ -161,6 +161,7 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
         raise FileExistsError(f"PRIVATE_REPORT_COLLISION: {report_path}")
     outcomes = []
     server_started = False
+    server_shutdown_ok = True
     try:
         for job in jobs:
             parser, mode, fixture_id = job
@@ -185,12 +186,17 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
                 break
     finally:
         if server_started:
-            subprocess.run([runner, "--no-install", "tsx", str(cli), "mineru-server",
-                            "--action", "stop"], cwd=cli.parent.parent,
-                           capture_output=True, text=True, timeout=240, check=False)
+            try:
+                stop = subprocess.run([runner, "--no-install", "tsx", str(cli), "mineru-server",
+                                       "--action", "stop"], cwd=cli.parent.parent,
+                                      capture_output=True, text=True, timeout=240, check=False)
+                server_shutdown_ok = stop.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                server_shutdown_ok = False
         summary = {
             "schema": "acs-real-book-model-comparison-v1",
-            "status": "EXECUTION_PASS_ONLY" if len(outcomes) == len(jobs) and all(x["status"] == "OK" for x in outcomes) else "INCOMPLETE_OR_FAILED",
+            "status": "EXECUTION_PASS_ONLY" if server_shutdown_ok and len(outcomes) == len(jobs) and all(x["status"] == "OK" for x in outcomes) else "INCOMPLETE_OR_FAILED",
+            "serverShutdownOk": server_shutdown_ok,
             "completed": len(outcomes), "planned": len(jobs), "results": outcomes,
             "qualityGroundTruth": "NOT_MEASURED",
             "warning": "No per-page ground truth. Structural/accuracy rankings are unsupported.",
