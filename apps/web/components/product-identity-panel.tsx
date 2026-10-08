@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { ProductIdentityCorrection } from "@/components/product-identity-correction";
 import {
   canConfirmProductIdentity,
   identityFieldLabel,
@@ -105,10 +106,21 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
   function reload() {
     if (submitting) return;
     setNotice(null);
+    setLoadError(null);
     setLastOutcome(null);
     setPreview(null);
     setLoading(true);
     setReloadIndex((n) => n + 1);
+  }
+
+  function recheckAfterCorrection(message: string) {
+    setNotice(message);
+    setLastOutcome(null);
+    setLoadError(null);
+    setPreview(null);
+    setLoading(true);
+    setReloadIndex((n) => n + 1);
+    router.refresh();
   }
 
   function openConfirmation() {
@@ -208,6 +220,7 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
           <p className="identity-muted">
             {preview.canWrite ? "当前角色具有提交资格，最终以服务端再次校验为准。" : "当前角色仅可查看，不具备写入权限。"}
           </p>
+          <ProductIdentityCorrection preview={preview} onRecheck={recheckAfterCorrection} />
         </>
       )}
 
