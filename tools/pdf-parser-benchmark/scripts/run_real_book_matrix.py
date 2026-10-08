@@ -148,6 +148,15 @@ def evidence_row(job: tuple[str, str, str], cp: subprocess.CompletedProcess[str]
     }
 
 
+def report_status(outcomes: list[dict], jobs: tuple, server_shutdown_ok: bool) -> str:
+    if (not server_shutdown_ok or len(outcomes) != len(jobs)
+            or any(row["status"] == "NOT_ACCEPTED" for row in outcomes)):
+        return "INCOMPLETE_OR_FAILED"
+    if any(row["status"] == "EXPECTED_CAPABILITY_REJECTION" for row in outcomes):
+        return "BASELINE_COMPLETE_WITH_EXPECTED_REJECTIONS"
+    return "EXECUTION_PASS_ONLY"
+
+
 def write_atomic(path: Path, payload: dict) -> None:
     part = path.with_suffix(".json.part")
     with part.open("x", encoding="utf-8") as f:
@@ -273,13 +282,7 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
                 server_shutdown_ok = False
         summary = {
             "schema": "acs-real-book-model-comparison-v1",
-            "status": (
-                "INCOMPLETE_OR_FAILED" if not server_shutdown_ok or len(outcomes) != len(jobs)
-                or any(x["status"] == "NOT_ACCEPTED" for x in outcomes)
-                else "BASELINE_COMPLETE_WITH_EXPECTED_REJECTIONS" if any(
-                    x["status"] == "EXPECTED_CAPABILITY_REJECTION" for x in outcomes)
-                else "EXECUTION_PASS_ONLY"
-            ),
+            "status": report_status(outcomes, jobs, server_shutdown_ok),
             "selectedSuite": active_suite,
             "executionPasses": sum(x["status"] == "EXECUTION_OK" for x in outcomes),
             "expectedRejections": sum(x["status"] == "EXPECTED_CAPABILITY_REJECTION" for x in outcomes),
