@@ -61,6 +61,18 @@ class MatrixContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PRIVATE_SUBSET_PARENT_CONFLICT"):
             manifest_fixture(self.root, "RB-PDF-11")
 
+    def test_parent_pdf_modified_without_manifest_update_rejected(self):
+        (self.fixture_root / "RB-PDF-01.pdf").write_bytes(b"swapped")
+        with self.assertRaisesRegex(ValueError, "PRIVATE_SUBSET_PARENT_FILE_CHANGED"):
+            manifest_fixture(self.root, "RB-PDF-11")
+
+    def test_source_page_map_modified_rejected(self):
+        manifest = json.loads(self.manifest.read_text())
+        manifest["fixtures"][1]["sourcePages1Based"] = [1, 2, 3]
+        self.manifest.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "PRIVATE_SUBSET_PAGE_MAP_CONFLICT"):
+            manifest_fixture(self.root, "RB-PDF-11")
+
     def test_stdout_success_needs_checksum_and_zero_exit(self):
         fixture = manifest_fixture(self.root, "RB-PDF-11")
         report = {
