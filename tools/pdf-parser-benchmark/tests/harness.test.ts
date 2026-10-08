@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import PDFDocument from "pdfkit";
 import { afterEach, describe, expect, it } from "vitest";
-import { runParser } from "../src/harness.js";
+import { loadFixture, runParser } from "../src/harness.js";
 
 /**
  * Harness-level integration tests. These use the REAL production pdfjs parser
@@ -92,6 +92,23 @@ describe("harness integration (real parsers, synthetic fixtures)", () => {
     expect(outcome.tempClean).toBe(true);
     expect(outcome.result?.parser.name).toBe("liteparse");
   }, 120_000);
+
+  it("fails closed on swapped private fixture bytes before parser execution", async () => {
+    await writeTinyPdf("harness-private.pdf", 1);
+    await registerManifest([{ id: "harness-private", filename: "harness-private.pdf", declaredPages: 1, fixtureClass: "private-real-book" }]);
+    const { FIXTURES_ROOT } = await import("../src/filesystem-guard.js");
+    const manifestPath = join(FIXTURES_ROOT, "fixtures.manifest.json");
+    const manifest = JSON.parse(await import("node:fs/promises").then((fs) => fs.readFile(manifestPath, "utf8")));
+    manifest.fixtures[0].expectedSha256 = "0".repeat(64);
+    await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+    await expect(loadFixture("harness-private")).rejects.toThrow(/FIXTURE_SHA256_MISMATCH/);
+    await expect(runParser("pdfjs", "default", "harness-private", { cold: true, skipPreflight: true })).rejects.toThrow(/FIXTURE_SHA256_MISMATCH/);
+
+    manifest.fixtures[0].expectedSha256 = undefined;
+    manifest.fixtures[0].declaredBytes = 1;
+    await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+    await expect(loadFixture("harness-private")).rejects.toThrow(/FIXTURE_DECLARED_BYTES_MISMATCH/);
+  });
 
   it("rejects fixtures outside the manifest allowlist", async () => {
     await expect(runParser("pdfjs", "default", "no-such-fixture", { cold: true, skipPreflight: true })).rejects.toThrow(/FIXTURE_NOT_IN_MANIFEST|FIXTURE_FILE_MISSING/);
