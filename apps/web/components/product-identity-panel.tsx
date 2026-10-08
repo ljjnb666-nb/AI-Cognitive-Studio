@@ -188,6 +188,7 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
               <div><dt>书名 · dc:title</dt><dd>{display(preview.candidate?.title?.value)}</dd></div>
               <div><dt>语言 · dc:language</dt><dd>{display(preview.candidate?.language?.value)}</dd></div>
               <div><dt>原始标识 · dc:identifier</dt><dd>{display(preview.candidate?.identifier?.value)}</dd></div>
+              <div><dt>标识分类</dt><dd>{preview.candidate?.identifier?.classification === "UNCLASSIFIED" ? "未分类（仅为原始证据）" : "无可用分类"}</dd></div>
             </dl>
             <p className="identity-muted">原始标识并不必然是 ISBN，只有服务端通过类型及校验位核验后才可能写入。</p>
           </div>

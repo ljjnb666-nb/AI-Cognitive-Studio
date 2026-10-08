@@ -104,6 +104,7 @@ test("real OWNER/EDITOR/VIEWER: explicit EPUB confirmation, stale and conflictin
   await page.goto(detail(owner.documentId));
   const panel = page.locator(".identity-panel");
   await expect(panel.getByText("产品身份 · OWNER")).toBeVisible();
+  await expect(panel.getByText("未分类（仅为原始证据）")).toBeVisible();
   await expect(panel.getByText(owner.filename)).toBeVisible();
   await expect(page.getByRole("button", { name: button })).toBeEnabled();
   expect(await prisma.work.count({ where: { workspaceId } })).toBe(0);
