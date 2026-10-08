@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { StatusBadge } from "./status-badge";
+import { ProductIdentityPanel } from "./product-identity-panel";
 import { SourceProcessing } from "./source-processing";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
 import { cognitionTypeLabels } from "@/lib/cognitions";
@@ -133,6 +134,10 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
               processingSince={item.processingSince}
             />
           </div>
+        )}
+
+        {item.mediaType === "application/epub+zip" && (
+          <ProductIdentityPanel sourceDocumentId={item.id} sourceFileName={item.displayName} />
         )}
 
         {/* Memory Items Cards - Fully Keyboard Accessible Buttons */}

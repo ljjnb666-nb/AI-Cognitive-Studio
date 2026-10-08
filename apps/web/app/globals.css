@@ -898,3 +898,143 @@
     font-weight: 700;
   }
 }
+
+/* BOOK-INGESTION-04C-4C2: read-only candidate / explicit write confirmation */
+.identity-panel {
+  margin: 0 0 28px;
+}
+.identity-heading,
+.identity-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.identity-title {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+.identity-description {
+  margin: 12px 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+}
+.identity-file {
+  margin: 10px 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.identity-status {
+  padding: 12px 14px;
+  margin: 14px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+  color: var(--text-primary);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.identity-data-block {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.identity-data-block h3,
+.identity-audit h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 650;
+}
+.identity-muted {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.identity-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.identity-fields > div {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+.identity-fields dt {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.identity-fields dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+.identity-audit {
+  margin: 16px 0;
+  padding: 12px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.identity-audit ul,
+.identity-plan {
+  margin: 10px 0;
+  padding-left: 22px;
+}
+.identity-audit li,
+.identity-plan li {
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+.identity-actions {
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+.identity-dialog {
+  width: min(94vw, 560px);
+  max-height: min(85vh, 750px);
+  padding: 0;
+  margin: auto;
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 80px #25232135;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+.identity-dialog::backdrop {
+  background: #252321a8;
+}
+.identity-dialog-body {
+  padding: 24px;
+}
+.identity-dialog-body h2 {
+  font-size: 23px;
+  line-height: 1.35;
+}
+.identity-dialog-body p,
+.identity-dialog-body li {
+  font-size: 14px;
+}
+@media (max-width: 640px) {
+  .identity-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .identity-dialog-body {
+    padding: 18px;
+  }
+  .identity-dialog .identity-actions > button {
+    flex: 1 1 125px;
+  }
+}
