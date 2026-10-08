@@ -52,6 +52,8 @@ jobs:
           # The release gates record and verify the PR head, not GitHub's
           # ephemeral pull-request merge ref.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: REAL-BOOK-BENCHMARK-01A private import regressions (synthetic-only)
+        run: python3 -m unittest discover -v -s tools/pdf-parser-benchmark/scripts -p 'test_import_private_real_books.py'
       - uses: pnpm/action-setup@v4
         with:
           version: 10.30.3
