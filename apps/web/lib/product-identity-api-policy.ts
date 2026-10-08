@@ -27,7 +27,9 @@ export function productIdentityApiError(error: unknown): { error: string; status
     return { error: "PRODUCT_IDENTITY_ACCESS_DENIED", status: 403 };
   }
   if (code === "SOURCE_DOCUMENT_ACCESS_DENIED") return { error: "PRODUCT_IDENTITY_NOT_FOUND", status: 404 };
+  if (code === "PRODUCT_IDENTITY_CORRECTION_INVALID") return { error: "PRODUCT_IDENTITY_INVALID_REQUEST", status: 400 };
   if ([
+    "PRODUCT_IDENTITY_NO_BOUND_EDITION",
     "PRODUCT_IDENTITY_SOURCE_FORMAT_NOT_PROMOTABLE",
     "PRODUCT_IDENTITY_EXTRACTION_NOT_PROMOTABLE",
     "PRODUCT_IDENTITY_CANDIDATE_INVALID",

@@ -1007,6 +1007,7 @@ model Source {
   edition     Edition?         @relation(fields: [editionId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   documents   SourceDocument[]
   projects    ProjectSource[]
+  manualIdentityEdits ProductIdentityManualEdit[]
 
   @@unique([id, workspaceId])
   @@index([workspaceId])
@@ -1256,6 +1257,27 @@ model DocumentExtraction {
 
   @@unique([id, sourceDocumentId, workspaceId])
   @@unique([ingestionRunId, sourceDocumentId, workspaceId])
+}
+
+/// Append-only-by-service human-origin audit trail for deliberate Work/Edition
+/// corrections. Source-scoped, not extraction-scoped: reingestion and version
+/// switches never erase correction provenance. Changes hold changed fields only.
+model ProductIdentityManualEdit {
+  id               String   @id @default(cuid())
+  workspaceId      String
+  sourceId         String
+  sourceDocumentId String
+  extractionId     String
+  actorUserId      String
+  workId           String
+  editionId        String
+  reason           String
+  changes          Json
+  createdAt        DateTime @default(now())
+  source           Source   @relation(fields: [sourceId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@index([workspaceId, sourceId, createdAt])
+  @@index([workspaceId, sourceDocumentId, createdAt])
 }
 
 model ProductIdentityPromotion {

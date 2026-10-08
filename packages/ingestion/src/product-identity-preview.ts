@@ -31,10 +31,19 @@ export type ProductIdentityPreview = {
     workId: string;
     editionId: string;
     title: string;
+    workUpdatedAt: string;
+    editionUpdatedAt: string;
     language: string | null;
     isbn10: string | null;
     isbn13: string | null;
   } | null;
+  recentCorrections: Array<{
+    id: string;
+    actorUserId: string;
+    reason: string;
+    changes: unknown;
+    createdAt: string;
+  }>;
   promotion: {
     status: "APPLIED" | "NOOP" | "CONFLICT" | "BLOCKED";
     reasonCode: string | null;
@@ -61,8 +70,8 @@ export async function readProductIdentityPreviewForUser(
           select: {
             edition: {
               select: {
-                id: true, workId: true, language: true, isbn10: true, isbn13: true,
-                work: { select: { title: true } },
+                id: true, workId: true, language: true, isbn10: true, isbn13: true, updatedAt: true,
+                work: { select: { title: true, updatedAt: true } },
               },
             },
           },
@@ -74,7 +83,7 @@ export async function readProductIdentityPreviewForUser(
   // from documents that do not exist in the requested workspace.
   if (!member || !document) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
 
-  const [latestDocument, current] = await Promise.all([
+  const [latestDocument, current, edits] = await Promise.all([
     prisma.sourceDocument.findFirst({
       where: { sourceId: document.sourceId, workspaceId: context.workspaceId },
       orderBy: { version: "desc" },
@@ -94,6 +103,12 @@ export async function readProductIdentityPreviewForUser(
         },
       },
     }),
+    prisma.productIdentityManualEdit.findMany({
+      where: { workspaceId: context.workspaceId, sourceId: document.sourceId },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 10,
+      select: { id: true, actorUserId: true, reason: true, changes: true, createdAt: true },
+    }),
   ]);
   if (!latestDocument) throw new Error("PRODUCT_IDENTITY_SOURCE_BINDING_INVALID");
 
@@ -107,6 +122,8 @@ export async function readProductIdentityPreviewForUser(
     workId: edition.workId,
     editionId: edition.id,
     title: edition.work.title,
+    workUpdatedAt: edition.work.updatedAt.toISOString(),
+    editionUpdatedAt: edition.updatedAt.toISOString(),
     language: edition.language,
     isbn10: edition.isbn10,
     isbn13: edition.isbn13,
@@ -133,5 +150,6 @@ export async function readProductIdentityPreviewForUser(
     candidate,
     product,
     promotion,
+    recentCorrections: edits.map((edit) => ({ ...edit, createdAt: edit.createdAt.toISOString() })),
   };
 }

@@ -26,6 +26,7 @@ export { EPUB_QUALITY_REASON_CODES, evaluateEpubExtractionQuality, type EpubExtr
 export { OcrCapacityDeferredError, OcrCapacityDeferralError } from "./ocr-capacity-errors.js";
 export { PRODUCT_IDENTITY_PROMOTION_REASON_CODES, promoteCurrentProductIdentityForUser, type ProductIdentityConflict, type ProductIdentityIgnoredField, type ProductIdentityPromotionOutcome, type ProductIdentityPromotionReasonCode } from "./product-identity-promotion.js";
 export { readProductIdentityPreviewForUser, type ProductIdentityPreview, type ProductIdentityPreviewState } from "./product-identity-preview.js";
+export { correctProductIdentityForUser, type ProductIdentityCorrectionInput, type ProductIdentityCorrectionOutcome, type ProductIdentityManualValues } from "./product-identity-correction.js";
 export { runPdfExtraction, type PdfRunExtraction, type PdfRunExtractionInput } from "./pdf-run.js";
 export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun, terminalizeRunWithRoutingOutcome, transitionOcrCapacityDeferred, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
 export { classifyIngestionFailure, ingestionStatusForTerminalFailure, type IngestionFailureClass } from "./ingestion-failure.js";
