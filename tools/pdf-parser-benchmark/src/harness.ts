@@ -12,6 +12,7 @@ import {
 } from "./filesystem-guard.js";
 import { diskFreeBytes, gpuState, ramAvailableBytes } from "./resource-monitor.js";
 import { Runner, ensureCleanDir, sha256File, writeJsonFileAtomic } from "./runner.js";
+import { classifyParserFailure } from "./failure-kind.js";
 import {
   buildBenchmarkResult,
   parseBenchmarkResult,
@@ -205,6 +206,12 @@ export async function runParser(
       failureWarnings = outcome.warnings;
     }
 
+    const failureKind = classifyParserFailure({
+      parserId, mode, exitCode: outcome.metrics.exitCode,
+      timedOut: outcome.metrics.timedOut, stderr: outcome.stderr,
+      warnings: [...warnings, ...outcome.warnings, ...failureWarnings],
+      hasNormalizedOutput: normalized !== null,
+    });
     result = buildBenchmarkResult({
       run: { id: runId, startedAt, finishedAt: new Date().toISOString(), coldStart: options.cold },
       parser: outcome.parser as ParserDescriptor,
@@ -223,8 +230,9 @@ export async function runParser(
       reliability: {
         exitCode: outcome.metrics.exitCode ?? null,
         timeout: outcome.metrics.timedOut,
-        crashed: outcome.metrics.exitCode !== 0 && !outcome.metrics.timedOut,
-        oom: /heap|OOM|out of memory|killed/i.test(outcome.stderr ?? ""),
+        crashed: failureKind === "PROCESS_FAILURE",
+        failureKind,
+        oom: failureKind === "OUT_OF_MEMORY",
         partialOutput: outcome.metrics.outputLimitExceeded || (childFailed && outcome.metrics.exitCode === 0),
         warnings: [...warnings, ...failureWarnings],
       },
@@ -239,7 +247,7 @@ export async function runParser(
       parser: { name: parserId, version: "unknown", mode },
       document: { fixtureId, inputSha256: fixture.sha256, bytes: fixture.bytes, detectedPages: null },
       performance: { wallTimeMs: 0, cpuTimeMs: null, peakRssMb: null, peakGpuMb: null },
-      reliability: { exitCode: null, timeout: false, crashed: true, oom: false, partialOutput: false, warnings: [message] },
+      reliability: { exitCode: null, timeout: false, crashed: true, failureKind: "HARNESS_ERROR", oom: false, partialOutput: false, warnings: [message] },
       extraction: {
         extractedPages: 0,
         emptyPages: 0,
