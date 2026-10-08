@@ -59,6 +59,9 @@ async function printHostBaseline(): Promise<void> {
 }
 
 async function mineruServer(action: "status" | "start" | "stop"): Promise<number> {
+  // The control command uses a dedicated cwd, which is not created by
+  // per-parser run-scoped temp directories (mineru-flash/...).
+  await mkdir(join(TEMP_ROOT, "mineru"), { recursive: true });
   const outcome = await new Runner().run({
     programId: "mineru_cli",
     argv: ["server", action],
