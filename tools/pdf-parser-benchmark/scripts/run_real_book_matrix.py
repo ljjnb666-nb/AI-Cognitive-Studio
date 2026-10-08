@@ -114,6 +114,8 @@ def evidence_row(job: tuple[str, str, str], cp: subprocess.CompletedProcess[str]
     document = document if isinstance(document, dict) else {}
     run = payload.get("run")
     run = run if isinstance(run, dict) else {}
+    gate = payload.get("benchmarkOutcome")
+    gate = gate if isinstance(gate, dict) else {}
     warnings = rel.get("warnings")
     warnings = warnings if isinstance(warnings, list) else []
     identity_ok = (document.get("inputSha256") == fixture["expectedSha256"]
@@ -121,11 +123,18 @@ def evidence_row(job: tuple[str, str, str], cp: subprocess.CompletedProcess[str]
     child_exit = rel.get("exitCode")
     safe_failure = not any(rel.get(x) for x in ("timeout", "partialOutput", "oom"))
     kind = rel.get("failureKind")
-    ok = (identity_ok and cp.returncode == 0 and child_exit == 0 and safe_failure
-          and rel.get("crashed") is False and kind in (None, False))
+    evidence_integrity = (gate.get("tempClean") is True
+                          and not any(isinstance(w, str) and w.startswith("RESULT_PERSIST_FAILED:")
+                                      for w in warnings))
+    ok = (identity_ok and evidence_integrity and gate.get("status") == "OK"
+          and gate.get("accepted") is True and cp.returncode == 0
+          and child_exit == 0 and safe_failure and rel.get("crashed") is False
+          and kind is None)
     # This is a documented negative control: the production PDF.js parser
     # rejects image-only source. Never treat it as a successful extraction.
-    expected = (identity_ok and parser == "pdfjs" and mode == "default"
+    expected = (identity_ok and evidence_integrity
+                and gate.get("status") == "PARSER_FAILED" and gate.get("accepted") is False
+                and parser == "pdfjs" and mode == "default"
                 and target in ("RB-PDF-12", "RB-PDF-13")
                 and cp.returncode != 0 and child_exit == 3
                 and rel.get("crashed") is False and safe_failure
@@ -139,6 +148,7 @@ def evidence_row(job: tuple[str, str, str], cp: subprocess.CompletedProcess[str]
         "subsetSha256": fixture["expectedSha256"], "parentSha256": fixture["parentSha256"],
         "sourcePages1Based": fixture["sourcePages1Based"], "status": classification,
         "failureKind": kind if isinstance(kind, str) else None,
+        "tempClean": gate.get("tempClean") if type(gate.get("tempClean")) is bool else None,
         "childExitCode": child_exit if type(child_exit) is int else None,
         "cliExitCode": cp.returncode, "runId": run.get("id"), "runtimeSeconds": round(seconds, 2),
         "extractedPages": extraction.get("extractedPages") if ok else None,
