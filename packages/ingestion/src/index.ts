@@ -319,3 +319,163 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
                   sourcePageId: dbPage?.id,
                   ordinal: blockOrdinal++,
                   kind: block.kind,
+                  text: block.text,
+                  contentHash: sha256Utf8(block.text),
+                  metadata: canonicalBlockMetadata(block, run.sourceDocument.mediaType),
+                  // A block either carries a real parser-produced bbox or none at
+                  // all; a fake or unit-less guess must never be persisted.
+                  bbox: block.bbox ? JSON.parse(JSON.stringify(parseSourceBlockBbox(block.bbox))) : undefined,
+                },
+              });
+            }
+          }
+          await tx.currentDocumentExtraction.upsert({
+            where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId } },
+            create: { sourceDocumentId: run.sourceDocumentId, workspaceId: run.workspaceId, extractionId: extraction.id },
+            update: { extractionId: extraction.id },
+          });
+          if (!run.job.userId) throw new Error("INGESTION_INITIATOR_REQUIRED");
+          const bootstrap = await tx.bookAnalysisBootstrap.upsert({
+            where: { ingestionRunId: run.id },
+            create: {
+              workspaceId: run.workspaceId,
+              sourceDocumentId: run.sourceDocumentId,
+              ingestionRunId: run.id,
+              extractionId: extraction.id,
+              requestedByUserId: run.job.userId,
+            },
+            // The ingestion lineage is immutable. A replay may only observe its
+            // original durable bootstrap; it must never retarget a new extraction or user.
+            update: {},
+          });
+          await tx.outboxEvent.create({
+            data: {
+              topic: BOOK_ANALYSIS_BOOTSTRAP_TOPIC,
+              aggregateId: bootstrap.id,
+              payload: { bootstrapId: bootstrap.id, dispatchGeneration: bootstrap.dispatchGeneration },
+            },
+          });
+          // One-way routing outcome, written inside the same fenced transaction
+          // as the publication it describes. Already-written outcomes are only
+          // tolerable when byte-equivalent (deterministic decision).
+          if (pdfRouting && !await writeRoutingOutcome(run.id, pdfRouting.routingGeneration, pdfRoutingOutcome(pdfRouting.decision, true), tx)) throw new Error(SourceError.ROUTING_PLAN_CONFLICT);
+          await completeRunSuccess(tx, run.id, claim.token);
+        });
+      } catch (error) {
+        const code = (error instanceof Error ? error.message.split(":")[0] : undefined) ?? "UNEXPECTED_ERROR";
+        // The non-publish outcome + terminal state were already committed by
+        // the fenced transaction above; propagate the content error as-is.
+        if (nonPublishTerminalized) throw error;
+        // RF05 P1-02: the PRE-COMMIT capacity signal is handled BEFORE the
+        // generic in-memory ownershipLost shortcut. The PostgreSQL deferral
+        // transaction is the authority — the in-memory flag never decides.
+        // Committed → the POST-COMMIT scheduler signal is thrown; rejected →
+        // the ownership-loss result; DB exception → propagates as
+        // infrastructure failure. Redis can never see a capacity signal
+        // without the durable ack.
+        if (error instanceof OcrCapacityDeferralError) {
+          const committed = await transitionOcrCapacityDeferred(error.deferral);
+          if (committed) {
+            logger.warn("ingestion.ocr_capacity_deferred", { ingestionRunId: run.id, code: "SOURCE_OCR_HOST_CAPACITY" });
+            throw new OcrCapacityDeferredError();
+          }
+          logger.warn("ingestion.ocr_capacity_deferral_rejected", { ingestionRunId: run.id });
+          throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
+        }
+        // Ownership loss writes NOTHING: the new owner (or the reconciler) owns
+        // the outcome, and a stale worker must never mutate newer durable state.
+        if (code === INGESTION_EXECUTION_OWNERSHIP_LOST || ownershipLost) throw error;
+        const failureClass = classifyIngestionFailure(code);
+        if (failureClass === "RETRYABLE_RUN" && claim.attemptCount < options.processMaxAttempts) {
+          // QUEUED is the retryable durable state; BullMQ's configured attempt
+          // policy schedules the next execution, which re-claims the run.
+          await transitionRunToRetryable(run.id, claim.token, code);
+          logger.warn("ingestion.retry_scheduled", { ingestionRunId: run.id, code, attemptCount: claim.attemptCount });
+          throw error;
+        }
+        const status = failureClass === "TERMINAL_RUN" ? ingestionStatusForTerminalFailure(code) : "FAILED";
+        // Fenced terminal write: requires live ownership; a lost race writes nothing.
+        await transitionRunToTerminal(run.id, claim.token, status, code);
+        logger.error("ingestion.failed", { ingestionRunId: run.id, code, status });
+        throw error;
+      } finally {
+        clearInterval(heartbeat);
+      }
+    },
+    async recoverIngestionForUser(context: TrustedRequestContext, sourceDocumentId: string, completion: { outboxTopic?: string } = {}) {
+      const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { userId: true } });
+      if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
+      return prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "SourceDocument" WHERE "id" = ${sourceDocumentId} AND "workspaceId" = ${context.workspaceId} FOR UPDATE`;
+        if (locked.length !== 1) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
+        const latest = await tx.ingestionRun.findFirst({ where: { sourceDocumentId, workspaceId: context.workspaceId }, orderBy: { createdAt: "desc" }, include: { job: true } });
+        if (latest && ["QUEUED", "RUNNING", "SUCCEEDED"].includes(latest.status)) return { run: latest, created: false };
+          // Recovery identity belongs to the durable source lineage, never to a
+          // particular Job's delivery attempts. The source row lock makes this
+          // count a serialized, monotonic generation number.
+          const generation = await tx.ingestionRun.count({ where: { sourceDocumentId, workspaceId: context.workspaceId } });
+          const job = await tx.job.create({ data: { userId: context.userId, workspaceId: context.workspaceId, type: INGESTION_JOB, payload: { sourceDocumentId }, idempotencyKey: `ingest:${sourceDocumentId}:retry:${generation}` } });
+        const run = await tx.ingestionRun.create({ data: { sourceDocumentId, workspaceId: context.workspaceId, jobId: job.id, parserVersion: latest?.parserVersion ?? "recovery", normalizationVersion: latest?.normalizationVersion ?? CANONICAL_NORMALIZATION_VERSION } });
+        await tx.outboxEvent.create({ data: { topic: completion.outboxTopic ?? INGESTION_TOPIC, aggregateId: run.id, payload: { ingestionRunId: run.id } } });
+        return { run, created: true };
+      });
+    },
+  };
+}
+
+type IngestionQueue = { add(name: string, payload: { ingestionRunId: string }, options: { jobId: string }): Promise<unknown> };
+export type IngestionDispatchOptions = { batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; aggregateIds?: string[]; topic?: string; /** Test-only fault seam; runs after queue acceptance and before the DB finalize transaction. */ beforeFinalize?: (eventId: string) => Promise<void> | void };
+export async function dispatchPendingIngestion(queue: IngestionQueue, options: IngestionDispatchOptions = {}): Promise<number> {
+  const { topic = INGESTION_TOPIC, ...dispatchOptions } = options;
+  return dispatchPendingOutbox({ topic, queue, jobName: INGESTION_JOB, parse: (payload) => payload as { ingestionRunId: string }, jobId: (payload) => payload.ingestionRunId, afterDispatch: async (tx, payload, jobId) => { await tx.ingestionRun.update({ where: { id: payload.ingestionRunId }, data: { job: { update: { queueJobId: jobId } } } }); }, ...dispatchOptions });
+  /* const batchSize = options.batchSize ?? 100, leaseMs = options.leaseMs ?? 60_000, maxAttempts = options.maxAttempts ?? 5;
+  await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'FAILED'::"OutboxStatus", "leaseUntil" = NULL, "claimToken" = NULL, "lastError" = COALESCE("lastError", 'OUTBOX_MAX_ATTEMPTS_EXCEEDED'), "updatedAt" = NOW() WHERE "topic" = 'source.ingestion.requested' AND "status" = 'PROCESSING'::"OutboxStatus" AND "leaseUntil" < NOW() AND "attemptCount" >= ${maxAttempts}`;
+  const events = await prisma.$queryRaw<Array<{ id: string; payload: unknown; claimToken: string }>>`
+    WITH candidates AS (
+      SELECT "id" FROM "OutboxEvent"
+      WHERE "topic" = 'source.ingestion.requested'
+        AND (${options.aggregateIds ?? []}::text[] = '{}'::text[] OR "aggregateId" = ANY(${options.aggregateIds ?? []}::text[]))
+        AND ("status" = 'PENDING'::"OutboxStatus" OR ("status" = 'PROCESSING'::"OutboxStatus" AND "leaseUntil" < NOW()))
+        AND "attemptCount" < ${maxAttempts}
+      ORDER BY "createdAt" ASC FOR UPDATE SKIP LOCKED LIMIT ${batchSize}
+    )
+    UPDATE "OutboxEvent" AS event SET "status" = 'PROCESSING'::"OutboxStatus", "claimedAt" = NOW(),
+      "claimToken" = md5(random()::text || clock_timestamp()::text || event."id"), "leaseUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond'), "attemptCount" = event."attemptCount" + 1, "updatedAt" = NOW()
+    FROM candidates WHERE event."id" = candidates."id" RETURNING event."id", event."payload", event."claimToken"
+  `;
+  for (const event of events) {
+    const ingestionRunId = (event.payload as { ingestionRunId: string }).ingestionRunId;
+    try {
+      await queue.add(INGESTION_JOB, { ingestionRunId }, { jobId: ingestionRunId });
+      await options.beforeFinalize?.(event.id);
+      await prisma.$transaction(async (tx) => {
+        const marked = await tx.$executeRaw`UPDATE "OutboxEvent" SET "status" = 'DISPATCHED'::"OutboxStatus", "dispatchedAt" = NOW(), "leaseUntil" = NULL, "claimToken" = NULL, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus" AND "claimToken" = ${event.claimToken}`;
+        if (marked !== 1) throw new Error("OUTBOX_CLAIM_LOST");
+        await tx.ingestionRun.update({ where: { id: ingestionRunId }, data: { job: { update: { queueJobId: ingestionRunId } } } });
+      });
+    } catch (error) {
+      const lastError = error instanceof Error ? error.message.slice(0, 2000) : "UNEXPECTED_ERROR";
+      await prisma.$executeRaw`UPDATE "OutboxEvent" SET "status" = CASE WHEN "attemptCount" >= ${maxAttempts} THEN 'FAILED'::"OutboxStatus" ELSE 'PENDING'::"OutboxStatus" END, "leaseUntil" = NULL, "claimToken" = NULL, "lastError" = ${lastError}, "updatedAt" = NOW() WHERE "id" = ${event.id} AND "status" = 'PROCESSING'::"OutboxStatus" AND "claimToken" = ${event.claimToken}`;
+    }
+  }
+  return events.length; */
+}
+/**
+ * Planned parser provenance, recorded when the upload completes — BEFORE any
+ * parser has run. This is also why recovery runs inherit the previous value.
+ * It is NOT the parser authority for what actually executed: the durable
+ * authority is DocumentExtraction (parserName/parserVersion plus
+ * canonicalSchemaVersion) and the per-block SourceBlock provenance metadata.
+ * New code must never branch on IngestionRun.parserVersion to decide which
+ * parser produced an extraction.
+ */
+function parserProvenance(mediaType: string): { name: string; version: string } {
+  if (mediaType === "text/plain") return { name: "builtin-text", version: "text-parser-v1" };
+  if (mediaType === "text/markdown") return { name: "builtin-markdown", version: "markdown-parser-v1" };
+  // PDF runs are routed/quality-gated since 04B-2: the planned pipeline
+  // identity is the router version; the native engine (pdfjs-isolated) remains
+  // the per-block provenance authority inside routing plan and extraction.
+  if (mediaType === "application/pdf") return { name: "pdfjs-isolated", version: "pdf-router-v1" };
+  if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v2" };
+  return { name: "unsupported", version: "unsupported-v1" };
+}

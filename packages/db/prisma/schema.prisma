@@ -1259,7 +1259,6 @@ model DocumentExtraction {
   @@unique([ingestionRunId, sourceDocumentId, workspaceId])
 }
 
-
 /// Append-only-by-service human-origin audit trail for deliberate Work/Edition
 /// corrections. Source-scoped, not extraction-scoped: reingestion and version
 /// switches never erase correction provenance. Changes hold changed fields only.
@@ -3021,3 +3020,30 @@ model Job {
   id                      String                   @id @default(cuid())
   userId                  String?
   workspaceId             String?
+  queueJobId              String?                  @unique
+  idempotencyKey          String?                  @unique
+  correlationId           String?
+  type                    String
+  status                  JobStatus                @default(QUEUED)
+  progress                Int                      @default(0)
+  attemptCount            Int                      @default(0)
+  payload                 Json
+  result                  Json?
+  error                   Json?
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @default(now()) @updatedAt
+  startedAt               DateTime?
+  completedAt             DateTime?
+  user                    User?                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace               Workspace?               @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  ingestionRun            IngestionRun?
+  bookAnalysisRun         BookAnalysisRun?
+  podcastGenerationRun    PodcastGenerationRun?
+  audioGenerationRun      AudioGenerationRun?
+  shortVideoGenerationRun ShortVideoGenerationRun?
+
+  @@index([userId])
+  @@index([status])
+  @@index([correlationId])
+  @@index([workspaceId, status])
+}
