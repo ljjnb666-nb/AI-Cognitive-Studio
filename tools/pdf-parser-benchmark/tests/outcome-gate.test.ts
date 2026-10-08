@@ -9,7 +9,7 @@ function acceptedRun(): RunOutcome {
     preflight: null,
     outputDir: "private-run-dir",
     warnings: [],
-    normalized: { pages: [] } as RunOutcome["normalized"],
+    normalized: { pages: [] } as unknown as RunOutcome["normalized"],
     result: {
       reliability: {
         exitCode: 0,
@@ -19,7 +19,7 @@ function acceptedRun(): RunOutcome {
         partialOutput: false,
         warnings: [],
       },
-    } as RunOutcome["result"],
+    } as unknown as RunOutcome["result"],
   };
 }
 
@@ -63,7 +63,7 @@ describe("real-book benchmark CLI exit contract", () => {
     const o = acceptedRun();
     o.normalized = null;
     expect(isSuccessfulRun(o)).toBe(false);
-    o.normalized = { pages: [] } as RunOutcome["normalized"];
+    o.normalized = { pages: [] } as unknown as RunOutcome["normalized"];
     o.result = null;
     expect(isSuccessfulRun(o)).toBe(false);
   });
