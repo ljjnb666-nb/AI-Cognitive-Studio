@@ -1,10 +1,11 @@
 import { prisma } from "@ai-cognitive/db";
 import type { WebIdentityContext } from "./identity";
+import { projectBookDisplay } from "./book-display";
 import { statusLabel, podcastStageLabel, videoStageLabel } from "./product-labels";
 
 export { statusLabel, podcastStageLabel, videoStageLabel };
 
-export type SourceSummary = { id: string; title: string; mediaType: string; createdAt: string; status: string; errorCode?: string; hasIntelligence: boolean };
+export type SourceSummary = { id: string; title: string; titleOrigin: "WORK" | "FILENAME"; fileName: string; version: number; isLatestVersion: boolean; mediaType: string; createdAt: string; status: string; errorCode?: string; hasIntelligence: boolean };
 export type GenerationSummary = { id: string; title: string; kind: "podcast" | "video"; status: string; stage: string; createdAt: string; updatedAt?: string; href: string; errorCode?: string };
 
 export const asDate = (value: Date | null | undefined) => value?.toISOString() ?? null;
@@ -23,8 +24,15 @@ export async function sources(context?: WebIdentityContext): Promise<SourceSumma
       select: {
         id: true,
         mediaType: true,
+        version: true,
         createdAt: true,
-        source: { select: { displayName: true } },
+        source: {
+          select: {
+            displayName: true,
+            edition: { select: { work: { select: { title: true } } } },
+            documents: { orderBy: [{ version: "desc" }, { createdAt: "desc" }], take: 1, select: { id: true } },
+          },
+        },
         ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true } },
         currentIntelligence: { select: { id: true } },
       },
@@ -32,8 +40,17 @@ export async function sources(context?: WebIdentityContext): Promise<SourceSumma
       take: 100,
     });
     return records.map((record) => ({
-      id: record.id, title: record.source.displayName, mediaType: record.mediaType, createdAt: record.createdAt.toISOString(),
-      status: record.ingestionRuns[0]?.status ?? "QUEUED", errorCode: record.ingestionRuns[0]?.errorCode ?? undefined,
+      id: record.id,
+      ...projectBookDisplay({
+        fileName: record.source.displayName,
+        workTitle: record.source.edition?.work.title,
+        version: record.version,
+        isLatestVersion: record.source.documents[0]?.id === record.id,
+      }),
+      mediaType: record.mediaType,
+      createdAt: record.createdAt.toISOString(),
+      status: record.ingestionRuns[0]?.status ?? "QUEUED",
+      errorCode: record.ingestionRuns[0]?.errorCode ?? undefined,
       hasIntelligence: Boolean(record.currentIntelligence),
     }));
   } catch {
@@ -96,7 +113,13 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
   const record = await prisma.sourceDocument.findFirst({
     where: { id: sourceDocumentId, workspaceId: identity.workspaceId },
     include: {
-      source: true, ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1 },
+      source: {
+        include: {
+          edition: { include: { work: true } },
+          documents: { orderBy: [{ version: "desc" }, { createdAt: "desc" }], take: 1, select: { id: true } },
+        },
+      },
+      ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1 },
       bookAnalysisBootstraps: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, createdAt: true, startedAt: true, updatedAt: true } },
       analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, status: true, analysisStage: true, extractionId: true, chunkSetId: true, errorCode: true, createdAt: true, startedAt: true, completedAt: true, executionLeaseUntil: true } },
       currentExtraction: { include: { extraction: { include: { structureNodes: { orderBy: { ordinal: "asc" } }, blocks: { orderBy: { ordinal: "asc" }, take: 40 } } } } },

@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { sourceDetail } from "@/lib/product";
+import { projectBookDisplay } from "@/lib/book-display";
 import { BookDetailView } from "@/components/book-detail-view";
 import { deriveProcessingStatus } from "@/lib/processing-state";
 import { processingWorkerAvailability } from "@/lib/worker-heartbeat";
@@ -29,6 +30,12 @@ export default async function SourcePage({ params }: { params: Promise<{ sourceD
       item={{
         id: item.id,
         displayName: item.source.displayName,
+        ...projectBookDisplay({
+          fileName: item.source.displayName,
+          workTitle: item.source.edition?.work.title,
+          version: item.version,
+          isLatestVersion: item.source.documents[0]?.id === item.id,
+        }),
         mediaType: item.mediaType,
         version: item.version,
         hasIntelligence: Boolean(item.currentIntelligence),

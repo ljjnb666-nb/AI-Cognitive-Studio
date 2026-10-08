@@ -14,8 +14,9 @@ export function LibraryView({ items }: { items: SourceSummary[] }) {
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
-      // Search title
-      if (search.trim() && !item.title.toLowerCase().includes(search.trim().toLowerCase())) {
+      // Match either authoritative Work title or original file name.
+      const term = search.trim().toLowerCase();
+      if (term && !item.title.toLowerCase().includes(term) && !item.fileName.toLowerCase().includes(term)) {
         return false;
       }
       // Format filter
@@ -23,8 +24,8 @@ export function LibraryView({ items }: { items: SourceSummary[] }) {
         const media = item.mediaType.toLowerCase();
         if (formatFilter === "PDF" && !media.includes("pdf")) return false;
         if (formatFilter === "EPUB" && !media.includes("epub")) return false;
-        if (formatFilter === "MD" && !media.includes("markdown") && !item.title.endsWith(".md")) return false;
-        if (formatFilter === "TXT" && !media.includes("text/plain") && !item.title.endsWith(".txt")) return false;
+        if (formatFilter === "MD" && !media.includes("markdown") && !item.fileName.endsWith(".md")) return false;
+        if (formatFilter === "TXT" && !media.includes("text/plain") && !item.fileName.endsWith(".txt")) return false;
       }
       // Status filter
       if (statusFilter !== "ALL") {
