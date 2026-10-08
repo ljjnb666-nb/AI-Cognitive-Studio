@@ -299,3 +299,65 @@ character counts or OCR engine confidence as a substitute for GT accuracy.
 The private runner test and exit contract regression are CI-gated using
 synthetic-only data; the GitHub runner must not fetch, render, or upload
 copyrighted real-book pages, text, or model artifacts.
+
+
+## REAL-BOOK-BENCHMARK-01E — separate native boundary evidence and offline OCR
+
+Previous real Windows benchmark evidence (01D): native prose was extracted by
+PDF.js/LiteParse; the production PDF.js parser deliberately rejected scanned
+PDF pages with `SOURCE_OCR_REQUIRED`, while LiteParse (OCR disabled)
+identified their pages but extracted zero characters. Those are capability
+facts, NOT OCR quality measurements.
+
+The 01E matrix supports **independent suites**. Run on the trusted Windows
+benchmark worktree with the existing private SHA-verified 01A/01B corpus:
+
+```powershell
+# Native baseline, six cases: PDF.js + LiteParse x RB-PDF-11/12/13
+python scripts/run_real_book_matrix.py --suite native
+
+# MinerU FLASH only, two scanned subsets; NO Docling prerequisites
+# Run ONLY after verifying the installed MinerU CLI and full model weights,
+# isolating/denying outbound network access, and checking resources.
+python scripts/run_real_book_matrix.py --suite mineru-flash --models-ready --offline-confirmed
+
+# Separate Docling OCR later, AFTER installing/verifying its model weights:
+python scripts/run_real_book_matrix.py --suite docling-ocr --models-ready --offline-confirmed
+```
+
+The original `--include-models --models-ready` remains a legacy alias for
+`--suite all`; do not use it for the MinerU-only experiment. The
+`--offline-confirmed` flag is an operator acknowledgement, **not** a
+firewall or a proof of offline readiness. Model suites pass common model
+client offline environment variables, but upstream loaders may ignore them.
+Block outbound networking at the host before approving a model run. Do not
+invoke the untimed `setup-models` command unless separately approved.
+
+Model startup fails closed with a Windows physical free-RAM check (>=4 GiB),
+C: free >=15 GiB, benchmark data volume free >=30 GiB; the existing parser
+preflight runs again during each invocation. Do not use `skipPreflight`.
+
+The native baseline treats **only** an exact PDF.js/default refusal on
+RB-PDF-12/13 with verified fixture ID/SHA, child exit 3, no timeout/OOM,
+an exact `PARSER_ERROR: SOURCE_OCR_REQUIRED` warning and
+`failureKind=EXPECTED_CAPABILITY_REJECTION` as a negative control.
+It remains a nonzero parser exit and **never** counts as extraction success.
+The suite continues to LiteParse and subsequent cases. All other unexpected
+failures stop immediately. Results distinguish:
+
+- `EXECUTION_PASS_ONLY`: every selected parser executed successfully;
+- `BASELINE_COMPLETE_WITH_EXPECTED_REJECTIONS`: full native evidence with
+  documented non-success OCR refusals;
+- `INCOMPLETE_OR_FAILED`: one or more cases are missing/failed or model
+  teardown did not succeed.
+
+The benchmark's `result.json` now optionally includes a `failureKind`
+classifier (`EXPECTED_CAPABILITY_REJECTION`, `PROCESS_FAILURE`,
+`TIMEOUT`, `OUT_OF_MEMORY`, `INVALID_OUTPUT`, `HARNESS_ERROR`).
+Historical result files without this optional field remain parseable.
+`qualityGroundTruth=NOT_MEASURED` stays unchanged: a process exit or
+a long OCR transcript is **not** evidence of accuracy. Human review of
+source-page text, figure handling and page-bound citation recovery is required
+before any quality acceptance.
+
+Do not modify the production PDF parser or copy raw book/OCR data into Git.
