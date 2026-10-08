@@ -61,6 +61,8 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check --no-deps 'pypdf==5.9.0'
           python3 -m unittest discover -v -s tools/pdf-parser-benchmark/scripts -p 'test_make_real_page_subsets.py'
+      - name: REAL-BOOK-BENCHMARK-01C serial comparison and authority tests (synthetic-only)
+        run: python3 -m unittest discover -v -s tools/pdf-parser-benchmark/scripts -p 'test_run_real_book_matrix.py'
       - uses: pnpm/action-setup@v4
         with:
           version: 10.30.3
@@ -75,6 +77,7 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           ./node_modules/.bin/tsc --noEmit --project tsconfig.json
+          ./node_modules/.bin/vitest run tests/outcome-gate.test.ts
       - name: Generate Prisma client
         run: pnpm db:generate
       - name: Lint
