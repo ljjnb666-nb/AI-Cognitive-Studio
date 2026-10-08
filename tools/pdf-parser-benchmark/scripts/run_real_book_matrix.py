@@ -30,6 +30,9 @@ MODELS = (
 )
 NATIVE = tuple((parser, "default", fixture) for fixture in ("RB-PDF-11", "RB-PDF-12", "RB-PDF-13") for parser in ("pdfjs", "liteparse"))
 SHA_LEN = 64
+LINEAGE = {"RB-PDF-11": ("RB-PDF-01", [22, 107, 192]),
+           "RB-PDF-12": ("RB-PDF-02", [73, 145, 261]),
+           "RB-PDF-13": ("RB-PDF-03", [51, 127, 379])}
 
 
 def sha256_file(path: Path) -> str:
@@ -68,6 +71,13 @@ def manifest_fixture(root: Path, target: str) -> dict:
     origin_rows = [r for r in rows if isinstance(r, dict) and r.get("id") == source_id]
     if len(origin_rows) != 1 or origin_rows[0].get("expectedSha256") != source_sha:
         raise ValueError(f"PRIVATE_SUBSET_PARENT_CONFLICT:{target}")
+    if (source_id, pages) != LINEAGE.get(target):
+        raise ValueError(f"PRIVATE_SUBSET_PAGE_MAP_CONFLICT:{target}")
+    parent = manifest_path.parent / (source_id + ".pdf")
+    if (parent.is_symlink() or not parent.is_file() or
+            parent.stat().st_size != origin_rows[0].get("declaredBytes") or
+            sha256_file(parent) != source_sha):
+        raise ValueError(f"PRIVATE_SUBSET_PARENT_FILE_CHANGED:{target}")
     return {"id": target, "expectedSha256": expected_sha, "parentSha256": source_sha, "sourcePages1Based": pages}
 
 
