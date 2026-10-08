@@ -103,9 +103,9 @@ test("real OWNER/EDITOR/VIEWER: explicit EPUB confirmation, stale and conflictin
   const owner = await epubFixture(userId, workspaceId, "产品身份 · OWNER");
   await page.goto(detail(owner.documentId));
   const panel = page.locator(".identity-panel");
-  await expect(panel.getByText("产品身份 · OWNER")).toBeVisible();
+  await expect(panel.locator(".identity-data-block").first().getByText("产品身份 · OWNER")).toBeVisible();
   await expect(panel.getByText("未分类（仅为原始证据）")).toBeVisible();
-  await expect(panel.getByText(owner.filename)).toBeVisible();
+  await expect(panel.locator(".identity-file").first()).toContainText(owner.filename);
   await expect(page.getByRole("button", { name: button })).toBeEnabled();
   expect(await prisma.work.count({ where: { workspaceId } })).toBe(0);
   await page.getByRole("button", { name: button }).click();
@@ -131,7 +131,7 @@ test("real OWNER/EDITOR/VIEWER: explicit EPUB confirmation, stale and conflictin
     where: { workspaceId_userId: { workspaceId, userId } }, data: { role: "VIEWER" },
   });
   await page.goto(detail(viewer.documentId));
-  await expect(panel.getByText("只读内容")).toBeVisible();
+  await expect(panel.locator(".identity-data-block").first().getByText("只读内容")).toBeVisible();
   await expect(panel.getByText("当前角色仅可查看，不具备写入权限。")).toBeVisible();
   await expect(page.getByRole("button", { name: button })).toBeDisabled();
   const denied = await page.request.post("/api/studio/identity/" + viewer.documentId, {
@@ -159,7 +159,7 @@ test("real OWNER/EDITOR/VIEWER: explicit EPUB confirmation, stale and conflictin
   await page.getByRole("button", { name: button }).click();
   await replaceExtraction(userId, workspaceId, stale.documentId, "更新后的候选书名");
   await page.getByRole("button", { name: confirmButton }).click();
-  await expect(panel.getByText("更新后的候选书名")).toBeVisible();
+  await expect(panel.locator(".identity-data-block").first().getByText("更新后的候选书名")).toBeVisible();
   expect(await prisma.productIdentityPromotion.count({ where: { sourceDocumentId: stale.documentId } })).toBe(0);
   expect((await prisma.source.findUniqueOrThrow({ where: { id_workspaceId: { id: stale.sourceId, workspaceId } } })).editionId).toBeNull();
 
