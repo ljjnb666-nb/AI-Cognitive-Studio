@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DATA_ROOT,
@@ -8,6 +8,7 @@ import {
   REPORTS_ROOT,
   TEMP_ROOT,
   assertFixturePath,
+  assertInside,
 } from "./filesystem-guard.js";
 import { diskFreeBytes, gpuState, ramAvailableBytes } from "./resource-monitor.js";
 import { Runner, ensureCleanDir, sha256File, writeJsonFileAtomic } from "./runner.js";
@@ -37,6 +38,10 @@ export type FixtureManifestEntry = {
   generator: string;
   declaredPages: number;
   notes: string;
+  /** Private fixture checksum: synthetic fixtures may omit. */
+  expectedSha256?: string;
+  declaredBytes?: number;
+  groundTruth?: string | null;
 };
 
 export type FixtureRecord = {
@@ -53,7 +58,19 @@ export async function loadFixture(fixtureId: string): Promise<FixtureRecord> {
   if (!entry) throw new Error(`FIXTURE_NOT_IN_MANIFEST: ${fixtureId}`);
   const path = assertFixturePath(join(FIXTURES_ROOT, entry.filename));
   if (!existsSync(path)) throw new Error(`FIXTURE_FILE_MISSING: ${path}`);
-  return { entry, path, sha256: await sha256File(path), bytes: (await stat(path)).size };
+  const file = await lstat(path);
+  if (!file.isFile() || file.isSymbolicLink()) throw new Error(`FIXTURE_NOT_REGULAR_FILE: ${fixtureId}`);
+  // The manifest cannot grant access through a symlinked parent directory.
+  assertInside(await realpath(FIXTURES_ROOT), await realpath(path), "fixture-realpath");
+  if (entry.declaredBytes !== undefined && (!Number.isSafeInteger(entry.declaredBytes) || entry.declaredBytes < 0 || file.size !== entry.declaredBytes)) {
+    throw new Error(`FIXTURE_DECLARED_BYTES_MISMATCH: ${fixtureId}`);
+  }
+  const sha256 = await sha256File(path);
+  if (entry.expectedSha256 !== undefined &&
+      (!/^[0-9a-f]{64}$/.test(entry.expectedSha256) || sha256 !== entry.expectedSha256)) {
+    throw new Error(`FIXTURE_SHA256_MISMATCH: ${fixtureId}`);
+  }
+  return { entry, path, sha256, bytes: file.size };
 }
 
 export type Preflight = {

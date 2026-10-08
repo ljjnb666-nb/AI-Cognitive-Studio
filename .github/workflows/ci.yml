@@ -52,6 +52,8 @@ jobs:
           # The release gates record and verify the PR head, not GitHub's
           # ephemeral pull-request merge ref.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: REAL-BOOK-BENCHMARK-01A private import regressions (synthetic-only)
+        run: python3 -m unittest discover -v -s tools/pdf-parser-benchmark/scripts -p 'test_import_private_real_books.py'
       - uses: pnpm/action-setup@v4
         with:
           version: 10.30.3
@@ -61,6 +63,11 @@ jobs:
           cache: pnpm
       - name: Install
         run: pnpm install --frozen-lockfile
+      - name: REAL-BOOK-BENCHMARK-01A isolated TypeScript contract
+        working-directory: tools/pdf-parser-benchmark
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          ./node_modules/.bin/tsc --noEmit --project tsconfig.json
       - name: Start MinIO
         run: docker compose up -d minio
       - name: Initialize private MinIO bucket
