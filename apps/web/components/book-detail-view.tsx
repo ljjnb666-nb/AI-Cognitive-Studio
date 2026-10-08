@@ -43,6 +43,9 @@ type Props = {
   item: {
     id: string;
     displayName: string;
+    title: string;
+    titleOrigin: "WORK" | "FILENAME";
+    isLatestVersion: boolean;
     mediaType: string;
     version: number;
     hasIntelligence: boolean;
@@ -91,8 +94,12 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
       <div className="interpretation-pane">
         <div className="page-eyebrow">系统解读</div>
         <h1 className="font-serif" style={{ fontSize: 32, fontWeight: 600, color: "var(--on-surface)", margin: "0 0 20px 0" }}>
-          {item.displayName}
+          {item.title}
         </h1>
+        <p style={{ color: "var(--text-secondary)", margin: "0 0 16px 0", fontSize: 13, overflowWrap: "anywhere" }}>
+          原文件：{item.displayName} · 文件版本 v{item.version}
+          {!item.isLatestVersion && " · 历史版本（显示所属书籍当前正式书名）"}
+        </p>
 
         {item.hasIntelligence && (
           <div style={{ display: "flex", gap: 12, marginBottom: 32 }}>

@@ -103,6 +103,8 @@ test("real OWNER/EDITOR/VIEWER: explicit EPUB confirmation, stale and conflictin
   const owner = await epubFixture(userId, workspaceId, "产品身份 · OWNER");
   await page.goto(detail(owner.documentId));
   const panel = page.locator(".identity-panel");
+  // An unpromoted file displays its original name, not advisory EPUB dc:title.
+  await expect(page.locator(".book-detail-layout h1")).toHaveText(owner.filename);
   await expect(panel.locator(".identity-data-block").first().getByText("产品身份 · OWNER")).toBeVisible();
   await expect(panel.getByText("未分类（仅为原始证据）")).toBeVisible();
   await expect(panel.locator(".identity-file").first()).toContainText(owner.filename);
@@ -124,6 +126,14 @@ test("real OWNER/EDITOR/VIEWER: explicit EPUB confirmation, stale and conflictin
   expect(ownerSource.edition?.work.title).toBe("产品身份 · OWNER");
   expect(ownerSource.edition?.isbn13).toBe("9780306406157");
   expect(await prisma.productIdentityPromotion.count({ where: { sourceDocumentId: owner.documentId } })).toBe(1);
+  // Read-after-commit updates the detail title and library card through the
+  // authoritative Source -> Edition -> Work relation, preserving original name.
+  await expect(page.locator(".book-detail-layout h1")).toHaveText("产品身份 · OWNER");
+  await page.goto("/studio/library");
+  const ownerCard = page.locator('a[href="/studio/library/' + owner.documentId + '"]');
+  await expect(ownerCard.locator("h3")).toHaveText("产品身份 · OWNER");
+  await expect(ownerCard).toContainText(owner.filename);
+  await expect(ownerCard).toContainText("文件版本 v1");
 
   // VIEWER: read-only preview but direct POST remains forbidden.
   const viewer = await epubFixture(userId, workspaceId, "只读内容");
