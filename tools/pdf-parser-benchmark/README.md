@@ -131,3 +131,54 @@ npm test
 - RAM preflight per parser before each run; insufficient RAM records
   `SKIPPED_RESOURCE_CONSTRAINT` instead of forcing a run.
 - Facts only: no overall score, no winner is computed (#40).
+
+
+## Private real-book fixture intake (REAL-BOOK-BENCHMARK-01A)
+
+Synthetic F1–F12 fixtures remain the deterministic ground-truth suite. Real
+user-provided PDFs are **private, additional inputs**, not public fixtures.
+The private selection JSON belongs to the user's separate evidence package
+(schema `acs-real-book-fixtures-v1`); **never commit it, the ZIP, actual books,
+OCR text, rendered pages, or any private benchmark artifacts to Git**.
+
+1. Generate the synthetic fixtures and their manifest with `npm run fixtures`
+   in this isolated benchmark tool. Confirm the manifest exists in
+   `D:\ai-cognitive-pdf-benchmark-data\fixtures\fixtures.manifest.json`.
+2. Put the user's original ebook ZIP and selection JSON somewhere **outside
+   the repository**. Do not move source books into this worktree.
+3. From `tools/pdf-parser-benchmark` run (PowerShell):
+
+   ```powershell
+   python scripts/import_private_real_books.py --zip "D:\private\电子书.zip" --selection "D:\private\real_book_selection.json" --dry-run
+   python scripts/import_private_real_books.py --zip "D:\private\电子书.zip" --selection "D:\private\real_book_selection.json" --priority P0
+   python -m unittest discover -s scripts -p "test_import_private_real_books.py" -v
+   ```
+
+The importer rejects out-of-allowlist fixture IDs, manifest collisions, unsafe
+ZIP members, wrong byte counts and SHA-256, stale partial files, symlinks and
+concurrent import locks. Dry-run hashes **all selected source bytes**, and
+actual import stages each PDF to the private root with no-clobber installation.
+A private manifest row includes `declaredBytes`, `expectedSha256`, and
+`groundTruth: null`. `loadFixture()` validates both before launching any
+parser; no missing ground truth is turned into a fabricated quality score.
+
+After host preflight passes, start with one native-text PDF and only a bounded
+OCR sample. Never interpret `--page-cap` as a limit on the production-equivalent
+`pdfjs` adapter: it reads the entire document under production parser limits.
+For Docling and MinerU, the default page cap is 50; full-book run comparisons
+are not comparable with partial-page runs unless documented separately.
+
+```powershell
+npx tsx src/cli.ts preflight
+npx tsx src/cli.ts run --parser pdfjs --fixture RB-PDF-01 --cold-only
+npx tsx src/cli.ts run --parser docling --mode ocr --fixture RB-PDF-02 --cold-only
+```
+
+The heavy model commands above are **instructions, not CI test evidence**.
+If the C: disk pressure, D: disk space, RAM or model readiness gates fail,
+record the blocked state rather than bypassing preflight. Do not start
+all modes or download models implicitly. Keep parser run outputs private.
+Compare quality only after independent human page-level ground truth exists;
+prior native-text checks or isolated Tesseract probes cannot prove a Docling/
+MinerU winner. A successful import proves **sample identity**, not extraction
+accuracy or whole-pipeline reliability.
