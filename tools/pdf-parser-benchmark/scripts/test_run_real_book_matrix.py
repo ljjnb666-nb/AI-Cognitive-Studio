@@ -102,6 +102,7 @@ class MatrixContractTests(unittest.TestCase):
     def test_stdout_success_needs_checksum_and_zero_exit(self):
         fixture = manifest_fixture(self.root, "RB-PDF-11")
         report = {
+            "benchmarkOutcome": {"status": "OK", "tempClean": True, "accepted": True},
             "run": {"id": "synthetic"},
             "document": {"inputSha256": fixture["expectedSha256"], "fixtureId": "RB-PDF-11"},
             "reliability": {"exitCode": 0, "crashed": False, "failureKind": None, "timeout": False,
@@ -126,6 +127,7 @@ class MatrixContractTests(unittest.TestCase):
         fixture = manifest_fixture(self.root, "RB-PDF-11")
         fixture["id"] = "RB-PDF-12"
         result = {
+            "benchmarkOutcome": {"status": "PARSER_FAILED", "tempClean": True, "accepted": False},
             "run": {"id": "synthetic-negative"},
             "document": {"inputSha256": fixture["expectedSha256"], "fixtureId": "RB-PDF-12"},
             "reliability": {
@@ -154,6 +156,21 @@ class MatrixContractTests(unittest.TestCase):
             outcome = evidence_row(job, CompletedProcess([], 1, json.dumps(item), ""), 1.0, fixture)
             self.assertEqual(outcome["status"], "NOT_ACCEPTED", field)
 
+        for gate_name, gate_value in (("tempClean", False), ("accepted", True),
+                                      ("status", "OK")):
+            item = json.loads(json.dumps(result))
+            item["benchmarkOutcome"][gate_name] = gate_value
+            rejected = evidence_row(job, CompletedProcess([], 1, json.dumps(item), ""), 1.0, fixture)
+            self.assertEqual(rejected["status"], "NOT_ACCEPTED", gate_name)
+        item = json.loads(json.dumps(result))
+        item["reliability"]["warnings"].append("RESULT_PERSIST_FAILED: disk")
+        self.assertEqual(evidence_row(job, CompletedProcess([], 1, json.dumps(item), ""), 1.0, fixture)["status"],
+                         "NOT_ACCEPTED")
+        item = json.loads(json.dumps(result))
+        item.pop("benchmarkOutcome")
+        self.assertEqual(evidence_row(job, CompletedProcess([], 1, json.dumps(item), ""), 1.0, fixture)["status"],
+                         "NOT_ACCEPTED")
+
         result["document"]["inputSha256"] = "0" * 64
         wrong_source = evidence_row(job, CompletedProcess([], 1, json.dumps(result), ""), 1.0, fixture)
         self.assertEqual(wrong_source["status"], "NOT_ACCEPTED")
@@ -165,6 +182,7 @@ class MatrixContractTests(unittest.TestCase):
     def test_capability_refusal_must_not_mask_healthy_native_success(self):
         fixture = manifest_fixture(self.root, "RB-PDF-11")
         result = {
+            "benchmarkOutcome": {"status": "OK", "tempClean": True, "accepted": True},
             "run": {"id": "native"},
             "document": {"inputSha256": fixture["expectedSha256"], "fixtureId": "RB-PDF-11"},
             "reliability": {"exitCode": 0, "crashed": False, "failureKind": None,
