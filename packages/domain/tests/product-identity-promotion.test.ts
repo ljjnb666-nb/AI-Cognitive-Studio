@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyProductIdentifierForPromotion,
   isPromotableProductLanguage,
+  normalizeIsbnForComparison,
   normalizeProductIdentityTitleForComparison,
 } from "../src/product-identity-promotion.js";
 
@@ -23,8 +24,16 @@ describe("controlled product identity promotion helpers", () => {
     expect(classifyProductIdentifierForPromotion("ISBN 0-306-40615-2")).toEqual({ kind: "ISBN10", value: "0306406152" });
   });
 
-  it("never infers ISBN from bare digits and rejects invalid explicit ISBN", () => {
+  it("never infers ISBN from bare digits and rejects invalid or non-Bookland explicit ISBN", () => {
     expect(classifyProductIdentifierForPromotion("9780306406157")).toEqual({ kind: "UNCLASSIFIED" });
     expect(classifyProductIdentifierForPromotion("urn:isbn:9780306406158")).toEqual({ kind: "INVALID_EXPLICIT_ISBN" });
+    expect(classifyProductIdentifierForPromotion("ISBN: 1234567890128")).toEqual({ kind: "INVALID_EXPLICIT_ISBN" });
+  });
+
+  it("normalizes valid stored ISBN formatting only for comparison", () => {
+    expect(normalizeIsbnForComparison("978-0-306-40615-7", "ISBN13")).toBe("9780306406157");
+    expect(normalizeIsbnForComparison("ISBN-10: 0-306-40615-2", "ISBN10")).toBe("0306406152");
+    expect(normalizeIsbnForComparison("1234567890128", "ISBN13")).toBeNull();
+    expect(normalizeIsbnForComparison("not-an-isbn", "ISBN10")).toBeNull();
   });
 });
