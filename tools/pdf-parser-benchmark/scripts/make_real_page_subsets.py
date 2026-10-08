@@ -149,6 +149,11 @@ def run(root: Path, targets: list[str], dry_run: bool = False) -> dict:
                 writer.write(sink)
                 sink.flush()
                 os.fsync(sink.fileno())
+            # Re-verify the original source after the lazy PDF reader finishes.
+            # Otherwise a source swapped between preflight and extraction would
+            # produce a sample falsely attributed to the old SHA-256.
+            if file_hash(source_path) != sha:
+                raise ValueError(f"SOURCE_CHANGED_DURING_SUBSET:{source_id}")
             entry = make_entry(target, source_id, sha, pages, part)
             # Hard link: same-volume no-clobber publish, never replace a source
             # or a previously registered target. Track rollback immediately.
