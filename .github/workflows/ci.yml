@@ -78,7 +78,7 @@ jobs:
   # ---------------------------------------------------------------------------
   core-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17-alpine
@@ -140,8 +140,8 @@ jobs:
         run: pnpm --filter @ai-cognitive/db prisma migrate deploy
         env:
           DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
-      - name: Install FFmpeg, FFprobe, and Redis CLI for media and Phase 6 processing
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg redis-tools
+      - name: Install and attest required media/Redis CLI tools (bounded)
+        run: bash scripts/ci-install-media-tools.sh
       - name: Unit tests
         run: pnpm test:unit
       - name: Integration tests
@@ -182,6 +182,118 @@ jobs:
   # Real PostgreSQL 17 + Redis 7 + MinIO + FFmpeg + Playwright Chromium.
   # ---------------------------------------------------------------------------
   product-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: ai_cognitive_studio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d ai_cognitive_studio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The release gates record and verify the PR head, not GitHub's
+          # ephemeral pull-request merge ref.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact-head checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          echo "expected=${EXPECTED_SHA}"
+          echo "actual=${actual}"
+          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
+            echo "::error::Checked-out HEAD ${actual} does not match expected exact head ${EXPECTED_SHA}"
+            exit 1
+          fi
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Start MinIO
+        run: docker compose up -d minio
+      - name: Initialize private MinIO bucket
+        run: docker compose run --rm minio-init
+      - name: Create isolated test database
+        run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Apply test migration
+        run: pnpm --filter @ai-cognitive/db prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      - name: Install and attest required media/Redis CLI tools (bounded)
+        run: bash scripts/ci-install-media-tools.sh
+      - name: Install Playwright browser
+        run: pnpm --filter @ai-cognitive/web exec playwright install --with-deps chromium
+      - name: Phase 6 browser product acceptance
+        run: pnpm test:phase6:e2e
+        env:
+          POSTGRES_HOST_PORT: "5432"
+      - name: Phase 7 auth/browser acceptance
+        run: pnpm test:phase7:e2e
+        env:
+          POSTGRES_HOST_PORT: "5432"
+      - name: Phase 9 full product release gate (real auth + workspace BYOK + no external AI calls)
+        run: pnpm test:phase9:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
+      - name: Phase 10 Cognitive Unit product release gate (real auth + PostgreSQL + no external AI calls)
+        run: pnpm test:phase10:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
+      - name: Phase 11 Thinking Session product release gate (real auth + PostgreSQL + fake Gateway)
+        run: pnpm test:phase11:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
+      - name: Phase 12 Teach Back + Cognition Mastery product release gate (real auth + PostgreSQL + fake Gateway)
+        run: pnpm test:phase12:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
+      - name: Phase 13 Personalized Cognition System product release gate (real auth + PostgreSQL + deterministic personalization)
+        run: pnpm test:phase13:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
+      - name: Phase 14 Studio Product Experience release gate (real auth + PostgreSQL + no external AI calls)
+        run: pnpm test:phase14:release
+        env:
+          POSTGRES_HOST_PORT: "5432"
+      - name: Upload Phase 14 visual evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase14-visual-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: output/playwright/*.png
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Domain 4 — quality-performance: Phases 15-16 release gates.
+  # Real PostgreSQL 17 + Redis 7 + MinIO + FFmpeg (phase15:release re-runs the
+  # phase 3/4 media pipeline and a full build internally). No browser.
+  # ---------------------------------------------------------------------------
+  quality-performance:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -245,120 +357,8 @@ jobs:
         run: pnpm --filter @ai-cognitive/db prisma migrate deploy
         env:
           DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
-      - name: Install FFmpeg, FFprobe, and Redis CLI for media and Phase 6 processing
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg redis-tools
-      - name: Install Playwright browser
-        run: pnpm --filter @ai-cognitive/web exec playwright install --with-deps chromium
-      - name: Phase 6 browser product acceptance
-        run: pnpm test:phase6:e2e
-        env:
-          POSTGRES_HOST_PORT: "5432"
-      - name: Phase 7 auth/browser acceptance
-        run: pnpm test:phase7:e2e
-        env:
-          POSTGRES_HOST_PORT: "5432"
-      - name: Phase 9 full product release gate (real auth + workspace BYOK + no external AI calls)
-        run: pnpm test:phase9:release
-        env:
-          POSTGRES_HOST_PORT: "5432"
-      - name: Phase 10 Cognitive Unit product release gate (real auth + PostgreSQL + no external AI calls)
-        run: pnpm test:phase10:release
-        env:
-          POSTGRES_HOST_PORT: "5432"
-      - name: Phase 11 Thinking Session product release gate (real auth + PostgreSQL + fake Gateway)
-        run: pnpm test:phase11:release
-        env:
-          POSTGRES_HOST_PORT: "5432"
-      - name: Phase 12 Teach Back + Cognition Mastery product release gate (real auth + PostgreSQL + fake Gateway)
-        run: pnpm test:phase12:release
-        env:
-          POSTGRES_HOST_PORT: "5432"
-      - name: Phase 13 Personalized Cognition System product release gate (real auth + PostgreSQL + deterministic personalization)
-        run: pnpm test:phase13:release
-        env:
-          POSTGRES_HOST_PORT: "5432"
-      - name: Phase 14 Studio Product Experience release gate (real auth + PostgreSQL + no external AI calls)
-        run: pnpm test:phase14:release
-        env:
-          POSTGRES_HOST_PORT: "5432"
-      - name: Upload Phase 14 visual evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase14-visual-evidence-${{ github.event.pull_request.head.sha || github.sha }}
-          path: output/playwright/*.png
-          if-no-files-found: error
-
-  # ---------------------------------------------------------------------------
-  # Domain 4 — quality-performance: Phases 15-16 release gates.
-  # Real PostgreSQL 17 + Redis 7 + MinIO + FFmpeg (phase15:release re-runs the
-  # phase 3/4 media pipeline and a full build internally). No browser.
-  # ---------------------------------------------------------------------------
-  quality-performance:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: app
-          POSTGRES_PASSWORD: app
-          POSTGRES_DB: ai_cognitive_studio
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U app -d ai_cognitive_studio"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # The release gates record and verify the PR head, not GitHub's
-          # ephemeral pull-request merge ref.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Assert exact-head checkout
-        env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          actual="$(git rev-parse HEAD)"
-          echo "expected=${EXPECTED_SHA}"
-          echo "actual=${actual}"
-          if [ "${actual}" != "${EXPECTED_SHA}" ]; then
-            echo "::error::Checked-out HEAD ${actual} does not match expected exact head ${EXPECTED_SHA}"
-            exit 1
-          fi
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.30.3
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - name: Install
-        run: pnpm install --frozen-lockfile
-      - name: Start MinIO
-        run: docker compose up -d minio
-      - name: Initialize private MinIO bucket
-        run: docker compose run --rm minio-init
-      - name: Create isolated test database
-        run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
-      - name: Generate Prisma client
-        run: pnpm db:generate
-      - name: Apply test migration
-        run: pnpm --filter @ai-cognitive/db prisma migrate deploy
-        env:
-          DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
-      - name: Install FFmpeg, FFprobe, and Redis CLI for media and Phase 6 processing
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg redis-tools
+      - name: Install and attest required media/Redis CLI tools (bounded)
+        run: bash scripts/ci-install-media-tools.sh
       - name: Phase 15 Podcast Content Quality release gate (deterministic and no external AI calls)
         run: pnpm test:phase15:release
         env:
@@ -386,7 +386,7 @@ jobs:
   # ---------------------------------------------------------------------------
   stability-beta:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:17-alpine
@@ -448,8 +448,8 @@ jobs:
         run: pnpm --filter @ai-cognitive/db prisma migrate deploy
         env:
           DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
-      - name: Install FFmpeg, FFprobe, and Redis CLI for media and Phase 6 processing
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg redis-tools
+      - name: Install and attest required media/Redis CLI tools (bounded)
+        run: bash scripts/ci-install-media-tools.sh
       - name: Install Playwright browser
         run: pnpm --filter @ai-cognitive/web exec playwright install --with-deps chromium
       - name: Phase 17 Closed Beta core release gate
