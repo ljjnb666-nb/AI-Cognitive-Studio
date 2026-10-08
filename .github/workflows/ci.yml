@@ -54,6 +54,10 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: REAL-BOOK-BENCHMARK-01A private import regressions (synthetic-only)
         run: python3 -m unittest discover -v -s tools/pdf-parser-benchmark/scripts -p 'test_import_private_real_books.py'
+      - name: REAL-BOOK-BENCHMARK-01B synthetic page-subset regression
+        run: |
+          python3 -m pip install --disable-pip-version-check --no-deps 'pypdf==5.9.0'
+          python3 -m unittest discover -v -s tools/pdf-parser-benchmark/scripts -p 'test_make_real_page_subsets.py'
       - uses: pnpm/action-setup@v4
         with:
           version: 10.30.3
