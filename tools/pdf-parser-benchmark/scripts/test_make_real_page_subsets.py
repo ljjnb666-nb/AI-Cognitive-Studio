@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pypdf import PdfReader, PdfWriter
-from make_real_page_subsets import PLANS, run
+from make_real_page_subsets import PLANS, run, file_hash
 
 
 class PageSubsetTests(unittest.TestCase):
@@ -59,6 +59,25 @@ class PageSubsetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SOURCE_IDENTITY_MISMATCH"):
             run(self.root, ["RB-PDF-11"])
         self.assertFalse((self.root / "RB-PDF-11.pdf").exists())
+
+    def test_source_changed_between_preflight_and_pdf_write_rejected(self):
+        actual_hash = file_hash
+        source_hash_calls = {"count": 0}
+
+        def changed_after_preflight(path):
+            if path.name == "RB-PDF-01.pdf":
+                source_hash_calls["count"] += 1
+                if source_hash_calls["count"] == 2:
+                    return "0" * 64
+            return actual_hash(path)
+
+        with patch("make_real_page_subsets.file_hash", side_effect=changed_after_preflight):
+            with self.assertRaisesRegex(ValueError, "SOURCE_CHANGED_DURING_SUBSET"):
+                run(self.root, ["RB-PDF-11"])
+        self.assertEqual(source_hash_calls["count"], 2)
+        self.assertFalse((self.root / "RB-PDF-11.pdf").exists())
+        self.assertFalse((self.root / "RB-PDF-11.pdf.part").exists())
+        self.assertEqual(len(json.loads(self.manifest.read_text())["fixtures"]), 1)
 
     def test_declared_page_count_must_match(self):
         o = json.loads(self.manifest.read_text())
