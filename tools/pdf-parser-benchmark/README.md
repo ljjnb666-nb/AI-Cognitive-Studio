@@ -182,3 +182,56 @@ Compare quality only after independent human page-level ground truth exists;
 prior native-text checks or isolated Tesseract probes cannot prove a Docling/
 MinerU winner. A successful import proves **sample identity**, not extraction
 accuracy or whole-pipeline reliability.
+
+
+## Representative real-book page subsets (REAL-BOOK-BENCHMARK-01B)
+
+This step is **non-production**. It makes small private PDF subsets from the
+already checksum-verified RB-PDF-01/02/03. It never commits, uploads, or prints
+the original book text or pages. It uses Python 3.10+ and `pypdf==5.9.0`
+(install in an isolated Python environment, not the production Node workspace).
+
+The fixed source-physical-page sampling map is:
+
+| subset fixture | original fixture | original 1-based pages | intended layout |
+| --- | --- | --- | --- |
+| RB-PDF-11 | RB-PDF-01 | 22, 107, 192 | native Chinese prose |
+| RB-PDF-12 | RB-PDF-02 | 73, 145, 261 | light scan / body / illustrated page |
+| RB-PDF-13 | RB-PDF-03 | 51, 127, 379 | dense textbook / code and figures |
+
+Each generated private manifest entry holds its **own SHA-256** and byte count,
+the parent fixture ID and parent SHA-256, plus `sourcePages1Based`. Note
+that `pageIndex` in a subset parser output is **subset-local**, and cannot be
+reported as a physical page number in the original book until mapped using
+`sourcePages1Based[pageIndex]`. The mapping is immutable sample evidence,
+not publication evidence. Extraction quality is **NOT_GRADED** until separate
+human ground truth is annotated.
+
+PowerShell (from `tools/pdf-parser-benchmark`, after 01A private import):
+
+```powershell
+python -m pip install --no-deps "pypdf==5.9.0"
+python scripts/make_real_page_subsets.py --dry-run
+python scripts/make_real_page_subsets.py
+python -m unittest discover -v -s scripts -p "test_make_real_page_subsets.py"
+npx tsx src/cli.ts preflight
+npx tsx src/cli.ts run --parser pdfjs --fixture RB-PDF-11 --cold-only
+npx tsx src/cli.ts run --parser liteparse --fixture RB-PDF-11 --cold-only
+npx tsx src/cli.ts run --parser docling --mode ocr --fixture RB-PDF-12 --cold-only
+npx tsx src/cli.ts run --parser mineru --mode flash --fixture RB-PDF-13 --cold-only
+```
+
+Run parsers **serially**. First confirm the parser-specific runtime/model
+readiness, native baseline, host disk guard and RAM. For modes requiring
+download, use the explicit untimed setup step and ask for approval before
+model downloads. Never bypass production limits. A successful three-page OCR
+smoke run does not prove full-book reliability; the long-document regression
+is a separate acceptance gate.
+
+**Do not treat character count as accuracy**: RB-PDF-12 includes an
+illustrated page whose intended output may be image evidence rather than
+body prose. Record image/figure handling separately and annotate per-page
+ground truth for text recall, structural recovery and source locators.
+A locally installed Tesseract probe is only an independent baseline; it is
+not a Docling/MinerU result. Always report unavailable metrics as
+`NOT_MEASURED` instead of zero. Keep private run outputs outside Git.
