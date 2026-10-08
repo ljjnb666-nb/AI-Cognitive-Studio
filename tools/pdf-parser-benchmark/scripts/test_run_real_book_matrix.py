@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
 
-from run_real_book_matrix import selected_matrix, manifest_fixture, evidence_row, NATIVE
+from run_real_book_matrix import selected_matrix, manifest_fixture, evidence_row, report_status, NATIVE
 
 
 class MatrixContractTests(unittest.TestCase):
@@ -47,6 +47,18 @@ class MatrixContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MODEL_READINESS_CONFIRMATION_REQUIRED"):
             selected_matrix(True, False)
         self.assertEqual(len(selected_matrix(True, True)), 10)
+
+    def test_expected_rejection_preserves_evidence_and_continues(self):
+        jobs = (("pdfjs", "default", "RB-PDF-12"), ("liteparse", "default", "RB-PDF-12"))
+        rows = [{"status": "EXPECTED_CAPABILITY_REJECTION"}, {"status": "EXECUTION_OK"}]
+        self.assertEqual(report_status(rows, jobs, True),
+                         "BASELINE_COMPLETE_WITH_EXPECTED_REJECTIONS")
+        self.assertEqual(report_status(rows[:1], jobs, True), "INCOMPLETE_OR_FAILED")
+        self.assertEqual(report_status([rows[0], {"status": "NOT_ACCEPTED"}], jobs, True),
+                         "INCOMPLETE_OR_FAILED")
+        self.assertEqual(report_status(rows, jobs, False), "INCOMPLETE_OR_FAILED")
+        self.assertEqual(report_status([{"status": "EXECUTION_OK"}] * 2, jobs, True),
+                         "EXECUTION_PASS_ONLY")
 
     def test_mineru_solo_skips_native_negative_controls_and_docling(self):
         jobs = selected_matrix(False, True, "mineru-flash")
