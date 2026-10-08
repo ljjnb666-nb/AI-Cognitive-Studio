@@ -29,6 +29,7 @@ export const Reliability = z.object({
   exitCode: z.number().int().nullable(),
   timeout: z.boolean(),
   crashed: z.boolean(),
+  failureKind: z.enum(["EXPECTED_CAPABILITY_REJECTION", "TIMEOUT", "OUT_OF_MEMORY", "PROCESS_FAILURE", "INVALID_OUTPUT", "HARNESS_ERROR"]).nullable().optional(),
   oom: z.boolean(),
   partialOutput: z.boolean(),
   warnings: z.array(z.string()),

@@ -59,6 +59,9 @@ async function printHostBaseline(): Promise<void> {
 }
 
 async function mineruServer(action: "status" | "start" | "stop"): Promise<number> {
+  // The control command uses a dedicated cwd, which is not created by
+  // per-parser run-scoped temp directories (mineru-flash/...).
+  await mkdir(join(TEMP_ROOT, "mineru"), { recursive: true });
   const outcome = await new Runner().run({
     programId: "mineru_cli",
     argv: ["server", action],
@@ -210,10 +213,17 @@ async function main(): Promise<void> {
           timeoutOverrideMs: arg("--timeout-ms") ? Number(arg("--timeout-ms")) : undefined,
           pageCapOverride: arg("--page-cap") ? (arg("--page-cap") === "all" ? null : Number(arg("--page-cap"))) : undefined,
         });
-        console.log(JSON.stringify(outcome.result ?? { status: outcome.status, warnings: outcome.warnings }, null, 2));
+        // The CLI envelope is separate from immutable result.json: cleanup
+        // happens after persistence, and must remain observable to orchestrators.
+        const accepted = isSuccessfulRun(outcome);
+        const envelope = {
+          ...(outcome.result ?? { status: outcome.status, warnings: outcome.warnings }),
+          benchmarkOutcome: { status: outcome.status, tempClean: outcome.tempClean, accepted },
+        };
+        console.log(JSON.stringify(envelope, null, 2));
         // A parsable result.json is an evidence artifact, NOT proof of success.
         // Fail-closed for shell/automation consumers on parser, preflight or cleanup failure.
-        if (!isSuccessfulRun(outcome)) {
+        if (!accepted) {
           console.error(`BENCHMARK_RUN_NOT_OK: ${outcome.status} fixture=${fixture} parser=${parser} mode=${mode}`);
           process.exitCode = 1;
         }
