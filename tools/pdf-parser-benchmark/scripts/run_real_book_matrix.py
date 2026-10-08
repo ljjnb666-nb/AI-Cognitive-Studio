@@ -150,7 +150,7 @@ def evidence_row(job: tuple[str, str, str], cp: subprocess.CompletedProcess[str]
 
 def report_status(outcomes: list[dict], jobs: tuple, server_shutdown_ok: bool) -> str:
     if (not server_shutdown_ok or len(outcomes) != len(jobs)
-            or any(row["status"] == "NOT_ACCEPTED" for row in outcomes)):
+            or any(row["status"] not in ("EXECUTION_OK", "EXPECTED_CAPABILITY_REJECTION") for row in outcomes)):
         return "INCOMPLETE_OR_FAILED"
     if any(row["status"] == "EXPECTED_CAPABILITY_REJECTION" for row in outcomes):
         return "BASELINE_COMPLETE_WITH_EXPECTED_REJECTIONS"
@@ -269,7 +269,7 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
                               "runtimeSeconds": item["runtimeSeconds"]}, ensure_ascii=False), flush=True)
             # Fail closed: do not consume more RAM / GPU or pretend a later success
             # makes a missing or failed case pass.
-            if item["status"] == "NOT_ACCEPTED":
+            if item["status"] not in ("EXECUTION_OK", "EXPECTED_CAPABILITY_REJECTION"):
                 break
     finally:
         if server_started:
