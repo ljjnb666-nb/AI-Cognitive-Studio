@@ -158,6 +158,33 @@ def write_atomic(path: Path, payload: dict) -> None:
     os.replace(part, path)
 
 
+def model_resource_preflight(data_root: Path) -> None:
+    """Fail closed BEFORE starting MinerU; parser gates re-check resources later."""
+    import ctypes
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+    status = MemoryStatus()
+    status.dwLength = ctypes.sizeof(status)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise RuntimeError("MODEL_PHYSICAL_RAM_UNKNOWN")
+    if status.ullAvailPhys < 4 * 1024 ** 3:
+        raise RuntimeError("MODEL_RAM_PRESSURE_MIN_4_GB")
+    if shutil.disk_usage("C:\\").free < 15 * 1024 ** 3:
+        raise RuntimeError("MODEL_C_DRIVE_PRESSURE")
+    if shutil.disk_usage(data_root).free < 30 * 1024 ** 3:
+        raise RuntimeError("MODEL_DATA_DRIVE_PRESSURE")
+
+
 def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path, npx: str,
         suite: str = "native", offline_confirmed: bool = False) -> dict:
     jobs = selected_matrix(include_models, models_ready, suite)
@@ -175,6 +202,7 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
     if not cli.is_file():
         raise ValueError("BENCHMARK_CLI_NOT_FOUND")
     if active_models:
+        model_resource_preflight(data_root)
         # Verify ONLY selected model runtimes; do not require Docling to run MinerU.
         executables = {
             "docling": data_root / "python" / "docling" / "Scripts" / "python.exe",
@@ -199,6 +227,16 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
     report_path = report_dir / f"real-book-matrix-{label}-{time.time_ns()}.json"
     if report_path.exists() or report_path.is_symlink():
         raise FileExistsError(f"PRIVATE_REPORT_COLLISION: {report_path}")
+    # Offline switches constrain common model clients. The operator must also
+    # block outbound networking: not every model loader honors these switches.
+    child_env = dict(os.environ)
+    if active_models:
+        child_env.update({
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "HF_DATASETS_OFFLINE": "1",
+            "MODELSCOPE_OFFLINE": "1",
+        })
     outcomes = []
     server_started = False
     server_shutdown_ok = True
@@ -207,14 +245,14 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
             parser, mode, fixture_id = job
             if parser == "mineru" and not server_started:
                 command = [runner, "--no-install", "tsx", str(cli), "mineru-server", "--action", "start"]
-                start = subprocess.run(command, cwd=cli.parent.parent, capture_output=True, text=True, timeout=240)
+                start = subprocess.run(command, cwd=cli.parent.parent, capture_output=True, text=True, timeout=240, env=child_env)
                 if start.returncode != 0:
                     raise RuntimeError("MINERU_SERVER_START_FAILED")
                 server_started = True
             command = [runner, "--no-install", "tsx", str(cli), "run", "--parser", parser,
                        "--mode", mode, "--fixture", fixture_id, "--cold-only"]
             begun = time.monotonic()
-            proc = subprocess.run(command, cwd=cli.parent.parent, capture_output=True, text=True,
+            proc = subprocess.run(command, cwd=cli.parent.parent, capture_output=True, text=True, env=child_env,
                                   timeout=1800 if parser in ("docling", "mineru") else 300)
             item = evidence_row(job, proc, time.monotonic() - begun, fixture_rows[fixture_id])
             outcomes.append(item)
@@ -229,7 +267,7 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
             try:
                 stop = subprocess.run([runner, "--no-install", "tsx", str(cli), "mineru-server",
                                        "--action", "stop"], cwd=cli.parent.parent,
-                                      capture_output=True, text=True, timeout=240, check=False)
+                                      capture_output=True, text=True, timeout=240, check=False, env=child_env)
                 server_shutdown_ok = stop.returncode == 0
             except (OSError, subprocess.TimeoutExpired):
                 server_shutdown_ok = False
