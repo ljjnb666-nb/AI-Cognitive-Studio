@@ -144,6 +144,7 @@ def run(archive: Path, selection: Path, fixtures_root: Path, tier: str, dry_run:
             f.write("private benchmark import; do not delete while running\n")
         created: list[Path] = []
         partials_created: list[Path] = []
+        manifest_partial_created = False
         try:
             for sample in samples:
                 dest = fixtures_root / (sample["id"] + ".pdf")
@@ -168,6 +169,7 @@ def run(archive: Path, selection: Path, fixtures_root: Path, tier: str, dry_run:
             if additions:
                 part_manifest = fixtures_root / "fixtures.manifest.json.part"
                 with part_manifest.open("x", encoding="utf-8") as f:
+                    manifest_partial_created = True
                     json.dump({**existing, "fixtures": [*existing["fixtures"], *additions]}, f, ensure_ascii=False, indent=2)
                     f.write("\n")
                     f.flush()
@@ -184,7 +186,7 @@ def run(archive: Path, selection: Path, fixtures_root: Path, tier: str, dry_run:
                 if part.exists() and not part.is_symlink():
                     part.unlink()
             temporary_manifest = fixtures_root / "fixtures.manifest.json.part"
-            if temporary_manifest.exists() and not temporary_manifest.is_symlink():
+            if manifest_partial_created and temporary_manifest.exists() and not temporary_manifest.is_symlink():
                 temporary_manifest.unlink()
             lock.unlink()
 
