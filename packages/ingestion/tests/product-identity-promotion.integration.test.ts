@@ -240,6 +240,26 @@ describe("controlled product identity promotion authority", () => {
     )).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");
   });
 
+  it("returns SUPERSEDED for historical APPLIED replay after a newer SourceDocument appears", async () => {
+    const value = await fixture({ title: "First Book" });
+    const context = { userId: value.user.id, workspaceId: value.workspace.id };
+    const input = { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id };
+    const first = await promoteCurrentProductIdentityForUser(context, input);
+    expect(first.status).toBe("APPLIED");
+
+    const newer = await addDocumentVersion(value, { title: "Second Book" });
+    const replay = await promoteCurrentProductIdentityForUser(context, input);
+    expect(replay).toEqual({
+      status: "SUPERSEDED",
+      expectedSourceDocumentId: value.document.id,
+      latestSourceDocumentId: newer.document.id,
+    });
+    await expect(prisma.productIdentityPromotion.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    const preview = await readProductIdentityPreviewForUser(context, value.document.id);
+    expect(preview).toMatchObject({ state: "SUPERSEDED", canPromote: false, promotion: { status: "APPLIED" } });
+  });
+
   it("marks older SourceDocument version superseded even with its own current extraction", async () => {
     const value = await fixture({ title: "First Version" });
     const newer = await addDocumentVersion(value, { title: "Second Version" });
