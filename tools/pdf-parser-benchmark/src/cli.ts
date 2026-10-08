@@ -210,6 +210,14 @@ async function main(): Promise<void> {
           pageCapOverride: arg("--page-cap") ? (arg("--page-cap") === "all" ? null : Number(arg("--page-cap"))) : undefined,
         });
         console.log(JSON.stringify(outcome.result ?? { status: outcome.status, warnings: outcome.warnings }, null, 2));
+        // A parsable result.json is an evidence artifact, NOT proof of success.
+        // Fail-closed for shell/automation consumers on parser, preflight or cleanup failure.
+        if (outcome.status !== "OK" || outcome.tempClean === false ||
+            outcome.result?.reliability.crashed || outcome.result?.reliability.timeout ||
+            outcome.result?.reliability.partialOutput || outcome.result?.reliability.exitCode !== 0) {
+          console.error(`BENCHMARK_RUN_NOT_OK: ${outcome.status} fixture=${fixture} parser=${parser} mode=${mode}`);
+          process.exitCode = 1;
+        }
       }
       break;
     }
