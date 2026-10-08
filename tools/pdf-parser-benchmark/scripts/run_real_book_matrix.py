@@ -127,15 +127,28 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
     fixture_rows = {fixture: manifest_fixture(data_root, fixture) for _, _, fixture in jobs}
     if not cli.is_file():
         raise ValueError("BENCHMARK_CLI_NOT_FOUND")
+    if include_models:
+        # Opt-in plus installed executables and model-data root. It is not
+        # sufficient to infer a model revision, OCR accuracy or zero downloads.
+        for exe in (
+            data_root / "python" / "docling" / "Scripts" / "python.exe",
+            data_root / "python" / "mineru" / "Scripts" / "mineru.exe",
+        ):
+            if exe.is_symlink() or not exe.is_file():
+                raise ValueError("MODEL_EXECUTABLE_NOT_READY")
+        if not (data_root / "models").is_dir():
+            raise ValueError("MODEL_CACHE_NOT_READY")
     runner = shutil.which(npx)
     if runner is None:
         raise ValueError("NPX_NOT_FOUND")
     report_dir = data_root / "reports"
     if report_dir.is_symlink() or not report_dir.is_dir():
         raise ValueError("PRIVATE_REPORT_DIR_NOT_READY")
-    report_path = report_dir / ("real-book-matrix-models.json" if include_models else "real-book-matrix-native.json")
+    # A separate non-overwriting report per run; never overwrite earlier evidence.
+    label = "models" if include_models else "native"
+    report_path = report_dir / f"real-book-matrix-{label}-{time.time_ns()}.json"
     if report_path.exists() or report_path.is_symlink():
-        raise FileExistsError(f"PRIVATE_REPORT_ALREADY_EXISTS: {report_path}")
+        raise FileExistsError(f"PRIVATE_REPORT_COLLISION: {report_path}")
     outcomes = []
     server_started = False
     try:
@@ -167,7 +180,7 @@ def run(data_root: Path, *, include_models: bool, models_ready: bool, cli: Path,
                            capture_output=True, text=True, timeout=240, check=False)
         summary = {
             "schema": "acs-real-book-model-comparison-v1",
-            "status": "PASS" if len(outcomes) == len(jobs) and all(x["status"] == "OK" for x in outcomes) else "INCOMPLETE_OR_FAILED",
+            "status": "EXECUTION_PASS_ONLY" if len(outcomes) == len(jobs) and all(x["status"] == "OK" for x in outcomes) else "INCOMPLETE_OR_FAILED",
             "completed": len(outcomes), "planned": len(jobs), "results": outcomes,
             "qualityGroundTruth": "NOT_MEASURED",
             "warning": "No per-page ground truth. Structural/accuracy rankings are unsupported.",
@@ -187,7 +200,7 @@ def main() -> None:
     result = run(args.data_root, include_models=args.include_models, models_ready=args.models_ready, cli=cli, npx=args.npx)
     print(json.dumps({"status": result["status"], "completed": result["completed"],
                       "planned": result["planned"]}, ensure_ascii=False))
-    if result["status"] != "PASS":
+    if result["status"] != "EXECUTION_PASS_ONLY":
         sys.exit(1)
 
 
