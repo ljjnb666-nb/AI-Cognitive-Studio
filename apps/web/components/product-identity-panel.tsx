@@ -69,9 +69,9 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
 
   useEffect(() => {
     const controller = new AbortController();
-    setLoading(true);
-    setLoadError(null);
-    setPreview(null);
+    // Loading/reset state is set by the caller before the reload key changes.
+    // Initial state already starts loading; avoid synchronous state changes
+    // during an effect (react-hooks/set-state-in-effect).
     void (async () => {
       try {
         const response = await fetch(endpoint, {
@@ -117,7 +117,7 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
 
   async function confirm() {
     const observed = preview;
-    if (submitLock.current || !canConfirmProductIdentity(observed)) return;
+    if (submitLock.current || !observed || !canConfirmProductIdentity(observed) || observed.sourceDocumentId !== sourceDocumentId) return;
     // A synchronous ref guard prevents duplicate POST even before React rerenders.
     submitLock.current = true;
     dialogRef.current?.close();

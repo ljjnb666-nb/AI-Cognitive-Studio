@@ -137,7 +137,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
         )}
 
         {item.mediaType === "application/epub+zip" && (
-          <ProductIdentityPanel sourceDocumentId={item.id} sourceFileName={item.displayName} />
+          <ProductIdentityPanel key={item.id} sourceDocumentId={item.id} sourceFileName={item.displayName} />
         )}
 
         {/* Memory Items Cards - Fully Keyboard Accessible Buttons */}
