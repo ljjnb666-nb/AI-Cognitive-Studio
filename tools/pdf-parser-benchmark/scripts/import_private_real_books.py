@@ -163,8 +163,10 @@ def run(archive: Path, selection: Path, fixtures_root: Path, tier: str, dry_run:
                     raise ValueError(f"COPY_SHA256_MISMATCH:{sample['id']}")
                 # Same-volume atomic no-clobber: never overwrite an existing file.
                 os.link(part, dest)
-                part.unlink()
+                # Once the destination exists, rollback owns it even if
+                # removing the staging link fails unexpectedly.
                 created.append(dest)
+                part.unlink()
             additions = [entry_for(sample) for sample in samples if sample["id"] not in known]
             if additions:
                 part_manifest = fixtures_root / "fixtures.manifest.json.part"
