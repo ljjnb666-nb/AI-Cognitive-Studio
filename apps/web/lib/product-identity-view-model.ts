@@ -186,7 +186,7 @@ export function manualIdentityFormError(changes: Partial<Record<ManualIdentityFi
 export function manualIdentityOutcomeMessage(status: unknown, httpStatus: number): string {
   if (status === "APPLIED" && httpStatus >= 200 && httpStatus < 300) return "人工修正已保存，正在重新读取正式书名和审计记录。";
   if (status === "NOOP" && httpStatus >= 200 && httpStatus < 300) return "保存结果无变更，已重新检查正式信息。";
-  if (status === "CONFLICT") return "正式书籍信息已被其他操作修改；本次没有覆盖。已重新读取最新数据，请重新核对。";
+  if (status === "CONFLICT") return "正式书籍信息已被其他操作修改；本次不会覆盖已有字段。已重新读取最新数据，请重新核对。";
   if (status === "STALE") return "当前解析已更新，旧版本修正未写入。请重新核对。";
   if (status === "SUPERSEDED") return "源文件已出现新版本，旧版本修正未写入。请切换到最新文件。";
   if (httpStatus === 400 || httpStatus === 422) return "输入不符合服务端校验要求，本次没有保存。请检查书名、语言、ISBN 和修正原因。";
