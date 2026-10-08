@@ -4,6 +4,7 @@ import { prisma } from "@ai-cognitive/db";
 
 const password = "ProductIdentityBrowser2026!";
 const freshEmail = () => "identity-ui-" + randomUUID() + "@ai-cognitive-studio.test";
+let phase14Identity: { email: string; userId: string; workspaceId: string } | null = null;
 const candidate = (title: string) => ({
   kind: "epub",
   schemaVersion: "product-identity-candidate-v1",
@@ -15,6 +16,24 @@ const candidate = (title: string) => ({
 });
 
 async function signUp(page: Page) {
+  // The Phase 14 server deliberately keeps Better Auth's stricter per-endpoint
+  // signup rate limit enabled. Reuse an actual browser-authenticated account
+  // across independent tests, resetting its role; every fixture remains unique.
+  // This avoids manufacturing a signup burst that masks unrelated browser tests.
+  if (phase14Identity) {
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: phase14Identity.workspaceId, userId: phase14Identity.userId } },
+      data: { role: "OWNER" },
+    });
+    await page.goto("/sign-in");
+    await page.locator('input[name="email"]').fill(phase14Identity.email);
+    await page.locator('input[name="password"]').fill(password);
+    const response = page.waitForResponse((item) => item.url().endsWith("/api/auth/sign-in/email"));
+    await page.getByRole("button", { name: "登录并进入工作台" }).click();
+    expect((await response).status()).toBe(200);
+    await expect(page).toHaveURL(/\/studio$/);
+    return { userId: phase14Identity.userId, workspaceId: phase14Identity.workspaceId };
+  }
   const email = freshEmail();
   await page.goto("/sign-up");
   await page.locator('input[name="name"]').fill("Product Identity Acceptance");
@@ -25,6 +44,7 @@ async function signUp(page: Page) {
   await expect(page).toHaveURL(/\/studio$/);
   const user = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
   expect(user.memberships).toHaveLength(1);
+  phase14Identity = { email, userId: user.id, workspaceId: user.memberships[0]!.workspaceId };
   return { userId: user.id, workspaceId: user.memberships[0]!.workspaceId };
 }
 
@@ -287,13 +307,18 @@ test("04C-4C4B browser: OWNER and EDITOR correct authoritative identity, VIEWER 
   await prisma.workspaceMember.create({ data: { workspaceId: otherWorkspace.id, userId: otherUser.id, role: "OWNER" } });
   const privateDocument = await epubFixture(otherUser.id, otherWorkspace.id, "private", "private official");
   expect((await page.request.get("/api/studio/identity/" + privateDocument.documentId)).status()).toBe(404);
+  // A VIEWER is denied by the write gate first (403), regardless of document
+  // existence; an EDITOR proceeds to the workspace-scoped document gate (404).
   expect((await page.request.post("/api/studio/identity/" + privateDocument.documentId + "/corrections", {
     data: payload, headers: { Origin: "http://localhost:3014" },
-  })).status()).toBe(404);
+  })).status()).toBe(403);
 
   await prisma.workspaceMember.update({
     where: { workspaceId_userId: { workspaceId, userId } }, data: { role: "EDITOR" },
   });
+  expect((await page.request.post("/api/studio/identity/" + privateDocument.documentId + "/corrections", {
+    data: payload, headers: { Origin: "http://localhost:3014" },
+  })).status()).toBe(404);
   const editor = await epubFixture(userId, workspaceId, "编辑者候选", "编辑者正式书名");
   await page.goto(detail(editor.documentId));
   await panel.getByRole("button", { name: "编辑正式书籍信息" }).click();
