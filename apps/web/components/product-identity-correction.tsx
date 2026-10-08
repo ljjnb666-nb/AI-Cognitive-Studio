@@ -11,6 +11,7 @@ import {
   manualIdentityFormError,
   manualIdentityOutcomeMessage,
   type ManualIdentityDraft,
+  type ManualIdentityField,
   type ProductIdentityPreview,
 } from "@/lib/product-identity-view-model";
 
@@ -39,7 +40,7 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
   const [busy, setBusy] = useState(false);
   const product = preview.product;
   const canEdit = canEditProductIdentity(preview);
-  const changes = product ? manualIdentityChanges(product, draft) : {};
+  const changes: Partial<Record<ManualIdentityField, string>> = product ? manualIdentityChanges(product, draft) : {};
   const validation = manualIdentityFormError(changes, reason);
 
   function begin() {
@@ -161,7 +162,9 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
           <p className="identity-muted">
             只提交发生变化的字段。ISBN、语言等最终有效性以服务端校验为准，不能清空已有字段。
           </p>
-          {error && <p role="alert" className="identity-status">{error}</p>}
+          <p role={error ? "alert" : "status"} className="identity-muted">
+            {error ?? validation ?? "已填写有效修正原因，可核对修改前后内容。"}
+          </p>
           <div className="identity-actions">
             <button type="button" className="btn btn-secondary" disabled={busy} onClick={cancel}>取消修改</button>
             <button type="submit" className="btn btn-primary" disabled={busy || !!validation}>核对修改内容</button>
