@@ -63,6 +63,11 @@ jobs:
           cache: pnpm
       - name: Install
         run: pnpm install --frozen-lockfile
+      - name: REAL-BOOK-BENCHMARK-01A isolated TypeScript contract
+        working-directory: tools/pdf-parser-benchmark
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          ./node_modules/.bin/tsc --noEmit --project tsconfig.json
       - name: Start MinIO
         run: docker compose up -d minio
       - name: Initialize private MinIO bucket
