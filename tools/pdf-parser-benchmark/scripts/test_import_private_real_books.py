@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from import_private_real_books import run
 
@@ -92,6 +93,25 @@ class PrivateFixtureImportTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             run(self.archive, self.selection, self.fixtures, "P0", False)
         self.assertEqual(part.read_bytes(), b"preexisting")
+
+    def test_staging_unlink_failure_rolls_back_published_pdf(self):
+        original_unlink = Path.unlink
+        injected = {"raised": False}
+
+        def fail_first_stage_unlink(path, *args, **kwargs):
+            if path.name == "RB-PDF-01.pdf.part" and not injected["raised"]:
+                injected["raised"] = True
+                raise OSError("injected stage cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", fail_first_stage_unlink):
+            with self.assertRaisesRegex(OSError, "injected stage cleanup failure"):
+                run(self.archive, self.selection, self.fixtures, "P0", False)
+        self.assertTrue(injected["raised"])
+        self.assertFalse((self.fixtures / "RB-PDF-01.pdf").exists())
+        self.assertFalse((self.fixtures / "RB-PDF-01.pdf.part").exists())
+        self.assertFalse((self.fixtures / ".real-book-import.lock").exists())
+        self.assertEqual(len(json.loads(self.manifest.read_text())["fixtures"]), 1)
 
     def test_preexisting_manifest_partial_preserved(self):
         part = self.fixtures / "fixtures.manifest.json.part"
