@@ -93,6 +93,14 @@ class PrivateFixtureImportTests(unittest.TestCase):
             run(self.archive, self.selection, self.fixtures, "P0", False)
         self.assertEqual(part.read_bytes(), b"preexisting")
 
+    def test_preexisting_manifest_partial_preserved(self):
+        part = self.fixtures / "fixtures.manifest.json.part"
+        part.write_bytes(b"previous interrupted transaction")
+        with self.assertRaises(FileExistsError):
+            run(self.archive, self.selection, self.fixtures, "P0", False)
+        self.assertEqual(part.read_bytes(), b"previous interrupted transaction")
+        self.assertEqual(len(json.loads(self.manifest.read_text())["fixtures"]), 1)
+
     def test_manifest_symlink_rejected(self):
         self.manifest.unlink()
         self.manifest.symlink_to(self.root / "other.json")
