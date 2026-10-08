@@ -332,7 +332,10 @@ export async function promoteCurrentProductIdentityForUser(
       FOR UPDATE
     `;
     if (memberships.length !== 1) throw new Error("WORKSPACE_ACCESS_DENIED");
-    if (memberships[0]!.role === "VIEWER") throw new Error("WORKSPACE_WRITE_ACCESS_DENIED");
+    // Fail closed: a future workspace role does not inherit identity-write authority.
+    if (memberships[0]!.role !== "OWNER" && memberships[0]!.role !== "EDITOR") {
+      throw new Error("WORKSPACE_WRITE_ACCESS_DENIED");
+    }
     return promoteInTransaction(tx, { workspaceId: context.workspaceId, ...input });
   });
 }

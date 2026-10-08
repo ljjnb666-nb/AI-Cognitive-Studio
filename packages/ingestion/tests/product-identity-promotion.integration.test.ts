@@ -304,6 +304,21 @@ describe("controlled product identity promotion authority", () => {
     expect(preview).toMatchObject({ state: "MISSING_TITLE", canPromote: false });
   });
 
+  it("allows EDITOR to promote the current extraction under the explicit write-role allowlist", async () => {
+    const value = await fixture({ title: "Editor Allowed" });
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: value.workspace.id, userId: value.user.id } },
+      data: { role: "EDITOR" },
+    });
+    const result = await promoteCurrentProductIdentityForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
+    );
+    expect(result.status).toBe("APPLIED");
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+  });
+
   it("denies VIEWER identity mutation with zero durable side effects", async () => {
     const value = await fixture({ title: "Protected Book" });
     await prisma.workspaceMember.update({
@@ -453,6 +468,29 @@ describe("controlled product identity promotion authority", () => {
     });
     expect(source.edition?.language).toBe("fr");
     expect(source.edition?.isbn13).toBe("978-0-306-40615-7");
+  });
+
+  it.each([
+    "ISBN-10: 978-0-306-40615-7",
+    "ISBN-13: 0-306-40615-2",
+  ])("ignores mismatched explicit scheme without rewriting EPUB evidence (%s)", async (identifier) => {
+    const value = await fixture({ title: "Scheme Mismatch", identifier });
+    const result = await promoteCurrentProductIdentityForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
+    );
+    expect(result.status).toBe("APPLIED");
+    if (result.status === "APPLIED") {
+      expect(result.promotion.ignoredFields).toContainEqual({ field: "identifier", reason: "INVALID_EXPLICIT_ISBN" });
+    }
+    const source = await prisma.source.findUniqueOrThrow({
+      where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } },
+      include: { edition: true },
+    });
+    expect(source.edition?.isbn10).toBeNull();
+    expect(source.edition?.isbn13).toBeNull();
+    const extraction = await prisma.documentExtraction.findUniqueOrThrow({ where: { id: value.extraction.id } });
+    expect(extraction.productIdentityCandidate).toMatchObject({ identifier: { value: identifier } });
   });
 
   it("does not persist checksum-valid non-Bookland EAN as ISBN13", async () => {

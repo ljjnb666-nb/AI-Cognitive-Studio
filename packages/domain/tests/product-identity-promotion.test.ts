@@ -24,6 +24,16 @@ describe("controlled product identity promotion helpers", () => {
     expect(classifyProductIdentifierForPromotion("ISBN 0-306-40615-2")).toEqual({ kind: "ISBN10", value: "0306406152" });
   });
 
+  it("honors explicit ISBN scheme labels instead of silently switching schemes", () => {
+    expect(classifyProductIdentifierForPromotion("ISBN-10: 0-306-40615-2")).toEqual({ kind: "ISBN10", value: "0306406152" });
+    expect(classifyProductIdentifierForPromotion("ISBN-13: 978-0-306-40615-7")).toEqual({ kind: "ISBN13", value: "9780306406157" });
+    expect(classifyProductIdentifierForPromotion("isbn-10 978-0-306-40615-7")).toEqual({ kind: "INVALID_EXPLICIT_ISBN" });
+    expect(classifyProductIdentifierForPromotion("ISBN-13: 0-306-40615-2")).toEqual({ kind: "INVALID_EXPLICIT_ISBN" });
+    // Unqualified ISBN and urn:isbn: still recognize the actual valid scheme.
+    expect(classifyProductIdentifierForPromotion("ISBN: 978-0-306-40615-7")).toEqual({ kind: "ISBN13", value: "9780306406157" });
+    expect(classifyProductIdentifierForPromotion("urn:isbn:0-306-40615-2")).toEqual({ kind: "ISBN10", value: "0306406152" });
+  });
+
   it("never infers ISBN from bare digits and rejects invalid or non-Bookland explicit ISBN", () => {
     expect(classifyProductIdentifierForPromotion("9780306406157")).toEqual({ kind: "UNCLASSIFIED" });
     expect(classifyProductIdentifierForPromotion("urn:isbn:9780306406158")).toEqual({ kind: "INVALID_EXPLICIT_ISBN" });
