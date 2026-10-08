@@ -39,6 +39,7 @@ export {
 export {
   classifyProductIdentifierForPromotion,
   isPromotableProductLanguage,
+  normalizeIsbnForComparison,
   normalizeProductIdentityTitleForComparison,
   type ProductIdentifierPromotionClassification,
 } from "./product-identity-promotion.js";

@@ -319,6 +319,54 @@ describe("controlled product identity promotion authority", () => {
     await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
   });
 
+  it("serializes concurrent membership downgrade before identity mutation", async () => {
+    const value = await fixture({ title: "Protected During Downgrade" });
+    let releaseRoleChange!: () => void;
+    let roleChangeLocked!: () => void;
+    const releaseRoleChangePromise = new Promise<void>((resolve) => { releaseRoleChange = resolve; });
+    const roleChangeLockedPromise = new Promise<void>((resolve) => { roleChangeLocked = resolve; });
+
+    const roleChange = prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT "workspaceId"
+        FROM "WorkspaceMember"
+        WHERE "workspaceId" = ${value.workspace.id} AND "userId" = ${value.user.id}
+        FOR UPDATE
+      `;
+      await tx.workspaceMember.update({
+        where: { workspaceId_userId: { workspaceId: value.workspace.id, userId: value.user.id } },
+        data: { role: "VIEWER" },
+      });
+      roleChangeLocked();
+      await releaseRoleChangePromise;
+    });
+
+    await roleChangeLockedPromise;
+
+    let promotionSettled = false;
+    const promotion = promoteCurrentProductIdentityForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
+    ).then(
+      (result) => ({ ok: true as const, result }),
+      (error: unknown) => ({ ok: false as const, error }),
+    ).finally(() => { promotionSettled = true; });
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(promotionSettled).toBe(false);
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+    await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+
+    releaseRoleChange();
+    await roleChange;
+    const outcome = await promotion;
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect((outcome.error as Error).message).toBe("WORKSPACE_WRITE_ACCESS_DENIED");
+    await expect(prisma.productIdentityPromotion.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+    await expect(prisma.edition.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+  });
+
   it("creates and binds one Work/Edition from the current candidate and is exact-extraction idempotent", async () => {
     const value = await fixture({ title: "Fixture Book", language: "en", identifier: "urn:isbn:978-0-306-40615-7" });
     const context = { userId: value.user.id, workspaceId: value.workspace.id };
@@ -381,6 +429,47 @@ describe("controlled product identity promotion authority", () => {
     const source = await prisma.source.findUniqueOrThrow({ where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } }, include: { edition: true } });
     expect(source.edition?.language).toBe("zh-CN");
     expect(source.edition?.isbn10).toBe("0306406152");
+  });
+
+  it("treats equivalent formatted existing ISBN as equal while preserving stored formatting", async () => {
+    const value = await fixture({
+      title: "Same Book",
+      language: "fr",
+      identifier: "urn:isbn:978-0-306-40615-7",
+      bind: { title: "Same Book", language: null, isbn13: "978-0-306-40615-7" },
+    });
+    const result = await promoteCurrentProductIdentityForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
+    );
+    expect(result.status).toBe("APPLIED");
+    if (result.status === "APPLIED") {
+      expect(result.promotion.conflicts).toEqual([]);
+      expect(result.promotion.appliedFields).toEqual(["edition.language"]);
+    }
+    const source = await prisma.source.findUniqueOrThrow({
+      where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } },
+      include: { edition: true },
+    });
+    expect(source.edition?.language).toBe("fr");
+    expect(source.edition?.isbn13).toBe("978-0-306-40615-7");
+  });
+
+  it("does not persist checksum-valid non-Bookland EAN as ISBN13", async () => {
+    const value = await fixture({ title: "Not An ISBN", identifier: "ISBN: 1234567890128" });
+    const result = await promoteCurrentProductIdentityForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id },
+    );
+    expect(result.status).toBe("APPLIED");
+    if (result.status === "APPLIED") {
+      expect(result.promotion.ignoredFields).toContainEqual({ field: "identifier", reason: "INVALID_EXPLICIT_ISBN" });
+    }
+    const source = await prisma.source.findUniqueOrThrow({
+      where: { id_workspaceId: { id: value.source.id, workspaceId: value.workspace.id } },
+      include: { edition: true },
+    });
+    expect(source.edition?.isbn13).toBeNull();
   });
 
   it("refuses stale extraction promotion after CurrentDocumentExtraction moves", async () => {
