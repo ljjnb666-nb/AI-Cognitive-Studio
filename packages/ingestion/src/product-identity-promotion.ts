@@ -134,9 +134,6 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
   } catch {
     throw new Error("PRODUCT_IDENTITY_CANDIDATE_INVALID");
   }
-  const existingPromotion = await tx.productIdentityPromotion.findUnique({ where: { extractionId: extraction.id } });
-  if (existingPromotion) return { status: existingPromotion.status, promotion: existingPromotion };
-
   // Product identity is Source-scoped, while SourceDocument is version-scoped.
   // Lock the Source row so concurrent promotions from two document versions
   // cannot both observe editionId = NULL and create competing identities.
@@ -168,6 +165,12 @@ async function promoteInTransaction(tx: Prisma.TransactionClient, input: Promoti
       latestSourceDocumentId: latestDocument.id,
     };
   }
+
+  // A historical record is audit evidence, not proof that the extraction
+  // remains the Source-level winner. Check the latest SourceDocument first,
+  // even for an exact-extraction idempotent replay.
+  const existingPromotion = await tx.productIdentityPromotion.findUnique({ where: { extractionId: extraction.id } });
+  if (existingPromotion) return { status: existingPromotion.status, promotion: existingPromotion };
 
   const ignoredFields: ProductIdentityIgnoredField[] = [];
   const title = candidate.title && normalizeProductIdentityTitleForComparison(candidate.title.value).length > 0

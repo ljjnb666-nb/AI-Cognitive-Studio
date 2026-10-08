@@ -2,6 +2,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { buildEpubProductIdentityCandidate } from "@ai-cognitive/domain";
 import { promoteCurrentProductIdentityForUser } from "../src/product-identity-promotion.js";
+import { readProductIdentityPreviewForUser } from "../src/product-identity-preview.js";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
@@ -187,6 +188,122 @@ afterEach(async () => {
 afterAll(async () => { await prisma.$disconnect(); });
 
 describe("controlled product identity promotion authority", () => {
+  it("previews the exact current EPUB extraction without writing product identity", async () => {
+    const value = await fixture({ title: "Preview Title", language: "zh-CN", identifier: "urn:uuid:1234" });
+    const preview = await readProductIdentityPreviewForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      value.document.id,
+    );
+    expect(preview).toMatchObject({
+      sourceDocumentId: value.document.id,
+      latestSourceDocumentId: value.document.id,
+      currentExtractionId: value.extraction.id,
+      qualityStatus: "ACCEPTED",
+      state: "READY",
+      canWrite: true,
+      canPromote: true,
+      product: null,
+      promotion: null,
+      candidate: {
+        title: { value: "Preview Title", sourceField: "dc:title" },
+        language: { value: "zh-CN", sourceField: "dc:language" },
+        identifier: { value: "urn:uuid:1234", classification: "UNCLASSIFIED" },
+      },
+    });
+    await expect(prisma.productIdentityPromotion.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(0);
+  });
+
+  it("allows VIEWER read-only preview but denies promotion", async () => {
+    const value = await fixture({ title: "Read-Only" });
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: value.workspace.id, userId: value.user.id } },
+      data: { role: "VIEWER" },
+    });
+    const preview = await readProductIdentityPreviewForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      value.document.id,
+    );
+    expect(preview).toMatchObject({ state: "READY", canWrite: false, canPromote: false });
+  });
+
+  it("does not disclose a document outside an authenticated workspace", async () => {
+    const target = await fixture({ title: "Private Title" });
+    const outsider = await fixture({ title: "Other Workspace" });
+    await expect(readProductIdentityPreviewForUser(
+      { userId: outsider.user.id, workspaceId: outsider.workspace.id },
+      target.document.id,
+    )).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");
+    await expect(readProductIdentityPreviewForUser(
+      { userId: outsider.user.id, workspaceId: target.workspace.id },
+      target.document.id,
+    )).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");
+  });
+
+  it("returns SUPERSEDED for historical APPLIED replay after a newer SourceDocument appears", async () => {
+    const value = await fixture({ title: "First Book" });
+    const context = { userId: value.user.id, workspaceId: value.workspace.id };
+    const input = { sourceDocumentId: value.document.id, expectedExtractionId: value.extraction.id };
+    const first = await promoteCurrentProductIdentityForUser(context, input);
+    expect(first.status).toBe("APPLIED");
+
+    const newer = await addDocumentVersion(value, { title: "Second Book" });
+    const replay = await promoteCurrentProductIdentityForUser(context, input);
+    expect(replay).toEqual({
+      status: "SUPERSEDED",
+      expectedSourceDocumentId: value.document.id,
+      latestSourceDocumentId: newer.document.id,
+    });
+    await expect(prisma.productIdentityPromotion.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    await expect(prisma.work.count({ where: { workspaceId: value.workspace.id } })).resolves.toBe(1);
+    const preview = await readProductIdentityPreviewForUser(context, value.document.id);
+    expect(preview).toMatchObject({ state: "SUPERSEDED", canPromote: false, promotion: { status: "APPLIED" } });
+  });
+
+  it("marks older SourceDocument version superseded even with its own current extraction", async () => {
+    const value = await fixture({ title: "First Version" });
+    const newer = await addDocumentVersion(value, { title: "Second Version" });
+    const context = { userId: value.user.id, workspaceId: value.workspace.id };
+    const oldPreview = await readProductIdentityPreviewForUser(context, value.document.id);
+    const newPreview = await readProductIdentityPreviewForUser(context, newer.document.id);
+    expect(oldPreview).toMatchObject({
+      state: "SUPERSEDED",
+      latestSourceDocumentId: newer.document.id,
+      canPromote: false,
+    });
+    expect(newPreview).toMatchObject({
+      state: "READY",
+      latestSourceDocumentId: newer.document.id,
+      currentExtractionId: newer.extraction.id,
+      canPromote: true,
+    });
+  });
+
+  it("reads durable promotion outcome and disables duplicate action", async () => {
+    const value = await fixture({ title: "Published Identity" });
+    const context = { userId: value.user.id, workspaceId: value.workspace.id };
+    await promoteCurrentProductIdentityForUser(context, {
+      sourceDocumentId: value.document.id,
+      expectedExtractionId: value.extraction.id,
+    });
+    const preview = await readProductIdentityPreviewForUser(context, value.document.id);
+    expect(preview).toMatchObject({
+      state: "ALREADY_RECORDED",
+      canPromote: false,
+      product: { title: "Published Identity" },
+      promotion: { status: "APPLIED" },
+    });
+  });
+
+  it("disables promotion when unbound candidate has no usable title", async () => {
+    const value = await fixture({ title: "   " });
+    const preview = await readProductIdentityPreviewForUser(
+      { userId: value.user.id, workspaceId: value.workspace.id },
+      value.document.id,
+    );
+    expect(preview).toMatchObject({ state: "MISSING_TITLE", canPromote: false });
+  });
+
   it("denies VIEWER identity mutation with zero durable side effects", async () => {
     const value = await fixture({ title: "Protected Book" });
     await prisma.workspaceMember.update({
