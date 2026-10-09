@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AdapterRunContext, AdapterRunOutput, ParserAdapter } from "./index.js";
+import { parseMineruPageMarkers, splitOversizeText, type MineruContentBlock } from "./mineru-page-markers.js";
 import { CACHE_ROOT } from "../src/filesystem-guard.js";
 
 const MINERU_VERSION = "4.0.3";
@@ -71,25 +72,50 @@ export const mineruAdapter: ParserAdapter = {
 
     try {
       const markdown = await readFile(markdownPath, "utf8");
-      const blocks = markdown
-        .split(/\n\s*\n/)
-        .map((chunk) => chunk.trim())
-        .filter((chunk) => chunk.length > 0)
-        .map((chunk) => ({
-          kind: chunk.startsWith("#") ? "heading" : "paragraph",
-          text: chunk.slice(0, 32_000),
-          pageIndex: null as number | null,
-          bbox: null,
-          confidence: null,
-          sourceMethod: "model-pipeline",
-        }));
-      if (blocks.length > 0) {
+
+      // 01H: page-marker provenance. VALID markers produce per-page containers
+      // with deterministic 0-based pageIndex (markers are 1-based) and
+      // block-level binding + doc blockRefs. MISSING keeps the legacy
+      // document-level container with null pageIndex. INVALID fails closed:
+      // no normalized candidate is produced, so the run can never be OK.
+      const markers = parseMineruPageMarkers(markdown, {
+        expectedTotalPages: pagesArg === "all" ? context.fixture.entry.declaredPages : undefined,
+        verifyDocIdPrefix: context.fixture.sha256,
+      });
+
+      const toDtoBlocks = (blocks: MineruContentBlock[], pageIndex: number) =>
+        blocks.flatMap((b) => {
+          const ref = b.imageRef
+            ? `doc:${b.imageRef.doc}/tier:${b.imageRef.tier}/page:${b.imageRef.page}/block:${b.imageRef.block}`
+            : null;
+          return splitOversizeText(b.text).map((piece, part, all) => ({
+            kind: b.kind,
+            text: piece,
+            pageIndex,
+            bbox: null,
+            confidence: null,
+            sourceMethod: b.kind === "figure" ? "markdown-image-ref" : "model-pipeline",
+            blockRef: ref === null ? null : all.length > 1 ? `${ref}#part${part + 1}` : ref,
+          }));
+        });
+
+      if (markers.status === "VALID") {
         candidate = {
           parser: { name: "mineru", version: MINERU_VERSION, runtime: "python 3.12.3 (torch 2.14.0+cpu)", mode: context.mode },
           fixtureId: context.fixture.entry.id,
-          // MinerU markdown is a document-level stream; per-block page binding is
-          // not asserted. Facts only: pages stay null, envelope count recorded.
-          pages: [{ pageIndex: 0, printedPageLabel: null, blocks }],
+          // Page binding provenance comes ONLY from the validated markers
+          // above; subset-local pageIndex never claims original-book physical
+          // pages (mapping is product-side manifest lineage, spec 01H #7).
+          pages: markers.pages.map((group) => ({
+            pageIndex: group.pageLocal1Based - 1,
+            printedPageLabel: null,
+            blocks: toDtoBlocks(group.blocks, group.pageLocal1Based - 1),
+          })),
+          pageMarkers: {
+            status: "VALID",
+            declaredTotalPages: markers.declaredTotalPages,
+            source: "mineru-markdown",
+          },
           readingOrderAvailable: true,
           // MinerU's CLI exposes no OCR toggle or engine fields — its pipeline
           // OCRs image-only pages by design. Unknowns stay null (spec #6).
@@ -106,8 +132,57 @@ export const mineruAdapter: ParserAdapter = {
           },
         };
         if (envelopePages !== null) warnings.push(`MINERU_ENVELOPE_TOTAL_PAGES: ${envelopePages}`);
+      } else if (markers.status === "MISSING") {
+        warnings.push("PAGE_MARKERS_MISSING");
+        const blocks = markdown
+          .split(/\n\s*\n/)
+          .map((chunk) => chunk.trim())
+          .filter((chunk) => chunk.length > 0)
+          .flatMap((chunk) =>
+            splitOversizeText(chunk).map((piece) => ({
+              kind: piece.startsWith("#") ? "heading" : "paragraph",
+              text: piece,
+              pageIndex: null as number | null,
+              bbox: null,
+              confidence: null,
+              sourceMethod: "model-pipeline",
+              blockRef: null,
+            })),
+          );
+        if (blocks.length > 0) {
+          candidate = {
+            parser: { name: "mineru", version: MINERU_VERSION, runtime: "python 3.12.3 (torch 2.14.0+cpu)", mode: context.mode },
+            fixtureId: context.fixture.entry.id,
+            // MinerU markdown is a document-level stream without page markers;
+            // per-block page binding is not asserted and stays unknown.
+            pages: [{ pageIndex: 0, printedPageLabel: null, blocks }],
+            pageMarkers: {
+              status: "MISSING",
+              declaredTotalPages: 0,
+              source: "mineru-markdown",
+            },
+            readingOrderAvailable: true,
+            // MinerU's CLI exposes no OCR toggle or engine fields — its pipeline
+            // OCRs image-only pages by design. Unknowns stay null (spec #6).
+            ocr: {
+              ocrModeRequested: false,
+              ocrEnabled: null,
+              engine: null,
+              model: null,
+              modelRevision: null,
+              language: null,
+              pagesOcrProcessed: null,
+              pagesRequiringOcr: null,
+              pagesOcrSucceeded: null,
+            },
+          };
+          if (envelopePages !== null) warnings.push(`MINERU_ENVELOPE_TOTAL_PAGES: ${envelopePages}`);
+        } else {
+          warnings.push("MINERU_EMPTY_MARKDOWN");
+        }
       } else {
-        warnings.push("MINERU_EMPTY_MARKDOWN");
+        // Fail closed: invalid markers can never produce a successful run.
+        warnings.push(`PAGE_MARKERS_INVALID: ${markers.failure.code}: ${markers.failure.detail}`);
       }
     } catch {
       warnings.push("NO_RESULT_FILE: mineru produced no markdown output (see stderr log)");

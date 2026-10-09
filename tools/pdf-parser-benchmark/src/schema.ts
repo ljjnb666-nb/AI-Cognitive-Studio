@@ -71,12 +71,30 @@ export const NormalizedBlock = z.object({
     .nullable(),
   confidence: zNullableFinite.nullable(),
   sourceMethod: z.string().nullable(),
+  /**
+   * 01H: upstream traceability id for the block (e.g. MinerU
+   * `doc:<sha>/tier:<tier>/page:N/block:M`). Null/absent when the parser does
+   * not expose one. Data identifier only — never a filesystem path.
+   */
+  blockRef: z.string().max(300).nullable().optional(),
 });
 
 export const NormalizedPage = z.object({
   pageIndex: z.number().int().nonnegative(),
   printedPageLabel: z.string().nullable(),
   blocks: z.array(NormalizedBlock),
+});
+
+/**
+ * 01H: page-binding provenance for parsers whose output carries page markers
+ * (MinerU markdown). VALID = markers validated (consecutive, unique, ordered,
+ * doc refs consistent); MISSING = no markers, page binding stays unknown.
+ * Absent on parsers without marker concepts and on legacy persisted results.
+ */
+export const PageMarkerProvenance = z.object({
+  status: z.enum(["VALID", "MISSING"]),
+  declaredTotalPages: z.number().int().nonnegative(),
+  source: z.string().min(1),
 });
 
 /**
@@ -102,6 +120,7 @@ export const NormalizedOutput = z.object({
   pages: z.array(NormalizedPage).max(5_000),
   readingOrderAvailable: z.boolean(),
   ocr: OcrProvenanceSchema.optional(),
+  pageMarkers: PageMarkerProvenance.optional(),
 });
 
 export const BenchmarkResult = z.object({
@@ -165,6 +184,37 @@ export function parseNormalizedOutput(raw: unknown): NormalizedOutput {
   return parsed.data;
 }
 
+/**
+ * Page-binding capability evidence (01H). `physicalPageIndex` is true ONLY
+ * when every content block carries an integer pageIndex that matches its own
+ * page container and page indexes are unique — an ordinary array index on a
+ * document-level container (blocks all null) does NOT prove page binding.
+ *
+ * Semantics: the index is physical for the PROCESSED document. It is NOT the
+ * original-book physical page; mapping a processed-document page to the book
+ * requires pinned manifest lineage in the product layer (see README:
+ * subset-local pageIndex can never be published as a book page number).
+ */
+export function buildEvidence(
+  pages: NormalizedOutput["pages"],
+  blocks: NormalizedOutput["pages"][number]["blocks"],
+  readingOrderAvailable: boolean,
+): z.infer<typeof Evidence> {
+  const pagesBound = pages.length > 0 && pages.every((p) => Number.isInteger(p.pageIndex));
+  const pageIndexesUnique = new Set(pages.map((p) => p.pageIndex)).size === pages.length;
+  const blocksBound = blocks.length > 0 && blocks.every((b) => Number.isInteger(b.pageIndex));
+  const blockInOwnPage =
+    blocksBound &&
+    pages.every((p) => p.blocks.every((b) => b.pageIndex === p.pageIndex));
+  return {
+    physicalPageIndex: pagesBound && pageIndexesUnique && blocksBound && blockInOwnPage,
+    bbox: blocks.some((b) => b.bbox !== null) || false,
+    confidence: blocks.some((b) => b.confidence !== null) || false,
+    readingOrder: readingOrderAvailable,
+    printedPageLabel: pages.some((p) => p.printedPageLabel !== null) || false,
+  };
+}
+
 /** Derives the public BenchmarkResult from a validated normalized output + run metadata. */
 export function buildBenchmarkResult(input: {
   run: BenchmarkResult["run"];
@@ -199,12 +249,6 @@ export function buildBenchmarkResult(input: {
       equations: normalized ? count(["equation", "formula"]) : null,
       ocrPages: null,
     },
-    evidence: {
-      physicalPageIndex: pages.some((p) => Number.isInteger(p.pageIndex)) || false,
-      bbox: blocks.some((b) => b.bbox !== null) || false,
-      confidence: blocks.some((b) => b.confidence !== null) || false,
-      readingOrder: normalized?.readingOrderAvailable ?? false,
-      printedPageLabel: pages.some((p) => p.printedPageLabel !== null) || false,
-    },
+    evidence: buildEvidence(pages, blocks, normalized?.readingOrderAvailable ?? false),
   };
 }
