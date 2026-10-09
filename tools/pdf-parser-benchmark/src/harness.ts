@@ -206,6 +206,8 @@ export async function runParser(
         candidate = parseNormalizedOutput(outcome.normalizedCandidate);
         if (candidate.fixtureId !== fixtureId) throw new Error("FIXTURE_ID_MISMATCH: unexpected normalized fixtureId");
       } catch (error) {
+        // A schema-valid but cross-fixture candidate is still untrusted.
+        candidate = null;
         const message = error instanceof Error ? error.message : String(error);
         parserWarnings.push(`NORMALIZED_OUTPUT_INVALID: ${message}`);
       }
