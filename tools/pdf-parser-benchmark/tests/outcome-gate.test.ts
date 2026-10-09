@@ -13,6 +13,7 @@ function acceptedRun(): RunOutcome {
     result: {
       reliability: {
         exitCode: 0,
+        failureKind: null,
         crashed: false,
         timeout: false,
         oom: false,
@@ -39,6 +40,12 @@ describe("real-book benchmark CLI exit contract", () => {
   it("rejects a successful parser if temp files were not cleaned", () => {
     const o = acceptedRun();
     o.tempClean = false;
+    expect(isSuccessfulRun(o)).toBe(false);
+  });
+
+  it("rejects a non-null failureKind even with valid exit and normalized data", () => {
+    const o = acceptedRun();
+    o.result!.reliability.failureKind = "PROCESS_FAILURE";
     expect(isSuccessfulRun(o)).toBe(false);
   });
 

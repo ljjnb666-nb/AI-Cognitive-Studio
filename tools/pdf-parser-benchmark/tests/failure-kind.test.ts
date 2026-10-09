@@ -29,6 +29,10 @@ describe("real-book OCR capability rejection semantics", () => {
     expect(classifyParserFailure({ ...baseline, stderr: "out of memory" })).toBe("OUT_OF_MEMORY");
   });
 
+  it("enforces output resource-limit failure even with normalized output and exit zero", () => {
+    expect(classifyParserFailure({ ...baseline, exitCode: 0, hasNormalizedOutput: true, outputLimitExceeded: true })).toBe("PROCESS_FAILURE");
+  });
+
   it("separates invalid output, general process failure and successful execution", () => {
     expect(classifyParserFailure({ ...baseline, exitCode: 0 })).toBe("INVALID_OUTPUT");
     expect(classifyParserFailure({ ...baseline, exitCode: 0, hasNormalizedOutput: true })).toBe(null);

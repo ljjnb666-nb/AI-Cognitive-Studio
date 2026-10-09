@@ -13,6 +13,7 @@ import {
 import { diskFreeBytes, gpuState, ramAvailableBytes } from "./resource-monitor.js";
 import { Runner, ensureCleanDir, sha256File, writeJsonFileAtomic } from "./runner.js";
 import { classifyParserFailure } from "./failure-kind.js";
+import { deriveRunStatus } from "./outcome-gate.js";
 import {
   buildBenchmarkResult,
   parseBenchmarkResult,
@@ -176,8 +177,6 @@ export async function runParser(
   const startedAt = new Date().toISOString();
   let result: BenchmarkResult;
   let normalized: NormalizedOutput | null = null;
-  let childFailed = false;
-  let failureWarnings: string[] = [];
 
   try {
     const outcome = await adapter.run({
@@ -198,20 +197,30 @@ export async function runParser(
     await writeFile(join(outDir, "stderr.log"), outcome.stderr ?? "", "utf8").catch(() => undefined);
     await writeJsonFileAtomic(join(outDir, "metrics.json"), outcome.metrics);
 
-    if (outcome.normalizedCandidate) {
-      normalized = parseNormalizedOutput(outcome.normalizedCandidate);
-      await writeJsonFileAtomic(join(outDir, "normalized.json"), normalized);
-    } else {
-      childFailed = true;
-      failureWarnings = outcome.warnings;
+    // Parsing a candidate is not acceptance: a nonzero exit, timeout, OOM,
+    // resource/output limit or invalid schema must not publish normalized.json.
+    let candidate: NormalizedOutput | null = null;
+    const parserWarnings = [...new Set([...warnings, ...outcome.warnings])];
+    if (outcome.normalizedCandidate != null) {
+      try {
+        candidate = parseNormalizedOutput(outcome.normalizedCandidate);
+        if (candidate.fixtureId !== fixtureId) throw new Error("FIXTURE_ID_MISMATCH: unexpected normalized fixtureId");
+      } catch (error) {
+        // A schema-valid but cross-fixture candidate is still untrusted.
+        candidate = null;
+        const message = error instanceof Error ? error.message : String(error);
+        parserWarnings.push(`NORMALIZED_OUTPUT_INVALID: ${message}`);
+      }
     }
 
     const failureKind = classifyParserFailure({
       parserId, mode, exitCode: outcome.metrics.exitCode,
       timedOut: outcome.metrics.timedOut, stderr: outcome.stderr,
-      warnings: [...warnings, ...outcome.warnings, ...failureWarnings],
-      hasNormalizedOutput: normalized !== null,
+      warnings: parserWarnings,
+      hasNormalizedOutput: candidate !== null,
+      outputLimitExceeded: outcome.metrics.outputLimitExceeded,
     });
+    normalized = failureKind === null ? candidate : null;
     result = buildBenchmarkResult({
       run: { id: runId, startedAt, finishedAt: new Date().toISOString(), coldStart: options.cold },
       parser: outcome.parser as ParserDescriptor,
@@ -233,14 +242,19 @@ export async function runParser(
         crashed: failureKind === "PROCESS_FAILURE",
         failureKind,
         oom: failureKind === "OUT_OF_MEMORY",
-        partialOutput: outcome.metrics.outputLimitExceeded || (childFailed && outcome.metrics.exitCode === 0),
-        warnings: [...warnings, ...failureWarnings],
+        partialOutput: outcome.metrics.outputLimitExceeded ||
+          (failureKind !== null && candidate !== null) ||
+          (failureKind === "INVALID_OUTPUT" && outcome.metrics.exitCode === 0),
+        warnings: parserWarnings,
       },
       normalized,
     });
     parseBenchmarkResult(result);
+    // Only fully accepted parser runs publish a normalized evidence artifact.
+    if (normalized !== null) await writeJsonFileAtomic(join(outDir, "normalized.json"), normalized);
   } catch (error) {
-    childFailed = true;
+    normalized = null;
+    await rm(join(outDir, "normalized.json"), { force: true }).catch(() => undefined);
     const message = error instanceof Error ? error.message : String(error);
     result = {
       run: { id: runId, startedAt, finishedAt: new Date().toISOString(), coldStart: options.cold },
@@ -262,17 +276,6 @@ export async function runParser(
       evidence: { physicalPageIndex: false, bbox: false, confidence: false, readingOrder: false, printedPageLabel: false },
     };
     warnings.push(message);
-  }
-
-  // result.json is the run-completion marker and is written LAST: a run dir
-  // without a parsable result.json is an incomplete run, never valid evidence.
-  try {
-    await writeJsonFileAtomic(join(outDir, "result.json"), result);
-  } catch (persistError) {
-    const message = persistError instanceof Error ? persistError.message : String(persistError);
-    warnings.push(`RESULT_PERSIST_FAILED: ${message}`);
-    result.reliability.warnings.push(`RESULT_PERSIST_FAILED: ${message}`);
-    childFailed = true;
   }
 
   // Quality evaluation (Phase 2B spec #15/#16): additive run-scoped sidecar.
@@ -323,9 +326,37 @@ export async function runParser(
   } catch {
     tempClean = false;
   }
+  if (!tempClean) {
+    const warning = "TEMP_CLEANUP_FAILED: run temporary directory remains";
+    warnings.push(warning);
+    result.reliability.warnings.push(warning);
+    result.reliability.failureKind = "HARNESS_ERROR";
+    result.reliability.crashed = true;
+  }
+
+  // Completion marker LAST: no result.json is published before quality
+  // sidecar handling and cleanup. A failed write leaves an incomplete run.
+  result.run.finishedAt = new Date().toISOString();
+  let resultPersisted = false;
+  try {
+    await writeJsonFileAtomic(join(outDir, "result.json"), result);
+    resultPersisted = true;
+  } catch (persistError) {
+    const message = persistError instanceof Error ? persistError.message : String(persistError);
+    const warning = `RESULT_PERSIST_FAILED: ${message}`;
+    warnings.push(warning);
+    result.reliability.warnings.push(warning);
+    result.reliability.failureKind = "HARNESS_ERROR";
+    result.reliability.crashed = true;
+  }
 
   return {
-    status: childFailed ? "PARSER_FAILED" : "OK",
+    status: deriveRunStatus({
+      reliability: result.reliability,
+      hasNormalizedOutput: normalized !== null,
+      resultPersisted,
+      tempClean,
+    }),
     result,
     normalized,
     preflight: check,

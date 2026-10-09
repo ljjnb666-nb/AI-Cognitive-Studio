@@ -18,9 +18,12 @@ export function classifyParserFailure(input: {
   stderr: string;
   warnings: readonly string[];
   hasNormalizedOutput: boolean;
+  /** A killed/oversize run can never publish a successful result, even on exit 0. */
+  outputLimitExceeded?: boolean;
 }): ParserFailureKind {
   if (input.timedOut) return "TIMEOUT";
   if (/\b(?:out of memory|oom|heap|killed)\b/i.test(input.stderr)) return "OUT_OF_MEMORY";
+  if (input.outputLimitExceeded) return "PROCESS_FAILURE";
   if (
     input.parserId === "pdfjs" &&
     input.mode === "default" &&
