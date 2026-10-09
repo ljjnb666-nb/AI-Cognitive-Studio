@@ -55,8 +55,9 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
           skipped.push({ path: resultPath, reason: "UNPARSABLE_RESULT: result.json is not valid JSON" });
           continue;
         }
+        let result: BenchmarkResult;
         try {
-          const result = parseBenchmarkResult(parsed);
+          result = parseBenchmarkResult(parsed);
           results.push(result);
           entries.push({ parserKey: parserDir.name, runId: runDir.name, runDir: runPath, result });
         } catch (error) {
