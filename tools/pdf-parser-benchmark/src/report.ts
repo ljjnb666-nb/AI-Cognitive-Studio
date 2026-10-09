@@ -8,6 +8,8 @@ import { isSuccessfulReliability } from "./outcome-gate.js";
 export type AggregateReport = {
   markdown: string;
   results: BenchmarkResult[];
+  /** Authoritative per-run acceptance; matches the Metrics table, including persisted normalized validation. */
+  runAcceptance: Array<{ result: BenchmarkResult; parserKey: string; accepted: boolean }>;
   /** Run directories whose evidence exists but could not be trusted as a result. */
   skipped: Array<{ path: string; reason: string }>;
   quality: QualityReport[];
@@ -30,6 +32,7 @@ type RunEntry = {
  */
 export async function buildAggregateReport(): Promise<AggregateReport> {
   const results: BenchmarkResult[] = [];
+  const runAcceptance: AggregateReport["runAcceptance"] = [];
   const entries: RunEntry[] = [];
   const quality: QualityReport[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
@@ -58,6 +61,11 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
         let result: BenchmarkResult;
         try {
           result = parseBenchmarkResult(parsed);
+          // Never accept a valid-looking result.json copied into another fixture/run directory.
+          if (result.run.id !== runDir.name || result.document.fixtureId !== fixtureDir.name) {
+            skipped.push({ path: resultPath, reason: "RESULT_IDENTITY_MISMATCH: persisted result does not belong to this fixture/run directory" });
+            continue;
+          }
           results.push(result);
           entries.push({ parserKey: parserDir.name, runId: runDir.name, runDir: runPath, result });
         } catch (error) {
@@ -111,6 +119,7 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
     // Old runs with missing normalized.json or non-null failureKind are failed.
     const failed = !isSuccessfulReliability(r.reliability) ||
       (await readRunNormalized(entry.runDir, entry.result.document.fixtureId)) === null;
+    runAcceptance.push({ result: r, parserKey: entry.parserKey, accepted: !failed });
     lines.push(
       `| ${r.document.fixtureId} | ${entry.parserKey} | ${entry.runId} | ${r.run.coldStart ? "COLD" : "WARM"} | ${failed ? "FAILED" : "OK"} | ${r.performance.wallTimeMs} | ${r.performance.peakRssMb ?? "n/a"} | ${r.extraction.extractedPages} | ${r.extraction.characters} | ${r.extraction.blocks} | ${r.reliability.exitCode ?? "null"} | ${r.reliability.timeout} | ${r.reliability.warnings.length} |`,
     );
@@ -211,7 +220,7 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
 
   appendQualitySections(lines, quality);
 
-  return { markdown: lines.join("\n"), results, skipped, quality };
+  return { markdown: lines.join("\n"), results, runAcceptance, skipped, quality };
 }
 
 /** Historical failed runs may retain normalized files for diagnostics, not accepted evidence. */
