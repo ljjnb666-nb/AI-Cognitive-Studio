@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ADAPTERS, runParser } from "../src/harness.js";
 import { buildAggregateReport } from "../src/report.js";
@@ -79,6 +79,17 @@ describe("real runParser path with isolated synthetic adapter", () => {
         }));
       }
     }
+    // Inject a deterministic, real filesystem persistence error at result.json.
+    stub.mockImplementationOnce(async (context) => {
+      await mkdir(join(dirname(context.rawDir), "result.json"), { recursive: true });
+      return result();
+    });
+    const incomplete = await runParser("pdfjs", "default", fixtureId, { cold: true, skipPreflight: true });
+    expect(incomplete.status).toBe("PARSER_FAILED");
+    expect(isSuccessfulRun(incomplete)).toBe(false);
+    expect(incomplete.result?.reliability.failureKind).toBe("HARNESS_ERROR");
+    expect(incomplete.result?.reliability.warnings.join(" ")).toContain("RESULT_PERSIST_FAILED");
+
     stub.mockResolvedValueOnce(result());
     const ok = await runParser("pdfjs", "default", fixtureId, { cold: true, skipPreflight: true });
     expect(ok.status).toBe("OK");
@@ -93,6 +104,7 @@ describe("real runParser path with isolated synthetic adapter", () => {
     const matrixRow = summary.markdown.split("\n").find(s => s.startsWith("| pdfjs |"));
     expect(matrixRow?.split("|")[5]?.trim()).toBe("false"); // failed-only "table"
     expect(summary.skipped.some(x => x.reason.startsWith("UNTRUSTED_EVALUATED_QUALITY"))).toBe(true);
+    expect(summary.skipped.some(x => x.reason.startsWith("INCOMPLETE_RUN"))).toBe(true);
     stub.mockRestore();
   }, 60_000);
 });
