@@ -80,7 +80,8 @@ export const liteparseAdapter: ParserAdapter = {
         wallTimeMs: outcome.wallTimeMs,
         exitCode: outcome.exitCode,
         timedOut: outcome.timedOut,
-        outputLimitExceeded: outcome.outputLimitExceeded,
+        // stdout, stderr and output directory limits are all terminal failures.
+        outputLimitExceeded: outcome.outputLimitExceeded || outcome.stdoutTruncated || outcome.stderrTruncated,
         peakRssMb: outcome.peakRssMb,
         cpuTimeMs: outcome.cpuTimeMs,
         peakGpuMb: outcome.peakGpuMb,

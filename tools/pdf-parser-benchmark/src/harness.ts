@@ -204,6 +204,7 @@ export async function runParser(
     if (outcome.normalizedCandidate != null) {
       try {
         candidate = parseNormalizedOutput(outcome.normalizedCandidate);
+        if (candidate.fixtureId !== fixtureId) throw new Error("FIXTURE_ID_MISMATCH: unexpected normalized fixtureId");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         parserWarnings.push(`NORMALIZED_OUTPUT_INVALID: ${message}`);
