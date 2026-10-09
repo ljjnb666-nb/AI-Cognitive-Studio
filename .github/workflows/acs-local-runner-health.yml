@@ -1,0 +1,42 @@
+# Trusted manual-only workflow. Must exist on default branch to be dispatchable.
+# Security: no pull_request/push trigger; no checkout; no scripts from PRs; no model downloads.
+name: ACS Windows local runner health
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: acs-windows-local-health
+  cancel-in-progress: false
+
+jobs:
+  health:
+    # A manually dispatched workflow from the trusted default branch only.
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Read-only runner handshake and local prerequisites
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_RUNNER_REQUIRED' }
+          # No checkout, no external command execution, no private-book read.
+          $project = 'D:\所有项目\90_Worktrees\AI-Cognitive-Studio-pdf-parser-benchmark'
+          $privateData = 'D:\ai-cognitive-pdf-benchmark-data'
+          $checks = [ordered]@{
+            runner_connected = $true
+            windows_runner = ($env:RUNNER_OS -eq 'Windows')
+            project_worktree_present = (Test-Path -LiteralPath $project -PathType Container)
+            private_data_root_present = (Test-Path -LiteralPath $privateData -PathType Container)
+            node_on_path = ($null -ne (Get-Command node -ErrorAction SilentlyContinue))
+            python_on_path = ($null -ne (Get-Command python -ErrorAction SilentlyContinue))
+            git_on_path = ($null -ne (Get-Command git -ErrorAction SilentlyContinue))
+          }
+          Write-Output ('ACS_RUNNER_HEALTH=' + ($checks | ConvertTo-Json -Compress))
+          if (-not $checks.project_worktree_present -or -not $checks.private_data_root_present) {
+            throw 'LOCAL_BENCHMARK_DATA_NOT_READY: review boolean checks only; no private data uploaded'
+          }
+          Write-Output 'ACS_RUNNER_HANDSHAKE_PASS'
