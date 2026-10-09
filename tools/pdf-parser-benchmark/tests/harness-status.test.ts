@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { classifyParserFailure } from "../src/failure-kind.js";
 import { deriveRunStatus, isSuccessfulReliability } from "../src/outcome-gate.js";
+import { parseRunNormalizedArtifact } from "../src/report.js";
 import type { BenchmarkResult } from "../src/schema.js";
 
 function reliable(): BenchmarkResult["reliability"] {
@@ -84,6 +85,20 @@ describe("PDF benchmark authoritative run status", () => {
     });
     expect(failureKind).toBe("EXPECTED_CAPABILITY_REJECTION");
     expect(status({ reliability: { ...reliable(), exitCode: 3, failureKind }, hasNormalizedOutput: false })).toBe("PARSER_FAILED");
+  });
+
+  it("rejects invalid or cross-fixture normalized artifacts in the aggregate report", () => {
+    const valid = {
+      parser: { name: "synthetic", version: "1.0" },
+      fixtureId: "same-fixture",
+      pages: [],
+      readingOrderAvailable: false,
+    };
+    expect(parseRunNormalizedArtifact(valid, "same-fixture")).not.toBeNull();
+    expect(parseRunNormalizedArtifact(valid, "other-fixture")).toBeNull();
+    expect(parseRunNormalizedArtifact({}, "same-fixture")).toBeNull();
+    expect(parseRunNormalizedArtifact({ ...valid, pages: "not-an-array" }, "same-fixture")).toBeNull();
+    expect(parseRunNormalizedArtifact({ ...valid, pages: [{ pageIndex: -1, blocks: [] }] }, "same-fixture")).toBeNull();
   });
 
   it("allows quality-sidecar warnings to remain additive, not parser failures", () => {

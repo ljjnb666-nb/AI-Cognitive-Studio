@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OUTPUTS_ROOT } from "./filesystem-guard.js";
-import { parseBenchmarkResult, type BenchmarkResult, type NormalizedOutput } from "./schema.js";
+import { parseBenchmarkResult, parseNormalizedOutput, type BenchmarkResult, type NormalizedOutput } from "./schema.js";
 import { parseQualityReport, type QualityReport } from "./quality/schema.js";
 import { isSuccessfulReliability } from "./outcome-gate.js";
 
@@ -99,7 +99,7 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
     // A result.json alone cannot prove a successful parser execution.
     // Old runs with missing normalized.json or non-null failureKind are failed.
     const failed = !isSuccessfulReliability(r.reliability) ||
-      (await readRunNormalized(entry.runDir)) === null;
+      (await readRunNormalized(entry.runDir, entry.result.document.fixtureId)) === null;
     lines.push(
       `| ${r.document.fixtureId} | ${entry.parserKey} | ${entry.runId} | ${r.run.coldStart ? "COLD" : "WARM"} | ${failed ? "FAILED" : "OK"} | ${r.performance.wallTimeMs} | ${r.performance.peakRssMb ?? "n/a"} | ${r.extraction.extractedPages} | ${r.extraction.characters} | ${r.extraction.blocks} | ${r.reliability.exitCode ?? "null"} | ${r.reliability.timeout} | ${r.reliability.warnings.length} |`,
     );
@@ -145,7 +145,7 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
     let ocrRequestedSeen = false;
     let ocrFieldSeen = false;
     for (const entry of group) {
-      const normalized = await readRunNormalized(entry.runDir);
+      const normalized = await readRunNormalized(entry.runDir, entry.result.document.fixtureId);
       if (!normalized) continue;
       if (normalized.ocr !== undefined) {
         ocrFieldSeen = true;
@@ -184,7 +184,7 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
   for (const [key, group] of byParser.entries()) {
     lines.push(`### ${key}`);
     const first = group[0]!;
-    const normalized = await readRunNormalized(first.runDir);
+    const normalized = await readRunNormalized(first.runDir, first.result.document.fixtureId);
     if (!normalized) {
       lines.push("_no normalized output_");
       continue;
@@ -260,11 +260,25 @@ function appendQualitySections(lines: string[], quality: QualityReport[]): void 
   }
 }
 
-async function readRunNormalized(runDir: string): Promise<NormalizedOutput | null> {
-  const raw = await readFile(join(runDir, "normalized.json"), "utf8").catch(() => null);
-  if (!raw) return null;
+/**
+ * Validate a persisted normalized artifact before using it as run evidence.
+ * JSON syntax alone is insufficient: the DTO must be valid and belong to
+ * the same fixture as the authoritative result.json in this run directory.
+ */
+export function parseRunNormalizedArtifact(raw: unknown, expectedFixtureId: string): NormalizedOutput | null {
   try {
-    return JSON.parse(raw) as NormalizedOutput;
+    const normalized = parseNormalizedOutput(raw);
+    return normalized.fixtureId === expectedFixtureId ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readRunNormalized(runDir: string, expectedFixtureId: string): Promise<NormalizedOutput | null> {
+  const raw = await readFile(join(runDir, "normalized.json"), "utf8").catch(() => null);
+  if (raw === null) return null;
+  try {
+    return parseRunNormalizedArtifact(JSON.parse(raw), expectedFixtureId);
   } catch {
     return null;
   }
