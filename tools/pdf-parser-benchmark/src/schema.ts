@@ -205,7 +205,7 @@ export function buildEvidence(
   const blocksBound = blocks.length > 0 && blocks.every((b) => Number.isInteger(b.pageIndex));
   const blockInOwnPage =
     blocksBound &&
-    blocks.every((b) => pages.some((p) => p.pageIndex === b.pageIndex));
+    pages.every((p) => p.blocks.every((b) => b.pageIndex === p.pageIndex));
   return {
     physicalPageIndex: pagesBound && pageIndexesUnique && blocksBound && blockInOwnPage,
     bbox: blocks.some((b) => b.bbox !== null) || false,

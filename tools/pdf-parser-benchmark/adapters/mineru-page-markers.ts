@@ -90,11 +90,12 @@ export type ParseMineruPageMarkersContext = {
 };
 
 const MARKER_RE = /^<!--\s*page\s+(\d+)\s+of\s+(\d+)\s*-->\s*$/;
+const MALFORMED_MARKER_LIKE_RE = /^\s*<!--\s*page\b/i;
 const IMAGE_REF_RE = /^!\[Image block\]\(doc:([^)\s]+)\/tier:([A-Za-z0-9._-]+)\/page:(\d+)\/block:(\d+)\)\s*$/;
 const IMAGE_LINE_RE = /^!\[/;
 const FENCE_RE = /^\s*```/;
 
-type LineKind = "marker" | "fence" | "image" | "content" | "blank";
+type LineKind = "marker" | "malformed-marker" | "fence" | "image" | "content" | "blank";
 
 function classifyLines(markdown: string): Array<{ kind: LineKind; text: string; marker?: { page: number; total: number } }> {
   // Normalize CRLF/CR to LF only; never alter line content itself.
@@ -119,6 +120,10 @@ function classifyLines(markdown: string): Array<{ kind: LineKind; text: string; 
     const marker = line.match(MARKER_RE);
     if (marker) {
       out.push({ kind: "marker", text: line, marker: { page: Number(marker[1]), total: Number(marker[2]) } });
+      continue;
+    }
+    if (MALFORMED_MARKER_LIKE_RE.test(line)) {
+      out.push({ kind: "malformed-marker", text: line });
       continue;
     }
     if (line.trim() === "") {
@@ -197,6 +202,10 @@ function groupSegmentIntoBlocks(lines: Array<{ kind: LineKind; text: string }>):
  */
 export function parseMineruPageMarkers(markdown: string, context: ParseMineruPageMarkersContext = {}): MineruPageMarkersResult {
   const lines = classifyLines(markdown);
+  // A present but malformed marker cannot degrade to MISSING provenance.
+  if (lines.some((line) => line.kind === "malformed-marker")) {
+    return { status: "INVALID", failure: { code: "PAGE_MARKER_SYNTAX_INVALID", detail: "malformed MinerU page marker" } };
+  }
 
   const markers: Array<{ index: number; page: number; total: number }> = lines.flatMap((l, index) =>
     l.kind === "marker" && l.marker ? [{ index, page: l.marker.page, total: l.marker.total }] : [],

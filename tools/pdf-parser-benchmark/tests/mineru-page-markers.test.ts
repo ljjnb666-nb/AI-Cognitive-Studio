@@ -346,4 +346,42 @@ describe("parseMineruPageMarkers", () => {
     const ordered = r.pages.flatMap((g) => g.blocks.map((b) => b.text));
     expect(ordered).toEqual(["甲", "乙", "丙", "丁"]);
   });
+  it("22. refuses a block bound to another existing page (false physical evidence)", () => {
+    const normalized = parseNormalizedOutput({
+      parser: parserDescriptor(), fixtureId: "SYN", readingOrderAvailable: true,
+      pages: [
+        { pageIndex: 0, printedPageLabel: null, blocks: [
+          { kind: "paragraph", text: "第一页误绑到第二页", pageIndex: 1, bbox: null, confidence: null, sourceMethod: "x" },
+        ] },
+        { pageIndex: 1, printedPageLabel: null, blocks: [
+          { kind: "paragraph", text: "第二页正常", pageIndex: 1, bbox: null, confidence: null, sourceMethod: "x" },
+        ] },
+      ],
+    });
+    const result = buildBenchmarkResult({
+      run: { id: "r", startedAt: "t", finishedAt: "t", coldStart: true },
+      parser: parserDescriptor(),
+      document: { fixtureId: "SYN", inputSha256: SHA, bytes: 1, detectedPages: 2 },
+      performance: { wallTimeMs: 1, cpuTimeMs: null, peakRssMb: null, peakGpuMb: null },
+      reliability: { exitCode: 0, timeout: false, crashed: false, oom: false, partialOutput: false, warnings: [] },
+      normalized,
+    });
+    expect(result.evidence.physicalPageIndex).toBe(false);
+  });
+
+  it("23. rejects malformed marker-like comments instead of pretending markers are missing", () => {
+    for (const md of [
+      "<!-- page 1 of two -->\n内容",
+      "<!-- page 1 of 1 --\n内容",
+      "<!-- Page 1 of 1 -->\n内容",
+      [marker(1, 2), "甲", "<!-- page two of 2 -->", "乙"].join("\n"),
+    ]) {
+      const r = parseMineruPageMarkers(md);
+      expect(r.status).toBe("INVALID");
+      if (r.status === "INVALID") expect(r.failure.code).toBe("PAGE_MARKER_SYNTAX_INVALID");
+    }
+    // Marker-like syntax within a fenced code sample remains ordinary content.
+    const fenced = [marker(1, 1), "```", "<!-- page 2 of two -->", "```"].join("\n");
+    expect(parseMineruPageMarkers(fenced).status).toBe("VALID");
+  });
 });
