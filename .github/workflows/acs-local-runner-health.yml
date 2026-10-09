@@ -24,11 +24,19 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_RUNNER_REQUIRED' }
           # No checkout, no external command execution, no private-book read.
-          $project = 'D:\所有项目\90_Worktrees\AI-Cognitive-Studio-pdf-parser-benchmark'
+          # Windows PowerShell 5.1 can decode UTF-8 temporary .ps1 files as ANSI.
+          # Construct the CJK directory component from Unicode code points;
+          # keeping this workflow script ASCII-only avoids mojibake paths.
+          $projectFolder = -join ([char[]]@(0x6240, 0x6709, 0x9879, 0x76EE))
+          $projectRoot = Join-Path 'D:\' $projectFolder
+          $worktreesRoot = Join-Path $projectRoot '90_Worktrees'
+          $project = Join-Path $worktreesRoot 'AI-Cognitive-Studio-pdf-parser-benchmark'
           $privateData = 'D:\ai-cognitive-pdf-benchmark-data'
           $checks = [ordered]@{
             runner_connected = $true
             windows_runner = ($env:RUNNER_OS -eq 'Windows')
+            project_root_present = (Test-Path -LiteralPath $projectRoot -PathType Container)
+            worktrees_root_present = (Test-Path -LiteralPath $worktreesRoot -PathType Container)
             project_worktree_present = (Test-Path -LiteralPath $project -PathType Container)
             private_data_root_present = (Test-Path -LiteralPath $privateData -PathType Container)
             node_on_path = ($null -ne (Get-Command node -ErrorAction SilentlyContinue))
