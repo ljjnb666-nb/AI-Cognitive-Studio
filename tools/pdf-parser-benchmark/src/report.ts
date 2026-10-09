@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { OUTPUTS_ROOT } from "./filesystem-guard.js";
 import { parseBenchmarkResult, type BenchmarkResult, type NormalizedOutput } from "./schema.js";
 import { parseQualityReport, type QualityReport } from "./quality/schema.js";
+import { isSuccessfulReliability } from "./outcome-gate.js";
 
 export type AggregateReport = {
   markdown: string;
@@ -95,12 +96,10 @@ export async function buildAggregateReport(): Promise<AggregateReport> {
   lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
   for (const entry of entries) {
     const r = entry.result;
-    const failed =
-      r.reliability.crashed ||
-      r.reliability.timeout ||
-      r.reliability.oom ||
-      r.reliability.partialOutput ||
-      (r.reliability.exitCode !== null && r.reliability.exitCode !== 0);
+    // A result.json alone cannot prove a successful parser execution.
+    // Old runs with missing normalized.json or non-null failureKind are failed.
+    const failed = !isSuccessfulReliability(r.reliability) ||
+      (await readRunNormalized(entry.runDir)) === null;
     lines.push(
       `| ${r.document.fixtureId} | ${entry.parserKey} | ${entry.runId} | ${r.run.coldStart ? "COLD" : "WARM"} | ${failed ? "FAILED" : "OK"} | ${r.performance.wallTimeMs} | ${r.performance.peakRssMb ?? "n/a"} | ${r.extraction.extractedPages} | ${r.extraction.characters} | ${r.extraction.blocks} | ${r.reliability.exitCode ?? "null"} | ${r.reliability.timeout} | ${r.reliability.warnings.length} |`,
     );
