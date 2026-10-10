@@ -5,6 +5,7 @@ import {
 import { MAX_CANDIDATE_BYTES, MAX_SELECTION_BYTES, MAX_PDF_BYTES, parseBookSelection,
   parseNormalizedCandidate, bookLabel, pdfPreviewEligibility, sealBlindDraft, comparePage,
 } from "./review.mjs";
+import { createPdfPageViewer } from "./preview.mjs";
 
 // No fetch, XHR, WebSocket, storage, service worker, telemetry or external assets.
 // Only local human-entered fields; never paste untrusted text into innerHTML.
@@ -18,7 +19,8 @@ const node = (tag, className = "", text = "") => {
 let draft = createDraft("RB-PDF-11");
 let activePage = 0;
 let dirty = false;
-let mapping = null, sourceUrl = null, sourceFixtureId = null;
+let mapping = null, sourcePresent = false, sourceFixtureId = null, previewPage = null;
+let sourceSelectionEpoch = 0;
 let candidates = [], selectedCandidate = -1;
 let sealed = null, gtExported = false;
 const exposedFixtures = new Set();
@@ -60,7 +62,7 @@ const labels = {
   COMPARE_TOO_MANY_BLOCKS: "逐段对照内容块数量超限",
   BLIND_GT_SEAL_REQUIRED: "请先独立导出 GT 并冻结，不得提前查看机器文字",
   SOURCE_PDF_SIZE_INVALID: "PDF 大小异常（至少 8 字节，最多 170 MB）",
-  SOURCE_PDF_FILENAME_MISMATCH: "原书文件名与当前样本编号不一致",
+  SOURCE_PDF_FILENAME_MISMATCH: "所选 PDF 与当前样本的完整原书不一致",
   SOURCE_PDF_SIZE_MISMATCH: "本机 PDF 大小与导入映射不一致",
   SOURCE_PDF_HEADER_INVALID: "所选文件没有 PDF 文件头",
   PAGE_INDEX_INVALID: "页面索引非法",
@@ -325,10 +327,24 @@ $("draft-file").addEventListener("change", async event => {
 
 // 02: browser-only private references. Never persist mapping, PDF bytes,
 // normalized candidate text, a comparison, or an object URL.
+const pdfViewer = createPdfPageViewer({
+  canvas: $("pdf-canvas"),
+  onStatus: ({ kind, message }) => {
+    const status = $("preview-status");
+    status.textContent = message;
+    status.dataset.state = kind;
+  },
+  loadPdfJs: async () => {
+    // The only dynamic import is the exact-version local npm asset, no CDN.
+    const pdfjs = await import("./vendor/pdf.mjs");
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.mjs", import.meta.url).href;
+    return pdfjs;
+  },
+});
 function releasePdf() {
-  if (sourceUrl) URL.revokeObjectURL(sourceUrl);
-  sourceUrl = null; sourceFixtureId = null;
-  $("pdf-frame").removeAttribute("src");
+  sourceSelectionEpoch++;
+  pdfViewer.clear();
+  sourcePresent = false; sourceFixtureId = null; previewPage = null;
   $("pdf-view").hidden = true;
   $("pdf-status").textContent = "未打开原书 PDF。";
 }
@@ -336,11 +352,11 @@ function renderReferences() {
   $("book-title").textContent = bookLabel(mapping, draft.fixtureId);
   const page = draft.pages[activePage];
   $("preview-page").textContent = String(page.originalPhysicalPage);
-  const canPreview = Boolean(sourceUrl) && sourceFixtureId === draft.fixtureId;
+  const canPreview = sourcePresent && sourceFixtureId === draft.fixtureId;
   $("pdf-view").hidden = !canPreview;
-  if (canPreview) {
-    const intended = sourceUrl + "#page=" + page.originalPhysicalPage + "&view=FitH";
-    if ($("pdf-frame").getAttribute("src") !== intended) $("pdf-frame").setAttribute("src", intended);
+  if (canPreview && previewPage !== page.originalPhysicalPage) {
+    previewPage = page.originalPhysicalPage;
+    void pdfViewer.go(previewPage);
   }
   const picker = $("candidate-choice");
   picker.replaceChildren();
@@ -399,17 +415,33 @@ $("book-map-file").addEventListener("change", async event => {
 $("load-source-pdf").addEventListener("click", () => $("source-pdf-file").click());
 $("source-pdf-file").addEventListener("change", async event => {
   const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
+  const pendingFixture = draft.fixtureId;
+  const selectionEpoch = ++sourceSelectionEpoch;
   try {
     if (file.size > MAX_PDF_BYTES) throw new AnnotationError("SOURCE_PDF_SIZE_INVALID");
-    const pendingFixture = draft.fixtureId;
     pdfPreviewEligibility(file, pendingFixture, mapping);
     if (!(await file.slice(0,8).text()).startsWith("%PDF-")) throw new AnnotationError("SOURCE_PDF_HEADER_INVALID");
-    if (draft.fixtureId !== pendingFixture) throw new AnnotationError("SOURCE_PDF_FILENAME_MISMATCH");
-    releasePdf(); sourceUrl = URL.createObjectURL(file); sourceFixtureId = pendingFixture;
-    $("pdf-status").textContent = "已选择本机 PDF " + file.name +
-      "；仅文件名、大小和 PDF 头通过检查，SHA 尚未验证。";
+    if (draft.fixtureId !== pendingFixture || selectionEpoch !== sourceSelectionEpoch) return;
+    releasePdf();
+    sourcePresent = true; sourceFixtureId = pendingFixture;
+    previewPage = draft.pages[activePage].originalPhysicalPage;
+    $("pdf-status").textContent = "已手动选择 " + file.name +
+      "；文件名、大小和 PDF 头通过检查，原书 SHA 尚未验证。";
     renderReferences();
-  } catch (error) { localError(error); }
+    void pdfViewer.open(file, previewPage);
+  } catch (error) {
+    if (draft.fixtureId !== pendingFixture || selectionEpoch !== sourceSelectionEpoch) return;
+    if (error instanceof AnnotationError && error.code === "SOURCE_PDF_FILENAME_MISMATCH") {
+      const original = FIXTURES[pendingFixture].source + ".pdf";
+      const mapped = mapping?.[FIXTURES[pendingFixture].source]?.displayName;
+      $("pdf-status").textContent = "当前样本 " + pendingFixture + " 对应完整原书 " + original +
+        (mapped && mapped !== original ? "（映射文件名：" + mapped + "）" : "") +
+        "。你选择的是 " + file.name + "，请重新选择完整原书，不要选三页实验样本。";
+    } else {
+      $("pdf-status").textContent = "所选 PDF 未通过本地安全检查；可重新选择正确的完整原书。";
+    }
+    localError(error);
+  }
 });
 $("clear-source-pdf").addEventListener("click", () => { releasePdf(); renderReferences(); });
 $("load-candidate").addEventListener("click", () => $("candidate-file").click());
@@ -440,6 +472,7 @@ $("reveal-candidate").addEventListener("click", () => {
   } catch (error) { localError(error); }
 });
 
+window.addEventListener("pagehide", () => releasePdf());
 window.addEventListener("beforeunload", event => {
   if (dirty) { event.preventDefault(); event.returnValue = ""; }
 });
