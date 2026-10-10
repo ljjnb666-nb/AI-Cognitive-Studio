@@ -1,0 +1,46 @@
+# Cloud-only synthetic regression. No self-hosted runner, private book or model.
+name: ACS PDF Quality synthetic gate
+
+on:
+  pull_request:
+    branches: [codex/pdf-parser-benchmark]
+    paths:
+      - "tools/pdf-parser-benchmark/**"
+      - ".github/workflows/acs-pdf-quality-synthetic.yml"
+  push:
+    branches: [codex/pdf-parser-benchmark]
+    paths:
+      - "tools/pdf-parser-benchmark/**"
+      - ".github/workflows/acs-pdf-quality-synthetic.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Assert exact-head checkout
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.12.0"
+          cache: npm
+          cache-dependency-path: tools/pdf-parser-benchmark/package-lock.json
+      - name: Install isolated benchmark dependencies with lifecycle scripts disabled
+        working-directory: tools/pdf-parser-benchmark
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Typecheck offline regrader
+        working-directory: tools/pdf-parser-benchmark
+        run: ./node_modules/.bin/tsc --noEmit --pretty false
+      - name: Human GT gate negative regression (synthetic data only)
+        working-directory: tools/pdf-parser-benchmark
+        run: ./node_modules/.bin/vitest run tests/real-book-quality-gate.test.ts
