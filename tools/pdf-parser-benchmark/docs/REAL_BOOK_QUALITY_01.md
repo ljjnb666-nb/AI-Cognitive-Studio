@@ -87,7 +87,7 @@ OCR text on scanned pages.
 - **G0 trusted revision:** CI of this isolated benchmark branch must pass,
   including synthetic-only negative GT tests. Merge and sync the bench worktree
   to exact reviewed SHA separately before a local run.
-- **G1 immutable source:** only the uniquely matching original matrix report
+- **G1 immutable source:** require metadata-report SHA-256 `e4f4a7b04adfaa484e3538921647127225057b9fdcf0015234fcd8f454b08f76` independently attested by GitHub Actions evidence verification #38029075853; only the uniquely matching original matrix report
   from GitHub run #38026320680 is accepted. Exactly four accepted native runs,
   two expected PDF.js scan refusals, exact manifest/sample SHA and page lineage.
 - **G2 independent GT:** all three GT JSON sidecars exist, pass v2 schema,
@@ -118,8 +118,8 @@ npx --no-install tsx scripts/regrade_real_book_quality.ts
 A missing/invalid GT or contradictory source evidence emits only
 `ACS_PDF_QUALITY_GATE_BLOCKED` and a nonzero exit; do not label it a
 failed parser or an accuracy measurement. On successful preparation it emits
-`ACS_PDF_QUALITY_EVIDENCE_READY` and writes a new, non-overwriting private
-`real-book-quality-<time>-<pid>.json` report. It never edits the old run.
+`ACS_PDF_QUALITY_EVIDENCE_READY` and writes a new, atomically published, non-overwriting private
+`real-book-quality-<time>-<pid>-<randomUUID>.json` report. It never edits the old run.
 Detailed quality metrics, missing key markers, reviewer IDs and content are
 private; **do not paste them into GitHub or chat**.
 
