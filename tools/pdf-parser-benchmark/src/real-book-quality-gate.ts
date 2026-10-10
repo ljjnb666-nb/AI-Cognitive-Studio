@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, lstat, readdir, mkdir, open } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { readFile, lstat, readdir, open } from "node:fs/promises";
+import { join, resolve, sep, relative } from "node:path";
 import { z } from "zod";
 import { DATA_ROOT, FIXTURES_ROOT, OUTPUTS_ROOT, REPORTS_ROOT } from "./filesystem-guard.js";
 import { parseGroundTruth, type GroundTruth } from "./ground-truth.js";
@@ -107,6 +107,14 @@ async function boundedFile(file: string, root: string, maximum: number): Promise
   if (!actual.startsWith(base + sep)) refuse("PATH_OUTSIDE_PRIVATE_ROOT");
   const rootStat = await lstat(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) refuse("PRIVATE_ROOT_NOT_REGULAR");
+  // Reject junctions/symlinks at EVERY intermediate component, not only
+  // at the final file; a trusted-looking path must not escape D: by link.
+  let parent = base;
+  for (const component of relative(base, actual).split(sep).slice(0, -1)) {
+    parent = join(parent, component);
+    const segment = await lstat(parent);
+    if (!segment.isDirectory() || segment.isSymbolicLink()) refuse("PRIVATE_PATH_LINK_BLOCKED");
+  }
   const stat = await lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > maximum) refuse("PRIVATE_FILE_INVALID");
   return readFile(file);
