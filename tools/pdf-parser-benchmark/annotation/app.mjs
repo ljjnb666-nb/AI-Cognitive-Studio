@@ -47,10 +47,10 @@ const labels = {
   SAVE_CANCELLED: "已取消保存，未改动本地文件",
   SAVE_FAILED: "保存失败，可能没有获得文件系统权限",
   TOO_MANY_BLOCKS: "每页最多 500 个内容块",
-  BOOK_MAPPING_SCHEMA_INVALID: "书名映射格式无效",
-  BOOK_MAPPING_MEMBER_INVALID: "原书文件名不合法",
-  BOOK_MAPPING_SOURCE_INVALID: "原书编号、SHA 或字节长度冲突",
-  BOOK_MAPPING_INCOMPLETE: "必须包含三本原书的映射",
+  BOOK_MAPPING_SCHEMA_INVALID: "文件不是原始 real_book_selection.json，或 JSON 结构不符合约定",
+  BOOK_MAPPING_MEMBER_INVALID: "原书文件名无效；请选择最初的 real_book_selection.json",
+  BOOK_MAPPING_SOURCE_INVALID: "三本原书的编号、格式、哈希或文件大小字段无效",
+  BOOK_MAPPING_INCOMPLETE: "映射必须同时包含 RB-PDF-01、02、03 三本原书",
   BOOK_MAPPING_PAGE_OUT_OF_RANGE: "原书页数与固定抽样页码冲突",
   CANDIDATE_SCHEMA_OR_FIXTURE_MISMATCH: "候选 JSON 格式或样本编号不匹配",
   CANDIDATE_PAGE_LAYOUT_INVALID: "候选必须包含子集索引 0、1、2 三页",
@@ -60,9 +60,9 @@ const labels = {
   COMPARE_TOO_MANY_BLOCKS: "逐段对照内容块数量超限",
   BLIND_GT_SEAL_REQUIRED: "请先独立导出 GT 并冻结，不得提前查看机器文字",
   SOURCE_PDF_SIZE_INVALID: "PDF 大小异常（至少 8 字节，最多 170 MB）",
-  SOURCE_PDF_FILENAME_MISMATCH: "原书文件名与当前样本编号不一致",
+  SOURCE_PDF_FILENAME_MISMATCH: "文件名不匹配：必须选择当前样本的完整原书 PDF，不能选择三页抽样子集",
   SOURCE_PDF_SIZE_MISMATCH: "本机 PDF 大小与导入映射不一致",
-  SOURCE_PDF_HEADER_INVALID: "所选文件没有 PDF 文件头",
+  SOURCE_PDF_HEADER_INVALID: "所选文件没有有效 PDF 文件头，请核对文件格式",
   PAGE_INDEX_INVALID: "页面索引非法",
 };
 
@@ -74,6 +74,18 @@ function setNotice(value, positive = false) {
 function localError(error) {
   const code = error instanceof AnnotationError ? error.code : "FILE_READ_FAILED";
   setNotice(labels[code] ?? ("安全检查阻塞：" + code));
+}
+function referenceStatus(id, message, state = "info") {
+  const status = $(id);
+  status.textContent = message;
+  status.dataset.state = state;
+}
+function referenceError(id, error, advice = "") {
+  const code = error instanceof AnnotationError ? error.code : "FILE_READ_FAILED";
+  const explanation = labels[code] ?? ("文件校验失败：" + code);
+  referenceStatus(id, "导入失败：" + explanation + (advice ? "。" + advice : ""), "error");
+  // Retain the existing global message while keeping local feedback visible.
+  setNotice(explanation);
 }
 function markDirty() {
   if (sealed) { setNotice("当前 GT 已冻结：不能在看过候选后修改原标注。请另起独立复核流程。"); return; }
@@ -330,7 +342,7 @@ function releasePdf() {
   sourceUrl = null; sourceFixtureId = null;
   $("pdf-frame").removeAttribute("src");
   $("pdf-view").hidden = true;
-  $("pdf-status").textContent = "未打开原书 PDF。";
+  referenceStatus("pdf-status", "未打开原书 PDF。");
 }
 function renderReferences() {
   $("book-title").textContent = bookLabel(mapping, draft.fixtureId);
@@ -391,25 +403,32 @@ $("book-map-file").addEventListener("change", async event => {
   const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
   try {
     if (file.size > MAX_SELECTION_BYTES) throw new AnnotationError("DRAFT_TOO_LARGE");
-    mapping = parseBookSelection(JSON.parse(await file.text()));
-    $("map-status").textContent = "仅此标签页加载了 3 本原书的文件名；不会保存到 GT JSON。";
+    referenceStatus("map-status", "正在校验本机书名映射……", "loading");
+    const imported = parseBookSelection(JSON.parse(await file.text()));
+    mapping = imported;
     renderReferences();
-  } catch (error) { localError(error); }
+    referenceStatus("map-status", "已导入书名映射：三本原书均已识别，请检查左侧显示的书名。文件只保留在本标签页。", "success");
+  } catch (error) {
+    referenceError("map-status", error, "请选原始 real_book_selection.json，而非 fixtures.manifest.json");
+  }
 });
 $("load-source-pdf").addEventListener("click", () => $("source-pdf-file").click());
 $("source-pdf-file").addEventListener("change", async event => {
   const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
   try {
+    referenceStatus("pdf-status", "正在检查所选 PDF 文件……", "loading");
     if (file.size > MAX_PDF_BYTES) throw new AnnotationError("SOURCE_PDF_SIZE_INVALID");
     const pendingFixture = draft.fixtureId;
     pdfPreviewEligibility(file, pendingFixture, mapping);
     if (!(await file.slice(0,8).text()).startsWith("%PDF-")) throw new AnnotationError("SOURCE_PDF_HEADER_INVALID");
     if (draft.fixtureId !== pendingFixture) throw new AnnotationError("SOURCE_PDF_FILENAME_MISMATCH");
     releasePdf(); sourceUrl = URL.createObjectURL(file); sourceFixtureId = pendingFixture;
-    $("pdf-status").textContent = "已选择本机 PDF " + file.name +
-      "；仅文件名、大小和 PDF 头通过检查，SHA 尚未验证。";
     renderReferences();
-  } catch (error) { localError(error); }
+    referenceStatus("pdf-status", "本机 PDF 已通过文件名、大小和文件头检查。下方已展开预览区；如预览空白请用系统 PDF 阅读器查看。SHA 尚未验证。", "success");
+  } catch (error) {
+    const expectedName = FIXTURES[draft.fixtureId]?.source + ".pdf";
+    referenceError("pdf-status", error, "当前样本应使用完整原书 " + expectedName + "；不要选择 RB-PDF-11/12/13 三页子集");
+  }
 });
 $("clear-source-pdf").addEventListener("click", () => { releasePdf(); renderReferences(); });
 $("load-candidate").addEventListener("click", () => $("candidate-file").click());
@@ -418,12 +437,17 @@ $("candidate-file").addEventListener("change", async event => {
   try {
     if (file.size > MAX_CANDIDATE_BYTES) throw new AnnotationError("CANDIDATE_TOO_LARGE");
     const pendingFixture = draft.fixtureId;
+    referenceStatus("candidate-status", "正在校验已存在的机器候选……", "loading");
     const candidate = parseNormalizedCandidate(JSON.parse(await file.text()), pendingFixture);
     if (draft.fixtureId !== pendingFixture) throw new AnnotationError("CANDIDATE_SCHEMA_OR_FIXTURE_MISMATCH");
     if (candidates.length === 4) throw new AnnotationError("CANDIDATE_TOO_LARGE");
     candidates.push(candidate); selectedCandidate = candidates.length - 1;
-    renderReferences(); setNotice("候选仅载入浏览器内存，尚未独立验真；人工 GT 必须先冻结。");
-  } catch (error) { localError(error); }
+    renderReferences();
+    referenceStatus("candidate-status", $("candidate-status").textContent + " 候选已导入本机内存；人工 GT 未冻结前仍隐藏机器文字。", "success");
+    setNotice("候选仅载入浏览器内存，尚未独立验真；人工 GT 必须先冻结。");
+  } catch (error) {
+    referenceError("candidate-status", error, "请选择当前 RB-PDF-11/12/13 样本已完成运行的 normalized.json");
+  }
 });
 $("candidate-choice").addEventListener("change", event => {
   selectedCandidate = event.target.value === "" ? -1 : Number(event.target.value);

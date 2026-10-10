@@ -105,3 +105,13 @@ input[type="checkbox"] { accent-color:var(--accent); width:16px; height:16px; }
 .comparison-cell small { display:block; color:var(--muted); margin-bottom:5px; }
 .comparison-cell pre { font:12px/1.65 "Microsoft YaHei","PingFang SC",sans-serif; white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 @media (max-width:850px) { .local-grid,.comparison-columns { grid-template-columns:1fr; } }
+
+/* Keep browser file-input outcomes visible next to their initiating buttons. */
+.local-file-status {
+  display:block; margin:9px 0 0; min-height:2.1em;
+  font-size:12px; font-weight:500; line-height:1.6;
+  overflow-wrap:anywhere;
+}
+.local-file-status[data-state="loading"] { color:#56626a; }
+.local-file-status[data-state="success"] { color:#176c58; }
+.local-file-status[data-state="error"] { color:#a33232; font-weight:700; }

@@ -157,6 +157,23 @@ describe("annotator-02 static and HTTP privacy barrier", () => {
       expect((await fetch(app.url,{method:"POST",body:"private"})).status).toBe(404);
     }finally{await app.close();}
   });
+  it("shows an accessible local result beside each file chooser on both success and failure", async () => {
+    const html=await readFile(new URL("../annotation/index.html",import.meta.url),"utf8");
+    const script=await readFile(new URL("../annotation/app.mjs",import.meta.url),"utf8");
+    const style=await readFile(new URL("../annotation/styles.css",import.meta.url),"utf8");
+    for(const id of ["map-status","pdf-status","candidate-status"]) {
+      expect(html).toContain('id="'+id+'" class="small local-file-status" role="status" aria-live="polite"');
+      expect(script).toContain('referenceStatus("'+id+'"');
+      expect(script).toContain('referenceError("'+id+'"');
+    }
+    expect(script).toContain('const imported = parseBookSelection(JSON.parse(await file.text()))');
+    expect(script).toContain('pdfPreviewEligibility(file, pendingFixture, mapping)');
+    expect(script).toContain('不要选择 RB-PDF-11/12/13 三页子集');
+    expect(script).toContain('请选原始 real_book_selection.json，而非 fixtures.manifest.json');
+    expect(style).toContain('.local-file-status[data-state="error"]');
+    expect(style).toContain('.local-file-status[data-state="success"]');
+    expect(script).not.toContain('window.alert(');
+  });
   it("keeps imported content outside persistent browser stores and remote APIs", async () => {
     const app=await readFile(new URL("../annotation/app.mjs",import.meta.url),"utf8");
     const review=await readFile(new URL("../annotation/review.mjs",import.meta.url),"utf8");
