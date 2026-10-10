@@ -57,7 +57,7 @@
             <p class="small">选择原始导入时的 <code>real_book_selection.json</code>，只读取三本书的显示名称与元数据。</p>
             <button id="load-book-map" type="button" class="button-light">读取本机书名映射</button>
             <input type="file" id="book-map-file" accept=".json,application/json" hidden>
-            <p id="map-status" class="small">未加载，匿名编号仍有效。</p>
+            <p id="map-status" class="small local-file-status" role="status" aria-live="polite" aria-atomic="true" data-state="info">未加载，匿名编号仍有效。</p>
           </div>
           <div>
             <strong>2. 原书 PDF 页面预览</strong>
@@ -65,7 +65,7 @@
             <button id="load-source-pdf" type="button" class="button-light">选择本机原书 PDF</button>
             <input type="file" id="source-pdf-file" accept=".pdf,application/pdf" hidden>
             <button id="clear-source-pdf" type="button" class="button-light">关闭预览</button>
-            <p id="pdf-status" class="small">未打开原书 PDF。</p>
+            <p id="pdf-status" class="small local-file-status" role="status" aria-live="polite" aria-atomic="true" data-state="info">未打开原书 PDF。</p>
           </div>
         </div>
         <div id="pdf-view" class="pdf-view" hidden>
@@ -81,7 +81,7 @@
             <input type="file" id="candidate-file" accept=".json,application/json" hidden>
             <label for="candidate-choice" class="field-label">选择已导入的候选（最多 4 份）</label>
             <select id="candidate-choice"><option value="">尚未导入</option></select>
-            <p id="candidate-status" class="small">机器候选不会自动写入人工标注。</p>
+            <p id="candidate-status" class="small local-file-status" role="status" aria-live="polite" aria-atomic="true" data-state="info">机器候选不会自动写入人工标注。</p>
           </div>
           <div>
             <strong>4. 独立标注冻结后揭示候选</strong>
