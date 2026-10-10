@@ -10,6 +10,7 @@ export const MAX_CANVAS_SIDE = 4096;
 export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
   let epoch = 0, pageEpoch = 0;
   let document = null, loadingTask = null, renderTask = null, renderedPage = null;
+  let requestedPage = null;
   const current = token => token === epoch;
   const emit = (kind, message) => onStatus({ kind, message });
   const destroy = value => { if (value) void Promise.resolve(value.destroy()).catch(() => {}); };
@@ -20,7 +21,7 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
   };
 
   function clear() {
-    epoch++; pageEpoch++;
+    epoch++; pageEpoch++; requestedPage = null;
     if (renderTask) { renderTask.cancel(); void renderTask.promise.catch(() => {}); }
     renderTask = null;
     // pdf.js owns all decoded pages and buffers. Do not retain the File.
@@ -35,6 +36,7 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
   }
 
   async function go(physicalPage) {
+    requestedPage = physicalPage;
     const token = epoch, turn = ++pageEpoch;
     const previous = renderTask;
     if (previous) {
@@ -83,6 +85,7 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
 
   async function open(file, physicalPage) {
     clear();
+    requestedPage = physicalPage;
     const token = epoch;
     if (file.size > MAX_INLINE_PDF_BYTES) {
       emit("external", "文件超过本机内嵌预览的 64 MB 内存保护上限；请使用系统 PDF 阅读器跳转物理第 " +
@@ -103,7 +106,7 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
       if (!current(token)) { destroy(loaded); return; }
       document = loaded;
       loadingTask = null;
-      await go(physicalPage);
+      await go(requestedPage);
     } catch {
       if (!current(token)) return;
       resetCanvas();
