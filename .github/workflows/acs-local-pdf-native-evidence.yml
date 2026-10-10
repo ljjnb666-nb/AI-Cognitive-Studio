@@ -1,0 +1,241 @@
+# Manual-only metadata verification for the one pinned PRIVATE native matrix run.
+# Reads only two private JSON metadata files. Never reads PDF bytes or text.
+name: ACS Windows PDF native evidence verification
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Verify private native report and emit allowlisted statistics only
+        shell: powershell
+        env:
+          GIT_OPTIONAL_LOCKS: '0'
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_NO_REPLACE_OBJECTS: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_REQUIRED' }
+
+          # ASCII-only, PowerShell 5.1 compatible CJK worktree pathname.
+          $rootName = -join ([char[]]@(0x6240, 0x6709, 0x9879, 0x76EE))
+          $wt = Join-Path (Join-Path (Join-Path 'D:\' $rootName) '90_Worktrees') 'AI-Cognitive-Studio-pdf-parser-benchmark'
+          $expectedBranch = 'codex/pdf-parser-benchmark'
+          $expectedHead = '56c0100043345085a4df35e995d40f4f50a7f9d2'
+          $approvedOrigin = @(
+            'https://github.com/ljjnb666-nb/AI-Cognitive-Studio.git',
+            'https://github.com/ljjnb666-nb/AI-Cognitive-Studio',
+            'git@github.com:ljjnb666-nb/AI-Cognitive-Studio.git',
+            'git@github.com:ljjnb666-nb/AI-Cognitive-Studio'
+          )
+
+          if (-not (Test-Path -LiteralPath $wt -PathType Container)) { throw 'BENCHMARK_WORKTREE_MISSING' }
+          $gitCmd = Get-Command 'git.exe' -ErrorAction Stop
+          $pythonCmd = Get-Command 'python.exe' -ErrorAction Stop
+          if ($gitCmd.CommandType -ne 'Application' -or $pythonCmd.CommandType -ne 'Application') {
+            throw 'REQUIRED_EXECUTABLE_NOT_AVAILABLE'
+          }
+          $git = $gitCmd.Source
+          $branch = @(& $git --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt symbolic-ref --quiet --short HEAD 2>$null)
+          if ($LASTEXITCODE -ne 0 -or $branch.Count -ne 1 -or $branch[0] -cne $expectedBranch) {
+            throw 'BENCHMARK_BRANCH_MISMATCH'
+          }
+          $head = @(& $git --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt rev-parse --verify HEAD 2>$null)
+          if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0] -cne $expectedHead) {
+            throw 'BENCHMARK_HEAD_MISMATCH'
+          }
+          $origin = @(& $git --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt remote get-url origin 2>$null)
+          if ($LASTEXITCODE -ne 0 -or $origin.Count -ne 1 -or $origin[0] -cnotin $approvedOrigin) {
+            throw 'BENCHMARK_ORIGIN_MISMATCH'
+          }
+          $gitStatus = @(& $git --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt status --porcelain=v1 --untracked-files=normal 2>$null)
+          if ($LASTEXITCODE -ne 0 -or @($gitStatus | Where-Object { $_ -cne '?? .mimosa/' }).Count -ne 0) {
+            throw 'BENCHMARK_WORKTREE_UNEXPECTED_CHANGES'
+          }
+
+          # Python is isolated (-I) and does not import site packages, install
+          # dependencies, run parsers or access the network. Its only output
+          # is fixed public IDs, enum classifications and aggregate counters.
+          $py = @'
+          import datetime
+          import hashlib
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          def verify():
+              root = Path(r"D:\ai-cognitive-pdf-benchmark-data")
+              report_dir = root / "reports"
+              manifest_path = root / "fixtures" / "fixtures.manifest.json"
+              for p in (root, report_dir, manifest_path.parent):
+                  if p.is_symlink() or not p.is_dir():
+                      raise ValueError("DIRECTORY_NOT_READY")
+              if manifest_path.is_symlink() or not manifest_path.is_file():
+                  raise ValueError("MANIFEST_NOT_READY")
+              if manifest_path.stat().st_size > 1024 * 1024:
+                  raise ValueError("MANIFEST_TOO_LARGE")
+
+              # Bind evidence to the previously verified GitHub Actions native
+              # matrix #38026320680, not an arbitrary newest local report.
+              start = int(datetime.datetime.fromisoformat("2026-10-10T05:05:29+00:00").timestamp() * 1000000000)
+              end = int(datetime.datetime.fromisoformat("2026-10-10T05:05:59+00:00").timestamp() * 1000000000)
+              candidates = []
+              for candidate in report_dir.iterdir():
+                  match = re.fullmatch(r"real-book-matrix-native-(\d{19})\.json", candidate.name)
+                  if match and start <= int(match.group(1)) <= end:
+                      candidates.append(candidate)
+              if len(candidates) != 1:
+                  raise ValueError("REPORT_CARDINALITY_INVALID")
+              report_file = candidates[0]
+              if report_file.is_symlink() or not report_file.is_file():
+                  raise ValueError("REPORT_NOT_REGULAR_FILE")
+              if not (0 < report_file.stat().st_size <= 131072):
+                  raise ValueError("REPORT_SIZE_INVALID")
+              # Reject a file changed significantly outside the source run.
+              mtime = report_file.stat().st_mtime
+              if not (start / 1000000000 - 10 <= mtime <= end / 1000000000 + 10):
+                  raise ValueError("REPORT_FILE_NOT_FROM_SOURCE_RUN")
+
+              blob = report_file.read_bytes()
+              manifest_blob = manifest_path.read_bytes()
+              report = json.loads(blob.decode("utf-8"))
+              manifest = json.loads(manifest_blob.decode("utf-8"))
+              if type(report) is not dict or type(manifest) is not dict:
+                  raise ValueError("SCHEMA_INVALID")
+              if report.get("schema") != "acs-real-book-model-comparison-v1":
+                  raise ValueError("SCHEMA_VERSION_INVALID")
+              if report.get("selectedSuite") != "native" or report.get("qualityGroundTruth") != "NOT_MEASURED":
+                  raise ValueError("SUITE_OR_QUALITY_INVALID")
+              if report.get("serverShutdownOk") is not True:
+                  raise ValueError("CLEANUP_INVALID")
+              for key in ("planned", "completed"):
+                  if type(report.get(key)) is not int or report[key] != 6:
+                      raise ValueError("CASE_COUNT_INVALID")
+              rows = report.get("results")
+              if type(rows) is not list or len(rows) != 6:
+                  raise ValueError("RESULT_ROWS_INVALID")
+              entries = manifest.get("fixtures")
+              if type(entries) is not list or len(entries) > 10000:
+                  raise ValueError("MANIFEST_ROWS_INVALID")
+              expected_pages = {
+                  "RB-PDF-11": ("RB-PDF-01", [22, 107, 192]),
+                  "RB-PDF-12": ("RB-PDF-02", [73, 145, 261]),
+                  "RB-PDF-13": ("RB-PDF-03", [51, 127, 379]),
+              }
+              def find_manifest_row(fixture_id):
+                  matched = [x for x in entries if type(x) is dict and x.get("id") == fixture_id]
+                  if len(matched) != 1:
+                      raise ValueError("MANIFEST_FIXTURE_AMBIGUOUS")
+                  return matched[0]
+
+              expected_cases = {
+                  (fixture, parser, "default")
+                  for fixture in expected_pages
+                  for parser in ("pdfjs", "liteparse")
+              }
+              seen = set()
+              output_cases = []
+              execution_ok = 0
+              rejections = 0
+              for row in rows:
+                  if type(row) is not dict:
+                      raise ValueError("RESULT_ROW_INVALID")
+                  fixture = row.get("fixtureId")
+                  parser = row.get("parser")
+                  mode = row.get("mode")
+                  case = (fixture, parser, mode)
+                  if case not in expected_cases or case in seen:
+                      raise ValueError("MATRIX_MISSING_DUPLICATE_OR_UNEXPECTED")
+                  seen.add(case)
+                  parent_id, pages = expected_pages[fixture]
+                  original = find_manifest_row(parent_id)
+                  subset = find_manifest_row(fixture)
+                  if (subset.get("sourceFixtureId") != parent_id or
+                      subset.get("sourcePages1Based") != pages or
+                      subset.get("sourceSha256") != original.get("expectedSha256") or
+                      row.get("sourcePages1Based") != pages or
+                      row.get("subsetSha256") != subset.get("expectedSha256") or
+                      row.get("parentSha256") != original.get("expectedSha256")):
+                      raise ValueError("SOURCE_LINEAGE_MISMATCH")
+                  for sha in (row.get("subsetSha256"), row.get("parentSha256")):
+                      if type(sha) is not str or not re.fullmatch(r"[0-9a-f]{64}", sha):
+                          raise ValueError("SOURCE_SHA_INVALID")
+                  status = row.get("status")
+                  reason = row.get("reasonCode")
+                  if row.get("tempClean") is not True:
+                      raise ValueError("TEMP_NOT_CLEAN")
+                  if status == "EXECUTION_OK":
+                      if (row.get("failureKind") is not None or
+                          type(row.get("cliExitCode")) is not int or row["cliExitCode"] != 0 or
+                          type(row.get("childExitCode")) is not int or row["childExitCode"] != 0 or
+                          reason != "NONE"):
+                          raise ValueError("SUCCESS_CONTRACT_INVALID")
+                      execution_ok += 1
+                  elif status == "EXPECTED_CAPABILITY_REJECTION":
+                      if (parser != "pdfjs" or fixture not in ("RB-PDF-12", "RB-PDF-13") or
+                          row.get("failureKind") != "EXPECTED_CAPABILITY_REJECTION" or
+                          type(row.get("cliExitCode")) is not int or row["cliExitCode"] == 0 or
+                          type(row.get("childExitCode")) is not int or row["childExitCode"] != 3 or
+                          reason != "SOURCE_OCR_REQUIRED"):
+                          raise ValueError("EXPECTED_REJECTION_CONTRACT_INVALID")
+                      rejections += 1
+                  else:
+                      raise ValueError("UNACCEPTED_OUTCOME")
+                  output_cases.append({
+                      "fixture": fixture, "parser": parser, "classification": status,
+                      "reason": reason,
+                  })
+              if seen != expected_cases:
+                  raise ValueError("MATRIX_NOT_COMPLETE")
+              if (type(report.get("executionPasses")) is not int or report["executionPasses"] != execution_ok or
+                  type(report.get("expectedRejections")) is not int or report["expectedRejections"] != rejections or
+                  type(report.get("unexpectedFailures")) is not int or report["unexpectedFailures"] != 0):
+                  raise ValueError("AGGREGATE_COUNT_INVALID")
+              expected_status = (
+                  "BASELINE_COMPLETE_WITH_EXPECTED_REJECTIONS" if rejections
+                  else "EXECUTION_PASS_ONLY"
+              )
+              if report.get("status") != expected_status:
+                  raise ValueError("BASELINE_STATUS_MISMATCH")
+              output_cases.sort(key=lambda x: (x["fixture"], x["parser"]))
+              return {
+                  "policy": "ACS_PDF_REAL_BOOK_EVIDENCE_V1",
+                  "source_github_run_id": 38026320680,
+                  "benchmark_head": "56c0100043345085a4df35e995d40f4f50a7f9d2",
+                  "status": "VERIFIED_NATIVE_EVIDENCE",
+                  "report_status": expected_status,
+                  "planned": 6, "completed": 6,
+                  "execution_ok": execution_ok,
+                  "expected_capability_rejections": rejections,
+                  "unexpected_failures": 0,
+                  "quality_ground_truth": "NOT_MEASURED",
+                  "metadata_report_sha256": hashlib.sha256(blob).hexdigest(),
+                  "cases": output_cases,
+              }
+
+          try:
+              summary = verify()
+              print("ACS_PDF_EVIDENCE_SUMMARY=" + json.dumps(summary, separators=(",", ":"), sort_keys=True))
+              print("ACS_PDF_EVIDENCE_VERIFIED")
+          except Exception:
+              # Never emit source paths, parser output or exception messages.
+              print("ACS_PDF_EVIDENCE_BLOCKED")
+              sys.exit(1)
+          '@
+          $python = $pythonCmd.Source
+          # Pipe ASCII-only static code to stdin to avoid PowerShell 5.1
+          # native-argument double-quote rewriting for Python -c.
+          $py | & $python -I -B -
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_PDF_EVIDENCE_REVIEW_FAILED' }
