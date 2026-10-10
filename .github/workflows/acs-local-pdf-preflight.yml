@@ -8,7 +8,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: acs-windows-pdf-preflight
+  group: acs-windows-pdf-local-ownership
   cancel-in-progress: false
 
 jobs:
@@ -65,6 +65,7 @@ jobs:
           $gitStatus = @(Invoke-ReadOnlyGit -GitArguments @('status', '--porcelain=v1', '--untracked-files=normal'))
           $trackedDirty = @($gitStatus | Where-Object { $_ -notmatch '^\?\?' }).Count -gt 0
           $untrackedPresent = @($gitStatus | Where-Object { $_ -match '^\?\?' }).Count -gt 0
+          $onlyAllowlistedUntracked = (@($gitStatus | Where-Object { $_ -match '^\?\?' -and $_ -cne '?? .mimosa/' }).Count -eq 0)
 
           function Free-GiB([string]$Letter) {
             try {
@@ -99,7 +100,9 @@ jobs:
 
           $branchOK = ($localBranch -ceq $expectedBranch)
           $headOK = ($localHead -ceq $expectedHead)
-          $gitClean = (-not $trackedDirty -and -not $untrackedPresent)
+          # Existing Mimosa audit data is preserved and allowlisted only as
+          # the sole untracked directory; any other untracked path blocks.
+          $gitClean = (-not $trackedDirty -and $onlyAllowlistedUntracked)
           $nativeCandidate = ($branchOK -and $headOK -and $gitClean -and $diskOK -and $nodeReady -and $pythonReady -and $tsxReady -and $dataRootReady -and $manifestReady)
 
           # No private PDF, manifest, filenames, model files or logs are opened.
@@ -112,6 +115,7 @@ jobs:
             head_matches = $headOK
             tracked_clean = (-not $trackedDirty)
             untracked_absent = (-not $untrackedPresent)
+            untracked_allowlisted_only = $onlyAllowlistedUntracked
             c_free_gib = $cFree
             d_free_gib = $dFree
             disk_threshold_pass = $diskOK
