@@ -132,7 +132,7 @@ function renderBlock(block, index) {
   input.maxLength = 100000;
   input.value = block.text;
   input.placeholder = block.role === "table" ? "表名/说明（可留空），单元格单独填写" :
-    block.role === "figure" ? "人工描述图片内容（可以留空，不会自动生成正文）" :
+    block.role === "figure" ? "原书图形的人工结构描述（不计入规范正文文本）" :
     "请从原书手动核对后逐字输入；不复制解析器输出";
   input.setAttribute("aria-label", ROLE_LABELS[block.role] + "文字");
   input.addEventListener("input", () => { block.text = input.value; markDirty(); });
