@@ -19,7 +19,9 @@ From the *already reviewed and safely synchronized* PDF worktree, run the existi
 No file request path, POST, upload, API, private-data-root lookup, scanner, OCR,
 parser, database, model or telemetry endpoint exists. CSP retains
 `connect-src 'none'`, `object-src 'none'`, `frame-src 'none'` and
-`worker-src 'self'`. Only pinned npm-installed PDF.js 6.2.108 ESM/worker
+`worker-src 'self'`, with only in-memory `img-src blob: data:` and
+`font-src blob: data:` for PDF painting. PDF WebAssembly is disabled so no
+`unsafe-eval` relaxation is needed. Only pinned npm-installed PDF.js 6.2.108 ESM/worker
 assets are served; no third-party/CDN/remote data assets.
 
 1. Select `RB-PDF-11`, `12`, or `13`. The fixed **source physical page**
@@ -96,6 +98,8 @@ assets are served; no third-party/CDN/remote data assets.
   memory, not included in draft/GT exports. PDF.js document, worker and Canvas are released
   when samples change or preview closes. CSP blocks **all frames**, permits
   only same-origin pinned PDF.js worker/module files and blocks network fetches.
+  Embedded PDF raster images/fonts may use only local `blob:`/`data:` sources,
+  never external origins. Unsupported WASM-dependent images need the external-reader fallback.
 - PDF.js Canvas rendering avoids the known sandboxed built-in-PDF-viewer
   compatibility risk, but actual Windows Edge / Chrome rendering remains
   **not verified** until explicitly re-tested. Failures always offer an
