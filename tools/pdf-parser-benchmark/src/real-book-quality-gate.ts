@@ -6,6 +6,7 @@ import { DATA_ROOT, FIXTURES_ROOT, OUTPUTS_ROOT, REPORTS_ROOT } from "./filesyst
 import { parseGroundTruth, type GroundTruth } from "./ground-truth.js";
 import { evaluateQuality } from "./quality/evaluate.js";
 import { parseQualityReport } from "./quality/schema.js";
+import { normalizeText } from "./quality/metrics.js";
 import { parseBenchmarkResult, parseNormalizedOutput } from "./schema.js";
 
 /** REAL-BOOK-QUALITY-01: offline regrading of immutable native evidence.
@@ -102,6 +103,50 @@ export function validateHumanReview(raw: unknown, fixture: string, gtBytes: Buff
   for (const b of gt.blocks) if (b.page > 2) refuse("GROUND_TRUTH_PAGE_OUT_OF_RANGE");
   for (const p of gt.ocrRequiredPages) if (p > 2) refuse("GROUND_TRUTH_PAGE_OUT_OF_RANGE");
   if (new Set(gt.blocks.map(b => b.id)).size !== gt.blocks.length) refuse("GROUND_TRUTH_BLOCK_IDS_DUPLICATE");
+  // A review flag alone cannot establish that all three pages have been
+  // annotated. Require a non-noise block on EVERY subset page, including
+  // legitimate figure-only/table-only pages that contain no body text.
+  const contentRoles = new Set(["heading", "paragraph", "list_item", "table", "figure", "caption", "footnote", "formula"]);
+  for (const page of [0, 1, 2]) {
+    if (!gt.blocks.some(b => b.page === page && contentRoles.has(b.role))) refuse("GROUND_TRUTH_PAGE_CONTENT_MISSING");
+  }
+  const canonical = normalizeText(gt.text);
+  // Only compare roles that must be included in canonical prose; figure alt
+  // text, formulas and table cells can have separate structural GT entries.
+  const proseRoles = new Set(["heading", "paragraph", "list_item", "caption", "footnote"]);
+  for (const block of gt.blocks) {
+    if (proseRoles.has(block.role) && normalizeText(block.text).length > 0 &&
+        !canonical.includes(normalizeText(block.text))) refuse("GROUND_TRUTH_TEXT_BLOCK_CONFLICT");
+  }
+  for (const marker of gt.keyMarkers) {
+    if (!canonical.includes(normalizeText(marker))) refuse("GROUND_TRUTH_MARKER_CONFLICT");
+  }
+  if (gt.ocrRequired !== (gt.ocrRequiredPages.length > 0) ||
+      new Set(gt.ocrRequiredPages).size !== gt.ocrRequiredPages.length) refuse("GROUND_TRUTH_OCR_CONFLICT");
+}
+
+/** The saved result and normalized evidence must belong to the claimed engine. */
+export function assertNativeParserIdentity(
+  parser: string, resultName: string, normalizedName: string,
+  resultMode?: string, normalizedMode?: string,
+): void {
+  const expectedName = parser === "pdfjs" ? "pdfjs-isolated" : parser === "liteparse" ? "liteparse" : null;
+  if (expectedName === null || resultName !== expectedName || normalizedName !== expectedName ||
+      resultMode !== "default" || normalizedMode !== "default") refuse("PARSER_EVIDENCE_IDENTITY_MISMATCH");
+}
+
+/** Page indices in the subset are 0,1,2; original physical page numbers
+ * remain separately pinned by the manifest. Never mistake container ordinal
+ * for authoritative per-block page binding.
+ */
+export function assertSubsetPageOwnership(normalized: { pages: Array<{pageIndex: number; blocks: Array<{pageIndex: number | null}>}> }): void {
+  const indexes = normalized.pages.map(p => p.pageIndex);
+  if (indexes.length !== 3 || indexes.some((id, i) => id !== i)) refuse("SUBSET_PAGE_INDEX_INVALID");
+  for (const page of normalized.pages) {
+    for (const block of page.blocks) {
+      if (block.pageIndex !== null && block.pageIndex !== page.pageIndex) refuse("BLOCK_PAGE_BINDING_CONFLICT");
+    }
+  }
 }
 
 async function boundedFile(file: string, root: string, maximum: number): Promise<Buffer> {
@@ -194,7 +239,8 @@ export async function regradePrivateNativeEvidence(root = DATA_ROOT): Promise<Pr
     if (row.status === "EXPECTED_CAPABILITY_REJECTION") {
       if (parser !== "pdfjs" || !["RB-PDF-12", "RB-PDF-13"].includes(fixture) ||
           row.failureKind !== "EXPECTED_CAPABILITY_REJECTION" || row.reasonCode !== "SOURCE_OCR_REQUIRED" ||
-          row.childExitCode !== 3 || row.cliExitCode === 0) refuse("UNEXPECTED_REJECTION");
+          row.childExitCode !== 3 || !Number.isInteger(row.cliExitCode) ||
+          (row.cliExitCode as number) === 0) refuse("UNEXPECTED_REJECTION");
       results.push({ fixtureId: fixture, parser, status: "EXPECTED_CAPABILITY_REJECTION", originalPages: source.pages, quality: null });
       continue;
     }
@@ -209,6 +255,8 @@ export async function regradePrivateNativeEvidence(root = DATA_ROOT): Promise<Pr
         result.document.inputSha256 !== identities.get(fixture)?.expectedSha256 ||
         result.reliability.exitCode !== 0 || result.reliability.failureKind !== null ||
         normalized.fixtureId !== fixture || normalized.pages.length !== 3) refuse("IMMUTABLE_RUN_IDENTITY_INVALID");
+    assertNativeParserIdentity(parser, result.parser.name, normalized.parser.name, result.parser.mode, normalized.parser.mode);
+    assertSubsetPageOwnership(normalized);
     const quality = parseQualityReport(evaluateQuality({
       runId: row.runId, fixtureId: fixture, parserKey: parser, parserMode: "default",
       groundTruth: truths.get(fixture)!, normalized, ocrMetadata: normalized.ocr ?? null,
