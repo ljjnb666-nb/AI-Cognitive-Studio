@@ -15,12 +15,12 @@ REAL-BOOK-QUALITY-01 certificate gate remain mandatory.
 
 From the *already reviewed and safely synchronized* PDF worktree, run the existing
 `node scripts/serve_gt_annotation.mjs`. The server binds random-port
-`127.0.0.1`, checks Host and remote IP and serves **only** six fixed UI routes
-(`/`, `/index.html`, `/app.mjs`, `/workspace.mjs`, `/review.mjs`, `/styles.css`).
+`127.0.0.1`, checks Host and remote IP and serves **only** nine fixed HTTP routes (UI, `/preview.mjs`, and two PDF.js vendor ESM files).
 No file request path, POST, upload, API, private-data-root lookup, scanner, OCR,
 parser, database, model or telemetry endpoint exists. CSP retains
-`connect-src 'none'`, `object-src 'none'`; only a sandboxed `blob:` frame is
-allowed for a user-selected PDF. No third-party assets.
+`connect-src 'none'`, `object-src 'none'`, `frame-src 'none'` and
+`worker-src 'self'`. Only pinned npm-installed PDF.js 6.2.108 ESM/worker
+assets are served; no third-party/CDN/remote data assets.
 
 1. Select `RB-PDF-11`, `12`, or `13`. The fixed **source physical page**
    map is respectively `RB-PDF-01: 22, 107, 192`,
@@ -39,11 +39,19 @@ allowed for a user-selected PDF. No third-party assets.
    The browser checks the filename, size (when mapping exists), and PDF magic
    header. This is **not a SHA-256 attestation**. A separate private manifest
    and exact file SHA are required before provenance can be trusted.
-   The built-in PDF viewer navigates with `#page=<original 1-based page>`.
-   Its page-fragment support depends on Chrome/Edge/browser PDF integration:
-   if the viewer fails, use an external local PDF reader and manually check
-   the original *physical* page. Never mistake printed page labels for these IDs.
-   Switching samples or closing preview revokes the file's blob URL.
+   The repaired preview invokes local PDF.js `getDocument({data: Uint8Array})`
+   and renders **only the chosen original physical page** to a bounded Canvas.
+   It does not use the Edge/Chrome built-in viewer, iframe, blob URL, a PDF
+   upload endpoint, extracted machine text, OCR, or outbound PDF fetches.
+   It validates the requested page against the actual PDF page count; UI page
+   switching is latest-wins. The page Canvas is capped at 3 million pixels;
+   documents above **64 MiB** are not read into an in-memory PDF.js document
+   and require the external reader fallback. (The previous 170 MB file-selection
+   safety limit remains.) For a damaged, encrypted, unsupported or oversized
+   PDF, open the *same full original* in the system PDF reader, then navigate
+   to the **physical** page, not the printed page label. Switching books or
+   closing preview destroys the PDF.js loading/document/render tasks and frees
+   the Canvas. It still does **not** attest to the original book SHA.
 4. **Machine candidate**: click *导入已有机器候选*, and manually select a
    completed, pre-existing private `normalized.json` under the local benchmark
    `outputs/<fixtureId>/<parser>/runs/<runId>/` tree. The UI accepts at most
@@ -85,12 +93,13 @@ allowed for a user-selected PDF. No third-party assets.
   allowlisted checked-in UI, and no web requests or persistent browser storage.
 - Imported metadata is allowlisted. Untrusted candidate text is written to
   DOM **textContent**, never `innerHTML`; candidate data is only held in
-  memory, not included in draft/GT exports. Source PDF object URLs are revoked
-  when samples change or preview closes. CSP permits only a sandboxed
-  local `blob:` document frame (no same-origin privilege).
-- Reading a PDF in an embedded browser is inherently dependent on its PDF
-  viewer and may not work with sandboxing on all platforms. The fallback is
-  **external local PDF reader**, not weakening CSP or permitting remote scripts.
+  memory, not included in draft/GT exports. PDF.js document, worker and Canvas are released
+  when samples change or preview closes. CSP blocks **all frames**, permits
+  only same-origin pinned PDF.js worker/module files and blocks network fetches.
+- PDF.js Canvas rendering avoids the known sandboxed built-in-PDF-viewer
+  compatibility risk, but actual Windows Edge / Chrome rendering remains
+  **not verified** until explicitly re-tested. Failures always offer an
+  **external local PDF reader** fallback, not a relaxed CSP or remote scripts.
 - Matching a selected local file's name/size is **not cryptographic source
   validation**; no local title mapping or OCR candidate is automatically
   considered trustworthy. A verified native-OCR run is *not* the same thing as
@@ -106,10 +115,42 @@ allowed for a user-selected PDF. No third-party assets.
 ## Synthetic release gates
 
 The cloud PDF synthetic workflow checks JS syntax for
-`annotation/review.mjs`, runs prior 01 tests and the new
+`annotation/review.mjs` and `annotation/preview.mjs`, runs prior 01 tests and the new
 `tests/gt-annotation-review.test.mjs` (synthetic book names/text only).
 The new test covers source-name limits/traversal, cross-book/page mismatch,
 OCR unknowns, SHA-disclaimer semantics, read-only server access, blind
 sealing, per-page alignment and exclusion of untrusted fields. Existing
 `tests/real-book-quality-gate.test.ts` still fails closed without true
 human reviews. Do not run any private PDF benchmark in cloud CI.
+
+## REAL-BOOK-GT-ANNOTATOR-02-EDGE-PREVIEW-REPAIR acceptance
+
+- This is **code-only** on an isolated Draft PR to the PDF experiment branch;
+  no private book, private GT, OCR, parser, Windows runner or sync was invoked.
+- The Node test uses an injected synthetic PDF.js runtime to check physical
+  pages (22/107/192), page-count rejection, stale async reads, close/destroy,
+  bounded pixels, corrupt file fallback and no private error-text reflection.
+  It is **not a real Microsoft Edge acceptance test**.
+- The test also passes a synthetic actual `NormalizedOutput` object through
+  `src/schema.ts` Zod parsing and the browser candidate adapter, including
+  OCR nullability. This is not authorization to read a private normalized.json.
+- To open the annotator in the approved local worktree after **separately
+  authorized merge and pinned Git-only synchronization**, ensure isolated
+  dependencies are installed with `npm ci --ignore-scripts` inside
+  `tools/pdf-parser-benchmark`, then manually start the existing server.
+  Never run `npm run bench`, OCR, parser executables or self-hosted runner
+  changes as part of this workflow.
+- Edge re-test: load the approved filename mapping by file picker, select
+  the **full original** for RB-PDF-11, confirm the 22/107/192 source pages
+  display with no blocked iframe; repeat 73/145/261 and 51/127/379 with
+  their corresponding originals. Inspect Chinese progress/error states.
+  Deliberately pick an incorrect three-page subset, close during loading,
+  switch pages quickly, re-open another permitted book, try an invalid synthetic
+  PDF and test any oversized PDF only with **synthetic data**.
+- Chrome re-test: repeat the same navigation and disposal flow. Inspect
+  browser network activity to confirm no outbound PDF/file transfer, while
+  same-origin fixed module/worker loads are permitted. Verify candidate text
+  remains invisible until independent GT export and explicit seal.
+- On any mismatch, stop, keep the Draft PR open, and record **only non-private**
+  error codes and synthetic repro details. Do not treat a rendered page, a
+  parser OCR flag or a machine comparison as quality-scored human Ground Truth.
