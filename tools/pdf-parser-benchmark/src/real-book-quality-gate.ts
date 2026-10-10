@@ -14,6 +14,8 @@ import { parseBenchmarkResult, parseNormalizedOutput } from "./schema.js";
  */
 export const BENCHMARK_HEAD = "56c0100043345085a4df35e995d40f4f50a7f9d2";
 export const SOURCE_RUN_ID = 38026320680;
+/** Metadata-only report digest attested by independent Actions #38029075853. */
+export const SOURCE_REPORT_SHA256 = "e4f4a7b04adfaa484e3538921647127225057b9fdcf0015234fcd8f454b08f76";
 export const SOURCE_START_NS = BigInt(Date.parse("2026-10-10T05:05:29Z")) * 1_000_000n;
 export const SOURCE_END_NS = BigInt(Date.parse("2026-10-10T05:05:59Z")) * 1_000_000n;
 export const PAGES: Record<string, { source: string; pages: number[] }> = {
@@ -156,7 +158,9 @@ export async function regradePrivateNativeEvidence(root = DATA_ROOT): Promise<Pr
   const sourceStat = await lstat(sourceFile);
   if (sourceStat.mtimeMs < Number(SOURCE_START_NS / 1_000_000n) - 10000 ||
       sourceStat.mtimeMs > Number(SOURCE_END_NS / 1_000_000n) + 10000) refuse("SOURCE_REPORT_MTIME_INVALID");
-  const original = parsePrivateJson(await boundedFile(sourceFile, reportDir, 131072)) as Record<string, unknown>;
+  const originalBytes = await boundedFile(sourceFile, reportDir, 131072);
+  if (sha(originalBytes) !== SOURCE_REPORT_SHA256) refuse("PINNED_REPORT_SHA_MISMATCH");
+  const original = parsePrivateJson(originalBytes) as Record<string, unknown>;
   const manifest = parsePrivateJson(await boundedFile(join(manifests, "fixtures.manifest.json"), manifests, 1048576));
   const identities = identityRows(manifest);
   if (!original || original.schema !== "acs-real-book-model-comparison-v1" || original.status !== "BASELINE_COMPLETE_WITH_EXPECTED_REJECTIONS" ||
