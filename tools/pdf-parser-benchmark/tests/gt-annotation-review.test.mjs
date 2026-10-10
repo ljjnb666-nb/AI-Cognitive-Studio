@@ -169,6 +169,8 @@ describe("annotator-02 static and HTTP privacy barrier", () => {
       expect(cross.status).toBe(404);
       expect(index.headers.get("content-security-policy")).toContain("frame-src 'none'");
       expect(index.headers.get("content-security-policy")).toContain("worker-src 'self'");
+      expect(index.headers.get("content-security-policy")).toContain("font-src blob: data:");
+      expect(index.headers.get("content-security-policy")).toContain("img-src blob: data:");
       expect(index.headers.get("content-security-policy")).toContain("connect-src 'none'");
       const html=await index.text();
       expect(html).not.toContain("<iframe");
@@ -230,7 +232,7 @@ describe("02 Edge preview repair — offline, synthetic browser rendering contra
     expect(v.canvas.hidden).toBe(false);
     expect(v.canvas.width*v.canvas.height).toBeLessThanOrEqual(MAX_CANVAS_PIXELS);
     expect(v.lib.getDocument.mock.calls[0][0]).toMatchObject({
-      isEvalSupported:false,enableXfa:false,disableAutoFetch:true,disableRange:true,
+      isEvalSupported:false,enableXfa:false,useWasm:false,disableAutoFetch:true,disableRange:true,
     });
     expect(v.lib.getDocument.mock.calls[0][0].data).toBeInstanceOf(Uint8Array);
     await v.viewer.go(107);
@@ -246,6 +248,8 @@ describe("02 Edge preview repair — offline, synthetic browser rendering contra
     await v.viewer.open({...v.file,size:MAX_INLINE_PDF_BYTES+1,
       arrayBuffer:() => {throw Error("must not read bytes");}},22);
     expect(v.statuses.at(-1).kind).toBe("external");
+    await v.viewer.go(192);
+    expect(v.statuses.at(-1).message).toContain("192");
     expect(v.lib.getDocument).not.toHaveBeenCalled();
     await v.viewer.open(v.file,107);
     expect(v.statuses.at(-1).kind).toBe("error");
