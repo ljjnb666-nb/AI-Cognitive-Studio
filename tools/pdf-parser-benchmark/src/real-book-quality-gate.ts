@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { readFile, lstat, readdir, open } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile, lstat, readdir, open, rename, rm } from "node:fs/promises";
 import { join, resolve, sep, relative } from "node:path";
 import { z } from "zod";
 import { DATA_ROOT, FIXTURES_ROOT, OUTPUTS_ROOT, REPORTS_ROOT } from "./filesystem-guard.js";
@@ -226,12 +226,20 @@ export async function regradePrivateNativeEvidence(root = DATA_ROOT): Promise<Pr
 export async function writePrivateQualityReport(report: PrivateQualitySummary): Promise<void> {
   const stat = await lstat(REPORTS_ROOT);
   if (!stat.isDirectory() || stat.isSymbolicLink()) refuse("REPORT_ROOT_INVALID");
-  const output = join(REPORTS_ROOT, "real-book-quality-" + Date.now() + "-" + process.pid + ".json");
-  const fh = await open(output, "wx", 0o600);
+  const id = Date.now() + "-" + process.pid + "-" + randomUUID();
+  const output = join(REPORTS_ROOT, "real-book-quality-" + id + ".json");
+  const staging = join(REPORTS_ROOT, ".real-book-quality-" + id + ".json.part");
+  const fh = await open(staging, "wx", 0o600);
   try {
     await fh.writeFile(JSON.stringify(report, null, 2) + "\n", "utf8");
     await fh.sync();
   } finally {
     await fh.close();
+  }
+  try {
+    await rename(staging, output);
+  } catch {
+    await rm(staging, { force: true }).catch(() => undefined);
+    refuse("PRIVATE_QUALITY_PERSIST_FAILED");
   }
 }
