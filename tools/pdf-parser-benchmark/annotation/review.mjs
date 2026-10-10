@@ -136,19 +136,37 @@ export function comparePage(seal, rawDraft, candidate, pageIndex) {
   for (let i=n-1;i>=0;i--) for (let j=m-1;j>=0;j--) {
     table[i][j] = a[i] === b[j] ? 1+table[i+1][j+1] : Math.max(table[i+1][j],table[i][j+1]);
   }
+  // Preserve exact anchors, then pair *unmatched* intervals by position for
+  // side-by-side transcription checks. Paired text is NOT a verified semantic
+  // alignment and is never assigned an error metric.
+  const anchors = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { anchors.push([i,j]); i++; j++; }
+    else if (table[i+1][j] >= table[i][j+1]) i++;
+    else j++;
+  }
+  anchors.push([n,m]); // sentinel
   const rows = [];
-  let i=0,j=0;
-  while(i<n || j<m){
-    if(i<n && j<m && a[i]===b[j]){
-      rows.push({status:"一致（仅文本）",humanId:human[i].id,humanText:human[i].text,
-        candidateOrdinal:machine[j].ordinal,candidateText:machine[j].text,kind:machine[j].kind});i++;j++;
-    }else if(i<n && (j===m || table[i+1][j]>=table[i][j+1])){
-      rows.push({status:"人工有／候选未对齐",humanId:human[i].id,humanText:human[i].text,
-        candidateOrdinal:null,candidateText:"",kind:null});i++;
-    }else {
-      rows.push({status:"候选有／人工未对齐",humanId:null,humanText:"",
-        candidateOrdinal:machine[j].ordinal,candidateText:machine[j].text,kind:machine[j].kind});j++;
+  let fromHuman = 0, fromMachine = 0;
+  const row = (status, humanIndex, machineIndex) => ({
+    status,
+    humanId: humanIndex === null ? null : human[humanIndex].id,
+    humanText: humanIndex === null ? "" : human[humanIndex].text,
+    candidateOrdinal: machineIndex === null ? null : machine[machineIndex].ordinal,
+    candidateText: machineIndex === null ? "" : machine[machineIndex].text,
+    kind: machineIndex === null ? null : machine[machineIndex].kind,
+  });
+  for (const [atHuman,atMachine] of anchors) {
+    const gap = Math.max(atHuman-fromHuman,atMachine-fromMachine);
+    for (let delta=0;delta<gap;delta++) {
+      const hi = fromHuman+delta < atHuman ? fromHuman+delta : null;
+      const mi = fromMachine+delta < atMachine ? fromMachine+delta : null;
+      rows.push(row(hi===null ? "候选有／人工未对齐" :
+        mi===null ? "人工有／候选未对齐" : "文字不同／待人工核对", hi, mi));
     }
+    if (atHuman < n && atMachine < m) rows.push(row("一致（仅文本）",atHuman,atMachine));
+    fromHuman=atHuman+1;fromMachine=atMachine+1;
   }
   return {pageIndex,sourcePage:FIXTURES[seal.fixtureId].originals[pageIndex],rows,
     note:"仅按 NFKC + 去空白匹配，不代表准确率或审核完成。顺序、未识别文本与 OCR 仍需逐段人工判断。"};
