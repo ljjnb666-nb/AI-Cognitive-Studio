@@ -10,7 +10,7 @@ export const MAX_CANVAS_SIDE = 4096;
 export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
   let epoch = 0, pageEpoch = 0;
   let document = null, loadingTask = null, renderTask = null, renderedPage = null;
-  let requestedPage = null;
+  let requestedPage = null, externalOnly = false;
   const current = token => token === epoch;
   const emit = (kind, message) => onStatus({ kind, message });
   const destroy = value => { if (value) void Promise.resolve(value.destroy()).catch(() => {}); };
@@ -21,7 +21,7 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
   };
 
   function clear() {
-    epoch++; pageEpoch++; requestedPage = null;
+    epoch++; pageEpoch++; requestedPage = null; externalOnly = false;
     if (renderTask) { renderTask.cancel(); void renderTask.promise.catch(() => {}); }
     renderTask = null;
     // pdf.js owns all decoded pages and buffers. Do not retain the File.
@@ -47,7 +47,10 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
     renderTask = null;
     if (renderedPage) { try { renderedPage.cleanup(); } catch {} renderedPage = null; }
     resetCanvas();
-    if (!document) return;
+    if (!document) {
+      if (externalOnly) emit("external", "内存保护：请用系统 PDF 阅读器跳转原书物理第 " + physicalPage + " 页。");
+      return;
+    }
     if (!Number.isInteger(physicalPage) || physicalPage < 1 || physicalPage > document.numPages) {
       emit("error", "原书没有物理第 " + physicalPage + " 页，请核对是否选择了完整原书；可使用系统 PDF 阅读器。");
       return;
@@ -88,6 +91,7 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
     requestedPage = physicalPage;
     const token = epoch;
     if (file.size > MAX_INLINE_PDF_BYTES) {
+      externalOnly = true;
       emit("external", "文件超过本机内嵌预览的 64 MB 内存保护上限；请使用系统 PDF 阅读器跳转物理第 " +
         physicalPage + " 页。");
       return;
@@ -99,7 +103,7 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
       const bytes = new Uint8Array(await file.arrayBuffer());
       if (!current(token)) return;
       loadingTask = pdfjs.getDocument({
-        data: bytes, isEvalSupported: false, enableXfa: false, useSystemFonts: false,
+        data: bytes, isEvalSupported: false, enableXfa: false, useWasm: false, useSystemFonts: false,
         disableAutoFetch: true, disableStream: true, disableRange: true,
       });
       const loaded = await loadingTask.promise;
