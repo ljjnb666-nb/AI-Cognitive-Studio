@@ -70,7 +70,7 @@ allowed for a user-selected PDF. No third-party assets.
    fields/GT export. A changed draft fails the pure snapshot assertion.
    Only now does the page show exact normalized per-block alignment:
    `一致（仅文本）`, `人工有／候选未对齐`,
-   `候选有／人工未对齐`. Neither mismatch nor equality is a quality score.
+   `候选有／人工未对齐`, or `文字不同／待人工核对`. Non-exact blocks are paired by position between exact anchors for readability, **not** asserted equivalent. Neither mismatch nor equality is a quality score.
    The UI never copies machine candidate text into the GT editor.
    This is a **session-level workflow safeguard**, not a tamper-proof human
    independence attestation. Refreshing/resetting or using another browser
