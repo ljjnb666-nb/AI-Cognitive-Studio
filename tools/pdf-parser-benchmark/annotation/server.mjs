@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTENT_SECURITY_POLICY =
   "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; " +
-  "img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'self'; " +
+  "img-src blob: data:; font-src blob: data:; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'self'; " +
   "form-action 'none'; base-uri 'none'";
 const ALLOWED_FILES = Object.freeze({
   "/": ["index.html", "text/html; charset=utf-8"],
