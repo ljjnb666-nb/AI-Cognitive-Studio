@@ -55,12 +55,13 @@ describe("offline human GT authoring — purely synthetic", () => {
     expect(gt.normalizationPolicy).toBe("NFKC + remove whitespace");
     expect(gt.blocks.map(b => b.id)).toEqual(Array.from({ length: gt.blocks.length }, (_, i) => "B" + (i + 1)));
     expect(gt.blocks.map(b => b.page)).toEqual([0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2]);
-    expect(gt.text).toBe("章节甲\n第一段正文测试。\n项目一\n项目二\n图注释\n末尾文字");
+    expect(gt.text).toBe("章节甲\n第一段正文测试。\n项目一\n项目二\n演示表\n名称 数值\n甲 1\n图注释\na+b=c\n末尾文字");
     expect(gt.ocrRequiredPages).toEqual([1]);
     expect(gt.ocrKeyPhrases).toEqual([{ page: 1, phrase: "项目一" }]);
     expect(gt.tables).toEqual([{ page: 1, rows: 2, cols: 2, cells: [["名称", "数值"], ["甲", "1"]] }]);
     expect(gt.lists).toEqual([{ page: 1, ordered: true, items: ["项目一", "项目二"] }]);
     expect(gt.formulas).toEqual([{ page: 2, display: true, text: "a+b=c" }]);
+    expect(gt.blocks.filter(b => b.role === "table").map(b => b.text)).toEqual(["演示表\n名称 数值\n甲 1"]);
     expect(gt.headings).toEqual([{ page: 0, text: "章节甲" }]);
     expect(gt.noise).toEqual([{ kind: "header", text: "重复页眉" }, { kind: "footer", text: "重复页脚" }]);
   });
