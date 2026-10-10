@@ -320,6 +320,120 @@ $("draft-file").addEventListener("change", async event => {
     else localError(new AnnotationError("FILE_READ_FAILED"));
   }
 });
+
+// 02: browser-only private references. Never persist mapping, PDF bytes,
+// normalized candidate text, a comparison, or an object URL.
+function releasePdf() {
+  if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+  sourceUrl = null; sourceFixtureId = null;
+  $("pdf-frame").removeAttribute("src");
+  $("pdf-view").hidden = true;
+  $("pdf-status").textContent = "未打开原书 PDF。";
+}
+function renderReferences() {
+  $("book-title").textContent = bookLabel(mapping, draft.fixtureId);
+  const page = draft.pages[activePage];
+  $("preview-page").textContent = String(page.originalPhysicalPage);
+  const canPreview = Boolean(sourceUrl) && sourceFixtureId === draft.fixtureId;
+  $("pdf-view").hidden = !canPreview;
+  if (canPreview) {
+    const intended = sourceUrl + "#page=" + page.originalPhysicalPage + "&view=FitH";
+    if ($("pdf-frame").getAttribute("src") !== intended) $("pdf-frame").setAttribute("src", intended);
+  }
+  const picker = $("candidate-choice");
+  picker.replaceChildren();
+  const empty = node("option", "", candidates.length ? "请选择一份已有候选" : "尚未导入");
+  empty.value = ""; picker.append(empty);
+  for (const [i, candidate] of candidates.entries()) {
+    const opt = node("option", "", candidate.parser + " · " + candidate.mode + " · " + (i+1));
+    opt.value = String(i); picker.append(opt);
+  }
+  picker.value = selectedCandidate >= 0 ? String(selectedCandidate) : "";
+  const selected = candidates[selectedCandidate];
+  $("candidate-status").textContent = selected
+    ? selected.parser + " / " + selected.version + "；" + selected.ocrLabel +
+      (selected.engine ? "（引擎：" + selected.engine + "）" : "") +
+      "。缺少块级页码：" + selected.unknownBindings + "；文件内容未独立验真。"
+    : "未选择候选。仅接受当前三页子集的 normalized.json，导入不会解锁机器文字。";
+  $("blind-status").textContent = sealed
+    ? "当前人工 GT 已冻结；机器对照只读，不生成准确率或双人复核声明。"
+    : "盲标阶段：机器候选文字隐藏。请先导出人工 GT 候选，再冻结。";
+  $("reveal-candidate").disabled = Boolean(sealed);
+  $("comparison").hidden = !sealed;
+  if (!sealed) { $("comparison-rows").replaceChildren(); return; }
+  if (!selected) {
+    $("comparison-context").textContent = "请选择同一样本的机器候选以查看本页对照。";
+    $("comparison-rows").replaceChildren(); return;
+  }
+  try {
+    const diff = comparePage(sealed, draft, selected, activePage);
+    $("comparison-context").textContent = "原书物理页 " + diff.sourcePage +
+      " · " + selected.parser + " " + selected.mode + " · " + diff.note;
+    const host = $("comparison-rows"); host.replaceChildren();
+    if (!diff.rows.length) host.append(node("p","empty","本页双方均无可对照的文字。"));
+    for (const row of diff.rows) {
+      const panel = node("article","comparison-row");
+      panel.append(node("strong","difference-status",row.status));
+      const columns = node("div","comparison-columns");
+      const human = node("div","comparison-cell");
+      human.append(node("small","","人工 GT " + (row.humanId??"（无此段）")),node("pre","",row.humanText));
+      const machine = node("div","comparison-cell");
+      machine.append(node("small","","机器候选 " + (row.candidateOrdinal??"（无此段）") +
+        (row.kind ? " · " + row.kind : "")),node("pre","",row.candidateText));
+      columns.append(human,machine);panel.append(columns);host.append(panel);
+    }
+  } catch (error) { localError(error); $("comparison-rows").replaceChildren(); }
+}
+$("load-book-map").addEventListener("click", () => $("book-map-file").click());
+$("book-map-file").addEventListener("change", async event => {
+  const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
+  try {
+    if (file.size > MAX_SELECTION_BYTES) throw new AnnotationError("DRAFT_TOO_LARGE");
+    mapping = parseBookSelection(JSON.parse(await file.text()));
+    $("map-status").textContent = "仅此标签页加载了 3 本原书的文件名；不会保存到 GT JSON。";
+    renderReferences();
+  } catch (error) { localError(error); }
+});
+$("load-source-pdf").addEventListener("click", () => $("source-pdf-file").click());
+$("source-pdf-file").addEventListener("change", async event => {
+  const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
+  try {
+    if (file.size > MAX_PDF_BYTES) throw new AnnotationError("SOURCE_PDF_SIZE_INVALID");
+    pdfPreviewEligibility(file, draft.fixtureId, mapping);
+    if (!(await file.slice(0,8).text()).startsWith("%PDF-")) throw new AnnotationError("SOURCE_PDF_HEADER_INVALID");
+    releasePdf(); sourceUrl = URL.createObjectURL(file); sourceFixtureId = draft.fixtureId;
+    $("pdf-status").textContent = "已选择本机 PDF " + file.name +
+      "；仅文件名、大小和 PDF 头通过检查，SHA 尚未验证。";
+    renderReferences();
+  } catch (error) { localError(error); }
+});
+$("clear-source-pdf").addEventListener("click", () => { releasePdf(); renderReferences(); });
+$("load-candidate").addEventListener("click", () => $("candidate-file").click());
+$("candidate-file").addEventListener("change", async event => {
+  const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
+  try {
+    if (file.size > MAX_CANDIDATE_BYTES) throw new AnnotationError("CANDIDATE_TOO_LARGE");
+    const candidate = parseNormalizedCandidate(JSON.parse(await file.text()), draft.fixtureId);
+    if (candidates.length === 4) throw new AnnotationError("CANDIDATE_TOO_LARGE");
+    candidates.push(candidate); selectedCandidate = candidates.length - 1;
+    renderReferences(); setNotice("候选仅载入浏览器内存，尚未独立验真；人工 GT 必须先冻结。");
+  } catch (error) { localError(error); }
+});
+$("candidate-choice").addEventListener("change", event => {
+  selectedCandidate = event.target.value === "" ? -1 : Number(event.target.value);
+  renderReferences();
+});
+$("reveal-candidate").addEventListener("click", () => {
+  try {
+    if (!gtExported || !candidates[selectedCandidate]) throw new AnnotationError("BLIND_GT_SEAL_REQUIRED");
+    const snapshot = sealBlindDraft(draft);
+    if (!window.confirm("请确认：已独立依据原书完成标注，且 GT 候选 JSON 已保存。揭示机器输出后本标签页禁止修改或重新导出该份 GT。继续？")) return;
+    sealed = snapshot; exposedFixtures.add(draft.fixtureId);
+    renderPage();
+    setNotice("盲标 GT 已冻结，可以对照机器候选。机器输出不能反向写入 GT；还需两位真实复核者独立复核。", true);
+  } catch (error) { localError(error); }
+});
+
 window.addEventListener("beforeunload", event => {
   if (dirty) { event.preventDefault(); event.returnValue = ""; }
 });
