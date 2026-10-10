@@ -103,6 +103,11 @@ describe("offline human GT authoring — purely synthetic", () => {
     wrongOCR.pages[1].ocrRequired = false;
     blockCode(wrongOCR, "OCR_PAGE_NOT_SELECTED");
   });
+  it("preserves genuinely empty first and last table cells (no TSV trimming)", () => {
+    const d = fillSynthetic();
+    d.pages[1].blocks[2].tableTsv = "\tB\nA\t\n";
+    expect(buildGroundTruth(d).tables[0].cells).toEqual([["", "B"], ["A", ""]]);
+  });
   it("rejects ragged TSV and empty formula/list-item fields", () => {
     const d = fillSynthetic();
     d.pages[1].blocks[2].tableTsv = "A\tB\nC";
