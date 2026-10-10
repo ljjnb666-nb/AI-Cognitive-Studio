@@ -35,8 +35,8 @@ jobs:
           $wt = Join-Path $root 'AI-Cognitive-Studio-pdf-parser-benchmark'
           $allowedUntracked = '?? .mimosa/'
           $expectedBranch = 'codex/pdf-parser-benchmark'
-          $expectedLocal = '7033ba83f7387d4daa7424eb25d384d40a860b78'
-          $expectedTarget = '56c0100043345085a4df35e995d40f4f50a7f9d2'
+          $expectedLocal = '56c0100043345085a4df35e995d40f4f50a7f9d2'
+          $expectedTarget = 'a473ea65ca14a7d8804a5b4d6062f6b644c627c2'
           $allowedRemote = @(
             'https://github.com/ljjnb666-nb/AI-Cognitive-Studio.git',
             'https://github.com/ljjnb666-nb/AI-Cognitive-Studio',
