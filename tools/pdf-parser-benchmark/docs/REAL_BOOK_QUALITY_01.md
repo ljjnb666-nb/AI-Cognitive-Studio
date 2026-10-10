@@ -36,6 +36,12 @@ For each `RB-PDF-11`, `RB-PDF-12` and `RB-PDF-13` create:
    heading/list/table/formula/figure data, OCR-required pages, and noise.
    Unsupported or not-present evidence must not be invented. Never construct
    GT by copying PDF.js/LiteParse output, nor use an LLM to guess GT.
+   **Consistency gate:** each of the three subset pages must have at least one
+   substantive GT block (a figure/table/formula suffices for an image-only
+   page); canonical prose must contain every prose/heading/list/caption/footnote
+   block and every key marker. `ocrRequired` must match the presence of
+   unique `ocrRequiredPages`. Missing-page or internally contradictory
+   annotations are blocked, not scored.
 2. `fixtures/<ID>.ground-truth.review.json` with schema
    `acs-real-book-human-ground-truth-review-v1`.
    Use the same SHA-256 as the exact GT bytes; source/subset hashes must match
@@ -96,6 +102,8 @@ OCR text on scanned pages.
   to the manifest source/subset SHA and page map. Missing/rejected => BLOCKED.
 - **G3 evidence fidelity:** for the four accepted runs, `result.json` and
   `normalized.json` must be complete and coherent with the pinned matrix
+  including exact PDF.js/LiteParse engine identity, default parser mode,
+  ordered subset-page indices 0/1/2 and nonconflicting block-page ownership
   (`runId`, input SHA, parser mode, fixture, cold run, exit status, 3 pages).
   No parser re-execution or overwriting any old evidence.
 - **G4 v2 evaluator:** all four runs must produce `EVALUATED` reports via
