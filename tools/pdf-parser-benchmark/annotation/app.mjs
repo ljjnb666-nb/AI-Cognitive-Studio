@@ -299,8 +299,10 @@ $("export-gt").addEventListener("click", async () => {
   try {
     const candidate = buildGroundTruth(draft);
     if (!window.confirm("导出的是人工标注候选文件，不是已复核证据。确认已经从原书人工录入，并另行安排两人独立复核？")) return;
-    const saved = await saveObject(candidate, draft.fixtureId + ".ground-truth.json");
-    if (saved) { gtExported = true; setNotice("已请求保存 GT 候选。请确认文件实际落盘，然后可冻结并对照候选；该文件仍非人工复核证据。", true); }
+    const pendingFixture = draft.fixtureId;
+    const pendingSnapshot = JSON.stringify(parseDraft(draft));
+    const saved = await saveObject(candidate, pendingFixture + ".ground-truth.json");
+    if (saved && draft.fixtureId === pendingFixture && JSON.stringify(parseDraft(draft)) === pendingSnapshot && !sealed) { gtExported = true; setNotice("已请求保存 GT 候选。请确认文件实际落盘，然后可冻结并对照候选；该文件仍非人工复核证据。", true); }
   } catch (error) { localError(error); }
 });
 $("import-draft").addEventListener("click", () => $("draft-file").click());
@@ -399,9 +401,11 @@ $("source-pdf-file").addEventListener("change", async event => {
   const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
   try {
     if (file.size > MAX_PDF_BYTES) throw new AnnotationError("SOURCE_PDF_SIZE_INVALID");
-    pdfPreviewEligibility(file, draft.fixtureId, mapping);
+    const pendingFixture = draft.fixtureId;
+    pdfPreviewEligibility(file, pendingFixture, mapping);
     if (!(await file.slice(0,8).text()).startsWith("%PDF-")) throw new AnnotationError("SOURCE_PDF_HEADER_INVALID");
-    releasePdf(); sourceUrl = URL.createObjectURL(file); sourceFixtureId = draft.fixtureId;
+    if (draft.fixtureId !== pendingFixture) throw new AnnotationError("SOURCE_PDF_FILENAME_MISMATCH");
+    releasePdf(); sourceUrl = URL.createObjectURL(file); sourceFixtureId = pendingFixture;
     $("pdf-status").textContent = "已选择本机 PDF " + file.name +
       "；仅文件名、大小和 PDF 头通过检查，SHA 尚未验证。";
     renderReferences();
@@ -413,7 +417,9 @@ $("candidate-file").addEventListener("change", async event => {
   const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
   try {
     if (file.size > MAX_CANDIDATE_BYTES) throw new AnnotationError("CANDIDATE_TOO_LARGE");
-    const candidate = parseNormalizedCandidate(JSON.parse(await file.text()), draft.fixtureId);
+    const pendingFixture = draft.fixtureId;
+    const candidate = parseNormalizedCandidate(JSON.parse(await file.text()), pendingFixture);
+    if (draft.fixtureId !== pendingFixture) throw new AnnotationError("CANDIDATE_SCHEMA_OR_FIXTURE_MISMATCH");
     if (candidates.length === 4) throw new AnnotationError("CANDIDATE_TOO_LARGE");
     candidates.push(candidate); selectedCandidate = candidates.length - 1;
     renderReferences(); setNotice("候选仅载入浏览器内存，尚未独立验真；人工 GT 必须先冻结。");
