@@ -1,0 +1,132 @@
+# Trusted default-branch-only manual audit; NEVER run pull-request code on this host.
+# Scope: read-only Git metadata, host resources, and existence-only prerequisites.
+name: ACS Windows PDF benchmark preflight
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: acs-windows-pdf-preflight
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: \${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Read-only Git ownership and resource gates
+        shell: powershell
+        env:
+          GIT_OPTIONAL_LOCKS: '0'
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_NO_REPLACE_OBJECTS: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_RUNNER_REQUIRED' }
+
+          # Keep this PowerShell 5.1 script ASCII-only. See PR #82.
+          $rootName = -join ([char[]]@(0x6240, 0x6709, 0x9879, 0x76EE))
+          $root = Join-Path (Join-Path 'D:\' $rootName) '90_Worktrees'
+          $worktree = Join-Path $root 'AI-Cognitive-Studio-pdf-parser-benchmark'
+          $dataRoot = 'D:\ai-cognitive-pdf-benchmark-data'
+          $expectedBranch = 'codex/pdf-parser-benchmark'
+          # Exact remote experimental HEAD reviewed when this workflow was authored.
+          # Do not fetch/pull/reset on the host. Update this pin by reviewed PR only.
+          $expectedHead = '56c0100043345085a4df35e995d40f4f50a7f9d2'
+
+          if (-not (Test-Path -LiteralPath $worktree -PathType Container)) {
+            throw 'PDF_WORKTREE_NOT_FOUND'
+          }
+
+          $gitCmd = Get-Command 'git.exe' -ErrorAction Stop
+          if ($gitCmd.CommandType -ne 'Application') { throw 'GIT_EXECUTABLE_REQUIRED' }
+          $gitPath = $gitCmd.Source
+
+          function Invoke-ReadOnlyGit([string[]]$GitArguments) {
+            # Prevent optional index writes and Git fsmonitor execution.
+            $lines = @(& $gitPath --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -c core.quotePath=true -C $worktree @GitArguments 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw 'LOCAL_GIT_READ_FAILED' }
+            return $lines
+          }
+
+          $branchResult = @(Invoke-ReadOnlyGit -GitArguments @('symbolic-ref', '--quiet', '--short', 'HEAD'))
+          $headResult = @(Invoke-ReadOnlyGit -GitArguments @('rev-parse', '--verify', 'HEAD'))
+          if ($branchResult.Count -ne 1 -or $headResult.Count -ne 1) {
+            throw 'LOCAL_GIT_IDENTITY_AMBIGUOUS'
+          }
+          $localBranch = [string]$branchResult[0]
+          $localHead = [string]$headResult[0]
+          if ($localHead -notmatch '^[0-9a-f]{40}$') { throw 'LOCAL_GIT_HEAD_INVALID' }
+
+          # Never emit paths or file names: report aggregate dirty flags only.
+          $gitStatus = @(Invoke-ReadOnlyGit -GitArguments @('status', '--porcelain=v1', '--untracked-files=normal'))
+          $trackedDirty = @($gitStatus | Where-Object { $_ -notmatch '^\?\?' }).Count -gt 0
+          $untrackedPresent = @($gitStatus | Where-Object { $_ -match '^\?\?' }).Count -gt 0
+
+          function Free-GiB([string]$Letter) {
+            try {
+              $drive = [System.IO.DriveInfo]::new($Letter)
+              if (-not $drive.IsReady) { return $null }
+              return [Math]::Round(($drive.AvailableFreeSpace / 1GB), 2)
+            }
+            catch { return $null }
+          }
+
+          $cFree = Free-GiB 'C'
+          $dFree = Free-GiB 'D'
+          $ramFree = $null
+          try {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            if ($null -ne $os -and $null -ne $os.FreePhysicalMemory) {
+              $ramFree = [Math]::Round(([double]$os.FreePhysicalMemory / 1048576.0), 2)
+            }
+          }
+          catch { $ramFree = $null }
+
+          # Disk thresholds come from the benchmark contract. A 4-GiB RAM
+          # model gate is reported but does not authorize an OCR/model run.
+          $diskOK = ($null -ne $cFree -and $cFree -ge 15 -and $null -ne $dFree -and $dFree -ge 30)
+          $modelRamOK = ($null -ne $ramFree -and $ramFree -ge 4)
+          $nodeReady = ($null -ne (Get-Command 'node.exe' -ErrorAction SilentlyContinue))
+          $pythonReady = ($null -ne (Get-Command 'python.exe' -ErrorAction SilentlyContinue))
+          $benchDir = Join-Path $worktree 'tools\pdf-parser-benchmark'
+          $tsxReady = (Test-Path -LiteralPath (Join-Path $benchDir 'node_modules\.bin\tsx.cmd') -PathType Leaf)
+          $manifestReady = (Test-Path -LiteralPath (Join-Path $dataRoot 'fixtures\fixtures.manifest.json') -PathType Leaf)
+          $dataRootReady = (Test-Path -LiteralPath $dataRoot -PathType Container)
+
+          $branchOK = ($localBranch -ceq $expectedBranch)
+          $headOK = ($localHead -ceq $expectedHead)
+          $gitClean = (-not $trackedDirty -and -not $untrackedPresent)
+          $nativeCandidate = ($branchOK -and $headOK -and $gitClean -and $diskOK -and $nodeReady -and $pythonReady -and $tsxReady -and $dataRootReady -and $manifestReady)
+
+          # No private PDF, manifest, filenames, model files or logs are opened.
+          $summary = [ordered]@{
+            policy = 'ACS_PDF_LOCAL_PREFLIGHT_V1'
+            runner_os = 'Windows'
+            expected_head = $expectedHead
+            local_head = $localHead
+            branch_matches = $branchOK
+            head_matches = $headOK
+            tracked_clean = (-not $trackedDirty)
+            untracked_absent = (-not $untrackedPresent)
+            c_free_gib = $cFree
+            d_free_gib = $dFree
+            disk_threshold_pass = $diskOK
+            ram_free_gib = $ramFree
+            model_ram_4g_pass = $modelRamOK
+            node_present = $nodeReady
+            python_present = $pythonReady
+            tsx_installed = $tsxReady
+            data_root_present = $dataRootReady
+            fixture_manifest_present = $manifestReady
+            native_candidate_only = $nativeCandidate
+          }
+          Write-Output ('ACS_PDF_PREFLIGHT=' + ($summary | ConvertTo-Json -Compress))
+
+          # Fail closed on stale Git, local edits, missing deps or disk limits.
+          # A native candidate is NOT authorization to execute private books.
+          if (-not $nativeCandidate) { throw 'ACS_PDF_PREFLIGHT_BLOCKED' }
+          Write-Output 'ACS_PDF_PREFLIGHT_PASS_NATIVE_CANDIDATE_ONLY'
