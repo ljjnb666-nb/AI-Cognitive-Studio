@@ -11,6 +11,7 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
   let epoch = 0, pageEpoch = 0;
   let document = null, loadingTask = null, renderTask = null, renderedPage = null;
   let requestedPage = null, externalOnly = false;
+  let previousRenderSettled = Promise.resolve();
   const current = token => token === epoch;
   const emit = (kind, message) => onStatus({ kind, message });
   const destroy = value => { if (value) void Promise.resolve(value.destroy()).catch(() => {}); };
@@ -22,7 +23,11 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
 
   function clear() {
     epoch++; pageEpoch++; requestedPage = null; externalOnly = false;
-    if (renderTask) { renderTask.cancel(); void renderTask.promise.catch(() => {}); }
+    if (renderTask) {
+      const prior = renderTask;
+      prior.cancel();
+      previousRenderSettled = Promise.resolve(prior.promise).catch(() => {});
+    }
     renderTask = null;
     // pdf.js owns all decoded pages and buffers. Do not retain the File.
     if (renderedPage) { try { renderedPage.cleanup(); } catch {} }
@@ -38,6 +43,10 @@ export function createPdfPageViewer({ canvas, onStatus, loadPdfJs }) {
   async function go(physicalPage) {
     requestedPage = physicalPage;
     const token = epoch, turn = ++pageEpoch;
+    // clear() may have detached a previous canvas renderer before it settles.
+    // Await its cancellation before sharing the canvas with the next book.
+    await previousRenderSettled;
+    if (!current(token) || turn !== pageEpoch) return;
     const previous = renderTask;
     if (previous) {
       previous.cancel();
