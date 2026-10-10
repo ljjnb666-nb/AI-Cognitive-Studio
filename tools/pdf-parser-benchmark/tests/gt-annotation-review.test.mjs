@@ -116,7 +116,7 @@ describe("annotator-02 offline reference contracts — synthetic only", () => {
     const result=comparePage(seal,d,c,0);
     expect(result.sourcePage).toBe(22);
     expect(result.rows.map(x=>x.status)).toEqual(["一致（仅文本）","一致（仅文本）","候选有／人工未对齐"]);
-    expect(comparePage(seal,d,c,1).rows.map(x=>x.status)).toEqual(["人工有／候选未对齐","候选有／人工未对齐"]);
+    expect(comparePage(seal,d,c,1).rows.map(x=>x.status)).toEqual(["文字不同／待人工核对"]);
     expect(comparePage(seal,d,c,2).sourcePage).toBe(192);
     expect(result.note).toMatch(/不代表准确率/);
   });
@@ -125,8 +125,10 @@ describe("annotator-02 offline reference contracts — synthetic only", () => {
     const d=draft(),seal=sealBlindDraft(d),c=parseNormalizedCandidate(n,"RB-PDF-11");
     const rows=comparePage(seal,d,c,0).rows;
     expect(rows.filter(x=>x.status==="一致（仅文本）")).toHaveLength(1);
-    expect(rows.some(x=>x.status==="人工有／候选未对齐")).toBe(true);
+    expect(rows.some(x=>x.status==="文字不同／待人工核对")).toBe(true);
     expect(rows.some(x=>x.status==="候选有／人工未对齐")).toBe(true);
+    const paired=rows.find(x=>x.status==="文字不同／待人工核对");
+    expect([paired.humanText,paired.candidateText]).toEqual(["人工正文","人工正丈"]);
   });
   it("drops unknown untrusted candidate keys before presenting content", () => {
     const c=normalized();c.malicious={upload:"https://example.test/private"};
