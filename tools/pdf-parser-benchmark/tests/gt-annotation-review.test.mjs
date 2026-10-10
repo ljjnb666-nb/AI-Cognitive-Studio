@@ -283,6 +283,27 @@ describe("02 Edge preview repair — offline, synthetic browser rendering contra
     expect(v.lib.getDocument).not.toHaveBeenCalled();
     expect(v.canvas.hidden).toBe(true);
   });
+  it("does not reuse a canvas across books until a canceled render has settled", async () => {
+    const v=syntheticViewer();
+    let releaseRender;
+    v.doc.getPage.mockImplementationOnce(async p => {
+      v.visited.push(p);
+      return {getViewport:({scale}) => ({width:400*scale,height:400*scale}),
+        cleanup:vi.fn(),render:() => ({
+          promise:new Promise(resolve=>{releaseRender=resolve;}),cancel:vi.fn(),
+        })};
+    });
+    const first=v.viewer.open(v.file,22);
+    for(let i=0;i<20 && !releaseRender;i++) await Promise.resolve();
+    expect(releaseRender).toBeTypeOf("function");
+    const second=v.viewer.open(v.file,107);
+    for(let i=0;i<10;i++) await Promise.resolve();
+    expect(v.visited).toEqual([22]); // next book must not paint the busy canvas
+    releaseRender();
+    await Promise.all([first,second]);
+    expect(v.visited).toEqual([22,107]);
+    expect(v.statuses.at(-1).kind).toBe("ready");
+  });
   it("damaged PDF fails visibly with external reader fallback, without leaking private content", async () => {
     const v=syntheticViewer();
     v.lib.getDocument.mockImplementationOnce(() => ({
