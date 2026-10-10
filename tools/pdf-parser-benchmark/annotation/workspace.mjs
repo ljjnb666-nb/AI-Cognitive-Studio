@@ -19,7 +19,7 @@ export const ROLE_LABELS = Object.freeze({
   footnote: "脚注", formula: "公式", header: "页眉",
   footer: "页脚", page_number: "页码",
 });
-const BODY_ROLES = new Set(["heading", "paragraph", "list_item", "caption", "footnote"]);
+const BODY_ROLES = new Set(["heading", "paragraph", "list_item", "table", "caption", "footnote", "formula"]);
 const NOISE_ROLES = new Set(["header", "footer", "page_number"]);
 const CONTENT_ROLES = new Set(["heading", "paragraph", "list_item", "table", "figure", "caption", "footnote", "formula"]);
 const MAX_BLOCKS_PER_PAGE = 500;
@@ -138,19 +138,25 @@ export function buildGroundTruth(rawDraft) {
     let currentList = null;
     for (const block of page.blocks) {
       // B1...Bn are assigned strictly in manual page/reading order.
+      // Preserve table-cell text and formula transcription in the canonical
+      // text, matching the repository's synthetic GT builder. A figure's
+      // human image description is structural evidence, not invented prose.
+      let bodyText = block.text;
+      if (block.role === "table") {
+        const grid = tableGrid(block.tableTsv);
+        const recoveredCells = grid.map(row => row.join(" ")).join("\n");
+        bodyText = [block.text.trim(), recoveredCells].filter(Boolean).join("\n");
+        gt.tables.push({ page: page.index, rows: grid.length, cols: grid[0].length, cells: grid });
+      }
       const id = "B" + (gt.blocks.length + 1);
-      gt.blocks.push({ id, page: page.index, column: block.column, role: block.role, text: block.text });
-      if (BODY_ROLES.has(block.role) && block.text.trim()) canonical.push(block.text);
+      gt.blocks.push({ id, page: page.index, column: block.column, role: block.role, text: bodyText });
+      if (BODY_ROLES.has(block.role) && bodyText.trim()) canonical.push(bodyText);
       if (block.role === "heading" && block.text.trim()) {
         gt.headings.push({ page: page.index, text: block.text });
       }
       if (block.role === "formula") {
         if (!block.text.trim()) fail("FORMULA_TEXT_REQUIRED");
         gt.formulas.push({ page: page.index, display: block.display, text: block.text });
-      }
-      if (block.role === "table") {
-        const cells = tableGrid(block.tableTsv);
-        gt.tables.push({ page: page.index, rows: cells.length, cols: cells[0].length, cells });
       }
       if (block.role === "list_item") {
         if (!block.text.trim()) fail("LIST_ITEM_TEXT_REQUIRED");
