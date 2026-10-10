@@ -53,8 +53,11 @@ REAL-BOOK-QUALITY-01 gate is authorized and passed.
    figures, captions, footnotes, formulas, page header/footer/number noise.
    Reorder blocks with the ↑ and ↓ buttons. Set columns where relevant.
    A table's `tableTsv` uses real TABs between cells and newlines between
-   rows, with equal columns per row. Formula blocks need canonical textual
-   transcriptions. Figure-only pages may include an image block with no prose;
+   rows, with equal columns per row; **leading/trailing empty cells are retained**.
+   Table-cell and formula text are included in canonical expected text, just
+   like the existing synthetic v2 benchmark contract. Figure descriptions
+   remain structure-only rather than invented source prose. Formula blocks
+   need canonical textual transcriptions. Figure-only pages may include an image block with no prose;
    **do not invent OCR text**. Include manually transcribed markers and OCR
    phrases only if they exist in the original.
 7. Save `<fixture>.ground-truth.draft.json` frequently. This is a *draft
