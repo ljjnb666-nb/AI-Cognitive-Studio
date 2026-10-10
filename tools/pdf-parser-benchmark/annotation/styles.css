@@ -84,3 +84,24 @@ input[type="checkbox"] { accent-color:var(--accent); width:16px; height:16px; }
 .boundary p { font-size:11px; color:var(--muted); }
 @media (max-width:1130px) { .layout { grid-template-columns:200px minmax(0,1fr); } .inspector { grid-column:1 / -1; border-left:0; border-top:1px solid var(--line); display:block; } .sidebar { padding:22px 14px; } .workarea { padding:28px; } }
 @media (max-width:650px) { .topbar { padding:12px 16px; height:auto; gap:8px; } .privacy-pill { font-size:10px; } .layout { display:block; } .sidebar { border-right:0; border-bottom:1px solid var(--line); } .page-nav { grid-template-columns:repeat(3,1fr); } .page-item { padding:8px; } .sidebar-tip { display:none; } .workarea { padding:20px 15px; } .page-heading { flex-direction:column; } h1 { font-size:23px; } .panel { padding:15px; } }
+
+/* 02 local-only source reference and sealed diff panes */
+[hidden] { display:none !important; }
+.book-title { overflow-wrap:anywhere; padding:9px 11px; background:#f2f9f6; border:1px solid #d9e8e3; border-radius:8px; font-size:12px; color:#236358; }
+.local-documents code { overflow-wrap:anywhere; font-size:11px; }
+.local-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.local-grid > div { min-width:0; border:1px solid var(--line); padding:15px; border-radius:12px; background:#fcfefd; }
+.local-grid strong { font-size:12px; }
+.local-grid .button-light,.local-grid .button-primary { margin:4px 6px 4px 0; }
+.local-grid .small { overflow-wrap:anywhere; }
+.compare-tools { margin-top:16px; }
+.pdf-view { padding:15px; margin-top:16px; border:1px solid var(--line); border-radius:12px; }
+.pdf-view iframe { border:1px solid var(--line); background:#edf2f0; display:block; width:100%; min-height:360px; height:52vh; }
+.comparison-rows { display:grid; gap:12px; }
+.comparison-row { border:1px solid var(--line); border-radius:10px; padding:12px; background:#fcfefd; min-width:0; }
+.difference-status { display:block; color:#485f5b; margin-bottom:8px; font-size:12px; }
+.comparison-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.comparison-cell { min-width:0; border:1px solid #d6e8e1; border-radius:9px; background:white; padding:10px; }
+.comparison-cell small { display:block; color:var(--muted); margin-bottom:5px; }
+.comparison-cell pre { font:12px/1.65 "Microsoft YaHei","PingFang SC",sans-serif; white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
+@media (max-width:850px) { .local-grid,.comparison-columns { grid-template-columns:1fr; } }
