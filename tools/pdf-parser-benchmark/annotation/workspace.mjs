@@ -99,9 +99,12 @@ export function parseDraft(raw) {
   };
 }
 function tableGrid(tsv) {
-  const nonempty = tsv.trim();
-  if (!nonempty) fail("TABLE_CELLS_REQUIRED");
-  const grid = nonempty.replace(/\r\n/gu, "\n").split("\n").map(row => row.split("\t"));
+  if (!tsv.trim()) fail("TABLE_CELLS_REQUIRED");
+  // Do not trim the TSV payload: leading/trailing tabs represent actual
+  // blank edge cells, as required by GtTable's empty-string cell semantics.
+  const rows = tsv.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n").split("\n");
+  if (rows.at(-1) === "") rows.pop(); // Ignore only a final newline.
+  const grid = rows.map(row => row.split("\t"));
   if (grid.length > 50 || grid.some(r => r.length > 30 || r.some(cell => cell.length > 1000))) fail("TABLE_GRID_TOO_LARGE");
   const cols = grid[0]?.length;
   if (!cols || grid.some(row => row.length !== cols)) fail("TABLE_GRID_NOT_RECTANGULAR");
