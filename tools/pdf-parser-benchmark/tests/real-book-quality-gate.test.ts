@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { GroundTruth } from "../src/ground-truth.js";
-import { PrivateQualityGateError, validateHumanReview } from "../src/real-book-quality-gate.js";
+import { PrivateQualityGateError, validateHumanReview, assertNativeParserIdentity, assertSubsetPageOwnership } from "../src/real-book-quality-gate.js";
 
 const sourceSha = "a".repeat(64);
 const subsetSha = "b".repeat(64);
@@ -87,6 +87,43 @@ describe("REAL-BOOK-QUALITY-01 human annotation release gate (synthetic only)", 
     rejected("GROUND_TRUTH_PAGE_OUT_OF_RANGE", review(), out);
     const duplicate = groundTruth(); duplicate.blocks[1]!.id = "B1";
     rejected("GROUND_TRUTH_BLOCK_IDS_DUPLICATE", review(), duplicate);
+  });
+  it("rejects missing content annotation for any sampled physical page", () => {
+    const gt = groundTruth();
+    gt.blocks.splice(1, 1);
+    rejected("GROUND_TRUTH_PAGE_CONTENT_MISSING", review(), gt);
+  });
+  it("rejects human GT text/ordered blocks that contradict one another", () => {
+    const gt = groundTruth();
+    gt.blocks[2]!.text = "different sentence never in canonical text";
+    rejected("GROUND_TRUTH_TEXT_BLOCK_CONFLICT", review(), gt);
+    const wrongMarker = groundTruth();
+    wrongMarker.keyMarkers = ["not-in-human-transcript"];
+    rejected("GROUND_TRUTH_MARKER_CONFLICT", review(), wrongMarker);
+  });
+  it("rejects inconsistent OCR-required flags and duplicate OCR pages", () => {
+    const gt = groundTruth();
+    gt.ocrRequired = false;
+    gt.ocrRequiredPages = [0];
+    rejected("GROUND_TRUTH_OCR_CONFLICT", review(), gt);
+    const duplicate = groundTruth();
+    duplicate.ocrRequired = true;
+    duplicate.ocrRequiredPages = [0, 0];
+    rejected("GROUND_TRUTH_OCR_CONFLICT", review(), duplicate);
+  });
+  it("allows verified native parser identities, not swapped engines or modes", () => {
+    expect(() => assertNativeParserIdentity("pdfjs", "pdfjs-isolated", "pdfjs-isolated", "default", "default")).not.toThrow();
+    expect(() => assertNativeParserIdentity("liteparse", "liteparse", "liteparse", "default", "default")).not.toThrow();
+    expect(() => assertNativeParserIdentity("pdfjs", "liteparse", "pdfjs-isolated", "default", "default")).toThrow("PARSER_EVIDENCE_IDENTITY_MISMATCH");
+    expect(() => assertNativeParserIdentity("liteparse", "liteparse", "liteparse", "ocr", "default")).toThrow("PARSER_EVIDENCE_IDENTITY_MISMATCH");
+  });
+  it("blocks swapped subset-page ownership and mismatched block bindings", () => {
+    const sample = () => [0, 1, 2].map(pageIndex => ({ pageIndex, blocks: [{ pageIndex }] }));
+    expect(() => assertSubsetPageOwnership({ pages: sample() })).not.toThrow();
+    const swapped = sample(); swapped[0]!.pageIndex = 1;
+    expect(() => assertSubsetPageOwnership({ pages: swapped })).toThrow("SUBSET_PAGE_INDEX_INVALID");
+    const mismatched = sample(); mismatched[1]!.blocks[0]!.pageIndex = 2;
+    expect(() => assertSubsetPageOwnership({ pages: mismatched })).toThrow("BLOCK_PAGE_BINDING_CONFLICT");
   });
   it("rejects invented reviewer approvals and incomplete source checks", () => {
     const r = review(); (r.reviewers as Array<Record<string, unknown>>)[0]!.confirmedAgainstOriginal = false;
