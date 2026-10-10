@@ -8,7 +8,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: acs-windows-pdf-preflight
+  group: acs-windows-pdf-local-ownership
   cancel-in-progress: false
 
 jobs:
