@@ -9,6 +9,7 @@ import {
   MAX_CANDIDATE_BYTES,
 } from "../annotation/review.mjs";
 import { startAnnotationServer } from "../annotation/server.mjs";
+import { parseNormalizedOutput } from "../src/schema.ts";
 
 const source = id => ({ id, format:"pdf", sha256:"a".repeat(64), bytes:8192, pages:450,
   archive_member:"bookcase/" + id + "-原书.pdf" });
@@ -78,6 +79,24 @@ describe("annotator-02 offline reference contracts — synthetic only", () => {
     expect(c.pages[0].blocks[2].text).toBe("机器多出");
     expect(c).not.toHaveProperty("score");
     expect(c).not.toHaveProperty("reviewers");
+  });
+  it("imports a synthetic actual NormalizedOutput Zod contract, including full OCR fields", () => {
+    const actual=normalized();
+    actual.ocr={...actual.ocr,model:null,modelRevision:null,language:"zh",
+      pagesOcrProcessed:2,pagesRequiringOcr:2};
+    for (const page of actual.pages) {
+      for (const block of page.blocks) {
+        block.bbox=null; block.confidence=null; block.sourceMethod="ocr";
+      }
+    }
+    const persisted=parseNormalizedOutput(actual);
+    const candidate=parseNormalizedCandidate(persisted,"RB-PDF-11");
+    expect(candidate.pages.map(p=>p.index)).toEqual([0,1,2]);
+    expect(candidate.ocrLabel).toMatch(/上游声明 OCR 已启用/);
+    for (const parserName of ["pdfjs-isolated","liteparse","docling","mineru"]) {
+      persisted.parser.name=parserName;
+      expect(parseNormalizedCandidate(persisted,"RB-PDF-11").parser).toBe(parserName);
+    }
   });
   it("rejects wrong fixture IDs, missing page, duplicate page or cross-page blocks", () => {
     throwsCode(()=>parseNormalizedCandidate(normalized(),"RB-PDF-12"),"CANDIDATE_SCHEMA_OR_FIXTURE_MISMATCH");
