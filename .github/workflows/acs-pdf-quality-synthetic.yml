@@ -48,6 +48,7 @@ jobs:
         working-directory: tools/pdf-parser-benchmark
         run: |
           node --check annotation/workspace.mjs
+          node --check annotation/review.mjs
           node --check annotation/app.mjs
           node --check annotation/server.mjs
           node --check scripts/serve_gt_annotation.mjs
