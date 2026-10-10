@@ -1,0 +1,164 @@
+# Trusted, manual-only execution of the pinned local native 3-page real-book matrix.
+# NEVER check out PR code, publish private book content, or install models.
+name: ACS Windows PDF native real-book matrix
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+
+jobs:
+  native:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 40
+    steps:
+      - name: Validate pinned worktree and execute offline native-only comparison
+        shell: powershell
+        env:
+          GIT_OPTIONAL_LOCKS: '0'
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_NO_REPLACE_OBJECTS: '1'
+          GIT_LFS_SKIP_SMUDGE: '1'
+          NPM_CONFIG_OFFLINE: 'true'
+          NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+          NPM_CONFIG_AUDIT: 'false'
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          HF_DATASETS_OFFLINE: '1'
+          MODELSCOPE_OFFLINE: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_REQUIRED' }
+
+          # ASCII-only for Windows PowerShell 5.1 (CJK path fix from PR #82).
+          $rootName = -join ([char[]]@(0x6240, 0x6709, 0x9879, 0x76EE))
+          $wt = Join-Path (Join-Path (Join-Path 'D:\' $rootName) '90_Worktrees') 'AI-Cognitive-Studio-pdf-parser-benchmark'
+          $data = 'D:\ai-cognitive-pdf-benchmark-data'
+          $reports = Join-Path $data 'reports'
+          $scratch = Join-Path $data 'temp'
+          $bench = Join-Path $wt 'tools\pdf-parser-benchmark'
+          $script = Join-Path $bench 'scripts\run_real_book_matrix.py'
+          $tsx = Join-Path $bench 'node_modules\.bin\tsx.cmd'
+          $manifest = Join-Path $data 'fixtures\fixtures.manifest.json'
+          $branch = 'codex/pdf-parser-benchmark'
+          $head = '56c0100043345085a4df35e995d40f4f50a7f9d2'
+          $allowedUntracked = '?? .mimosa/'
+          $approvedOrigin = @(
+            'https://github.com/ljjnb666-nb/AI-Cognitive-Studio.git',
+            'https://github.com/ljjnb666-nb/AI-Cognitive-Studio',
+            'git@github.com:ljjnb666-nb/AI-Cognitive-Studio.git',
+            'git@github.com:ljjnb666-nb/AI-Cognitive-Studio'
+          )
+
+          foreach ($directory in @($wt, $data, $reports, $scratch, $bench)) {
+            if (-not (Test-Path -LiteralPath $directory -PathType Container)) { throw 'PRIVATE_BENCHMARK_DIRECTORY_NOT_READY' }
+            $item = Get-Item -LiteralPath $directory -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_REPARSE_DIRECTORY' }
+          }
+          foreach ($file in @($script, $tsx, $manifest)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'BENCHMARK_PREREQUISITE_MISSING' }
+          }
+          $gitCmd = Get-Command 'git.exe' -ErrorAction Stop
+          $pythonCmd = Get-Command 'python.exe' -ErrorAction Stop
+          if ($gitCmd.CommandType -ne 'Application' -or $pythonCmd.CommandType -ne 'Application') {
+            throw 'NATIVE_EXECUTABLE_NOT_FOUND'
+          }
+          $git = $gitCmd.Source
+          $python = $pythonCmd.Source
+
+          function Git-Read([string[]]$Arguments) {
+            $result = @(& $git --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt @Arguments 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw 'GIT_READ_FAILED' }
+            return $result
+          }
+          function Assert-Source {
+            $actualBranch = @(Git-Read -Arguments @('symbolic-ref', '--quiet', '--short', 'HEAD'))
+            $actualHead = @(Git-Read -Arguments @('rev-parse', '--verify', 'HEAD'))
+            $origin = @(Git-Read -Arguments @('remote', 'get-url', 'origin'))
+            if ($actualBranch.Count -ne 1 -or $actualBranch[0] -cne $branch -or
+                $actualHead.Count -ne 1 -or $actualHead[0] -cne $head -or
+                $origin.Count -ne 1 -or $origin[0] -cnotin $approvedOrigin) {
+              throw 'PINNED_BENCHMARK_SOURCE_MISMATCH'
+            }
+            $status = @(Git-Read -Arguments @('status', '--porcelain=v1', '--untracked-files=normal'))
+            if (@($status | Where-Object { $_ -cne $allowedUntracked }).Count -ne 0) {
+              throw 'UNEXPECTED_GIT_WORKTREE_CHANGES'
+            }
+            return ($status -ccontains $allowedUntracked)
+          }
+          function Assert-Resources {
+            $c = [System.IO.DriveInfo]::new('C')
+            $d = [System.IO.DriveInfo]::new('D')
+            if (-not $c.IsReady -or -not $d.IsReady -or
+                $c.AvailableFreeSpace -lt 15GB -or $d.AvailableFreeSpace -lt 30GB) {
+              throw 'DISK_RESOURCE_GATE_FAILED'
+            }
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            if ($null -eq $os -or [double]$os.FreePhysicalMemory -lt (2 * 1024 * 1024)) {
+              throw 'NATIVE_RAM_RESOURCE_GATE_FAILED'
+            }
+          }
+
+          $mimosaBefore = Assert-Source
+          if ($mimosaBefore) {
+            $mimosaPath = Join-Path $wt '.mimosa'
+            if (-not (Test-Path -LiteralPath $mimosaPath -PathType Container)) { throw 'MIMOSA_MISSING' }
+            $mimosa = Get-Item -LiteralPath $mimosaPath -Force -ErrorAction Stop
+            if (($mimosa.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'MIMOSA_REPARSE_POINT_BLOCKED'
+            }
+          }
+          Assert-Resources
+
+          # All subprocess outputs remain ONLY under the private D: reports root.
+          # Do not print or upload raw stdout/stderr, parser artifacts or PDFs.
+          $env:BENCH_DATA_ROOT = $data
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          $suffix = [guid]::NewGuid().ToString('N')
+          $stdoutPath = Join-Path $reports ("native-github-" + $suffix + ".stdout.log")
+          $stderrPath = Join-Path $reports ("native-github-" + $suffix + ".stderr.log")
+          if ((Test-Path -LiteralPath $stdoutPath) -or (Test-Path -LiteralPath $stderrPath)) {
+            throw 'PRIVATE_OUTPUT_NAME_COLLISION'
+          }
+
+          $clock = [System.Diagnostics.Stopwatch]::StartNew()
+          $exitCode = -1
+          try {
+            $process = Start-Process -FilePath $python -ArgumentList @($script, '--suite', 'native') -WorkingDirectory $bench -NoNewWindow -PassThru -Wait -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+            $exitCode = [int]$process.ExitCode
+          }
+          catch {
+            # Never print exception content: command stderr may contain book paths.
+            throw 'PRIVATE_NATIVE_PROCESS_LAUNCH_FAILED'
+          }
+          finally {
+            $clock.Stop()
+          }
+
+          $mimosaAfter = Assert-Source
+          if ($mimosaBefore -ne $mimosaAfter) { throw 'MIMOSA_PRESERVATION_FAILED' }
+          Assert-Resources
+
+          # A zero exit from the pinned Python runner requires all 6 jobs
+          # accepted (including expected PDF.js OCR capability rejections).
+          $passed = ($exitCode -eq 0)
+          $safeStatus = if ($passed) { 'NATIVE_EXECUTION_PASS_ONLY' } else { 'NATIVE_INCOMPLETE_OR_FAILED' }
+          Write-Output ('ACS_PDF_NATIVE_RESULT=' + ([ordered]@{
+            policy = 'ACS_PDF_NATIVE_V1'
+            status = $safeStatus
+            expected_head = $head
+            planned_cases = 6
+            completed_cases = if ($passed) { 6 } else { $null }
+            elapsed_seconds = [Math]::Round($clock.Elapsed.TotalSeconds, 2)
+            local_private_logs_only = $true
+            model_modes_executed = $false
+            mimosa_preserved = $true
+          } | ConvertTo-Json -Compress))
+          if (-not $passed) { throw 'ACS_PDF_NATIVE_EXECUTION_FAILED_SEE_PRIVATE_LOCAL_LOGS' }
+          Write-Output 'ACS_PDF_NATIVE_PASS'
