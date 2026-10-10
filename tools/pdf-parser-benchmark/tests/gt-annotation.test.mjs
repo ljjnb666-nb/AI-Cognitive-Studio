@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import {
   DRAFT_SCHEMA, FIXTURES, createDraft, makeEmptyBlock,
   parseDraft, buildGroundTruth, assessDraft, AnnotationError,
@@ -149,7 +150,21 @@ describe("local static server — no real private data", () => {
         expect((await fetch(new URL(uri, app.url))).status).toBe(404);
       }
       expect((await fetch(app.url, { method: "POST", body: "private text" })).status).toBe(404);
-      expect((await fetch(app.url, { headers: { Host: "evil.example.test" } })).status).toBe(403);
+      // Undici's fetch() may replace a caller-supplied Host with the URL host;
+      // send raw HTTP to assert our real DNS-rebinding guard.
+      const wrongHostStatus = await new Promise((resolve, reject) => {
+        const destination = new URL(app.url);
+        const req = httpRequest({
+          hostname: destination.hostname, port: Number(destination.port),
+          path: "/", method: "GET", headers: { Host: "evil.example.test" },
+        }, response => {
+          response.resume();
+          response.once("end", () => resolve(response.statusCode));
+        });
+        req.once("error", reject);
+        req.end();
+      });
+      expect(wrongHostStatus).toBe(403);
     } finally {
       await app.close();
     }
