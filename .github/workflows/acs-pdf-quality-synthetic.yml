@@ -44,6 +44,16 @@ jobs:
       - name: Human GT gate negative regression (synthetic data only)
         working-directory: tools/pdf-parser-benchmark
         run: ./node_modules/.bin/vitest run tests/real-book-quality-gate.test.ts
+      - name: Syntax check offline annotation app and local-only server
+        working-directory: tools/pdf-parser-benchmark
+        run: |
+          node --check annotation/workspace.mjs
+          node --check annotation/app.mjs
+          node --check annotation/server.mjs
+          node --check scripts/serve_gt_annotation.mjs
+      - name: Synthetic annotation schema and loopback guard tests
+        working-directory: tools/pdf-parser-benchmark
+        run: ./node_modules/.bin/vitest run tests/gt-annotation.test.mjs
       - name: CLI fails closed without local human GT (cloud has no private books)
         shell: bash
         working-directory: tools/pdf-parser-benchmark

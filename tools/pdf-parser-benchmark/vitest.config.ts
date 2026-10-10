@@ -2,7 +2,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.ts", "tests/gt-annotation.test.mjs"],
     testTimeout: 60_000,
     hookTimeout: 30_000,
     // Test files share one fixture/outputs data root — run sequentially so the

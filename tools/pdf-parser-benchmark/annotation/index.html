@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light">
+  <title>Ground Truth 本地人工标注台</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">知</span><div><strong>Ground Truth 人工标注台</strong><small>AI Cognitive Studio · PDF Benchmark</small></div></div>
+    <div class="privacy-pill"><span class="dot"></span>仅本机 · 离线 · 不上传原文</div>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="eyebrow">样本选择</div>
+      <label class="field-label" for="fixture">实验样本</label>
+      <select id="fixture" aria-label="实验样本">
+        <option value="RB-PDF-11">RB-PDF-11 · 中文正文</option>
+        <option value="RB-PDF-12">RB-PDF-12 · 混合扫描</option>
+        <option value="RB-PDF-13">RB-PDF-13 · 教材结构</option>
+      </select>
+      <div class="section-head"><span>逐页标注</span><span class="muted">共 3 页</span></div>
+      <nav id="page-nav" class="page-nav" aria-label="样本页面"></nav>
+      <div class="sidebar-tip">
+        <strong>物理页码不是子集索引</strong>
+        <p>请对照原书物理页。编辑器内部使用 0、1、2 索引，导出时自动绑定原书页码映射。</p>
+      </div>
+      <div class="sidebar-tip secondary">
+        <strong>人工标注 ≠ 人工复核</strong>
+        <p>这里不会生成“两名复核者已确认”的记录，也不会执行解析器、OCR 或评分。</p>
+      </div>
+    </aside>
+    <main class="workarea">
+      <div class="eyebrow">REAL-BOOK-GT-ANNOTATOR-01</div>
+      <div class="page-heading">
+        <div>
+          <h1 id="page-title">第 1 页 · 人工核对</h1>
+          <p class="subheading" id="page-subtitle">原书物理第 22 页 · 子集页码 0</p>
+        </div>
+        <span class="step-pill" id="page-status">待标注</span>
+      </div>
+      <section class="guide">
+        <strong>如何开始</strong>
+        <p>在你本机的 PDF 阅读器中打开原书，对照本页输入<strong>真实文字和结构</strong>。不要粘贴 PDF.js、LiteParse 或其他解析器输出作为标准答案。表格使用制表符（Tab）分列、换行分行。</p>
+      </section>
+      <section class="panel">
+        <div class="panel-title"><h2>页面属性</h2><small>依据原书判断</small></div>
+        <label class="check-row"><input type="checkbox" id="ocr-required"><span>本页是需要 OCR 的图像页 / 扫描页</span></label>
+        <label class="field-label" for="ocr-phrases">扫描页人工识别的关键短语（每行一条，可留空）</label>
+        <textarea id="ocr-phrases" rows="2" maxlength="20000" placeholder="仅从原书手动抄录，不能从解析结果推断"></textarea>
+      </section>
+      <section class="panel">
+        <div class="panel-title">
+          <div><h2>原书阅读顺序与内容块</h2><small>拖动替代：使用每个内容块的上移 / 下移按钮，顺序即 B1...Bn</small></div>
+          <span id="block-count" class="counter">0 块</span>
+        </div>
+        <div id="blocks" class="blocks" aria-live="polite"></div>
+        <div class="block-actions">
+          <button type="button" class="action-add" data-add="paragraph">＋ 正文</button>
+          <button type="button" class="action-add" data-add="heading">＋ 标题</button>
+          <button type="button" class="action-add" data-add="list_item">＋ 列表</button>
+          <button type="button" class="action-add" data-add="table">＋ 表格</button>
+          <button type="button" class="action-add" data-add="figure">＋ 图片</button>
+          <button type="button" class="action-add" data-add="formula">＋ 公式</button>
+          <button type="button" class="action-add" data-add="caption">＋ 图注</button>
+          <button type="button" class="action-add" data-add="footnote">＋ 脚注</button>
+          <button type="button" class="action-add" data-add="header">＋ 页眉</button>
+          <button type="button" class="action-add" data-add="footer">＋ 页脚</button>
+          <button type="button" class="action-add" data-add="page_number">＋ 页码</button>
+        </div>
+      </section>
+      <div class="page-footer">
+        <button id="previous" type="button" class="button-light">← 上一页</button>
+        <button id="next" type="button" class="button-primary">下一页 →</button>
+      </div>
+    </main>
+    <aside class="inspector">
+      <div class="eyebrow">人工标准答案设置</div>
+      <h2>导出前检查</h2>
+      <p class="small">这一侧的字段作用于整个三页子集，不代表已经人工复核或完成质量验收。</p>
+      <div class="field-group">
+        <label class="field-label" for="page-width">PDF 页面宽度（pt）</label>
+        <input type="number" id="page-width" min="0" max="20000" step="0.01" placeholder="例如 595.28">
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="page-height">PDF 页面高度（pt）</label>
+        <input type="number" id="page-height" min="0" max="20000" step="0.01" placeholder="例如 841.89">
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="markers">人工核对关键标记（每行一条）</label>
+        <textarea rows="5" id="markers" maxlength="20000" placeholder="只能输入确实存在于原书正文的短语"></textarea>
+      </div>
+      <div class="validation" id="validation" role="status" aria-live="polite">草稿尚未检查</div>
+      <div class="actions">
+        <button id="check" type="button" class="button-light wide">检查全部 3 页</button>
+        <button id="save-draft" type="button" class="button-light wide">保存私有草稿 JSON</button>
+        <button id="import-draft" type="button" class="button-light wide">导入已有草稿</button>
+        <button id="export-gt" type="button" class="button-primary wide">导出 GT 候选 JSON</button>
+        <input type="file" id="draft-file" accept=".json,application/json" hidden>
+      </div>
+      <p class="note">建议文件只保存在 <code>D:\ai-cognitive-pdf-benchmark-data\fixtures</code>。若浏览器使用默认下载目录，请手动移动到 D 盘。请勿提交、上传或粘贴私有 JSON 到 GitHub/聊天。</p>
+      <div class="boundary"><strong>安全边界</strong><p>页面不连接网络、不请求原书 PDF、不存浏览器本地存储。不保存时，刷新或关闭页面将丢失内存中的未导出修改。</p></div>
+    </aside>
+  </div>
+</body>
+</html>
