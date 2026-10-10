@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; media-src 'none'; object-src 'none'; frame-src blob:; form-action 'none'; base-uri 'none'">
   <meta name="referrer" content="no-referrer">
   <meta name="color-scheme" content="light">
-  <title>Ground Truth 本地人工标注台</title>
+  <title>Ground Truth 原书与 OCR 离线校对台</title>
   <link rel="stylesheet" href="./styles.css">
   <script type="module" src="./app.mjs"></script>
 </head>
@@ -24,6 +24,7 @@
         <option value="RB-PDF-12">RB-PDF-12 · 混合扫描</option>
         <option value="RB-PDF-13">RB-PDF-13 · 教材结构</option>
       </select>
+      <p id="book-title" class="book-title">RB-PDF-01（未导入本机书名映射）</p>
       <div class="section-head"><span>逐页标注</span><span class="muted">共 3 页</span></div>
       <nav id="page-nav" class="page-nav" aria-label="样本页面"></nav>
       <div class="sidebar-tip">
@@ -36,7 +37,7 @@
       </div>
     </aside>
     <main class="workarea">
-      <div class="eyebrow">REAL-BOOK-GT-ANNOTATOR-01</div>
+      <div class="eyebrow">REAL-BOOK-GT-ANNOTATOR-02 · 本地分阶段校对</div>
       <div class="page-heading">
         <div>
           <h1 id="page-title">第 1 页 · 人工核对</h1>
@@ -46,7 +47,49 @@
       </div>
       <section class="guide">
         <strong>如何开始</strong>
-        <p>在你本机的 PDF 阅读器中打开原书，对照本页输入<strong>真实文字和结构</strong>。不要粘贴 PDF.js、LiteParse 或其他解析器输出作为标准答案。表格使用制表符（Tab）分列、换行分行。</p>
+        <p>可在上方手动选择原书 PDF 进行本地预览；也可使用系统 PDF 阅读器。先<strong>独立</strong>对照原书输入<strong>真实文字和结构</strong>。不要粘贴 PDF.js、LiteParse、Docling 或 MinerU 输出作为标准答案。表格使用制表符（Tab）分列、换行分行。</p>
+      </section>
+      <section class="panel local-documents">
+        <div class="panel-title"><div><h2>本地原书与已有解析参考</h2><small>文件只在此浏览器标签页使用；不自动打开磁盘文件，不上传、不调用 OCR</small></div></div>
+        <div class="local-grid">
+          <div>
+            <strong>1. 本地书名映射</strong>
+            <p class="small">选择原始导入时的 <code>real_book_selection.json</code>，只读取三本书的显示名称与元数据。</p>
+            <button id="load-book-map" type="button" class="button-light">读取本机书名映射</button>
+            <input type="file" id="book-map-file" accept=".json,application/json" hidden>
+            <p id="map-status" class="small">未加载，匿名编号仍有效。</p>
+          </div>
+          <div>
+            <strong>2. 原书 PDF 页面预览</strong>
+            <p class="small">手动选择对应原书 PDF；文件名与大小受约束，预览不表示 SHA 已验真。</p>
+            <button id="load-source-pdf" type="button" class="button-light">选择本机原书 PDF</button>
+            <input type="file" id="source-pdf-file" accept=".pdf,application/pdf" hidden>
+            <button id="clear-source-pdf" type="button" class="button-light">关闭预览</button>
+            <p id="pdf-status" class="small">未打开原书 PDF。</p>
+          </div>
+        </div>
+        <div id="pdf-view" class="pdf-view" hidden>
+          <div class="panel-title"><h2>原书物理页 <span id="preview-page">22</span>（浏览器内置 PDF 阅读器）</h2></div>
+          <iframe id="pdf-frame" title="本机 PDF 原书页面预览" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
+          <p class="small">如果浏览器无法显示内置预览，请在系统 PDF 阅读器中按物理页码打开原书。本预览只用于人工参考，不代表已完成 SHA 核验。</p>
+        </div>
+        <div class="local-grid compare-tools">
+          <div>
+            <strong>3. 机器解析 / OCR 候选</strong>
+            <p class="small">从本机私有 outputs 中手动选择既有运行的 <code>normalized.json</code>，不执行新的解析。</p>
+            <button id="load-candidate" type="button" class="button-light">导入已有机器候选</button>
+            <input type="file" id="candidate-file" accept=".json,application/json" hidden>
+            <label for="candidate-choice" class="field-label">选择已导入的候选（最多 4 份）</label>
+            <select id="candidate-choice"><option value="">尚未导入</option></select>
+            <p id="candidate-status" class="small">机器候选不会自动写入人工标注。</p>
+          </div>
+          <div>
+            <strong>4. 独立标注冻结后揭示候选</strong>
+            <p class="small">先完成原书人工标注，并导出 GT 候选 JSON，然后冻结草稿。冻结后才能查看机器识别文字。</p>
+            <button id="reveal-candidate" type="button" class="button-primary">冻结当前 GT 并查看候选</button>
+            <p id="blind-status" class="small">盲标阶段：机器文字隐藏。进入对照后本标签页不允许继续编辑该份 GT。</p>
+          </div>
+        </div>
       </section>
       <section class="panel">
         <div class="panel-title"><h2>页面属性</h2><small>依据原书判断</small></div>
@@ -73,6 +116,11 @@
           <button type="button" class="action-add" data-add="footer">＋ 页脚</button>
           <button type="button" class="action-add" data-add="page_number">＋ 页码</button>
         </div>
+      </section>
+      <section id="comparison" class="panel" hidden>
+        <div class="panel-title"><div><h2>冻结后逐段对照</h2><small>仅精确文本对齐；不自动评分、不反向修改人工 GT</small></div></div>
+        <p id="comparison-context" class="small"></p>
+        <div id="comparison-rows" class="comparison-rows"></div>
       </section>
       <div class="page-footer">
         <button id="previous" type="button" class="button-light">← 上一页</button>
@@ -104,7 +152,7 @@
         <input type="file" id="draft-file" accept=".json,application/json" hidden>
       </div>
       <p class="note">建议文件只保存在 <code>D:\ai-cognitive-pdf-benchmark-data\fixtures</code>。若浏览器使用默认下载目录，请手动移动到 D 盘。请勿提交、上传或粘贴私有 JSON 到 GitHub/聊天。</p>
-      <div class="boundary"><strong>安全边界</strong><p>页面不连接网络、不请求原书 PDF、不存浏览器本地存储。不保存时，刷新或关闭页面将丢失内存中的未导出修改。</p></div>
+      <div class="boundary"><strong>安全边界</strong><p>页面不连接网络、不向服务器请求原书 PDF、不存浏览器本地存储。只有手动选择文件才会在浏览器中读取。不保存时，刷新或关闭页面将丢失内存中的未导出修改。</p></div>
     </aside>
   </div>
 </body>

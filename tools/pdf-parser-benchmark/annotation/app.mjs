@@ -2,6 +2,9 @@ import {
   ROLES, ROLE_LABELS, FIXTURES, MAX_DRAFT_BYTES, createDraft, makeEmptyBlock,
   parseDraft, assessDraft, buildGroundTruth, AnnotationError,
 } from "./workspace.mjs";
+import { MAX_CANDIDATE_BYTES, MAX_SELECTION_BYTES, MAX_PDF_BYTES, parseBookSelection,
+  parseNormalizedCandidate, bookLabel, pdfPreviewEligibility, sealBlindDraft, comparePage,
+} from "./review.mjs";
 
 // No fetch, XHR, WebSocket, storage, service worker, telemetry or external assets.
 // Only local human-entered fields; never paste untrusted text into innerHTML.
@@ -15,6 +18,10 @@ const node = (tag, className = "", text = "") => {
 let draft = createDraft("RB-PDF-11");
 let activePage = 0;
 let dirty = false;
+let mapping = null, sourceUrl = null, sourceFixtureId = null;
+let candidates = [], selectedCandidate = -1;
+let sealed = null, gtExported = false;
+const exposedFixtures = new Set();
 const contentRoles = new Set(["heading", "paragraph", "list_item", "table", "figure", "caption", "footnote", "formula"]);
 const labels = {
   DRAFT_SCHEMA_INVALID: "草稿格式或样本 ID 不正确",
@@ -40,6 +47,23 @@ const labels = {
   SAVE_CANCELLED: "已取消保存，未改动本地文件",
   SAVE_FAILED: "保存失败，可能没有获得文件系统权限",
   TOO_MANY_BLOCKS: "每页最多 500 个内容块",
+  BOOK_MAPPING_SCHEMA_INVALID: "书名映射格式无效",
+  BOOK_MAPPING_MEMBER_INVALID: "原书文件名不合法",
+  BOOK_MAPPING_SOURCE_INVALID: "原书编号、SHA 或字节长度冲突",
+  BOOK_MAPPING_INCOMPLETE: "必须包含三本原书的映射",
+  BOOK_MAPPING_PAGE_OUT_OF_RANGE: "原书页数与固定抽样页码冲突",
+  CANDIDATE_SCHEMA_OR_FIXTURE_MISMATCH: "候选 JSON 格式或样本编号不匹配",
+  CANDIDATE_PAGE_LAYOUT_INVALID: "候选必须包含子集索引 0、1、2 三页",
+  CANDIDATE_PAGE_BINDING_INVALID: "候选内容块页码与所在页面不一致",
+  CANDIDATE_OCR_PROVENANCE_INVALID: "候选 OCR 来源字段不符合约定",
+  CANDIDATE_TOO_LARGE: "候选内容过大",
+  COMPARE_TOO_MANY_BLOCKS: "逐段对照内容块数量超限",
+  BLIND_GT_SEAL_REQUIRED: "请先独立导出 GT 并冻结，不得提前查看机器文字",
+  SOURCE_PDF_SIZE_INVALID: "PDF 大小异常（至少 8 字节，最多 170 MB）",
+  SOURCE_PDF_FILENAME_MISMATCH: "原书文件名与当前样本编号不一致",
+  SOURCE_PDF_SIZE_MISMATCH: "本机 PDF 大小与导入映射不一致",
+  SOURCE_PDF_HEADER_INVALID: "所选文件没有 PDF 文件头",
+  PAGE_INDEX_INVALID: "页面索引非法",
 };
 
 function setNotice(value, positive = false) {
@@ -52,7 +76,9 @@ function localError(error) {
   setNotice(labels[code] ?? ("安全检查阻塞：" + code));
 }
 function markDirty() {
+  if (sealed) { setNotice("当前 GT 已冻结：不能在看过候选后修改原标注。请另起独立复核流程。"); return; }
   dirty = true;
+  gtExported = false;
   const status = assessDraft(draft);
   if (status.status === "READY_FOR_INDEPENDENT_REVIEW") {
     setNotice(status.message + "（" + status.blocks + " 个内容块）", true);
@@ -95,7 +121,7 @@ function labeledInput(label, element) {
 function checkbox(text, checked, update) {
   const l = node("label", "check-row");
   const c = node("input");
-  c.type = "checkbox"; c.checked = checked;
+  c.type = "checkbox"; c.checked = checked; c.disabled = Boolean(sealed);
   c.addEventListener("change", () => { update(c.checked); markDirty(); });
   l.append(c, node("span", "", text));
   return l;
@@ -112,6 +138,7 @@ function renderBlock(block, index) {
     role.append(opt);
   }
   role.value = block.role;
+  role.disabled = Boolean(sealed);
   role.addEventListener("change", () => { block.role = role.value; renderPage(); markDirty(); });
   top.append(role);
   const controls = node("div", "block-controls");
@@ -121,7 +148,7 @@ function renderBlock(block, index) {
     ["删除", () => { draft.pages[activePage].blocks.splice(index, 1); renderPage(); markDirty(); }, true, false],
   ]) {
     const b = node("button", "icon-action" + (isDanger ? " danger" : ""), label);
-    b.type = "button"; b.disabled = disabled;
+    b.type = "button"; b.disabled = disabled || Boolean(sealed);
     b.addEventListener("click", fn);
     controls.append(b);
   }
@@ -129,6 +156,7 @@ function renderBlock(block, index) {
   card.append(top);
   const input = node("textarea");
   input.rows = block.role === "paragraph" ? 4 : 2;
+  input.disabled = Boolean(sealed);
   input.maxLength = 100000;
   input.value = block.text;
   input.placeholder = block.role === "table" ? "表名/说明（可留空），单元格单独填写" :
@@ -141,6 +169,7 @@ function renderBlock(block, index) {
   const cLabel = node("label", "", "列号（留空为无分栏）");
   const col = node("input");
   col.type = "number"; col.min = "0"; col.max = "10";
+  col.disabled = Boolean(sealed);
   col.value = block.column === null ? "" : String(block.column);
   col.addEventListener("change", () => {
     const raw = col.value.trim();
@@ -155,6 +184,7 @@ function renderBlock(block, index) {
   if (block.role === "table") {
     const tsv = node("textarea");
     tsv.rows = 5; tsv.maxLength = 50000;
+    tsv.disabled = Boolean(sealed);
     tsv.placeholder = "列 A [Tab] 列 B\n数值 1 [Tab] 数值 2\n保持每行列数相同";
     tsv.value = block.tableTsv;
     tsv.addEventListener("input", () => { block.tableTsv = tsv.value; markDirty(); });
@@ -180,9 +210,15 @@ function renderPage() {
   blocks.replaceChildren();
   if (page.blocks.length === 0) blocks.append(node("p", "empty", "本页还没有内容块。请对照原书，从下方添加标题、正文、图像或表格。"));
   for (let i = 0; i < page.blocks.length; i++) blocks.append(renderBlock(page.blocks[i], i));
-  renderNav(); updatePageStatus();
+  for (const btn of document.querySelectorAll("[data-add]")) btn.disabled = Boolean(sealed);
+  for (const id of ["ocr-required","ocr-phrases","page-width","page-height","markers","import-draft","export-gt","save-draft"])
+    $(id).disabled = Boolean(sealed);
+  renderNav(); updatePageStatus(); renderReferences();
 }
 function afterDraftLoaded() {
+  sealed = null; gtExported = false;
+  candidates = []; selectedCandidate = -1;
+  releasePdf();
   $("fixture").value = draft.fixtureId;
   $("page-width").value = draft.pageSize.width || "";
   $("page-height").value = draft.pageSize.height || "";
@@ -205,11 +241,12 @@ async function saveObject(value, filename) {
       try { await stream.write(blob); await stream.close(); }
       catch (error) { await stream.abort().catch(() => {}); throw error; }
       setNotice("文件保存操作完成。请确认保存在 D 盘的私有 fixtures 目录，不要上传到 GitHub。", true);
+      return true;
     } catch (error) {
       if (error?.name === "AbortError") localError(new AnnotationError("SAVE_CANCELLED"));
       else localError(new AnnotationError("SAVE_FAILED"));
     }
-    return;
+    return false;
   }
   // Browser fallback. This may land in Downloads on C:. Never claim it is on D:.
   const url = URL.createObjectURL(blob);
@@ -219,6 +256,7 @@ async function saveObject(value, filename) {
   link.click(); link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1200);
   setNotice("已请求浏览器下载。请检查下载目录，并手动转移至 D 盘私有 fixtures；不要上传 JSON。");
+  return true;
 }
 
 $("fixture").addEventListener("change", event => {
@@ -226,6 +264,10 @@ $("fixture").addEventListener("change", event => {
   if (dirty && !window.confirm("切换样本会清除当前内存中未保存的内容。确定继续吗？")) {
     event.target.value = draft.fixtureId;
     return;
+  }
+  if (exposedFixtures.has(id)) {
+    setNotice("当前会话已经揭示过这本书的机器候选。为避免污染独立标注，请使用独立的人工复核会话。");
+    event.target.value = draft.fixtureId; return;
   }
   draft = createDraft(id); activePage = 0; dirty = false; afterDraftLoaded();
 });
@@ -253,11 +295,14 @@ $("save-draft").addEventListener("click", () => {
   try { void saveObject(parseDraft(draft), draft.fixtureId + ".ground-truth.draft.json"); }
   catch (error) { localError(error); }
 });
-$("export-gt").addEventListener("click", () => {
+$("export-gt").addEventListener("click", async () => {
   try {
     const candidate = buildGroundTruth(draft);
     if (!window.confirm("导出的是人工标注候选文件，不是已复核证据。确认已经从原书人工录入，并另行安排两人独立复核？")) return;
-    void saveObject(candidate, draft.fixtureId + ".ground-truth.json");
+    const pendingFixture = draft.fixtureId;
+    const pendingSnapshot = JSON.stringify(parseDraft(draft));
+    const saved = await saveObject(candidate, pendingFixture + ".ground-truth.json");
+    if (saved && draft.fixtureId === pendingFixture && JSON.stringify(parseDraft(draft)) === pendingSnapshot && !sealed) { gtExported = true; setNotice("已请求保存 GT 候选。请确认文件实际落盘，然后可冻结并对照候选；该文件仍非人工复核证据。", true); }
   } catch (error) { localError(error); }
 });
 $("import-draft").addEventListener("click", () => $("draft-file").click());
@@ -277,6 +322,124 @@ $("draft-file").addEventListener("change", async event => {
     else localError(new AnnotationError("FILE_READ_FAILED"));
   }
 });
+
+// 02: browser-only private references. Never persist mapping, PDF bytes,
+// normalized candidate text, a comparison, or an object URL.
+function releasePdf() {
+  if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+  sourceUrl = null; sourceFixtureId = null;
+  $("pdf-frame").removeAttribute("src");
+  $("pdf-view").hidden = true;
+  $("pdf-status").textContent = "未打开原书 PDF。";
+}
+function renderReferences() {
+  $("book-title").textContent = bookLabel(mapping, draft.fixtureId);
+  const page = draft.pages[activePage];
+  $("preview-page").textContent = String(page.originalPhysicalPage);
+  const canPreview = Boolean(sourceUrl) && sourceFixtureId === draft.fixtureId;
+  $("pdf-view").hidden = !canPreview;
+  if (canPreview) {
+    const intended = sourceUrl + "#page=" + page.originalPhysicalPage + "&view=FitH";
+    if ($("pdf-frame").getAttribute("src") !== intended) $("pdf-frame").setAttribute("src", intended);
+  }
+  const picker = $("candidate-choice");
+  picker.replaceChildren();
+  const empty = node("option", "", candidates.length ? "请选择一份已有候选" : "尚未导入");
+  empty.value = ""; picker.append(empty);
+  for (const [i, candidate] of candidates.entries()) {
+    const opt = node("option", "", candidate.parser + " · " + candidate.mode + " · " + (i+1));
+    opt.value = String(i); picker.append(opt);
+  }
+  picker.value = selectedCandidate >= 0 ? String(selectedCandidate) : "";
+  const selected = candidates[selectedCandidate];
+  $("candidate-status").textContent = selected
+    ? selected.parser + " / " + selected.version + "；" + selected.ocrLabel +
+      (selected.engine ? "（引擎：" + selected.engine + "）" : "") +
+      "。缺少块级页码：" + selected.unknownBindings + "；文件内容未独立验真。"
+    : "未选择候选。仅接受当前三页子集的 normalized.json，导入不会解锁机器文字。";
+  $("blind-status").textContent = sealed
+    ? "当前人工 GT 已冻结；机器对照只读，不生成准确率或双人复核声明。"
+    : "盲标阶段：机器候选文字隐藏。请先导出人工 GT 候选，再冻结。";
+  $("reveal-candidate").disabled = Boolean(sealed);
+  $("comparison").hidden = !sealed;
+  if (!sealed) { $("comparison-rows").replaceChildren(); return; }
+  if (!selected) {
+    $("comparison-context").textContent = "请选择同一样本的机器候选以查看本页对照。";
+    $("comparison-rows").replaceChildren(); return;
+  }
+  try {
+    const diff = comparePage(sealed, draft, selected, activePage);
+    $("comparison-context").textContent = "原书物理页 " + diff.sourcePage +
+      " · " + selected.parser + " " + selected.mode + " · " + diff.note;
+    const host = $("comparison-rows"); host.replaceChildren();
+    if (!diff.rows.length) host.append(node("p","empty","本页双方均无可对照的文字。"));
+    for (const row of diff.rows) {
+      const panel = node("article","comparison-row");
+      panel.append(node("strong","difference-status",row.status));
+      const columns = node("div","comparison-columns");
+      const human = node("div","comparison-cell");
+      human.append(node("small","","人工 GT " + (row.humanId??"（无此段）")),node("pre","",row.humanText));
+      const machine = node("div","comparison-cell");
+      machine.append(node("small","","机器候选 " + (row.candidateOrdinal??"（无此段）") +
+        (row.kind ? " · " + row.kind : "")),node("pre","",row.candidateText));
+      columns.append(human,machine);panel.append(columns);host.append(panel);
+    }
+  } catch (error) { localError(error); $("comparison-rows").replaceChildren(); }
+}
+$("load-book-map").addEventListener("click", () => $("book-map-file").click());
+$("book-map-file").addEventListener("change", async event => {
+  const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
+  try {
+    if (file.size > MAX_SELECTION_BYTES) throw new AnnotationError("DRAFT_TOO_LARGE");
+    mapping = parseBookSelection(JSON.parse(await file.text()));
+    $("map-status").textContent = "仅此标签页加载了 3 本原书的文件名；不会保存到 GT JSON。";
+    renderReferences();
+  } catch (error) { localError(error); }
+});
+$("load-source-pdf").addEventListener("click", () => $("source-pdf-file").click());
+$("source-pdf-file").addEventListener("change", async event => {
+  const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
+  try {
+    if (file.size > MAX_PDF_BYTES) throw new AnnotationError("SOURCE_PDF_SIZE_INVALID");
+    const pendingFixture = draft.fixtureId;
+    pdfPreviewEligibility(file, pendingFixture, mapping);
+    if (!(await file.slice(0,8).text()).startsWith("%PDF-")) throw new AnnotationError("SOURCE_PDF_HEADER_INVALID");
+    if (draft.fixtureId !== pendingFixture) throw new AnnotationError("SOURCE_PDF_FILENAME_MISMATCH");
+    releasePdf(); sourceUrl = URL.createObjectURL(file); sourceFixtureId = pendingFixture;
+    $("pdf-status").textContent = "已选择本机 PDF " + file.name +
+      "；仅文件名、大小和 PDF 头通过检查，SHA 尚未验证。";
+    renderReferences();
+  } catch (error) { localError(error); }
+});
+$("clear-source-pdf").addEventListener("click", () => { releasePdf(); renderReferences(); });
+$("load-candidate").addEventListener("click", () => $("candidate-file").click());
+$("candidate-file").addEventListener("change", async event => {
+  const file = event.target.files?.[0]; event.target.value = ""; if (!file) return;
+  try {
+    if (file.size > MAX_CANDIDATE_BYTES) throw new AnnotationError("CANDIDATE_TOO_LARGE");
+    const pendingFixture = draft.fixtureId;
+    const candidate = parseNormalizedCandidate(JSON.parse(await file.text()), pendingFixture);
+    if (draft.fixtureId !== pendingFixture) throw new AnnotationError("CANDIDATE_SCHEMA_OR_FIXTURE_MISMATCH");
+    if (candidates.length === 4) throw new AnnotationError("CANDIDATE_TOO_LARGE");
+    candidates.push(candidate); selectedCandidate = candidates.length - 1;
+    renderReferences(); setNotice("候选仅载入浏览器内存，尚未独立验真；人工 GT 必须先冻结。");
+  } catch (error) { localError(error); }
+});
+$("candidate-choice").addEventListener("change", event => {
+  selectedCandidate = event.target.value === "" ? -1 : Number(event.target.value);
+  renderReferences();
+});
+$("reveal-candidate").addEventListener("click", () => {
+  try {
+    if (!gtExported || !candidates[selectedCandidate]) throw new AnnotationError("BLIND_GT_SEAL_REQUIRED");
+    const snapshot = sealBlindDraft(draft);
+    if (!window.confirm("请确认：已独立依据原书完成标注，且 GT 候选 JSON 已保存。揭示机器输出后本标签页禁止修改或重新导出该份 GT。继续？")) return;
+    sealed = snapshot; exposedFixtures.add(draft.fixtureId);
+    renderPage();
+    setNotice("盲标 GT 已冻结，可以对照机器候选。机器输出不能反向写入 GT；还需两位真实复核者独立复核。", true);
+  } catch (error) { localError(error); }
+});
+
 window.addEventListener("beforeunload", event => {
   if (dirty) { event.preventDefault(); event.returnValue = ""; }
 });
