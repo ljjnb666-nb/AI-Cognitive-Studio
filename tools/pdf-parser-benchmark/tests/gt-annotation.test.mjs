@@ -145,7 +145,7 @@ describe("local static server — no real private data", () => {
       const source = await fetch(new URL("workspace.mjs", app.url));
       expect(source.status).toBe(200);
       expect(await source.text()).toContain("export function buildGroundTruth");
-      for (const uri of ["fixtures/fixtures.manifest.json", "README.md", ".git/config", "C:/private.pdf", "robots.txt"]) {
+      for (const uri of ["fixtures/fixtures.manifest.json", "README.md", ".git/config", "C%3A/private.pdf", "robots.txt"]) {
         expect((await fetch(new URL(uri, app.url))).status).toBe(404);
       }
       expect((await fetch(app.url, { method: "POST", body: "private text" })).status).toBe(404);
