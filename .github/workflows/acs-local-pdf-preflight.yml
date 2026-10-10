@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   audit:
-    if: \${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 5
     steps:
