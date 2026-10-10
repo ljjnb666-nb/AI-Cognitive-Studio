@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; media-src 'none'; object-src 'none'; frame-src blob:; form-action 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'self'; form-action 'none'; base-uri 'none'">
   <meta name="referrer" content="no-referrer">
   <meta name="color-scheme" content="light">
   <title>Ground Truth 原书与 OCR 离线校对台</title>
@@ -69,9 +69,10 @@
           </div>
         </div>
         <div id="pdf-view" class="pdf-view" hidden>
-          <div class="panel-title"><h2>原书物理页 <span id="preview-page">22</span>（浏览器内置 PDF 阅读器）</h2></div>
-          <iframe id="pdf-frame" title="本机 PDF 原书页面预览" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
-          <p class="small">如果浏览器无法显示内置预览，请在系统 PDF 阅读器中按物理页码打开原书。本预览只用于人工参考，不代表已完成 SHA 核验。</p>
+          <div class="panel-title"><h2>原书物理页 <span id="preview-page">22</span>（本地 PDF.js 页面预览）</h2></div>
+          <p id="preview-status" class="small" role="status" aria-live="polite">等待选择完整原书。</p>
+          <div class="pdf-canvas-scroller"><canvas id="pdf-canvas" aria-label="原书本地 PDF 页面渲染" hidden></canvas></div>
+          <p class="small">仅渲染当前物理页。若预览失败或文件超出内存上限，请用系统 PDF 阅读器打开所选完整原书并跳转上述物理页码；不能把印刷页码当成物理页码。此预览不代表 SHA 验证。</p>
         </div>
         <div class="local-grid compare-tools">
           <div>
