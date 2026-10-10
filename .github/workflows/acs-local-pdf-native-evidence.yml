@@ -235,5 +235,7 @@ jobs:
               sys.exit(1)
           '@
           $python = $pythonCmd.Source
-          & $python -I -B -c $py
+          # Pipe ASCII-only static code to stdin to avoid PowerShell 5.1
+          # native-argument double-quote rewriting for Python -c.
+          $py | & $python -I -B -
           if ($LASTEXITCODE -ne 0) { throw 'ACS_PDF_EVIDENCE_REVIEW_FAILED' }
