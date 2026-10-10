@@ -86,7 +86,7 @@ export function parseNormalizedCandidate(raw, expectedFixtureId) {
   const ocr = raw.ocr;
   if (ocr !== undefined && (!plain(ocr) || typeof ocr.ocrModeRequested !== "boolean" ||
       ![true,false,null].includes(ocr.ocrEnabled) ||
-      ![null, "string"].includes(typeof ocr.engine === "string" ? "string" : ocr.engine) ||
+      (ocr.engine !== null && (typeof ocr.engine !== "string" || ocr.engine.length > 120)) ||
       (ocr.pagesOcrSucceeded !== null && (!Number.isInteger(ocr.pagesOcrSucceeded) || ocr.pagesOcrSucceeded < 0)))) {
     fail("CANDIDATE_OCR_PROVENANCE_INVALID");
   }
@@ -156,7 +156,7 @@ export function comparePage(seal, rawDraft, candidate, pageIndex) {
 
 export function pdfPreviewEligibility(file, fixtureId, mapping) {
   if (!FIXTURES[fixtureId]) fail("FIXTURE_NOT_ALLOWLISTED");
-  if (!file || typeof file.name !== "string" || file.size < 8 || file.size > MAX_PDF_BYTES) fail("SOURCE_PDF_SIZE_INVALID");
+  if (!file || typeof file.name !== "string" || !Number.isSafeInteger(file.size) || file.size < 8 || file.size > MAX_PDF_BYTES) fail("SOURCE_PDF_SIZE_INVALID");
   const source = FIXTURES[fixtureId].source;
   const expected = [source+".pdf"];
   if (mapping?.[source]?.displayName) expected.push(mapping[source].displayName);
