@@ -141,7 +141,7 @@ describe("annotator-02 static and HTTP privacy barrier", () => {
     const app=await startAnnotationServer();
     try{
       const [js,index,cross]=await Promise.all([
-        fetch(new URL("review.mjs",app.url)),fetch(app.url),fetch(new URL("D:/private.pdf",app.url))
+        fetch(new URL("review.mjs",app.url)),fetch(app.url),fetch(new URL("D%3A/private.pdf",app.url))
       ]);
       expect(js.status).toBe(200);expect(await js.text()).toContain("export function comparePage");
       expect(cross.status).toBe(404);
