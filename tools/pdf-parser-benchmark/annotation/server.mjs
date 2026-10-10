@@ -1,6 +1,6 @@
 /**
  * Read-only loopback-only app server. NO private data root or PDF paths.
- * Serves exactly four checked-in static UI files, no file uploads/POST/API.
+ * Serves exactly five checked-in static UI files, no file uploads/POST/API.
  */
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -10,13 +10,14 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTENT_SECURITY_POLICY =
   "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; " +
-  "img-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; " +
+  "img-src 'none'; media-src 'none'; object-src 'none'; frame-src blob:; " +
   "form-action 'none'; base-uri 'none'";
 const ALLOWED_FILES = Object.freeze({
   "/": ["index.html", "text/html; charset=utf-8"],
   "/index.html": ["index.html", "text/html; charset=utf-8"],
   "/app.mjs": ["app.mjs", "text/javascript; charset=utf-8"],
   "/workspace.mjs": ["workspace.mjs", "text/javascript; charset=utf-8"],
+  "/review.mjs": ["review.mjs", "text/javascript; charset=utf-8"],
   "/styles.css": ["styles.css", "text/css; charset=utf-8"],
 });
 function securityHeaders() {
