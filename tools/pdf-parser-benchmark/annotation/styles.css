@@ -96,7 +96,10 @@ input[type="checkbox"] { accent-color:var(--accent); width:16px; height:16px; }
 .local-grid .small { overflow-wrap:anywhere; }
 .compare-tools { margin-top:16px; }
 .pdf-view { padding:15px; margin-top:16px; border:1px solid var(--line); border-radius:12px; }
-.pdf-view iframe { border:1px solid var(--line); background:#edf2f0; display:block; width:100%; min-height:360px; height:52vh; }
+.pdf-canvas-scroller { border:1px solid var(--line); background:#edf2f0; min-height:180px; max-height:72vh; overflow:auto; text-align:center; }
+.pdf-canvas-scroller canvas { display:block; max-width:100%; height:auto; margin:0 auto; background:#fff; }
+#preview-status[data-state="error"],#preview-status[data-state="external"] { color:#975b1a; font-weight:600; }
+#preview-status[data-state="ready"] { color:#116d59; }
 .comparison-rows { display:grid; gap:12px; }
 .comparison-row { border:1px solid var(--line); border-radius:10px; padding:12px; background:#fcfefd; min-width:0; }
 .difference-status { display:block; color:#485f5b; margin-bottom:8px; font-size:12px; }
