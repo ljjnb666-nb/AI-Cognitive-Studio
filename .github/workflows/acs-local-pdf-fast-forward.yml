@@ -49,24 +49,24 @@ jobs:
           if ($gitCmd.CommandType -ne 'Application') { throw 'GIT_EXECUTABLE_REQUIRED' }
           $git = $gitCmd.Source
 
-          function Git-Read([string[]]$Args) {
-            $lines = @(& $git --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt @Args 2>$null)
+          function Git-Read([string[]]$GitArguments) {
+            $lines = @(& $git --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt @GitArguments 2>$null)
             if ($LASTEXITCODE -ne 0) { throw 'GIT_READ_FAILED' }
             return $lines
           }
-          function Git-Write([string[]]$Args) {
-            $null = @(& $git -c core.hooksPath=NUL -c core.fsmonitor=false -c submodule.recurse=false -C $wt @Args 2>$null)
+          function Git-Write([string[]]$GitArguments) {
+            $null = @(& $git -c core.hooksPath=NUL -c core.fsmonitor=false -c submodule.recurse=false -C $wt @GitArguments 2>$null)
             if ($LASTEXITCODE -ne 0) { throw 'GIT_SAFE_SYNC_COMMAND_FAILED' }
           }
           function Assert-Identity([string]$ExpectedHead) {
-            $b = @(Git-Read -Args @('symbolic-ref', '--quiet', '--short', 'HEAD'))
-            $h = @(Git-Read -Args @('rev-parse', '--verify', 'HEAD'))
+            $b = @(Git-Read -GitArguments @('symbolic-ref', '--quiet', '--short', 'HEAD'))
+            $h = @(Git-Read -GitArguments @('rev-parse', '--verify', 'HEAD'))
             if ($b.Count -ne 1 -or $h.Count -ne 1 -or $b[0] -cne $expectedBranch -or $h[0] -cne $ExpectedHead) {
               throw 'LOCAL_GIT_OWNERSHIP_OR_HEAD_MISMATCH'
             }
           }
           function Assert-Status {
-            $statuses = @(Git-Read -Args @('status', '--porcelain=v1', '--untracked-files=normal'))
+            $statuses = @(Git-Read -GitArguments @('status', '--porcelain=v1', '--untracked-files=normal'))
             $unexpected = @($statuses | Where-Object { $_ -cne $allowedUntracked })
             if ($unexpected.Count -ne 0) { throw 'UNEXPECTED_WORKTREE_CHANGES' }
             return @($statuses)
@@ -80,7 +80,7 @@ jobs:
           }
 
           Assert-Identity $expectedLocal
-          $origin = @(Git-Read -Args @('remote', 'get-url', 'origin'))
+          $origin = @(Git-Read -GitArguments @('remote', 'get-url', 'origin'))
           if ($origin.Count -ne 1 -or $origin[0] -cnotin $allowedRemote) { throw 'UNTRUSTED_ORIGIN_URL' }
 
           $beforeStatus = @(Assert-Status)
@@ -97,11 +97,11 @@ jobs:
 
           # Mutates local Git object/ref metadata, but not tracked working files.
           # No token embedded in commands; existing user credential required.
-          Git-Write -Args @('fetch', '--quiet', '--no-tags', '--no-recurse-submodules', 'origin', 'refs/heads/codex/pdf-parser-benchmark')
+          Git-Write -GitArguments @('fetch', '--quiet', '--no-tags', '--no-recurse-submodules', 'origin', 'refs/heads/codex/pdf-parser-benchmark')
 
-          $fetched = @(Git-Read -Args @('rev-parse', '--verify', 'FETCH_HEAD'))
+          $fetched = @(Git-Read -GitArguments @('rev-parse', '--verify', 'FETCH_HEAD'))
           if ($fetched.Count -ne 1 -or $fetched[0] -cne $expectedTarget) { throw 'FETCH_HEAD_NOT_PINNED' }
-          $conflict = @(Git-Read -Args @('ls-tree', '-r', '--name-only', $expectedTarget, '--', '.mimosa'))
+          $conflict = @(Git-Read -GitArguments @('ls-tree', '-r', '--name-only', $expectedTarget, '--', '.mimosa'))
           if ($conflict.Count -ne 0) { throw 'MIMOSA_TRACKED_TARGET_COLLISION' }
 
           # Ancestry check without trusting stale local origin tracking refs.
@@ -113,7 +113,7 @@ jobs:
 
           # Only working-tree mutation: trusted, pinned, fast-forward-only merge.
           # No clean/reset/checkout/force, and no submodule update.
-          Git-Write -Args @('merge', '--ff-only', '--no-edit', $expectedTarget)
+          Git-Write -GitArguments @('merge', '--ff-only', '--no-edit', $expectedTarget)
 
           Assert-Identity $expectedTarget
           $afterStatus = @(Assert-Status)
