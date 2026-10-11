@@ -20,9 +20,12 @@ export async function writeEvidencePack(): Promise<EvidencePack> {
   const report = await buildAggregateReport();
   await writeFile(join(dir, "summary.md"), report.markdown, "utf8");
 
-  const runRows = report.results.map((result) => ({
+  const runRows = report.runAcceptance.map(({ result, accepted }) => ({
     runId: result.run.id,
     fixtureId: result.document.fixtureId,
+    accepted,
+    status: accepted ? "OK" : "FAILED",
+    failureKind: result.reliability.failureKind ?? null,
     parser: result.parser.name,
     mode: result.parser.mode,
     coldStart: result.run.coldStart,
@@ -89,7 +92,7 @@ function deriveCapabilityRows(report: Awaited<ReturnType<typeof buildAggregateRe
   const byKey = new Map<string, { ocrEnabled: boolean | null; ocrRequested: boolean; ocrField: boolean; evaluatedRuns: number }>();
   for (const q of report.quality) {
     const entry = byKey.get(q.parserKey) ?? { ocrEnabled: null, ocrRequested: false, ocrField: false, evaluatedRuns: 0 };
-    entry.evaluatedRuns++;
+    if (q.status === "EVALUATED") entry.evaluatedRuns++;
     if (q.ocr?.metadata) {
       entry.ocrField = true;
       entry.ocrEnabled = q.ocr.metadata.ocrEnabled;
@@ -142,7 +145,7 @@ async function pythonPackageVersion(packageName: string): Promise<unknown> {
   }
 }
 
-function buildDecisionEvidence(report: Awaited<ReturnType<typeof buildAggregateReport>>): string {
+export function buildDecisionEvidence(report: Awaited<ReturnType<typeof buildAggregateReport>>): string {
   const lines: string[] = [];
   lines.push("# PDF Parser Benchmark — Decision Evidence (facts only)");
   lines.push("");
@@ -152,12 +155,11 @@ function buildDecisionEvidence(report: Awaited<ReturnType<typeof buildAggregateR
   lines.push("");
 
   const byKey = new Map<string, { runs: number; failed: number; wallMs: number[]; peakRssMb: Array<number | null> }>();
-  for (const result of report.results) {
+  for (const { result, accepted } of report.runAcceptance) {
     const key = result.parser.name.split(" ")[0]!;
     const entry = byKey.get(key) ?? { runs: 0, failed: 0, wallMs: [], peakRssMb: [] };
     entry.runs++;
-    const failed = result.reliability.crashed || result.reliability.timeout || result.reliability.oom || result.reliability.partialOutput;
-    if (failed) entry.failed++;
+    if (!accepted) entry.failed++;
     entry.wallMs.push(result.performance.wallTimeMs);
     entry.peakRssMb.push(result.performance.peakRssMb);
     byKey.set(key, entry);
@@ -197,12 +199,10 @@ function buildDecisionEvidence(report: Awaited<ReturnType<typeof buildAggregateR
 
   lines.push("## Failure cases");
   lines.push("");
-  const failures = report.results.filter(
-    (result) => result.reliability.crashed || result.reliability.timeout || result.reliability.oom || result.reliability.partialOutput,
-  );
+  const failures = report.runAcceptance.filter((entry) => !entry.accepted);
   if (failures.length === 0) lines.push("_none recorded in persisted runs._");
-  for (const failure of failures) {
-    lines.push(`- ${failure.document.fixtureId} / ${failure.parser.name} / ${failure.run.id}: crashed=${failure.reliability.crashed} timeout=${failure.reliability.timeout} oom=${failure.reliability.oom} partial=${failure.reliability.partialOutput} warnings=${JSON.stringify(failure.reliability.warnings.slice(0, 3))}`);
+  for (const { result: failure } of failures) {
+    lines.push(`- ${failure.document.fixtureId} / ${failure.parser.name} / ${failure.run.id}: failureKind=${failure.reliability.failureKind ?? "null"} exitCode=${failure.reliability.exitCode ?? "null"} crashed=${failure.reliability.crashed} timeout=${failure.reliability.timeout} oom=${failure.reliability.oom} partial=${failure.reliability.partialOutput} warnings=${JSON.stringify(failure.reliability.warnings.slice(0, 3))}`);
   }
   lines.push("");
 
