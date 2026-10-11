@@ -1,6 +1,6 @@
 /**
  * Read-only loopback-only app server. NO private data root or PDF paths.
- * Serves exactly five checked-in static UI files, no file uploads/POST/API.
+ * Serves allowlisted UI and pinned npm-installed PDF.js ESM assets. No uploads/POST/API.
  */
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONTENT_SECURITY_POLICY =
   "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; " +
-  "img-src 'none'; media-src 'none'; object-src 'none'; frame-src blob:; " +
+  "img-src blob: data:; font-src blob: data:; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'self'; " +
   "form-action 'none'; base-uri 'none'";
 const ALLOWED_FILES = Object.freeze({
   "/": ["index.html", "text/html; charset=utf-8"],
@@ -18,6 +18,10 @@ const ALLOWED_FILES = Object.freeze({
   "/app.mjs": ["app.mjs", "text/javascript; charset=utf-8"],
   "/workspace.mjs": ["workspace.mjs", "text/javascript; charset=utf-8"],
   "/review.mjs": ["review.mjs", "text/javascript; charset=utf-8"],
+  "/preview.mjs": ["preview.mjs", "text/javascript; charset=utf-8"],
+  // These two immutable routes point only to pdfjs-dist 6.2.108 installed by npm ci.
+  "/vendor/pdf.mjs": ["../node_modules/pdfjs-dist/build/pdf.mjs", "text/javascript; charset=utf-8"],
+  "/vendor/pdf.worker.mjs": ["../node_modules/pdfjs-dist/build/pdf.worker.mjs", "text/javascript; charset=utf-8"],
   "/styles.css": ["styles.css", "text/css; charset=utf-8"],
 });
 function securityHeaders() {
