@@ -161,5 +161,26 @@ class GLMTests(unittest.TestCase):
                         glm.execute_cloud(root,"RB-PDF-13",glm.DEFAULT_MODEL,
                             region_id=None,max_regions=1,cloud_consent=True,key="demo")
 
+    def test_failed_billable_call_has_durable_no_replay_marker(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            folder=root/"reports"/glm.SOURCE_RUN/"region-proposals-v1-RB-PDF-13"
+            folder.mkdir(parents=True)
+            (folder/"region-proposals.json").write_text(json.dumps(provenance()))
+            row=item(root/"fake.png")
+            with patch.object(glm,"verify_regions",return_value=(provenance(),[row])):
+                with patch.object(glm,"infer_cloud_one",side_effect=glm.CloudBlocked("CLOUD_RATE_LIMITED")) as send:
+                    with self.assertRaisesRegex(glm.CloudBlocked,"RATE_LIMITED"):
+                        glm.execute_cloud(root,"RB-PDF-13",glm.DEFAULT_MODEL,
+                            region_id=None,max_regions=1,cloud_consent=True,key="demo")
+                    send.assert_called_once()
+                receipt=root/"reports"/glm.SOURCE_RUN/".glm-cloud-v1-RB-PDF-13-page-002-region-01.cloud-attempted"
+                self.assertTrue(receipt.is_file())
+                with patch.object(glm,"infer_cloud_one") as send:
+                    with self.assertRaisesRegex(glm.CloudBlocked,"ALREADY_EXISTS"):
+                        glm.execute_cloud(root,"RB-PDF-13",glm.DEFAULT_MODEL,
+                            region_id=None,max_regions=1,cloud_consent=True,key="demo")
+                    send.assert_not_called()
+
 if __name__=="__main__":
     unittest.main()
