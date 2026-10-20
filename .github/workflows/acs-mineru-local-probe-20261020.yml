@@ -67,6 +67,22 @@ jobs:
           $modelExe = Join-Path $data 'python\mineru\Scripts\mineru.exe'
           $mineruPresent = Test-Path -LiteralPath $modelExe -PathType Leaf
           $modelsPresent = Test-Path -LiteralPath (Join-Path $data 'models') -PathType Container
+          # Never reveal filenames or paths from dirty status; allow only aggregate counters.
+          $trackedDirtyCount = $null
+          $untrackedCount = $null
+          $criticalTrackedPathsClean = $false
+          $actualHeadInAllowed = $headMatches
+          if ($gitQuerySucceeded) {
+            $trackedDirtyCount = @($status | Where-Object { $_ -notmatch '^\?\?' }).Count
+            $untrackedCount = @($status | Where-Object { $_ -match '^\?\?' }).Count
+            $criticalPrefixes = @('tools/pdf-parser-benchmark/src/','tools/pdf-parser-benchmark/adapters/','tools/pdf-parser-benchmark/scripts/','tools/pdf-parser-benchmark/package.json','tools/pdf-parser-benchmark/package-lock.json')
+            $criticalTrackedPathsClean = @($status | Where-Object {
+              $s = [string]$_
+              if ($s.Length -lt 4 -or $s -match '^\?\?') { return $false }
+              $relative = $s.Substring(3).Replace('\','/')
+              return @($criticalPrefixes | Where-Object { $relative.StartsWith($_, [System.StringComparison]::Ordinal) }).Count -gt 0
+            }).Count -eq 0
+          }
           $mineruVersionOK = $false
           if ($mineruPresent) {
             try {
@@ -104,6 +120,9 @@ jobs:
             git_origin_matches = $originMatches
             git_status_allowlisted_only = $statusMatches
             git_unexpected_status_count = $statusUnexpectedCount
+            git_tracked_dirty_count = $trackedDirtyCount
+            git_untracked_count = $untrackedCount
+            benchmark_critical_tracked_paths_clean = $criticalTrackedPathsClean
             mineru_exe_present = $mineruPresent
             mineru_4_0_3_verified = $mineruVersionOK
             model_directory_present = $modelsPresent
