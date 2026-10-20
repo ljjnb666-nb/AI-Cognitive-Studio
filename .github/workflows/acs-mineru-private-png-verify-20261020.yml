@@ -1,0 +1,76 @@
+# Independently re-check on-disk private PNGs: never upload image bytes or text.
+name: ACS MinerU private PNG evidence independent verification
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-private-png-verify-20261020.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 6
+    steps:
+      - name: Independently hash and validate private PNG manifests
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $p='D:\ai-cognitive-pdf-benchmark-data\python\mineru\Scripts\python.exe'
+          $script=@'
+          import hashlib,json,sys,re
+          from pathlib import Path
+          from PIL import Image
+          root=Path(r"D:\ai-cognitive-pdf-benchmark-data")
+          run=root/"reports"/"real-mineru-39440805765-1"
+          cases=(("RB-PDF-12",{261:3}),("RB-PDF-13",{51:1,127:1,379:1}))
+          def sha(path):
+              h=hashlib.sha256()
+              with path.open("rb") as f:
+                  for b in iter(lambda:f.read(1048576),b""):h.update(b)
+              return h.hexdigest()
+          try:
+              if not run.is_dir() or run.is_symlink():raise ValueError()
+              verified=[]
+              seen=0
+              for fixture,expected in cases:
+                  base=run/("figure-evidence-v1-"+fixture)
+                  mf=base/"figure-evidence.json"
+                  if not base.is_dir() or base.is_symlink() or not mf.is_file() or mf.is_symlink():raise ValueError()
+                  data=json.loads(mf.read_text(encoding="utf-8"))
+                  if data.get("schemaVersion")!="acs-mineru-figure-page-evidence-v1" or data.get("fixtureId")!=fixture or data.get("sourceRun")!="real-mineru-39440805765-1":raise ValueError()
+                  if data.get("claim")!="PERSISTED_FULL_PAGE_VISUAL_FALLBACK_ONLY" or data.get("noCroppedFigureOrDiagramRelationshipClaim") is not True:raise ValueError()
+                  pdf=root/"fixtures"/(fixture+".pdf")
+                  markdown=run/(fixture+".md")
+                  if sha(pdf)!=data.get("sourceSubsetSha256") or sha(markdown)!=data.get("sourceMarkdownSha256"):raise ValueError()
+                  imgs=data.get("images")
+                  if not isinstance(imgs,list) or len(imgs)!=len(expected):raise ValueError()
+                  actual={}
+                  for img in imgs:
+                      page=img.get("sourcePhysicalPage1Based")
+                      if page not in expected or page in actual:raise ValueError()
+                      rel=img.get("relativeImagePath")
+                      if not isinstance(rel,str) or re.fullmatch(r"pages/page-[0-9]{3}\.png",rel) is None:raise ValueError()
+                      path=base/rel
+                      if not path.is_file() or path.is_symlink() or path.stat().st_size!=img.get("imageBytes") or sha(path)!=img.get("imageSha256"):raise ValueError()
+                      with Image.open(path) as picture:
+                          picture.verify()
+                      with Image.open(path) as picture:
+                          if picture.format!="PNG" or picture.width!=img.get("widthPixels") or picture.height!=img.get("heightPixels"):raise ValueError()
+                      refs=img.get("sourceFigureBlockRefs")
+                      if not isinstance(refs,list) or len(refs)!=expected[page] or len(set(refs))!=len(refs):raise ValueError()
+                      if img.get("figureRegionBounds") is not None or img.get("diagramEdges") is not None or img.get("graphSemantics")!="NOT_VERIFIED" or img.get("regionType")!="FULL_PAGE_UNCROPPED":raise ValueError()
+                      actual[page]=len(refs)
+                      seen+=len(refs)
+                  if actual!=expected:raise ValueError()
+                  verified.append({"fixture":fixture,"pages_with_png":len(imgs),"refs":sum(actual.values()),"png_sha256_verified":True,"image_decodes":True,"source_pdf_and_markdown_sha256_verified":True})
+              print("ACS_PRIVATE_PNG_EVIDENCE_VERIFIED="+json.dumps({"status":"VERIFIED","source_run":39440805765,"cases":verified,"total_png_files":sum(v["pages_with_png"] for v in verified),"total_refs":seen,"graph_edges_verified":False,"private_image_bytes_exported":False},separators=(",",":")))
+          except Exception:
+              print("ACS_PRIVATE_PNG_EVIDENCE_BLOCKED")
+              sys.exit(2)
+          '@
+          $script|& $p -I -B -
+          if($LASTEXITCODE -ne 0) { throw 'LOCAL_PNG_MANIFEST_VERIFICATION_FAILED' }
