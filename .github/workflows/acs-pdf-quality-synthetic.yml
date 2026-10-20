@@ -44,6 +44,9 @@ jobs:
       - name: Human GT gate negative regression (synthetic data only)
         working-directory: tools/pdf-parser-benchmark
         run: ./node_modules/.bin/vitest run tests/real-book-quality-gate.test.ts
+      - name: Structure evidence gate (synthetic data only)
+        working-directory: tools/pdf-parser-benchmark
+        run: ./node_modules/.bin/vitest run tests/structure-evidence.test.mjs
       - name: Syntax check offline annotation app and local-only server
         working-directory: tools/pdf-parser-benchmark
         run: |
