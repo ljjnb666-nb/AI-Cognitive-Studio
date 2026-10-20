@@ -37,10 +37,6 @@ jobs:
           $stdoutMentionsMarkdown = $false
           $stdoutMentionsFileWritten = $false
           $stdoutHasError = $false
-          $stdoutJsonKeys = @()
-          $stdoutHasSuccessFalse = $false
-          $stdoutErrorHints = @()
-          $stdoutErrorShape = $null
           if ($exists) {
             $info = Get-Item -LiteralPath $scratch -Force
             if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_REPARSE_POINT' }
@@ -65,49 +61,6 @@ jobs:
                 $stdoutMentionsMarkdown = ($text -match '(?i)markdown|\.md')
                 $stdoutMentionsFileWritten = ($text -match '(?i)saved|wrote|written|output')
                 $stdoutHasError = ($text -match '(?i)error|failed|exception')
-                try {
-                  $envelope = ConvertFrom-Json -InputObject $text -ErrorAction Stop
-                  if ($null -ne $envelope) {
-                    $stdoutJsonKeys = @($envelope.PSObject.Properties.Name | Where-Object { $_ -match '^[A-Za-z0-9_]{1,45}
-              }
-            }
-            if (Test-Path -LiteralPath $stderr -PathType Leaf) { $stderrBytes = (Get-Item -LiteralPath $stderr).Length }
-          }
-          $out = [ordered]@{
-            policy='ACS_SYNTHETIC_OUTPUT_AUDIT_V1'
-            previous_public_synthetic_run=39434331198
-            scratch_exists=$exists
-            relative_synthetic_filenames=$safeNames
-            md_file_count=$mdCount
-            json_file_count=$jsonCount
-            pdf_file_count=$pdfCount
-            other_file_count=$otherCount
-            parse_stdout_bytes=$stdoutBytes
-            parse_stderr_bytes=$stderrBytes
-            stdout_contains_json=$stdoutJson
-            stdout_mentions_markdown=$stdoutMentionsMarkdown
-            stdout_mentions_output=$stdoutMentionsFileWritten
-            stdout_contains_error_token=$stdoutHasError
-            stdout_json_top_level_keys=$stdoutJsonKeys
-            stdout_success_false=$stdoutHasSuccessFalse
-            stdout_error_value_shape=$stdoutErrorShape
-            stdout_error_categories=$stdoutErrorHints
-            private_books_read=$false
-            parser_executed=$false
-          }
-          Write-Output ('ACS_SYNTHETIC_OUTPUT_AUDIT=' + ($out | ConvertTo-Json -Compress))
- })
-                    $stdoutHasSuccessFalse = ($null -ne $envelope.success -and $envelope.success -eq $false)
-                    $errorVal = $envelope.error
-                    if ($null -ne $errorVal) {
-                      $stdoutErrorShape = if ($errorVal -is [string]) { 'text' } else { 'object' }
-                    }
-                  }
-                } catch { $stdoutErrorShape = 'not_single_json' }
-                $needles = @('server','connection','model','network','timeout','missing','error','file','path','parse','ocr','failed','unavailable')
-                foreach ($token in $needles) {
-                  if ($text.IndexOf($token,[StringComparison]::OrdinalIgnoreCase) -ge 0) { $stdoutErrorHints += $token }
-                }
               }
             }
             if (Test-Path -LiteralPath $stderr -PathType Leaf) { $stderrBytes = (Get-Item -LiteralPath $stderr).Length }
