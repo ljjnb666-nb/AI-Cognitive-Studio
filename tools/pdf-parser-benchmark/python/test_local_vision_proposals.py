@@ -64,7 +64,7 @@ class VisionFlowTests(unittest.TestCase):
     def test_source_sha_mismatch_rejected(self):
         forged=item(Path("synthetic"))
         forged["sha"]="b"*64
-        with self.assertRaisesRegex(local.LocalVisionBlocked,"EVIDENCE_GATE"):
+        with self.assertRaisesRegex(local.LocalVisionBlocked,"ITEM_SHA_MISMATCH"):
             local.build_proposal([forged],provenance(),mode="prepare",model=None)
 
     def test_wrong_model_id_or_absent_model_fails_closed(self):
