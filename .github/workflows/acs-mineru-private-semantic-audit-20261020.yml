@@ -1,0 +1,87 @@
+# Read-only semantic witness counts from already generated private MinerU Markdown.
+# No text excerpts; only prespecified technical code tokens and numerical counts are exposed.
+name: ACS MinerU private diagram and code witness audit
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-private-semantic-audit-20261020.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect structured witnesses, not book text
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $py=Get-Command python.exe -ErrorAction Stop
+          $source=@'
+          import json,re,sys
+          from pathlib import Path
+          R=Path(r"D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1")
+          meta=R/"private-quality-audit-v1.json"
+          marker=re.compile(r"^<!--\s*page\s+(\d+)\s+of\s+(\d+)\s*-->$")
+          image=re.compile(r"^!\[[^\]]*\]\([^)]+\)\s*$")
+          outputs=[]
+          try:
+              if R.is_symlink() or not R.is_dir() or meta.is_symlink() or not meta.is_file():raise ValueError()
+              obj=json.loads(meta.read_text(encoding="utf-8"))
+              if obj.get("source_run_id")!=39440805765:raise ValueError()
+              expected={"RB-PDF-12":[73,145,261],"RB-PDF-13":[51,127,379]}
+              for file_id,pages in expected.items():
+                  md=R/(file_id+".md")
+                  if md.is_symlink() or not md.is_file() or md.stat().st_size>12000000:raise ValueError()
+                  txt=md.read_text(encoding="utf-8-sig")
+                  rows=txt.replace("\r\n","\n").replace("\r","\n").split("\n")
+                  starts=[(idx,int(m.group(1)),int(m.group(2))) for idx,ln in enumerate(rows) if (m:=marker.match(ln))]
+                  if len(starts)!=3 or [(n,t) for _,n,t in starts]!=[(1,3),(2,3),(3,3)]:raise ValueError()
+                  for i,page in enumerate(pages):
+                      seg=rows[starts[i][0]+1:starts[i+1][0] if i<2 else len(rows)]
+                      fig_lines=[line for line in seg if image.match(line)]
+                      prose_lines=[line for line in seg if line.strip() and not image.match(line)]
+                      joined="\n".join(prose_lines)
+                      tokens=re.sub(r"\s+","",joined)
+                      basic={
+                          "physical_page":page,
+                          "subset_page":i+1,
+                          "non_figure_text_chars":len(joined),
+                          "image_placeholder_lines":len(fig_lines),
+                          "code_fences":sum(line.lstrip().startswith(chr(96)*3) for line in seg),
+                          "ascii_technical_identifier_count":len(re.findall(r"\b[A-Za-z_]\w{3,}\b",joined)),
+                          "has_broken_unicode_replacement":"\ufffd" in joined,
+                          "graphic_edges_attested_from_text":False,
+                      }
+                      if file_id=="RB-PDF-13" and page==127:
+                          # Technical identifiers are generic coding tokens, not extracts.
+                          pats={
+                              "clientSocket":r"clientSocket",
+                              "serverSocket":r"serverSocket",
+                              "SOCK_STREAM":r"SOCK_STREAM",
+                              "AF_INET":r"AF_INET",
+                              "connect_call":r"(?i)\.connect\(",
+                              "recv_call":r"(?i)\.recv\(",
+                              "tcp_client_filename":r"TCPClient\.py",
+                              "socket_import":r"fromsocketimport"
+                          }
+                          basic["code_witnesses"]={key:bool(re.search(rx,tokens)) for key,rx in pats.items()}
+                      outputs.append(basic)
+              s={"policy":"ACS_MINERU_PRIVATE_SEMANTIC_WITNESS_V1","source_run":39440805765,
+                 "pages":outputs,
+                 "network_flow_edges_verified":False,"diagram_arrow_direction_verified":False,
+                 "human_ground_truth_certified":False,"no_private_text_uploaded":True}
+              out=R/"private-semantic-witness-v1.json"
+              if out.exists() or out.is_symlink():raise ValueError()
+              out.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+              print("ACS_MINERU_PRIVATE_SEMANTIC="+json.dumps(s,separators=(",",":"),ensure_ascii=True))
+          except Exception:
+              print("ACS_MINERU_SEMANTIC_AUDIT_BLOCKED")
+              sys.exit(1)
+          '@
+          $source| & $py.Source -I -B -
+          if($LASTEXITCODE -ne 0){throw 'SEMANTIC_WITNESS_GATE_FAILED'}
