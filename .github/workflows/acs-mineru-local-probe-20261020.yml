@@ -109,6 +109,25 @@ jobs:
             $ramFreeGiB = [Math]::Round(([double]$os.FreePhysicalMemory / 1048576.0), 2)
             $ramOK = ($ramFreeGiB -ge 4)
           } catch { $ramOK = $false }
+          # Read-only: check whether the runner could install temporary process-only
+          # outbound firewall rules. Do not create or change any firewall rules.
+          $runnerElevated = $false
+          $firewallEnabled = $false
+          try {
+            $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+            $runnerElevated = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+            $fw = @(Get-NetFirewallProfile -ErrorAction Stop)
+            $firewallEnabled = (@($fw | Where-Object { $_.Enabled -eq $false }).Count -eq 0 -and $fw.Count -gt 0)
+          } catch {
+            $runnerElevated = $false
+            $firewallEnabled = $false
+          }
+          # Count only; never print private filenames or model metadata.
+          $cacheRootsPresent = @(
+            (Test-Path -LiteralPath (Join-Path $data 'cache\\mineru\\home') -PathType Container),
+            (Test-Path -LiteralPath (Join-Path $data 'cache\\huggingface') -PathType Container)
+          )
           $readyCandidate = ($gitOK -and $mineruVersionOK -and $modelsPresent -and $manifest -and $samplesPresent -and $scriptReady -and $cliReady -and $diskOK -and $ramOK)
           $result = [ordered]@{
             policy = 'ACS_MINERU_LOCAL_PROBE_20261020'
@@ -135,6 +154,10 @@ jobs:
             ram_free_gib = $ramFreeGiB
             offline_weights_fully_verified = $false
             model_network_isolation_verified = $false
+            runner_elevated = $runnerElevated
+            windows_firewall_profiles_enabled = $firewallEnabled
+            mineru_home_dir_present = $cacheRootsPresent[0]
+            huggingface_cache_dir_present = $cacheRootsPresent[1]
             ready_candidate_only = $readyCandidate
             model_executed = $false
             private_content_exported = $false
