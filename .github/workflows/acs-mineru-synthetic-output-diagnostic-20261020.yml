@@ -53,67 +53,6 @@ jobs:
                 }
               }
             }
-            # Only this known synthetic service-status response (23 bytes) is displayed.
-            # Reject non-ASCII or long strings to avoid paths, host data, tokens, or logs.
-            $safeStatusLine = $null
-            $statusFile = Join-Path $dir 'status-before.stdout.log'
-            if (Test-Path -LiteralPath $statusFile -PathType Leaf) {
-              $st = Get-Item -LiteralPath $statusFile
-              if ($st.Length -gt 0 -and $st.Length -le 70) {
-                $candidate = [System.IO.File]::ReadAllText($statusFile).Trim()
-                if ($candidate -match '^[A-Za-z0-9 .:_()=-]{1,65}
-            $jsonKeys = @()
-            $jsonErrorCategory = 'none'
-            $jsonScalarTags = @()
-            $pout = Join-Path $dir 'parse.stdout.log'
-            if (Test-Path -LiteralPath $pout -PathType Leaf) {
-              $fileObj = Get-Item -LiteralPath $pout
-              if ($fileObj.Length -gt 0 -and $fileObj.Length -le 10240) {
-                try {
-                  $payload = [System.IO.File]::ReadAllText($pout) | ConvertFrom-Json -ErrorAction Stop
-                  $jsonKeys = @($payload.PSObject.Properties.Name | Select-Object -First 30)
-                  foreach ($name in @('ok','success','status','error','message','code','total_pages')) {
-                    $prop = $payload.PSObject.Properties[$name]
-                    if ($null -ne $prop) {
-                      $val = [string]$prop.Value
-                      if ($name -in @('error','message')) {
-                        if ($val -match '(?i)server|connect|endpoint') { $jsonErrorCategory = 'server_connectivity' }
-                        elseif ($val -match '(?i)model|weight|checkpoint') { $jsonErrorCategory = 'model_weights' }
-                        elseif ($val -match '(?i)not found|no such file|missing') { $jsonErrorCategory = 'missing_input_or_output' }
-                        elseif ($val -match '(?i)pdf|page|parse|invalid') { $jsonErrorCategory = 'input_or_parser' }
-                        elseif ($val -match '(?i)argument|option|usage') { $jsonErrorCategory = 'cli_usage' }
-                        elseif ($val -match '(?i)permission|denied') { $jsonErrorCategory = 'permissions' }
-                        else { $jsonErrorCategory = 'other' }
-                      } else { $jsonScalarTags += ($name + '=' + (($val -replace '[^A-Za-z0-9_-]','').Substring(0,[Math]::Min(40,($val -replace '[^A-Za-z0-9_-]','').Length)))) }
-                    }
-                  }
-                } catch { $jsonErrorCategory = 'unparseable' }
-              }
-            }
-            $serverStatusPreview = 'UNAVAILABLE'
-            $serverStatusPath = Join-Path $dir 'status-before.stdout.log'
-            if (Test-Path -LiteralPath $serverStatusPath -PathType Leaf) {
-              $serverStatusItem = Get-Item -LiteralPath $serverStatusPath
-              if ($serverStatusItem.Length -gt 0 -and $serverStatusItem.Length -le 128) {
-                $serverStatusPreview = [System.IO.File]::ReadAllText($serverStatusPath).Trim()
-                if ($serverStatusPreview.Length -gt 64 -or $serverStatusPreview -match '[\\/:]') { $serverStatusPreview = 'BLOCKED_STATUS_FORMAT' }
-              }
-            }
-            $versionPreview = 'UNAVAILABLE'
-            $versionPath = Join-Path $dir 'mineru-version.stdout.log'
-            if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
-              $versionItem = Get-Item -LiteralPath $versionPath
-              if ($versionItem.Length -gt 0 -and $versionItem.Length -le 128) {
-                $versionPreview = (([System.IO.File]::ReadAllText($versionPath)) -replace '[^A-Za-z0-9{}":._ -]','').Trim()
-              }
-            }
-            Write-Output ('SYNTHETIC_DEBUG=' + ([ordered]@{run=$id;present=$true;files=$files;checks=$checks;json_keys=$jsonKeys;json_scalar_tags=$jsonScalarTags;json_error_category=$jsonErrorCategory;server_status_safe_line=$safeStatusLine;server_status_preview=$serverStatusPreview;version_preview=$versionPreview} | ConvertTo-Json -Compress -Depth 8))
-          }
-) {
-                  $safeStatusLine = $candidate
-                }
-              }
-            }
             # Inspect ONLY generated synthetic stdout JSON; redact paths, URLs and non-ASCII.
             $jsonKeys = @()
             $jsonErrorCategory = 'none'
