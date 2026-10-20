@@ -346,8 +346,17 @@ def main() -> None:
     args=parser.parse_args()
     try:
         result=capture(DATA_ROOT,args.fixture)
-    except Exception:
-        print("ACS_FIGURE_GEOMETRY_BLOCKED")
+    except CandidateBlocked as exc:
+        code = str(exc)
+        if not re.fullmatch(r"[A-Z0-9_]{3,80}", code):
+            code = "INVALID_SAFE_REASON"
+        print("ACS_FIGURE_GEOMETRY_BLOCKED_REASON=" + code)
+        sys.exit(2)
+    except Exception as exc:
+        cls = type(exc).__name__
+        if not re.fullmatch(r"[A-Za-z]{3,48}", cls):
+            cls = "Unknown"
+        print("ACS_FIGURE_GEOMETRY_BLOCKED_RUNTIME_CLASS=" + cls)
         sys.exit(2)
     print("ACS_FIGURE_GEOMETRY_CANDIDATES="+json.dumps(result,sort_keys=True))
 
