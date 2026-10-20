@@ -96,9 +96,9 @@ jobs:
             if (Test-Path -LiteralPath $statusOutput -PathType Leaf) {
               if ((Get-Item -LiteralPath $statusOutput).Length -le 256) { $rawStatus = [System.IO.File]::ReadAllText($statusOutput).Trim() }
             }
-            if ($rawStatus -match '(?i)(未|没有).{0,3}(运行|启动)|停止|not running|not started|stopped|inactive|offline') {
+            if ($rawStatus -match '(?i)\u672a.{0,3}\u8fd0\u884c|\u6ca1\u6709.{0,3}\u8fd0\u884c|\u672a.{0,3}\u542f\u52a8|\u505c\u6b62|not running|not started|stopped|inactive|offline') {
               $serverState = 'STOPPED'
-            } elseif ($rawStatus -match '(?i)运行中|已运行|正在运行|running|started|active|online') {
+            } elseif ($rawStatus -match '(?i)\u8fd0\u884c\u4e2d|\u5df2\u8fd0\u884c|\u6b63\u5728\u8fd0\u884c|running|started|active|online') {
               $serverState = 'RUNNING'
             } else { $serverState = 'UNKNOWN' }
             # Status output contains only MinerU's own short local server state.
