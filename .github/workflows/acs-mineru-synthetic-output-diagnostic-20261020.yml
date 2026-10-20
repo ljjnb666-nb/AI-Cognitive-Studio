@@ -1,0 +1,57 @@
+# This workflow reads only scratch directories created by two synthetic runs.
+# Never reads fixtures, actual books, worktree code or model files.
+name: ACS MinerU synthetic output location diagnostic
+on:
+  push:
+    branches:
+      - ops/mineru-local-probe-20261020
+    paths:
+      - .github/workflows/acs-mineru-synthetic-output-diagnostic-20261020.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect only owned synthetic scratch artifacts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = 'D:\ai-cognitive-pdf-benchmark-data\temp'
+          $ids = @('mineru-synthetic-39434331198-1','mineru-synthetic-39434639695-1')
+          $allowed = @('parse.stdout.log','parse.stderr.log','mineru-result.md','mineru-version.stdout.log','mineru-version.stderr.log','status-before.stdout.log','status-before.stderr.log','synthetic-one-page.pdf')
+          foreach ($id in $ids) {
+            $dir = Join-Path $base $id
+            if (-not (Test-Path -LiteralPath $dir -PathType Container)) { Write-Output ('SYNTHETIC_DEBUG=' + ('{"run":"' + $id + '","present":false}')); continue }
+            $di = Get-Item -LiteralPath $dir -Force
+            if (($di.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_SYNTHETIC_SCRATCH' }
+            $files = @()
+            foreach ($item in @(Get-ChildItem -LiteralPath $dir -File -Force -ErrorAction Stop)) {
+              if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+              $safeName = if ($item.Name -cin $allowed) { $item.Name } else { 'other-file' }
+              $files += @{ name=$safeName; bytes=[int64]$item.Length }
+            }
+            $checks = [ordered]@{}
+            foreach ($name in @('parse.stdout.log','parse.stderr.log','mineru-version.stdout.log','mineru-version.stderr.log')) {
+              $p = Join-Path $dir $name
+              $key = $name.Replace('.','_')
+              $checks[$key + '_present'] = Test-Path -LiteralPath $p -PathType Leaf
+              if ($checks[$key + '_present']) {
+                $item = Get-Item -LiteralPath $p -Force
+                if ($item.Length -le 1048576 -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                  $s = [System.IO.File]::ReadAllText($p)
+                  $checks[$key + '_has_4_0_3'] = ($s -match '(^|\D)4\.0\.3(\D|$)')
+                  $checks[$key + '_mentions_markdown'] = ($s -match '(?i)markdown|\.md')
+                  $checks[$key + '_mentions_error'] = ($s -match '(?i)error|failed|exception|traceback')
+                  $checks[$key + '_mentions_success'] = ($s -match '(?i)success|completed|written|saved')
+                  $checks[$key + '_mentions_usage'] = ($s -match '(?i)usage:|unknown option|unrecognized arguments')
+                  $checks[$key + '_mentions_model_download'] = ($s -match '(?i)download|https?://')
+                  $checks[$key + '_has_json'] = ($s.TrimStart().StartsWith('{'))
+                }
+              }
+            }
+            Write-Output ('SYNTHETIC_DEBUG=' + ([ordered]@{run=$id;present=$true;files=$files;checks=$checks} | ConvertTo-Json -Compress -Depth 8))
+          }
