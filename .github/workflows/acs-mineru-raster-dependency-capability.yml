@@ -1,0 +1,32 @@
+name: ACS private image capture dependencies
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-raster-dependency-capability.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  detect:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 4
+    steps:
+      - name: Detect preinstalled raster libraries and local renderer binaries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $python='D:\ai-cognitive-pdf-benchmark-data\python\mineru\Scripts\python.exe'
+          $code=@'
+          import importlib.util,json
+          names=("pypdfium2","pdfium","pypdf","pdfplumber","pdf2image","fitz","pymupdf","PIL","reportlab","cv2","pyvips")
+          print("ACS_IMAGE_PYMODULES="+json.dumps({n:importlib.util.find_spec(n) is not None for n in names},sort_keys=True))
+          '@
+          $code|& $python -I -B -
+          if($LASTEXITCODE -ne 0) { throw 'PYTHON_PROBE_FAILED' }
+          foreach($name in @('pdftoppm','pdftocairo','mutool','magick','gswin64c','ffmpeg')) {
+            $found=[bool](Get-Command $name -ErrorAction SilentlyContinue)
+            Write-Output ('ACS_IMAGE_BINARY_'+$name.ToUpperInvariant()+'='+$found.ToString().ToLowerInvariant())
+          }
