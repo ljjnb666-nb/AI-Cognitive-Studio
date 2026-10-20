@@ -1,0 +1,76 @@
+# Independent read-only local comparison of crops to original SHA-pinned PNGs.
+# Never uploads or logs page/crop pixels, texts, bboxes, file paths or hashes.
+name: ACS private ROI crop independent verification
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-local-mineru-private-roi-verify-20261020.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 7
+    steps:
+      - name: Independently verify each saved crop against source raster pixels
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $py='D:\ai-cognitive-pdf-benchmark-data\python\mineru\Scripts\python.exe'
+          $script=@'
+          import hashlib,json,re,sys
+          from pathlib import Path
+          from PIL import Image,ImageChops
+          run=Path(r"D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1")
+          cases={"RB-PDF-12":{261},"RB-PDF-13":{51,127,379}}
+          def h(path):
+              d=hashlib.sha256()
+              with path.open("rb") as f:
+                  for blob in iter(lambda:f.read(1048576),b""):d.update(blob)
+              return d.hexdigest()
+          try:
+              for fid,expected_pages in cases.items():
+                  out=run/("region-proposals-v1-"+fid)
+                  old=run/("figure-evidence-v1-"+fid)
+                  obj=json.loads((out/"region-proposals.json").read_text(encoding="utf-8"))
+                  if obj.get("schemaVersion")!="acs-pdf-private-region-evidence-v1" or obj.get("fixtureId")!=fid or obj.get("sourceRun")!="real-mineru-39440805765-1" or obj.get("allRegionsAreUnverified") is not True or obj.get("noSemanticGraphClaims") is not True:raise ValueError()
+                  orig=json.loads((old/"figure-evidence.json").read_text(encoding="utf-8"))
+                  known={v["sourcePhysicalPage1Based"]:v for v in orig["images"]}
+                  pages=obj.get("pages")
+                  if len(pages)!=len(expected_pages):raise ValueError()
+                  total=0
+                  for p in pages:
+                      num=p["sourcePhysicalPage1Based"]
+                      if num not in expected_pages or num not in known or p["sourceImageSha256"]!=known[num]["imageSha256"]:raise ValueError()
+                      parent=old/known[num]["relativeImagePath"]
+                      if h(parent)!=known[num]["imageSha256"]:raise ValueError()
+                      if p["sourceImageWidth"]!=known[num]["widthPixels"] or p["sourceImageHeight"]!=known[num]["heightPixels"]:raise ValueError()
+                      regs=p.get("regions")
+                      if not isinstance(regs,list) or not 1<=len(regs)<=4:raise ValueError()
+                      with Image.open(parent) as page_img:
+                          page_img.load()
+                          for region in regs:
+                              if region.get("proposalStatus")!="UNVERIFIED_REGION_SUGGESTION" or region.get("semanticLabel") is not None or any(region.get(key) is not None for key in ("nodes","directedEdges","timingRelations")):raise ValueError()
+                              x,y,w,hgt=region["bboxPixels"]
+                              if not all(type(v) is int for v in (x,y,w,hgt)) or min(x,y)<0 or w<20 or hgt<20 or x+w>page_img.width or y+hgt>page_img.height:raise ValueError()
+                              name=region["relativeCropPath"]
+                              if not isinstance(name,str) or re.fullmatch(r"crops/page-[0-9]{3}-region-[0-9]{2}\.png",name) is None:raise ValueError()
+                              path=out/name
+                              if path.is_symlink() or not path.is_file() or path.stat().st_size!=region["cropBytes"] or h(path)!=region["cropSha256"]:raise ValueError()
+                              with Image.open(path) as cropped:
+                                  cropped.load()
+                                  if cropped.format!="PNG" or cropped.size!=(w,hgt):raise ValueError()
+                                  original=page_img.crop((x,y,x+w,y+hgt))
+                                  if ImageChops.difference(original.convert("RGB"),cropped.convert("RGB")).getbbox() is not None:raise ValueError()
+                              total+=1
+                  print("ACS_PRIVATE_ROI_VERIFIED="+json.dumps({"fixture":fid,"pages":len(pages),"crops_exact_pixel_match":total,"sha256_and_pixel_geometry_match":True,"all_semantic_relations_unverified":True,"private_content_exported":False},separators=(",",":")))
+          except Exception:
+              print("ACS_PRIVATE_ROI_VERIFICATION_BLOCKED")
+              sys.exit(2)
+          '@
+          $script|& $py -I -B -
+          if($LASTEXITCODE -ne 0) {throw 'PRIVATE_REGION_VERIFICATION_FAILED'}
