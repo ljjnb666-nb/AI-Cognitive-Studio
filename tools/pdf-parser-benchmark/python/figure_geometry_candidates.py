@@ -183,6 +183,22 @@ def match_arrow_tip(triangle: list[tuple[int, int]],
             "status": "GEOMETRIC_ARROWHEAD_CANDIDATE_UNVERIFIED"}
 
 
+def normalize_hough_segment(value: object) -> tuple[int, int, int, int] | None:
+    """Support HoughLinesP's (N,4) and (N,1,4) shapes across OpenCV builds."""
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    for _ in range(3):
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        else:
+            break
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in value):
+        return None
+    return tuple(int(v) for v in value)
+
+
 def candidate_geometry(image, physical_page: int) -> tuple[dict, object]:
     """Compute bounded pixel-coordinate primitives using existing cv2."""
     import cv2
@@ -195,10 +211,13 @@ def candidate_geometry(image, physical_page: int) -> tuple[dict, object]:
     line_entries = []
     if raw is not None:
         for arr in raw:
-            x1,y1,x2,y2 = [int(k) for k in arr[0]]
+            segment = normalize_hough_segment(arr)
+            if segment is None:
+                continue
+            x1,y1,x2,y2 = segment
             length=math.hypot(x2-x1,y2-y1)
             if length >= min_len:
-                line_entries.append((length,(x1,y1,x2,y2)))
+                line_entries.append((length,segment))
     line_entries.sort(key=lambda t:(-t[0],*t[1]))
     segments = [xy for _,xy in line_entries[:MAX_LINES]]
     lines = []
