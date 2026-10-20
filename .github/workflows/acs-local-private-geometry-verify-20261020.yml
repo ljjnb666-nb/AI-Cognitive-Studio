@@ -1,0 +1,83 @@
+# Read-only. Report only geometry counts/orientation, not OCR, image or coordinates.
+name: ACS private geometry independent audit
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-local-private-geometry-verify-20261020.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 6
+    steps:
+      - name: Verify pixel geometry and overlays without revealing private content
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $py='D:\ai-cognitive-pdf-benchmark-data\python\mineru\Scripts\python.exe'
+          $program=@'
+          import hashlib,json,re,sys,statistics
+          from pathlib import Path
+          from PIL import Image
+          R=Path(r"D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1")
+          CASES={"RB-PDF-12":[261],"RB-PDF-13":[51,127,379]}
+          def sha(path):
+              h=hashlib.sha256()
+              with path.open("rb") as f:
+                  for data in iter(lambda:f.read(1048576),b""):h.update(data)
+              return h.hexdigest()
+          def check_pt(x,y,w,h):
+              return isinstance(x,int) and isinstance(y,int) and 0<=x<w and 0<=y<h
+          try:
+              cases=[]
+              for fixture,pages in CASES.items():
+                  base=R/("geometry-candidates-v1-"+fixture)
+                  prior=R/("figure-evidence-v1-"+fixture)
+                  src=json.loads((prior/"figure-evidence.json").read_text(encoding="utf-8"))
+                  x=json.loads((base/"geometry-candidates.json").read_text(encoding="utf-8"))
+                  if x.get("schemaVersion")!="acs-pdf-figure-geometry-candidates-v1" or x.get("fixtureId")!=fixture or x.get("sourceRun")!="real-mineru-39440805765-1" or x.get("noGraphSemanticsClaim") is not True:raise ValueError()
+                  entries=x.get("pages")
+                  if not isinstance(entries,list) or len(entries)!=len(pages):raise ValueError()
+                  original={y["sourcePhysicalPage1Based"]:y for y in src["images"]}
+                  per=[]
+                  for obj in entries:
+                      page=obj["sourcePhysicalPage1Based"]
+                      if page not in original or page not in pages:raise ValueError()
+                      e=original[page]
+                      w,h=obj["imageWidthPixels"],obj["imageHeightPixels"]
+                      if w!=e["widthPixels"] or h!=e["heightPixels"] or obj["sourceRasterSha256"]!=e["imageSha256"] or obj["sourceFigureBlockRefs"]!=e["sourceFigureBlockRefs"]:raise ValueError()
+                      if obj["graphNodes"] is not None or obj["graphEdges"] is not None or obj["arrowDirectionRelations"] is not None or obj["timingRelations"] is not None:raise ValueError()
+                      lines=obj["lineSegments"]
+                      for line in lines:
+                          a,b,c,d=line["segmentPixels"]
+                          if not check_pt(a,b,w,h) or not check_pt(c,d,w,h):raise ValueError()
+                      for box in obj["boxes"]:
+                          a,b,c,d=box["bboxPixels"]
+                          if not check_pt(a,b,w,h) or not c>0 or not d>0 or a+c>w or b+d>h:raise ValueError()
+                      for arrow in obj["arrowheadCandidates"]:
+                          a,b=arrow["tip"]
+                          if not check_pt(a,b,w,h):raise ValueError()
+                      rel=obj["overlayRelativePath"]
+                      if not isinstance(rel,str) or re.fullmatch(r"overlays/page-[0-9]{3}-candidate-overlay.png",rel) is None:raise ValueError()
+                      png=base/rel
+                      if png.is_symlink() or not png.is_file() or sha(png)!=obj["overlaySha256"] or png.stat().st_size!=obj["overlayBytes"]:raise ValueError()
+                      with Image.open(png) as im:
+                          im.verify()
+                      with Image.open(png) as im:
+                          if im.size!=(w,h):raise ValueError()
+                      lens=[((v["segmentPixels"][2]-v["segmentPixels"][0])**2+(v["segmentPixels"][3]-v["segmentPixels"][1])**2)**.5 for v in lines]
+                      orientations={k:sum(v["orientation"]==k for v in lines) for k in ["HORIZONTAL_CANDIDATE","VERTICAL_CANDIDATE","DIAGONAL_CANDIDATE"]}
+                      per.append({"page":page,"lines":len(lines),"boxes":len(obj["boxes"]),"arrow_tips":len(obj["arrowheadCandidates"]),"orientation_counts":orientations,"median_line_length_px":round(statistics.median(lens),1) if lens else 0,"truncation":obj["candidateCountTruncated"],"overlays_png_verified":True})
+                  cases.append({"fixture":fixture,"pages":sorted(per,key=lambda k:k["page"])})
+              print("ACS_PRIVATE_GEOMETRY_VERIFIED="+json.dumps({"status":"VERIFIED","source_run":39440805765,"cases":cases,"graph_semantics_not_accepted":True,"private_pixels_uploaded":False},separators=(",",":")))
+          except Exception:
+              print("ACS_PRIVATE_GEOMETRY_VERIFICATION_BLOCKED")
+              sys.exit(2)
+          '@
+          $program|& $py -I -B -
+          if($LASTEXITCODE -ne 0) {throw 'GEOMETRY_METADATA_VERIFICATION_FAILED'}
