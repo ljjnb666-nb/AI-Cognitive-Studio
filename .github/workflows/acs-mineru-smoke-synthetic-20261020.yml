@@ -131,16 +131,27 @@ jobs:
             [System.IO.File]::WriteAllBytes($pdf, [System.Text.Encoding]::ASCII.GetBytes($builder.ToString()))
             $status = 'SERVER_PROBE'
             $oldServer = Run-PrivateCommand -Arguments @('server','status') -Label 'status-before' -TimeoutSeconds 45
-            if ($oldServer -eq 0) {
-              # A running server is *not ours*. Do not stop or restart it.
-              # A synthetic-only parse may reuse the existing local service.
-              $preexistingServer = $true
-              $status = 'SERVER_ALREADY_RUNNING'
-            } else {
+            # MinerU 4.0.3 server status can exit 0 while reporting the server
+            # is NOT running. Fail closed on unknown status, never use exit alone.
+            # ASCII script source: construct localized markers with char codes.
+            $notRunning = -join ([char[]]@(0x670D,0x52A1,0x672A,0x5728,0x8FD0,0x884C))
+            $runningMarker = -join ([char[]]@(0x6B63,0x5728,0x8FD0,0x884C))
+            $runningAlt = -join ([char[]]@(0x8FD0,0x884C,0x4E2D))
+            $statusLog = Join-Path $scratch 'status-before.stdout.log'
+            if (-not (Test-Path -LiteralPath $statusLog -PathType Leaf)) { throw 'SERVER_STATUS_OUTPUT_MISSING' }
+            $serverText = [System.IO.File]::ReadAllText($statusLog,[System.Text.Encoding]::UTF8)
+            if ($serverText.Contains($notRunning)) {
               $status = 'SERVER_START'
               $startExit = Run-PrivateCommand -Arguments @('server','start') -Label 'server-start' -TimeoutSeconds 180
               if ($startExit -ne 0) { $status = 'SERVER_START_FAILED' }
               else { $serverOwned = $true }
+            } elseif ($oldServer -eq 0 -and ($serverText.Contains($runningMarker) -or $serverText.Contains($runningAlt) -or $serverText -match '(?i)server.{0,20}running')) {
+              # Only explicitly running servers are reused; never stop them.
+              $preexistingServer = $true
+              $status = 'SERVER_ALREADY_RUNNING'
+            } else {
+              $status = 'SERVER_STATUS_UNRECOGNIZED'
+              throw 'SERVER_STATUS_UNRECOGNIZED'
             }
             if ($preexistingServer -or $serverOwned) {
               $status = 'PARSER_RUNNING'
