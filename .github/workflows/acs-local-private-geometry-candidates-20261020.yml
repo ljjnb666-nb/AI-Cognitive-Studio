@@ -378,8 +378,17 @@ jobs:
               args=parser.parse_args()
               try:
                   result=capture(DATA_ROOT,args.fixture)
-              except Exception:
-                  print("ACS_FIGURE_GEOMETRY_BLOCKED")
+              except CandidateBlocked as exc:
+                  code = str(exc)
+                  if not re.fullmatch(r"[A-Z0-9_]{3,80}", code):
+                      code = "INVALID_SAFE_REASON"
+                  print("ACS_FIGURE_GEOMETRY_BLOCKED_REASON=" + code)
+                  sys.exit(2)
+              except Exception as exc:
+                  cls = type(exc).__name__
+                  if not re.fullmatch(r"[A-Za-z]{3,48}", cls):
+                      cls = "Unknown"
+                  print("ACS_FIGURE_GEOMETRY_BLOCKED_RUNTIME_CLASS=" + cls)
                   sys.exit(2)
               print("ACS_FIGURE_GEOMETRY_CANDIDATES="+json.dumps(result,sort_keys=True))
           
@@ -395,10 +404,19 @@ jobs:
           [Array]::Copy($header, 0, $total, 0, $header.Length)
           [Array]::Copy($payload, 0, $total, $header.Length, $payload.Length)
           $digest = ([BitConverter]::ToString(([System.Security.Cryptography.SHA1]::Create()).ComputeHash($total))).Replace('-', '').ToLowerInvariant()
-          if ($digest -cne '85577e6cdbbbfb17c94e605fed35d2bc27b8d487') { throw 'TRUSTED_GEOMETRY_SCRIPT_SHA_MISMATCH' }
+          if ($digest -cne '812a334700df067b72752e46caeb5539956941e5') { throw 'TRUSTED_GEOMETRY_SCRIPT_SHA_MISMATCH' }
           foreach ($fixture in @('RB-PDF-12','RB-PDF-13')) {
             $result = @(& $py -I -B $scriptPath --fixture $fixture 2>$null)
             if ($LASTEXITCODE -ne 0) {
+              foreach ($line in $result) {
+                if ($line -match '^ACS_FIGURE_GEOMETRY_BLOCKED_(REASON|RUNTIME_CLASS)=[A-Za-z0-9_]{3,80}
+            foreach ($line in $result) {
+              if ($line -match '^ACS_FIGURE_GEOMETRY_CANDIDATES=') { Write-Output $line }
+            }
+          }
+          Write-Output 'ACS_PRIVATE_GEOMETRY_FOUR_PAGE_EXECUTION_PASS'
+) { Write-Output $line }
+              }
               Write-Output ('ACS_FIGURE_GEOMETRY_EXECUTION_BLOCKED=' + $fixture)
               throw 'GEOMETRY_EXECUTION_FAILED'
             }
