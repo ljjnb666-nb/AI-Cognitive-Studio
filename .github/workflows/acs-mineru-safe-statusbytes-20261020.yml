@@ -18,7 +18,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = 'D:\ai-cognitive-pdf-benchmark-data\temp'
-          $dir = Join-Path $root 'mineru-synthetic-39434331198-1'
+          $dir = Join-Path $root 'mineru-synthetic-39435930323-1'
           $source = Join-Path $dir 'status-before.stdout.log'
           if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'SYNTHETIC_STATUS_FILE_MISSING' }
           $di = Get-Item -LiteralPath $dir -Force
@@ -27,4 +27,4 @@ jobs:
           if ($info.Length -lt 1 -or $info.Length -gt 70) { throw 'SYNTHETIC_STATUS_LENGTH_INVALID' }
           $bytes = [System.IO.File]::ReadAllBytes($source)
           $hex = [System.BitConverter]::ToString($bytes).Replace('-','')
-          Write-Output ('ACS_SYNTHETIC_SERVER_STATUS_BYTES=' + ([ordered]@{original_run=39434331198;length=$bytes.Length;hex=$hex;private_pdf_read=$false;mineru_run=$false} | ConvertTo-Json -Compress))
+          Write-Output ('ACS_SYNTHETIC_SERVER_STATUS_BYTES=' + ([ordered]@{original_run=39435930323;length=$bytes.Length;hex=$hex;private_pdf_read=$false;mineru_run=$false} | ConvertTo-Json -Compress))
