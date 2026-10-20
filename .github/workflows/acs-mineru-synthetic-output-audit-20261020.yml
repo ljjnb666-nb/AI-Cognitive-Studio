@@ -1,0 +1,86 @@
+# Read-only artifact-location audit for one known synthetic-only smoke run.
+name: ACS MinerU synthetic output location audit
+
+on:
+  push:
+    branches: [ops/mineru-local-probe-20261020]
+    paths: [.github/workflows/acs-mineru-synthetic-output-audit-20261020.yml]
+
+permissions: {}
+
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+
+jobs:
+  synthetic-output-audit:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/ops/mineru-local-probe-20261020' && github.event_name == 'push' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Read previous synthetic-only scratch metadata
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_REQUIRED' }
+          $data = 'D:\ai-cognitive-pdf-benchmark-data'
+          $scratch = Join-Path $data 'temp\mineru-synthetic-39434331198-1'
+          $exists = Test-Path -LiteralPath $scratch -PathType Container
+          $safeNames = @()
+          $mdCount = 0
+          $jsonCount = 0
+          $pdfCount = 0
+          $otherCount = 0
+          $stdoutBytes = $null
+          $stderrBytes = $null
+          $stdoutJson = $false
+          $stdoutMentionsMarkdown = $false
+          $stdoutMentionsFileWritten = $false
+          $stdoutHasError = $false
+          if ($exists) {
+            $info = Get-Item -LiteralPath $scratch -Force
+            if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_REPARSE_POINT' }
+            $files = @(Get-ChildItem -LiteralPath $scratch -File -Recurse -Force -ErrorAction Stop | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 })
+            foreach ($f in $files) {
+              $rel = $f.FullName.Substring($scratch.Length).TrimStart([char]'\')
+              if ($rel -match '^[A-Za-z0-9_\-/\.]{1,170}$' -and $safeNames.Count -lt 40) { $safeNames += $rel }
+              switch ($f.Extension.ToLowerInvariant()) {
+                '.md' { $mdCount++ }
+                '.json' { $jsonCount++ }
+                '.pdf' { $pdfCount++ }
+                default { $otherCount++ }
+              }
+            }
+            $stdout = Join-Path $scratch 'parse.stdout.log'
+            $stderr = Join-Path $scratch 'parse.stderr.log'
+            if (Test-Path -LiteralPath $stdout -PathType Leaf) {
+              $stdoutBytes = (Get-Item -LiteralPath $stdout).Length
+              if ($stdoutBytes -lt 100000) {
+                $text = [System.IO.File]::ReadAllText($stdout)
+                $stdoutJson = $text.Contains('{')
+                $stdoutMentionsMarkdown = ($text -match '(?i)markdown|\.md')
+                $stdoutMentionsFileWritten = ($text -match '(?i)saved|wrote|written|output')
+                $stdoutHasError = ($text -match '(?i)error|failed|exception')
+              }
+            }
+            if (Test-Path -LiteralPath $stderr -PathType Leaf) { $stderrBytes = (Get-Item -LiteralPath $stderr).Length }
+          }
+          $out = [ordered]@{
+            policy='ACS_SYNTHETIC_OUTPUT_AUDIT_V1'
+            previous_public_synthetic_run=39434331198
+            scratch_exists=$exists
+            relative_synthetic_filenames=$safeNames
+            md_file_count=$mdCount
+            json_file_count=$jsonCount
+            pdf_file_count=$pdfCount
+            other_file_count=$otherCount
+            parse_stdout_bytes=$stdoutBytes
+            parse_stderr_bytes=$stderrBytes
+            stdout_contains_json=$stdoutJson
+            stdout_mentions_markdown=$stdoutMentionsMarkdown
+            stdout_mentions_output=$stdoutMentionsFileWritten
+            stdout_contains_error_token=$stdoutHasError
+            private_books_read=$false
+            parser_executed=$false
+          }
+          Write-Output ('ACS_SYNTHETIC_OUTPUT_AUDIT=' + ($out | ConvertTo-Json -Compress))
