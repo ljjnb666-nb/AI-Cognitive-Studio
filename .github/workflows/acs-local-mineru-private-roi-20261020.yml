@@ -1,0 +1,58 @@
+# Trusted private ROI job. The repository checkout is exact-SHA, isolated from the
+# owner's dirty benchmark worktree. No artifacts or private pixels are uploaded.
+name: ACS local MinerU private ROI crop acceptance
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-local-mineru-private-roi-20261020.yml
+permissions:
+  contents: read
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  private-roi:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 14
+    steps:
+      - name: Checkout pinned, isolated source
+        uses: actions/checkout@v4
+        with:
+          repository: ljjnb666-nb/AI-Cognitive-Studio
+          ref: 22f859ed60e83627b7a58cc6c8f6c23b7691da4e
+          persist-credentials: false
+          clean: true
+      - name: Verify SHA, resources and persist two private ROI sets
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $head = & git -C $env:GITHUB_WORKSPACE rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head.Trim() -cne '22f859ed60e83627b7a58cc6c8f6c23b7691da4e') {throw 'UNTRUSTED_CHECKOUT_SHA'}
+          $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          $c = [System.IO.DriveInfo]::new('C')
+          $d = [System.IO.DriveInfo]::new('D')
+          if (-not $c.IsReady -or -not $d.IsReady -or
+              [double]$os.FreePhysicalMemory -lt 4194304 -or
+              $c.AvailableFreeSpace -lt 15GB -or $d.AvailableFreeSpace -lt 30GB) {throw 'RESOURCE_NOT_READY'}
+          $py = 'D:\ai-cognitive-pdf-benchmark-data\python\mineru\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $py -PathType Leaf)) {throw 'PINNED_MINERU_PYTHON_MISSING'}
+          $file = Join-Path $env:GITHUB_WORKSPACE 'tools\pdf-parser-benchmark\python\private_region_proposals.py'
+          if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {throw 'TRUSTED_SCRIPT_MISSING'}
+          foreach ($fixture in @('RB-PDF-12','RB-PDF-13')) {
+            $output = @(& $py -I -B $file --fixture $fixture 2>$null)
+            if ($LASTEXITCODE -ne 0) {
+              foreach ($line in $output) {
+                if ($line -match '^ACS_REGION_PROPOSALS_(BLOCKED|RUNTIME_CLASS)=[A-Za-z0-9_]{3,80}$') {
+                  Write-Output $line
+                }
+              }
+              Write-Output ('ACS_REGION_PRIVATE_FIXTURE_FAILED='+$fixture)
+              throw 'PRIVATE_ROI_EXECUTION_REJECTED'
+            }
+            foreach ($line in $output) {
+              if ($line -match '^ACS_REGION_PROPOSALS=') {Write-Output $line}
+            }
+          }
+          Write-Output 'ACS_PRIVATE_ROI_TWO_FIXTURES_SUCCESS'
