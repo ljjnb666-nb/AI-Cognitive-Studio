@@ -42,6 +42,12 @@ jobs:
           $expectedHead = '7fed4c65b969b4e7625069860cf1a6dfd9dc92d6'
           $approvedOrigin = @('https://github.com/ljjnb666-nb/AI-Cognitive-Studio.git','https://github.com/ljjnb666-nb/AI-Cognitive-Studio','git@github.com:ljjnb666-nb/AI-Cognitive-Studio.git','git@github.com:ljjnb666-nb/AI-Cognitive-Studio')
           $gitOK = $false
+          $branchMatches = $false
+          $headMatches = $false
+          $originMatches = $false
+          $statusMatches = $false
+          $gitQuerySucceeded = $false
+          $statusUnexpectedCount = $null
           $git = Get-Command 'git.exe' -ErrorAction SilentlyContinue
           if ((Test-Path -LiteralPath $wt -PathType Container) -and $null -ne $git) {
             try {
@@ -49,7 +55,13 @@ jobs:
               $head = @(& $git.Source --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt rev-parse --verify HEAD 2>$null)
               $origin = @(& $git.Source --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt remote get-url origin 2>$null)
               $status = @(& $git.Source --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt status --porcelain=v1 --untracked-files=normal 2>$null)
-              $gitOK = ($branch.Count -eq 1 -and $branch[0] -ceq 'codex/pdf-parser-benchmark' -and $head.Count -eq 1 -and $head[0] -ceq $expectedHead -and $origin.Count -eq 1 -and $origin[0] -cin $approvedOrigin -and @($status | Where-Object { $_ -cne '?? .mimosa/' }).Count -eq 0)
+              $gitQuerySucceeded = $true
+              $branchMatches = ($branch.Count -eq 1 -and $branch[0] -ceq 'codex/pdf-parser-benchmark')
+              $headMatches = ($head.Count -eq 1 -and $head[0] -ceq $expectedHead)
+              $originMatches = ($origin.Count -eq 1 -and $origin[0] -cin $approvedOrigin)
+              $statusUnexpectedCount = @($status | Where-Object { $_ -cne '?? .mimosa/' }).Count
+              $statusMatches = ($statusUnexpectedCount -eq 0)
+              $gitOK = ($branchMatches -and $headMatches -and $originMatches -and $statusMatches)
             } catch { $gitOK = $false }
           }
           $modelExe = Join-Path $data 'python\mineru\Scripts\mineru.exe'
@@ -75,15 +87,23 @@ jobs:
             $diskOK = ($c.IsReady -and $d.IsReady -and $c.AvailableFreeSpace -ge 15GB -and $d.AvailableFreeSpace -ge 30GB)
           } catch { $diskOK = $false }
           $ramOK = $false
+          $ramFreeGiB = $null
           try {
             $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-            $ramOK = ([double]$os.FreePhysicalMemory -ge (4 * 1024 * 1024))
+            $ramFreeGiB = [Math]::Round(([double]$os.FreePhysicalMemory / 1048576.0), 2)
+            $ramOK = ($ramFreeGiB -ge 4)
           } catch { $ramOK = $false }
           $readyCandidate = ($gitOK -and $mineruVersionOK -and $modelsPresent -and $manifest -and $samplesPresent -and $scriptReady -and $cliReady -and $diskOK -and $ramOK)
           $result = [ordered]@{
             policy = 'ACS_MINERU_LOCAL_PROBE_20261020'
             runner_connected = $true
             repository_pinned_clean = $gitOK
+            git_query_succeeded = $gitQuerySucceeded
+            git_branch_matches = $branchMatches
+            git_head_matches = $headMatches
+            git_origin_matches = $originMatches
+            git_status_allowlisted_only = $statusMatches
+            git_unexpected_status_count = $statusUnexpectedCount
             mineru_exe_present = $mineruPresent
             mineru_4_0_3_verified = $mineruVersionOK
             model_directory_present = $modelsPresent
@@ -93,6 +113,7 @@ jobs:
             bench_dependencies_present = $cliReady
             disk_guard_pass = $diskOK
             ram_4g_pass = $ramOK
+            ram_free_gib = $ramFreeGiB
             offline_weights_fully_verified = $false
             model_network_isolation_verified = $false
             ready_candidate_only = $readyCandidate
