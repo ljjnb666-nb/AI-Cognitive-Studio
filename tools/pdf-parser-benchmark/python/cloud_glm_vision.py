@@ -160,9 +160,19 @@ def execute_cloud(root: Path, fixture: str, model: str, *,
     target_id = selected[0]["regionId"] if len(selected) == 1 else "batch"
     output = report / ("glm-cloud-v1-" + fixture + "-" + target_id)
     stage = report / ("." + output.name + "-stage")
-    if output.exists() or output.is_symlink() or stage.exists() or stage.is_symlink():
+    # Keep a durable spend/attempt marker even if a request fails after billing.
+    # Never automatically retry such a failure; manual review is required.
+    receipt = report / ("." + output.name + ".cloud-attempted")
+    if (output.exists() or output.is_symlink() or stage.exists()
+            or stage.is_symlink() or receipt.exists() or receipt.is_symlink()):
         raise CloudBlocked("CLOUD_RESULT_ALREADY_EXISTS")
-    # Reserve the output BEFORE sending billable requests to avoid accidental replay.
+    try:
+        with receipt.open("x", encoding="utf-8") as entry:
+            entry.write("Cloud attempt reserved; do not replay without inspection.\n")
+            entry.flush()
+            os.fsync(entry.fileno())
+    except FileExistsError:
+        raise CloudBlocked("CLOUD_RESULT_ALREADY_EXISTS") from None
     stage.mkdir()
     try:
         templates = {entry["regionId"]:entry for entry in empty_template(provenance)}
@@ -209,8 +219,7 @@ def execute_cloud(root: Path, fixture: str, model: str, *,
             os.fsync(handle.fileno())
         os.rename(stage, output)
     except BaseException:
-        # If a cloud request happened but output wasn't committed, fail closed.
-        # Do not automatically retry to avoid sending the same crop twice.
+        # Durable receipt remains even when output is incomplete. No auto retries.
         if stage.is_dir() and not stage.is_symlink():
             shutil.rmtree(stage)
         raise
@@ -218,8 +227,8 @@ def execute_cloud(root: Path, fixture: str, model: str, *,
         "status": "GLM_CLOUD_PROPOSALS_SAVED_UNREVIEWED",
         "fixtureId": fixture,
         "imagesSentToGLM": len(selected),
-        "sourcePagesSent": 0,
         "wholePdfSent": False,
+        "cropMayIncludeMostOfAPage": True,
         "modelProposedNodes": sum(len(r["proposal"]["nodes"]) for r in results),
         "modelProposedEdges": sum(len(r["proposal"]["edges"]) for r in results),
         "graphRelationsHumanVerified": False,
