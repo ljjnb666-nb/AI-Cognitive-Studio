@@ -8,10 +8,30 @@ from pathlib import Path
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from figure_geometry_candidates import (
-    CandidateBlocked, match_arrow_tip, validate_evidence,
+    CandidateBlocked, match_arrow_tip, normalize_hough_segment, validate_evidence,
 )
 
 SHA="a"*64
+
+
+class HoughLayoutTests(unittest.TestCase):
+    def test_flat_segment_from_windows_cv2(self):
+        self.assertEqual(normalize_hough_segment([20,30,40,50]), (20,30,40,50))
+
+    def test_nested_segment_from_other_cv2(self):
+        self.assertEqual(normalize_hough_segment([[20,30,40,50]]), (20,30,40,50))
+
+    def test_numpy_like_tolist_layouts(self):
+        class ArrayLike:
+            def __init__(self, value): self.value=value
+            def tolist(self): return self.value
+        self.assertEqual(normalize_hough_segment(ArrayLike([[10,11,12,13]])),(10,11,12,13))
+        self.assertEqual(normalize_hough_segment(ArrayLike([10,11,12,13])),(10,11,12,13))
+
+    def test_reject_invalid_rows_not_crash(self):
+        for case in (None,42,[],[1,2,3],[1,2,3,float("nan")],[["bad",2,3,4]]):
+            with self.subTest(case=case):
+                self.assertIsNone(normalize_hough_segment(case))
 
 
 class GeometryTests(unittest.TestCase):
