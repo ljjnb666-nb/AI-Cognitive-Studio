@@ -99,7 +99,9 @@ export function evaluateStructureEvidence({ reference, normalized }) {
   const pages = [];
   for (const refPage of reference.pages) {
     const page = byPage.get(refPage.subsetPageIndex);
-    const pageBound = !!page && page.blocks.length > 0 && normalized.pageMarkers?.status !== 'MISSING' &&
+    const mineruNeedsMarkerProof = normalized.parser?.name?.toLowerCase().includes('mineru') === true;
+    const markerTrusted = normalized.pageMarkers?.status !== 'MISSING' && (!mineruNeedsMarkerProof || normalized.pageMarkers?.status === 'VALID');
+    const pageBound = !!page && page.blocks.length > 0 && markerTrusted &&
       page.blocks.every((block) => block.pageIndex === refPage.subsetPageIndex);
     const status = !page ? 'MISSING_OUTPUT_PAGE' : !pageBound ? 'PAGE_BINDING_UNVERIFIED' : 'TEXT_EVIDENCE_ONLY';
     if (!pageBound) {
