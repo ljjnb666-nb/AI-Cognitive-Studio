@@ -53,5 +53,34 @@ jobs:
                 }
               }
             }
-            Write-Output ('SYNTHETIC_DEBUG=' + ([ordered]@{run=$id;present=$true;files=$files;checks=$checks} | ConvertTo-Json -Compress -Depth 8))
+            # Inspect ONLY generated synthetic stdout JSON; redact paths, URLs and non-ASCII.
+            $jsonKeys = @()
+            $jsonErrorCategory = 'none'
+            $jsonScalarTags = @()
+            $pout = Join-Path $dir 'parse.stdout.log'
+            if (Test-Path -LiteralPath $pout -PathType Leaf) {
+              $fileObj = Get-Item -LiteralPath $pout
+              if ($fileObj.Length -gt 0 -and $fileObj.Length -le 10240) {
+                try {
+                  $payload = [System.IO.File]::ReadAllText($pout) | ConvertFrom-Json -ErrorAction Stop
+                  $jsonKeys = @($payload.PSObject.Properties.Name | Select-Object -First 30)
+                  foreach ($name in @('ok','success','status','error','message','code','total_pages')) {
+                    $prop = $payload.PSObject.Properties[$name]
+                    if ($null -ne $prop) {
+                      $val = [string]$prop.Value
+                      if ($name -in @('error','message')) {
+                        if ($val -match '(?i)server|connect|endpoint') { $jsonErrorCategory = 'server_connectivity' }
+                        elseif ($val -match '(?i)model|weight|checkpoint') { $jsonErrorCategory = 'model_weights' }
+                        elseif ($val -match '(?i)not found|no such file|missing') { $jsonErrorCategory = 'missing_input_or_output' }
+                        elseif ($val -match '(?i)pdf|page|parse|invalid') { $jsonErrorCategory = 'input_or_parser' }
+                        elseif ($val -match '(?i)argument|option|usage') { $jsonErrorCategory = 'cli_usage' }
+                        elseif ($val -match '(?i)permission|denied') { $jsonErrorCategory = 'permissions' }
+                        else { $jsonErrorCategory = 'other' }
+                      } else { $jsonScalarTags += ($name + '=' + (($val -replace '[^A-Za-z0-9_-]','').Substring(0,[Math]::Min(40,($val -replace '[^A-Za-z0-9_-]','').Length)))) }
+                    }
+                  }
+                } catch { $jsonErrorCategory = 'unparseable' }
+              }
+            }
+            Write-Output ('SYNTHETIC_DEBUG=' + ([ordered]@{run=$id;present=$true;files=$files;checks=$checks;json_keys=$jsonKeys;json_scalar_tags=$jsonScalarTags;json_error_category=$jsonErrorCategory} | ConvertTo-Json -Compress -Depth 8))
           }
