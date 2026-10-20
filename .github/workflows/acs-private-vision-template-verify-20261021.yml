@@ -1,0 +1,77 @@
+# Independent read-only verification of 03B prepare results.
+name: ACS private local vision template independent audit
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-private-vision-template-verify-20261021.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Verify all prepared template crop SHA and no fake inference
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $python='D:\ai-cognitive-pdf-benchmark-data\python\mineru\Scripts\python.exe'
+          $code=@'
+          import json,hashlib,sys
+          from pathlib import Path
+          root=Path(r"D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1")
+          expected={"RB-PDF-12":4,"RB-PDF-13":11}
+          try:
+              totals=[]
+              for fixture,n in expected.items():
+                  region=root/("region-proposals-v1-"+fixture)/"region-proposals.json"
+                  out=root/("local-vision-proposals-v1-"+fixture+"-prepare")/"vision-proposals.json"
+                  if any(p.is_symlink() or not p.is_file() or p.stat().st_size>4000000 for p in (region,out)):raise ValueError()
+                  raw=region.read_bytes()
+                  ref=json.loads(raw)
+                  doc=json.loads(out.read_text(encoding="utf-8"))
+                  if (doc.get("schemaVersion")!="acs-local-vision-graph-proposal-batch-v1" or
+                      doc.get("fixtureId")!=fixture or doc.get("sourceRun")!="real-mineru-39440805765-1" or
+                      doc.get("sourceRegionManifestSha256")!=hashlib.sha256(raw).hexdigest() or
+                      doc.get("backend")!="none" or doc.get("mode")!="prepare" or
+                      doc.get("modelId") is not None or doc.get("reviewStatus")!="NOT_REVIEWED" or
+                      doc.get("graphVerified") is not False or doc.get("allProposalsEvidenceChecked") is not True):
+                      raise ValueError()
+                  key={}
+                  for page in ref["pages"]:
+                      for item in page["regions"]:
+                          rid=item["regionId"]
+                          if rid in key:raise ValueError()
+                          key[rid]=(item["cropSha256"],page["sourcePhysicalPage1Based"])
+                  actual=doc.get("results")
+                  if not isinstance(actual,list) or len(actual)!=n or len(key)!=n:raise ValueError()
+                  seen=set()
+                  for one in actual:
+                      rid=one.get("regionId")
+                      if rid not in key or rid in seen:raise ValueError()
+                      seen.add(rid)
+                      p=one.get("proposal")
+                      m=one.get("mappedPageEvidence")
+                      if (one.get("mode")!="NOT_RUN_TEMPLATE" or one.get("graphVerified") is not False or
+                          one.get("humanReviewRequired") is not True or
+                          one.get("sourceCropSha256")!=key[rid][0] or
+                          one.get("sourcePhysicalPage1Based")!=key[rid][1] or
+                          p.get("sourceCropSha256")!=key[rid][0] or
+                          p.get("graphStatus")!="PROPOSED_UNVERIFIED" or
+                          p.get("reviewStatus")!="NOT_REVIEWED" or p.get("humanVerified") is not False or
+                          p.get("nodes")!=[] or p.get("edges")!=[] or
+                          m.get("mappedNodes")!=[] or m.get("mappedEdges")!=[] or
+                          m.get("graphVerified") is not False):
+                          raise ValueError()
+                  totals.append({"fixture":fixture,"regions_verified":len(seen),"zero_fabricated_nodes":True,"zero_fabricated_edges":True,"source_sha_match":True})
+              print("ACS_PRIVATE_VISION_TEMPLATES_VERIFIED="+json.dumps({"status":"VERIFIED","cases":totals,"total_templates":sum(x["regions_verified"] for x in totals),"real_model_inference":False,"private_content_uploaded":False},separators=(",",":")))
+          except Exception:
+              print("ACS_PRIVATE_VISION_TEMPLATES_BLOCKED")
+              sys.exit(2)
+          '@
+          $code | & $python -I -B -
+          if($LASTEXITCODE -ne 0) {throw 'PRIVATE_TEMPLATES_ACCEPTANCE_FAILED'}
