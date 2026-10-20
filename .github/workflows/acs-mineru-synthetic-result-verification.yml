@@ -1,0 +1,34 @@
+# Verify only a previously generated, trusted synthetic PDF result; no private input.
+name: ACS MinerU synthetic extraction verification
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-synthetic-result-verification.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Verify expected synthetic text
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $data='D:\ai-cognitive-pdf-benchmark-data'
+          $root=Join-Path $data 'temp'
+          $dir=Join-Path $root 'mineru-synthetic-isolated-39435884830-1'
+          $path=Join-Path $dir 'mineru-result.md'
+          if (-not (Test-Path -LiteralPath $dir -PathType Container)) { throw 'SYNTHETIC_DIR_MISSING' }
+          if ((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'UNSAFE_SCRATCH' }
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'SYNTHETIC_RESULT_MISSING' }
+          $f=Get-Item -LiteralPath $path -Force
+          if (($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $f.Length -lt 1 -or $f.Length -gt 65536) { throw 'UNSAFE_RESULT' }
+          $text=[System.IO.File]::ReadAllText($path,[System.Text.Encoding]::UTF8)
+          $found=$text.Contains('Hello MinerU synthetic test')
+          Write-Output ('ACS_MINERU_SYNTHETIC_TEXT_VERIFIED=' + ([ordered]@{source='trusted_generated_synthetic_only';actual_markdown_bytes=[int64]$f.Length;expected_text_found=$found;private_pdf_read=$false} | ConvertTo-Json -Compress))
+          if (-not $found) { throw 'EXPECTED_SYNTHETIC_TEXT_NOT_FOUND' }
