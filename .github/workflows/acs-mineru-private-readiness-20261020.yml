@@ -1,0 +1,134 @@
+# Trusted read-only inspection for an explicitly authorized private local benchmark.
+# Does not run models, alter files or transmit private PDF/OCR/model content.
+name: ACS MinerU private book readiness gate
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-private-readiness-20261020.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  inspect:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event_name == 'push' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 15
+    steps:
+      - name: Inspect pinned sample lineage, cache metadata and outbound firewall
+        shell: powershell
+        env:
+          GIT_OPTIONAL_LOCKS: '0'
+          GIT_NO_REPLACE_OBJECTS: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $data = 'D:\ai-cognitive-pdf-benchmark-data'
+          $fixtureRoot = Join-Path $data 'fixtures'
+          $manifestPath = Join-Path $fixtureRoot 'fixtures.manifest.json'
+          $mineru = Join-Path $data 'python\mineru\Scripts\mineru.exe'
+          $python = Join-Path $data 'python\mineru\Scripts\python.exe'
+          $modelRoot = Join-Path $data 'models'
+          $cacheRoot = Join-Path $data 'cache'
+          $result = [ordered]@{
+            policy='ACS_MINERU_PRIVATE_READINESS_V1'
+            runner_os_is_windows=($env:RUNNER_OS -eq 'Windows')
+            pinned_sample_lineage_pass=$false
+            private_source_hashes_match=$false
+            original_physical_pages_match=$false
+            mineru_binary_present=$false
+            python_binary_present=$false
+            model_cache_roots_present=$false
+            cached_onnx_file_count=0
+            cache_weight_integrity_proven=$false
+            c_d_disk_pass=$false
+            ram_free_gib=$null
+            ram_4_gib_pass=$false
+            firewall_inspection_available=$false
+            all_firewall_profiles_enabled=$false
+            mineru_outbound_block_rule=$false
+            python_outbound_block_rule=$false
+            process_egress_isolation_candidate=$false
+            trusted_repo_code_executed=$false
+            private_model_executed=$false
+            private_data_uploaded=$false
+          }
+          try {
+            if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_HOST_REQUIRED' }
+            foreach ($dir in @($data,$fixtureRoot,$modelRoot,$cacheRoot)) {
+              if (-not (Test-Path -LiteralPath $dir -PathType Container)) { throw 'DIRECTORY_NOT_READY' }
+              if (((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_DIRECTORY_REPARSE' }
+            }
+            $result.mineru_binary_present = Test-Path -LiteralPath $mineru -PathType Leaf
+            $result.python_binary_present = Test-Path -LiteralPath $python -PathType Leaf
+            $result.model_cache_roots_present = (Test-Path -LiteralPath (Join-Path $cacheRoot 'mineru\home') -PathType Container) -and (Test-Path -LiteralPath (Join-Path $cacheRoot 'huggingface') -PathType Container)
+            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'MANIFEST_MISSING' }
+            $mf = Get-Item -LiteralPath $manifestPath -Force
+            if (($mf.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $mf.Length -lt 20 -or $mf.Length -gt 1048576) { throw 'MANIFEST_UNSAFE' }
+            $m = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+            $lines = @($m.fixtures)
+            if ($lines.Count -lt 6) { throw 'MANIFEST_TOO_SHORT' }
+            $lineage = @(
+              @{subset='RB-PDF-12';parent='RB-PDF-02';pages=@(73,145,261)},
+              @{subset='RB-PDF-13';parent='RB-PDF-03';pages=@(51,127,379)}
+            )
+            $shaOK = $true
+            $lineageOK = $true
+            $pagesOK = $true
+            foreach ($case in $lineage) {
+              $subset = @($lines | Where-Object { $_.id -ceq $case.subset })
+              $parents = @($lines | Where-Object { $_.id -ceq $case.parent })
+              if ($subset.Count -ne 1 -or $parents.Count -ne 1) { $lineageOK=$false; break }
+              $sr=$subset[0]; $pr=$parents[0]
+              if ($sr.fixtureClass -cne 'private-real-page-subset' -or $sr.filename -cne ($case.subset + '.pdf') -or $sr.sourceFixtureId -cne $case.parent -or
+                  $sr.sourceSha256 -cne $pr.expectedSha256) { $lineageOK=$false }
+              if ((@($sr.sourcePages1Based) -join ',') -cne (@($case.pages) -join ',')) { $pagesOK=$false }
+              foreach ($pair in @(@($sr,$case.subset),@($pr,$case.parent))) {
+                $row=$pair[0];$id=[string]$pair[1]
+                if ($row.expectedSha256 -cnotmatch '^[a-f0-9]{64}$' -or $row.declaredBytes -lt 1) { $shaOK=$false;continue }
+                $name=$id+'.pdf'
+                $path=Join-Path $fixtureRoot $name
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $shaOK=$false;continue }
+                $f=Get-Item -LiteralPath $path -Force
+                if (($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $f.Length -ne [int64]$row.declaredBytes) { $shaOK=$false;continue }
+                if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $row.expectedSha256) { $shaOK=$false }
+              }
+            }
+            $result.pinned_sample_lineage_pass=$lineageOK
+            $result.private_source_hashes_match=$shaOK
+            $result.original_physical_pages_match=$pagesOK
+            $c=[System.IO.DriveInfo]::new('C')
+            $d=[System.IO.DriveInfo]::new('D')
+            $result.c_d_disk_pass=($c.IsReady -and $d.IsReady -and $c.AvailableFreeSpace -ge 15GB -and $d.AvailableFreeSpace -ge 30GB)
+            $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            $result.ram_free_gib=[Math]::Round(([double]$os.FreePhysicalMemory / 1048576.0),2)
+            $result.ram_4_gib_pass=($result.ram_free_gib -ge 4)
+            if ($result.model_cache_roots_present) {
+              # Metadata only. File names and hashes are NEVER sent to GitHub.
+              $onnx=@(Get-ChildItem -LiteralPath $modelRoot -Filter '*.onnx' -Recurse -File -ErrorAction SilentlyContinue)
+              $result.cached_onnx_file_count=$onnx.Count
+            }
+            try {
+              $profiles=@(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
+              $result.firewall_inspection_available=($profiles.Count -ge 1)
+              $result.all_firewall_profiles_enabled=($profiles.Count -ge 3 -and @($profiles | Where-Object { $_.Enabled -ne 'True' }).Count -eq 0)
+              $blocks=@(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Outbound -Action Block -Enabled True -ErrorAction Stop)
+              $exeRules=@()
+              foreach ($rule in $blocks) {
+                $filter = $rule | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue
+                if ($null -ne $filter) {
+                  $exeRules+=@{program=[string]$filter.Program;profiles=[string]$rule.Profile}
+                }
+              }
+              $result.mineru_outbound_block_rule=(@($exeRules | Where-Object { $_.program -ieq $mineru }).Count -gt 0)
+              $result.python_outbound_block_rule=(@($exeRules | Where-Object { $_.program -ieq $python }).Count -gt 0)
+              $result.process_egress_isolation_candidate=($result.all_firewall_profiles_enabled -and $result.mineru_outbound_block_rule -and $result.python_outbound_block_rule)
+            } catch {
+              $result.firewall_inspection_available=$false
+            }
+          } catch {
+            $result.gate_error='HOST_METADATA_OR_HASH_GATE_FAILURE'
+          }
+          Write-Output ('ACS_MINERU_PRIVATE_READINESS=' + ($result | ConvertTo-Json -Compress -Depth 6))
+          Write-Output 'ACS_MINERU_READINESS_REPORTED_NO_PRIVATE_CONTENT'
