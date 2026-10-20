@@ -41,6 +41,9 @@ jobs:
       - name: Test private region provenance and vision graph suggestion gates
         working-directory: tools/pdf-parser-benchmark
         run: python3 -m unittest discover -s python -p "test_private_region_proposals.py" -v
+      - name: Local-only vision proposal and review authority regressions
+        working-directory: tools/pdf-parser-benchmark
+        run: python3 -m unittest discover -s python -p "test_local_vision_proposals.py" -v
       - name: Typecheck offline regrader
         working-directory: tools/pdf-parser-benchmark
         run: ./node_modules/.bin/tsc --noEmit --pretty false
