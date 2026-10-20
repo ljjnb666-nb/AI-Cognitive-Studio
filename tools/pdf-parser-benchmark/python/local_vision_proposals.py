@@ -198,7 +198,8 @@ def strict_local_request(path: str, payload: dict | None = None, timeout: int = 
 
 
 def ensure_loaded_model(model: str) -> None:
-    if not isinstance(model, str) or not MODEL_ID.fullmatch(model):
+    if (not isinstance(model, str) or not MODEL_ID.fullmatch(model)
+            or "://" in model or model.startswith(("http:", "https:"))):
         raise LocalVisionBlocked("MODEL_ID_INVALID")
     response = strict_local_request("/v1/models")
     records = response.get("data")
@@ -247,7 +248,11 @@ def build_proposal(items: list[dict], provenance: dict, *, mode: str, model: str
     templates = {p["regionId"]:p for p in empty_template(provenance)}
     results = []
     for item in items:
-        proposal = dict(templates[item["regionId"]])
+        template = templates.get(item.get("regionId"))
+        if (not isinstance(template, dict)
+                or item.get("sha") != template.get("sourceCropSha256")):
+            raise LocalVisionBlocked("REGION_ITEM_SHA_MISMATCH")
+        proposal = dict(template)
         status = "NOT_RUN_TEMPLATE"
         if mode == "infer":
             output = infer_one(model, item)
