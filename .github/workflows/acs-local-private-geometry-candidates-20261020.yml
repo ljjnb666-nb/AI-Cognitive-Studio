@@ -409,13 +409,7 @@ jobs:
             $result = @(& $py -I -B $scriptPath --fixture $fixture 2>$null)
             if ($LASTEXITCODE -ne 0) {
               foreach ($line in $result) {
-                if ($line -match '^ACS_FIGURE_GEOMETRY_BLOCKED_(REASON|RUNTIME_CLASS)=[A-Za-z0-9_]{3,80}
-            foreach ($line in $result) {
-              if ($line -match '^ACS_FIGURE_GEOMETRY_CANDIDATES=') { Write-Output $line }
-            }
-          }
-          Write-Output 'ACS_PRIVATE_GEOMETRY_FOUR_PAGE_EXECUTION_PASS'
-) { Write-Output $line }
+                if ($line -match '^ACS_FIGURE_GEOMETRY_BLOCKED_(REASON|RUNTIME_CLASS)=[A-Za-z0-9_]{3,80}$') { Write-Output $line }
               }
               Write-Output ('ACS_FIGURE_GEOMETRY_EXECUTION_BLOCKED=' + $fixture)
               throw 'GEOMETRY_EXECUTION_FAILED'
