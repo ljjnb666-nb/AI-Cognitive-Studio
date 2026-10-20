@@ -38,6 +38,9 @@ jobs:
       - name: Install isolated benchmark dependencies with lifecycle scripts disabled
         working-directory: tools/pdf-parser-benchmark
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test private region provenance and vision graph suggestion gates
+        working-directory: tools/pdf-parser-benchmark
+        run: python3 -m unittest discover -s python -p "test_private_region_proposals.py" -v
       - name: Typecheck offline regrader
         working-directory: tools/pdf-parser-benchmark
         run: ./node_modules/.bin/tsc --noEmit --pretty false
