@@ -97,6 +97,13 @@ jobs:
               return [int]$p.ExitCode
             }
 
+            # Require exact pinned CLI version; capture output privately, never upload it.
+            $versionExit = Run-PrivateCommand -Arguments @('--version') -Label 'mineru-version' -TimeoutSeconds 30
+            $versionPrivateLog = Join-Path $scratch 'mineru-version.stdout.log'
+            if ($versionExit -ne 0 -or -not (Test-Path -LiteralPath $versionPrivateLog -PathType Leaf)) { throw 'PINNED_MINERU_VERSION_REQUIRED' }
+            $versionText = [System.IO.File]::ReadAllText($versionPrivateLog)
+            if ($versionText.Length -gt 2048 -or $versionText -notmatch '(^|\\D)4\\.0\\.3(\\D|$)') { throw 'PINNED_MINERU_VERSION_MISMATCH' }
+
             # Produce a deterministic one-page PDF from inlined *public* text.
             # No PDF fixture, book, model blob, or repository file is read.
             $line = 'BT /F1 18 Tf 50 160 Td (Hello MinerU 4.0.3 synthetic smoke test) Tj ET'
