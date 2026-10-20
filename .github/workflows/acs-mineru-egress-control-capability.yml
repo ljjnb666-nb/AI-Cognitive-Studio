@@ -1,0 +1,50 @@
+# Read-only capability check; never alter firewall, PDF files, models or repo.
+name: ACS MinerU outbound isolation capability
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-egress-control-capability.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 4
+    steps:
+      - name: Inspect firewall elevation and available isolation mechanisms
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $admin = $false
+          try {
+            $identity=[System.Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal=New-Object System.Security.Principal.WindowsPrincipal($identity)
+            $admin=$principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+          } catch { $admin=$false }
+          $cimProfiles=$false
+          $firewallCmd=$false
+          try {
+            $p=@(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
+            $cimProfiles=($p.Count -ge 3)
+            $firewallCmd=($null -ne (Get-Command New-NetFirewallRule -ErrorAction SilentlyContinue))
+          } catch {}
+          $hyperv=$false
+          $docker=$false
+          try { $docker=($null -ne (Get-Command docker.exe -ErrorAction SilentlyContinue)) } catch {}
+          try { $hyperv=($null -ne (Get-Command New-VM -ErrorAction SilentlyContinue)) } catch {}
+          $data=[ordered]@{
+            policy='ACS_MINERU_EGRESS_CAPABILITY_V1'
+            runner_is_admin=$admin
+            firewall_profiles_queryable=$cimProfiles
+            firewall_rule_command_available=$firewallCmd
+            docker_cli_present=$docker
+            hyperv_cmdlet_present=$hyperv
+            no_firewall_changes=$true
+            no_private_content_read=$true
+            no_ocr_executed=$true
+          }
+          Write-Output ('ACS_MINERU_EGRESS_CAPABILITY=' + ($data | ConvertTo-Json -Compress))
