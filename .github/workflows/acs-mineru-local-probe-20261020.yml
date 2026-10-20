@@ -1,0 +1,103 @@
+# Isolated opt-in host probe. User authorized running local GitHub self-hosted tests.
+# Push event confined to this single, temporary branch. No checkout or untrusted PR code.
+name: ACS MinerU local read-only probe
+
+on:
+  push:
+    branches:
+      - ops/mineru-local-probe-20261020
+    paths:
+      - .github/workflows/acs-mineru-local-probe-20261020.yml
+
+permissions: {}
+
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/ops/mineru-local-probe-20261020' && github.event_name == 'push' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 6
+    steps:
+      - name: Read-only local MinerU and benchmark evidence
+        shell: powershell
+        env:
+          GIT_OPTIONAL_LOCKS: '0'
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_NO_REPLACE_OBJECTS: '1'
+          GIT_LFS_SKIP_SMUDGE: '1'
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          HF_DATASETS_OFFLINE: '1'
+          MODELSCOPE_OFFLINE: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # ASCII script for Windows PowerShell 5.1 compatibility.
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'NOT_WINDOWS' }
+          $rootName = -join ([char[]]@(0x6240,0x6709,0x9879,0x76EE))
+          $wt = Join-Path (Join-Path (Join-Path 'D:\' $rootName) '90_Worktrees') 'AI-Cognitive-Studio-pdf-parser-benchmark'
+          $data = 'D:\ai-cognitive-pdf-benchmark-data'
+          $expectedHead = '7fed4c65b969b4e7625069860cf1a6dfd9dc92d6'
+          $approvedOrigin = @('https://github.com/ljjnb666-nb/AI-Cognitive-Studio.git','https://github.com/ljjnb666-nb/AI-Cognitive-Studio','git@github.com:ljjnb666-nb/AI-Cognitive-Studio.git','git@github.com:ljjnb666-nb/AI-Cognitive-Studio')
+          $gitOK = $false
+          $git = Get-Command 'git.exe' -ErrorAction SilentlyContinue
+          if ((Test-Path -LiteralPath $wt -PathType Container) -and $null -ne $git) {
+            try {
+              $branch = @(& $git.Source --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt symbolic-ref --quiet --short HEAD 2>$null)
+              $head = @(& $git.Source --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt rev-parse --verify HEAD 2>$null)
+              $origin = @(& $git.Source --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt remote get-url origin 2>$null)
+              $status = @(& $git.Source --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false -C $wt status --porcelain=v1 --untracked-files=normal 2>$null)
+              $gitOK = ($branch.Count -eq 1 -and $branch[0] -ceq 'codex/pdf-parser-benchmark' -and $head.Count -eq 1 -and $head[0] -ceq $expectedHead -and $origin.Count -eq 1 -and $origin[0] -cin $approvedOrigin -and @($status | Where-Object { $_ -cne '?? .mimosa/' }).Count -eq 0)
+            } catch { $gitOK = $false }
+          }
+          $modelExe = Join-Path $data 'python\mineru\Scripts\mineru.exe'
+          $mineruPresent = Test-Path -LiteralPath $modelExe -PathType Leaf
+          $modelsPresent = Test-Path -LiteralPath (Join-Path $data 'models') -PathType Container
+          $mineruVersionOK = $false
+          if ($mineruPresent) {
+            try {
+              $ver = @(& $modelExe --version 2>$null)
+              $mineruVersionOK = ($LASTEXITCODE -eq 0 -and (($ver -join ' ') -match '(^|\D)4\.0\.3(\D|$)'))
+            } catch { $mineruVersionOK = $false }
+          }
+          $manifest = Test-Path -LiteralPath (Join-Path $data 'fixtures\fixtures.manifest.json') -PathType Leaf
+          $samples = @('RB-PDF-12.pdf','RB-PDF-13.pdf')
+          $samplesPresent = $true
+          foreach ($name in $samples) { if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $data 'fixtures') $name) -PathType Leaf)) { $samplesPresent = $false } }
+          $scriptReady = Test-Path -LiteralPath (Join-Path $wt 'tools\pdf-parser-benchmark\scripts\run_real_book_matrix.py') -PathType Leaf
+          $cliReady = Test-Path -LiteralPath (Join-Path $wt 'tools\pdf-parser-benchmark\node_modules\.bin\tsx.cmd') -PathType Leaf
+          $diskOK = $false
+          try {
+            $c = [System.IO.DriveInfo]::new('C')
+            $d = [System.IO.DriveInfo]::new('D')
+            $diskOK = ($c.IsReady -and $d.IsReady -and $c.AvailableFreeSpace -ge 15GB -and $d.AvailableFreeSpace -ge 30GB)
+          } catch { $diskOK = $false }
+          $ramOK = $false
+          try {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            $ramOK = ([double]$os.FreePhysicalMemory -ge (4 * 1024 * 1024))
+          } catch { $ramOK = $false }
+          $readyCandidate = ($gitOK -and $mineruVersionOK -and $modelsPresent -and $manifest -and $samplesPresent -and $scriptReady -and $cliReady -and $diskOK -and $ramOK)
+          $result = [ordered]@{
+            policy = 'ACS_MINERU_LOCAL_PROBE_20261020'
+            runner_connected = $true
+            repository_pinned_clean = $gitOK
+            mineru_exe_present = $mineruPresent
+            mineru_4_0_3_verified = $mineruVersionOK
+            model_directory_present = $modelsPresent
+            private_manifest_present = $manifest
+            subset_files_present = $samplesPresent
+            benchmark_runner_present = $scriptReady
+            bench_dependencies_present = $cliReady
+            disk_guard_pass = $diskOK
+            ram_4g_pass = $ramOK
+            offline_weights_fully_verified = $false
+            model_network_isolation_verified = $false
+            ready_candidate_only = $readyCandidate
+            model_executed = $false
+            private_content_exported = $false
+          }
+          Write-Output ('ACS_MINERU_LOCAL_PROBE=' + ($result | ConvertTo-Json -Compress))
+          Write-Output 'ACS_MINERU_PROBE_COMPLETED'
