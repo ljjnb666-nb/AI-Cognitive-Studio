@@ -356,7 +356,14 @@ def main() -> None:
         cls = type(exc).__name__
         if not re.fullmatch(r"[A-Za-z]{3,48}", cls):
             cls = "Unknown"
+        tb = exc.__traceback__
+        while tb is not None and tb.tb_next is not None:
+            tb = tb.tb_next
+        fn = tb.tb_frame.f_code.co_name if tb is not None else "unknown"
+        fn = fn if re.fullmatch(r"[A-Za-z_]{3,64}", fn) else "unknown"
+        loc = tb.tb_lineno if tb is not None else 0
         print("ACS_FIGURE_GEOMETRY_BLOCKED_RUNTIME_CLASS=" + cls)
+        print("ACS_FIGURE_GEOMETRY_BLOCKED_LOCATION=" + fn + "_" + str(loc))
         sys.exit(2)
     print("ACS_FIGURE_GEOMETRY_CANDIDATES="+json.dumps(result,sort_keys=True))
 
