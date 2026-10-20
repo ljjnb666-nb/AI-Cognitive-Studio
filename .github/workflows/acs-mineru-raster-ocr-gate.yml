@@ -1,0 +1,210 @@
+# User-authorized isolated MinerU 4.0.3 synthetic-only smoke retry.
+# Does not check out any repository code or open any private book/fixture.
+name: ACS MinerU raster-only OCR synthetic gate
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-raster-ocr-gate.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  smoke:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 18
+    steps:
+      - name: Verify server state and run local synthetic PDF safely
+        shell: powershell
+        env:
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          HF_DATASETS_OFFLINE: '1'
+          MODELSCOPE_OFFLINE: '1'
+          MINERU_MODEL_SOURCE: 'local'
+          PIP_NO_INDEX: '1'
+          NO_PROXY: '*'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_ONLY' }
+          $data = 'D:\ai-cognitive-pdf-benchmark-data'
+          $mineru = Join-Path $data 'python\mineru\Scripts\mineru.exe'
+          $scratchRoot = Join-Path $data 'temp'
+          $scratch = Join-Path $scratchRoot ('mineru-synthetic-isolated-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          $homeDir = Join-Path $data 'cache\mineru\home'
+          $hfDir = Join-Path $data 'cache\huggingface'
+          $status = 'PRECHECK'
+          $memory = $null
+          $serverState = 'UNKNOWN'
+          $serverOwned = $false
+          $parseCode = $null
+          $startCode = $null
+          $stopCode = $null
+          $outputSize = 0
+          $jsonError = $false
+          $safeStatusPreview = ''
+          $scratchCreated = $false
+          try {
+            foreach ($dir in @($data,$scratchRoot,$homeDir,$hfDir)) {
+              if (-not (Test-Path -LiteralPath $dir -PathType Container)) { throw 'MODEL_CACHE_MISSING' }
+              $d = Get-Item -LiteralPath $dir -Force
+              if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_DIR' }
+            }
+            if (-not (Test-Path -LiteralPath $mineru -PathType Leaf)) { throw 'MINERU_MISSING' }
+            $ready = $false
+            for ($attempt=0; $attempt -lt 10; $attempt++) {
+              $a = Get-CimInstance Win32_OperatingSystem
+              $gb1 = [double]$a.FreePhysicalMemory / 1048576.0
+              if ($gb1 -ge 4) {
+                Start-Sleep -Seconds 5
+                $b = Get-CimInstance Win32_OperatingSystem
+                $gb2 = [double]$b.FreePhysicalMemory / 1048576.0
+                $memory = [Math]::Round([Math]::Min($gb1,$gb2),2)
+                if ($memory -ge 4) { $ready = $true; break }
+              }
+              Start-Sleep -Seconds 12
+            }
+            $c = [System.IO.DriveInfo]::new('C')
+            $d = [System.IO.DriveInfo]::new('D')
+            if (-not $ready -or -not $c.IsReady -or -not $d.IsReady -or
+                $c.AvailableFreeSpace -lt 15GB -or $d.AvailableFreeSpace -lt 30GB) { $status='RESOURCE_GUARD'; throw 'RESOURCES' }
+            if (Test-Path -LiteralPath $scratch) { throw 'SCRATCH_COLLISION' }
+            New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
+            $scratchCreated = $true
+            $env:MINERU_HOME = $homeDir
+            $env:HF_HOME = $hfDir
+            $env:TEMP = $scratch
+            $env:TMP = $scratch
+
+            function Private-Cli([string[]] $Arguments, [string] $Label, [int] $Seconds) {
+              $out = Join-Path $scratch ($Label+'.stdout.log')
+              $err = Join-Path $scratch ($Label+'.stderr.log')
+              $p = Start-Process -FilePath $mineru -ArgumentList $Arguments -WorkingDirectory $scratch -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err -ErrorAction Stop
+              if (-not $p.WaitForExit($Seconds*1000)) {
+                $null = & taskkill.exe /PID $p.Id /T /F 2>$null
+                return -2
+              }
+              return [int]$p.ExitCode
+            }
+
+            # A status CLI exit code of zero is not sufficient evidence of an active server.
+            $statusCode = Private-Cli -Arguments @('server','status') -Label 'status-before' -Seconds 50
+            $rawStatus = ''
+            $statusOutput = Join-Path $scratch 'status-before.stdout.log'
+            if (Test-Path -LiteralPath $statusOutput -PathType Leaf) {
+              if ((Get-Item -LiteralPath $statusOutput).Length -le 256) { $rawStatus = [System.IO.File]::ReadAllText($statusOutput).Trim() }
+            }
+            if ($rawStatus -match '(?i)\u672a.{0,3}\u8fd0\u884c|\u6ca1\u6709.{0,3}\u8fd0\u884c|\u672a.{0,3}\u542f\u52a8|\u505c\u6b62|not running|not started|stopped|inactive|offline') {
+              $serverState = 'STOPPED'
+            } elseif ($rawStatus -match '(?i)\u8fd0\u884c\u4e2d|\u5df2\u8fd0\u884c|\u6b63\u5728\u8fd0\u884c|running|started|active|online') {
+              $serverState = 'RUNNING'
+            } else { $serverState = 'UNKNOWN' }
+            # Status output contains only MinerU's own short local server state.
+            if ($rawStatus.Length -le 60 -and $rawStatus -notmatch '[/\\]|https?:|[A-Fa-f0-9]{32,}') {
+              $safeStatusPreview = $rawStatus
+            }
+            if ($serverState -eq 'STOPPED') {
+              $status = 'SERVER_START'
+              $startCode = Private-Cli -Arguments @('server','start') -Label 'server-start' -Seconds 180
+              if ($startCode -ne 0) { $status='SERVER_START_FAILED'; throw 'START_FAILED' }
+              $serverOwned = $true
+            } elseif ($serverState -ne 'RUNNING') {
+              $status = 'SERVER_STATE_UNKNOWN'
+              throw 'UNKNOWN_SERVER_STATE'
+            }
+            # Raster-only one-page PDF: jpeg image XObject, no PDF text layer.
+            # This is generated from PUBLIC synthetic words, not a private fixture.
+            Add-Type -AssemblyName System.Drawing
+            $bmp = New-Object System.Drawing.Bitmap(1000,340,[System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.Clear([System.Drawing.Color]::White)
+            $font = New-Object System.Drawing.Font('Arial',59,[System.Drawing.FontStyle]::Bold,[System.Drawing.GraphicsUnit]::Pixel)
+            $brush = [System.Drawing.Brushes]::Black
+            $g.DrawString('MINERU OCR TEST 2026',$font,$brush,20,110)
+            $g.Flush()
+            $jpgStream = New-Object System.IO.MemoryStream
+            $bmp.Save($jpgStream,[System.Drawing.Imaging.ImageFormat]::Jpeg)
+            $jpeg = $jpgStream.ToArray()
+            $font.Dispose()
+            $g.Dispose()
+            $bmp.Dispose()
+            $jpgStream.Dispose()
+            if ($jpeg.Length -lt 1000 -or $jpeg.Length -gt 2000000) { throw 'SYNTHETIC_JPEG_SIZE_INVALID' }
+            $content = 'q 500 0 0 170 0 0 cm /Img Do Q'
+            $objects = @(
+              '<< /Type /Catalog /Pages 2 0 R >>',
+              '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+              '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 500 170] /Resources << /XObject << /Img 4 0 R >> >> /Contents 5 0 R >>',
+              '',
+              ('<< /Length ' + ([System.Text.Encoding]::ASCII.GetByteCount($content)) + " >>" + [char]10 + 'stream' + [char]10 + $content + [char]10 + 'endstream')
+            )
+            $pdfStream = New-Object System.IO.MemoryStream
+            function Write-PdfAscii([string]$Value) {
+              $b = [System.Text.Encoding]::ASCII.GetBytes($Value)
+              $pdfStream.Write($b,0,$b.Length)
+            }
+            Write-PdfAscii ("%PDF-1.4" + [char]10)
+            $offsets=@()
+            for($i=0; $i -lt 5; $i++) {
+              $offsets += [int64]$pdfStream.Position
+              Write-PdfAscii (($i+1).ToString() + " 0 obj" + [char]10)
+              if ($i -eq 3) {
+                Write-PdfAscii ("<< /Type /XObject /Subtype /Image /Width 1000 /Height 340 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " + $jpeg.Length + " >>" + [char]10 + 'stream' + [char]10)
+                $pdfStream.Write($jpeg,0,$jpeg.Length)
+                Write-PdfAscii ([char]10 + 'endstream' + [char]10)
+              } else {
+                Write-PdfAscii ($objects[$i] + [char]10)
+              }
+              Write-PdfAscii ('endobj' + [char]10)
+            }
+            $xref = [int64]$pdfStream.Position
+            Write-PdfAscii ("xref" + [char]10 + "0 6" + [char]10 + "0000000000 65535 f " + [char]10)
+            foreach($offset in $offsets) { Write-PdfAscii ($offset.ToString('D10') + ' 00000 n ' + [char]10) }
+            Write-PdfAscii ("trailer" + [char]10 + "<< /Size 6 /Root 1 0 R >>" + [char]10 + "startxref" + [char]10 + $xref + [char]10 + "%%EOF" + [char]10)
+            $pdf = Join-Path $scratch 'synthetic-scanned-one-page.pdf'
+            [System.IO.File]::WriteAllBytes($pdf,$pdfStream.ToArray())
+            $pdfStream.Dispose()
+            $status = 'PARSE_RUNNING'
+            $output = Join-Path $scratch 'mineru-result.md'
+            $parseCode = Private-Cli -Arguments @('parse',$pdf,'--tier','flash','--pages','all','--output',$output,'--json','--force') -Label 'parse' -Seconds 600
+            $stdout = Join-Path $scratch 'parse.stdout.log'
+            if (Test-Path -LiteralPath $stdout -PathType Leaf) {
+              if ((Get-Item -LiteralPath $stdout).Length -le 65536) {
+                $responseText = [System.IO.File]::ReadAllText($stdout).Trim()
+                if ($responseText.StartsWith('{')) {
+                  try {
+                    $response = $responseText | ConvertFrom-Json
+                    $jsonError = ($null -ne $response.PSObject.Properties['error'])
+                  } catch { $jsonError = $true }
+                }
+              }
+            }
+            if (Test-Path -LiteralPath $output -PathType Leaf) { $outputSize = (Get-Item -LiteralPath $output).Length }
+            $ocrTokensFound = $false
+            if ($outputSize -gt 0 -and $outputSize -lt 65536) {
+              $ocrResult = [System.IO.File]::ReadAllText($output)
+              $ocrTokensFound = ($ocrResult.ToUpperInvariant().Contains('MINERU') -and $ocrResult.ToUpperInvariant().Contains('OCR'))
+            }
+            if ($parseCode -eq 0 -and $outputSize -gt 0 -and -not $jsonError -and $ocrTokensFound) { $status='SYNTHETIC_PARSE_OK' }
+            else { $status='SYNTHETIC_PARSE_FAILED' }
+          } catch {
+            if ($status -in @('PRECHECK','PARSE_RUNNING','SERVER_START')) { $status='PRECHECK_OR_EXECUTION_FAILED' }
+          } finally {
+            if ($serverOwned) {
+              try { $stopCode = Private-Cli -Arguments @('server','stop') -Label 'server-stop' -Seconds 120 }
+              catch { $stopCode = -3 }
+              if ($stopCode -ne 0) { $status='SERVER_CLEANUP_FAILED' }
+            }
+            Write-Output ('ACS_MINERU_ISOLATED=' + ([ordered]@{
+              policy='ACS_MINERU_SYNTHETIC_ISOLATED_V1';status=$status;memory_gib=$memory;
+              preexisting_server_state=$serverState;server_status_message=$safeStatusPreview;
+              startup_exit=$startCode;parse_exit=$parseCode;stop_exit=$stopCode;
+              markdown_bytes=$outputSize;ocr_expected_tokens_found=$ocrTokensFound;json_error_present=$jsonError;
+              private_pdf_read=$false;private_content_exported=$false;no_repo_code_executed=$true;
+              model_download_instructed=$false;synthetic_only=$true;scratch_created=$scratchCreated
+            } | ConvertTo-Json -Compress))
+            if ($status -ne 'SYNTHETIC_PARSE_OK') { throw 'ACS_SYNTHETIC_NOT_ACCEPTED' }
+            Write-Output 'ACS_MINERU_ISOLATED_PASS'
+          }
