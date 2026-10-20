@@ -1,0 +1,325 @@
+"""Private SHA-bound page-region proposals for MinerU PDF figure evidence.
+
+This is an offline image-region proposal, NOT a semantic diagram interpreter.
+The detected regions may include prose. No graph nodes/edges are certified.
+No private images, OCR, names or coordinates are sent to GitHub Actions.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path(r"D:\ai-cognitive-pdf-benchmark-data")
+SOURCE_RUN = "real-mineru-39440805765-1"
+PAGES = {"RB-PDF-12": [73, 145, 261], "RB-PDF-13": [51, 127, 379]}
+MAX_PNG_BYTES = 20_000_000
+MAX_SOURCE_PDF_BYTES = 2_000_000_000
+MAX_PIXELS = 32_000_000
+MAX_ROIS_PER_PAGE = 4
+
+
+class RegionBlocked(ValueError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def unsafe_link(path: Path) -> bool:
+    return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+
+
+def directory(path: Path) -> None:
+    if unsafe_link(path) or not path.is_dir():
+        raise RegionBlocked("PRIVATE_DIRECTORY_NOT_READY")
+
+
+def file_ok(path: Path, maximum: int) -> bool:
+    return not unsafe_link(path) and path.is_file() and 0 < path.stat().st_size <= maximum
+
+
+def source_images(root: Path, fixture: str) -> list[dict]:
+    """Validate prior private provenance, not paths inferred from OCR."""
+    if fixture not in PAGES:
+        raise RegionBlocked("FIXTURE_NOT_ALLOWED")
+    directory(root)
+    directory(root / "fixtures")
+    directory(root / "reports")
+    report = root / "reports" / SOURCE_RUN
+    base = report / ("figure-evidence-v1-" + fixture)
+    for path in (report, base, base / "pages"):
+        directory(path)
+    manifest = base / "figure-evidence.json"
+    if not file_ok(manifest, 1_048_576):
+        raise RegionBlocked("FIGURE_MANIFEST_NOT_READY")
+    try:
+        record = json.loads(manifest.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeError):
+        raise RegionBlocked("FIGURE_MANIFEST_UNREADABLE") from None
+    if (record.get("schemaVersion") != "acs-mineru-figure-page-evidence-v1"
+            or record.get("sourceRun") != SOURCE_RUN
+            or record.get("fixtureId") != fixture
+            or record.get("sourcePages1Based") != PAGES[fixture]
+            or record.get("claim") != "PERSISTED_FULL_PAGE_VISUAL_FALLBACK_ONLY"
+            or record.get("noCroppedFigureOrDiagramRelationshipClaim") is not True):
+        raise RegionBlocked("FIGURE_MANIFEST_IDENTITY_MISMATCH")
+    source = root / "fixtures" / (fixture + ".pdf")
+    md = report / (fixture + ".md")
+    if not file_ok(source, MAX_SOURCE_PDF_BYTES) or not file_ok(md, 12_000_000):
+        raise RegionBlocked("SOURCE_NOT_READY")
+    if (sha256_file(source) != record.get("sourceSubsetSha256")
+            or sha256_file(md) != record.get("sourceMarkdownSha256")):
+        raise RegionBlocked("SOURCE_CHANGED")
+    images = record.get("images")
+    if not isinstance(images, list) or not 1 <= len(images) <= 3:
+        raise RegionBlocked("IMAGE_ROWS_INVALID")
+    result = []
+    seen = set()
+    for im in images:
+        if not isinstance(im, dict):
+            raise RegionBlocked("IMAGE_ROW_INVALID")
+        idx = im.get("subsetPageIndex")
+        if type(idx) is not int or not 0 <= idx < 3 or idx in seen:
+            raise RegionBlocked("PAGE_INDEX_INVALID")
+        seen.add(idx)
+        physical = im.get("sourcePhysicalPage1Based")
+        path_string = im.get("relativeImagePath")
+        if physical != PAGES[fixture][idx] or path_string != f"pages/page-{idx+1:03d}.png":
+            raise RegionBlocked("IMAGE_PAGE_OR_PATH_INVALID")
+        image = base / path_string
+        if not file_ok(image, MAX_PNG_BYTES) or image.stat().st_size != im.get("imageBytes"):
+            raise RegionBlocked("IMAGE_BYTES_CHANGED")
+        if sha256_file(image) != im.get("imageSha256"):
+            raise RegionBlocked("IMAGE_SHA_CHANGED")
+        w, h = im.get("widthPixels"), im.get("heightPixels")
+        if (type(w) is not int or type(h) is not int or w < 30 or h < 30
+                or w > 8192 or h > 8192 or w * h > MAX_PIXELS):
+            raise RegionBlocked("IMAGE_DIMENSIONS_INVALID")
+        refs = im.get("sourceFigureBlockRefs")
+        if (not isinstance(refs, list) or not 1 <= len(refs) <= 100
+                or len(set(refs)) != len(refs)
+                or not all(isinstance(v, str) and re.fullmatch(
+                    r"doc:[0-9a-f]{6,64}/tier:flash/page:[1-3]/block:[1-9][0-9]{0,5}", v
+                ) for v in refs)):
+            raise RegionBlocked("IMAGE_BLOCK_REFS_INVALID")
+        if (im.get("regionType") != "FULL_PAGE_UNCROPPED"
+                or im.get("graphSemantics") != "NOT_VERIFIED"
+                or im.get("figureRegionBounds") is not None
+                or im.get("diagramEdges") is not None):
+            raise RegionBlocked("UNJUSTIFIED_GRAPH_CLAIM")
+        result.append({"subsetPageIndex": idx, "physicalPage": physical,
+                       "path": image, "sha": im["imageSha256"],
+                       "width": w, "height": h, "refs": refs})
+    return sorted(result, key=lambda x: x["subsetPageIndex"])
+
+
+def rectangle_iou(a: tuple[int, int, int, int],
+                  b: tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    left, top = max(ax, bx), max(ay, by)
+    right, bottom = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+    intersection = max(0, right-left) * max(0, bottom-top)
+    union = aw*ah + bw*bh - intersection
+    return intersection/union if union > 0 else 0.0
+
+
+def constrain_region(box: tuple[int, int, int, int], width: int,
+                     height: int, padding: int = 8) -> tuple[int, int, int, int] | None:
+    if (not 0 < width <= 8192 or not 0 < height <= 8192
+            or not isinstance(box, (tuple, list)) or len(box) != 4
+            or not all(type(x) is int for x in box)
+            or not 0 <= padding <= 80):
+        return None
+    x, y, w, h = box
+    if w <= 0 or h <= 0 or x + w <= 0 or y + h <= 0 or x >= width or y >= height:
+        return None
+    left, top = max(0, x-padding), max(0, y-padding)
+    right, bottom = min(width, x+w+padding), min(height, y+h+padding)
+    if right-left < 20 or bottom-top < 20:
+        return None
+    return (left, top, right-left, bottom-top)
+
+
+def select_regions(raw: list[tuple[int, int, int, int]], width: int,
+                   height: int, cap: int = MAX_ROIS_PER_PAGE) -> list[tuple[int, int, int, int]]:
+    """Bound proposal count with deterministic area-ranking and overlap suppression.
+
+    Candidates are NOT recognized figures. They may include ordinary paragraphs.
+    """
+    if not 1 <= cap <= MAX_ROIS_PER_PAGE or width * height > MAX_PIXELS:
+        raise RegionBlocked("INVALID_REGION_BUDGET")
+    candidates = set()
+    for raw_box in raw[:1000]:
+        rect = constrain_region(raw_box, width, height)
+        if rect is None:
+            continue
+        x,y,w,h=rect
+        fraction=w*h/(width*height)
+        if fraction < .008 or fraction > .90:
+            continue
+        if w < width * .12 or h < height * .055:
+            continue
+        candidates.add(rect)
+    ordered = sorted(candidates, key=lambda b:(-b[2]*b[3], b[1], b[0], b[2], b[3]))
+    kept=[]
+    for proposal in ordered:
+        if all(rectangle_iou(proposal, other) < .68 for other in kept):
+            kept.append(proposal)
+        if len(kept) == cap:
+            break
+    return kept
+
+
+def propose_regions(image) -> list[dict]:
+    """Offline OpenCV multi-scale morphology. Heuristics, not probabilities."""
+    import cv2
+    height,width=image.shape[:2]
+    if width*height > MAX_PIXELS:
+        raise RegionBlocked("RASTER_TOO_LARGE")
+    gray=cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
+    _,binary=cv2.threshold(gray,0,255,cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    proposals=[]
+    for scale_x,scale_y in ((.025,.013),(.045,.032),(.065,.042)):
+        kw=max(5, int(width*scale_x)//2*2+1)
+        kh=max(5, int(height*scale_y)//2*2+1)
+        merged=cv2.morphologyEx(binary,cv2.MORPH_CLOSE,
+                               cv2.getStructuringElement(cv2.MORPH_RECT,(kw,kh)))
+        num, _, stats, _=cv2.connectedComponentsWithStats(merged,connectivity=8)
+        if num > 80_000:
+            raise RegionBlocked("PAGE_TOO_COMPLEX")
+        for x,y,w,h,area in stats[1:]:
+            if area<max(30,width*height*.0005):
+                continue
+            proposals.append((int(x),int(y),int(w),int(h)))
+    boxes=select_regions(proposals,width,height)
+    if not boxes:
+        coords=cv2.findNonZero(binary)
+        if coords is not None:
+            fallback=constrain_region(tuple(map(int,cv2.boundingRect(coords))),
+                                      width,height,16)
+            if fallback is not None:
+                boxes=[fallback]
+    return [{"bboxPixels":list(b), "proposalKind":"MORPHOLOGY_REGION_UNVERIFIED" if proposals
+             else "INK_EXTENT_FALLBACK_UNVERIFIED"} for b in boxes]
+
+
+def run(root: Path, fixture: str) -> dict:
+    import cv2
+    inputs=source_images(root,fixture)
+    report=root/"reports"/SOURCE_RUN
+    final=report/("region-proposals-v1-"+fixture)
+    stage=report/(".region-proposals-stage-v1-"+fixture)
+    if final.exists() or stage.exists() or unsafe_link(final) or unsafe_link(stage):
+        raise RegionBlocked("REGION_OUTPUT_EXISTS")
+    stage.mkdir()
+    total=0
+    processed=[]
+    try:
+        (stage/"crops").mkdir()
+        for item in inputs:
+            img=cv2.imread(str(item["path"]),cv2.IMREAD_COLOR)
+            if img is None or img.shape[1] != item["width"] or img.shape[0] != item["height"]:
+                raise RegionBlocked("PNG_DECODE_OR_SIZE_CHANGED")
+            proposals=propose_regions(img)
+            per=[]
+            for index,proposal in enumerate(proposals):
+                x,y,w,h=proposal["bboxPixels"]
+                if (x<0 or y<0 or w<20 or h<20 or x+w>item["width"] or y+h>item["height"]):
+                    raise RegionBlocked("REGION_OUT_OF_SOURCE_BOUNDS")
+                roi=img[y:y+h,x:x+w]
+                if roi.shape[:2] != (h,w):
+                    raise RegionBlocked("CROP_SIZE_MISMATCH")
+                name=f"page-{item['subsetPageIndex']+1:03d}-region-{index+1:02d}.png"
+                path=stage/"crops"/name
+                if not cv2.imwrite(str(path),roi) or not file_ok(path,MAX_PNG_BYTES):
+                    raise RegionBlocked("CROP_PERSIST_FAILED")
+                per.append({
+                    "regionId":f"page-{item['subsetPageIndex']+1:03d}-region-{index+1:02d}",
+                    "coordinateSpace":"FULL_PAGE_PNG_TOP_LEFT_PIXELS",
+                    "bboxPixels":[x,y,w,h],
+                    "relativeCropPath":"crops/"+name,
+                    "cropSha256":sha256_file(path),
+                    "cropBytes":path.stat().st_size,
+                    "proposalStatus":"UNVERIFIED_REGION_SUGGESTION",
+                    "proposalKind":proposal["proposalKind"],
+                    "semanticLabel":None,
+                    "nodes":None,"directedEdges":None,"timingRelations":None,
+                })
+                total+=1
+                del roi
+            processed.append({
+                "subsetPageIndex":item["subsetPageIndex"],
+                "sourcePhysicalPage1Based":item["physicalPage"],
+                "sourceImageSha256":item["sha"],
+                "sourceImageWidth":item["width"],
+                "sourceImageHeight":item["height"],
+                "sourceFigureBlockRefs":item["refs"],
+                "regions":per,
+                "needsHumanVisualReview":True,
+            })
+            del img
+        doc={
+            "schemaVersion":"acs-pdf-private-region-evidence-v1",
+            "fixtureId":fixture,"sourceRun":SOURCE_RUN,
+            "inputType":"SHA_VERIFIED_PRIVATE_FULL_PAGE_PNG",
+            "pages":processed,
+            "allRegionsAreUnverified":True,
+            "noSemanticGraphClaims":True,
+            "fallbackFullPageEvidenceStillAuthoritative":True,
+        }
+        path=stage/"region-proposals.json"
+        with path.open("x",encoding="utf-8") as file:
+            json.dump(doc,file,indent=2,ensure_ascii=False)
+            file.flush()
+            os.fsync(file.fileno())
+        os.rename(stage,final)
+    except BaseException:
+        if stage.is_dir() and not unsafe_link(stage):
+            shutil.rmtree(stage)
+        raise
+    return {
+        "status":"PRIVATE_REGION_PROPOSALS_PERSISTED",
+        "fixture":fixture,
+        "pagesProcessed":len(processed),
+        "croppedRegionProposals":total,
+        "cropAndSourceImageHashesSaved":True,
+        "semanticGraphOrArrowDirectionsVerified":False,
+        "privatePagePixelsExported":False,
+    }
+
+
+def main() -> None:
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--fixture",choices=list(PAGES),required=True)
+    args=parser.parse_args()
+    try:
+        result=run(ROOT,args.fixture)
+    except RegionBlocked as exc:
+        code=str(exc)
+        if not re.fullmatch(r"[A-Z0-9_]{3,80}",code):
+            code="UNKNOWN_GUARD"
+        print("ACS_REGION_PROPOSALS_BLOCKED="+code)
+        sys.exit(2)
+    except Exception as exc:
+        cls=type(exc).__name__
+        if not re.fullmatch(r"[A-Za-z]{3,40}",cls):
+            cls="Unknown"
+        print("ACS_REGION_PROPOSALS_RUNTIME_CLASS="+cls)
+        sys.exit(2)
+    print("ACS_REGION_PROPOSALS="+json.dumps(result,sort_keys=True))
+
+
+if __name__=="__main__":
+    main()
