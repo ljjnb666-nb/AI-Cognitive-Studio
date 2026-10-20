@@ -103,7 +103,9 @@ def infer_cloud_one(item: dict, model: str, key: str) -> dict:
     payload = {
         "model": model,
         "stream": False,
-        "max_tokens": 2500,
+        "do_sample": False,
+        "reasoning_effort": "low",
+        "max_tokens": 6000,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": [
@@ -118,17 +120,27 @@ def infer_cloud_one(item: dict, model: str, key: str) -> dict:
     answer = request_glm(payload, key)
     try:
         choice = answer["choices"][0]
+        if not isinstance(choice, dict):
+            raise TypeError()
+        finish = choice.get("finish_reason")
+        if finish == "length":
+            raise CloudBlocked("CLOUD_GENERATION_TRUNCATED")
+        if finish not in ("stop", None):
+            raise CloudBlocked("CLOUD_FINISH_STATUS_REJECTED")
         content = choice["message"]["content"]
-        if (choice.get("finish_reason") not in ("stop", None)
-                or not isinstance(content, str)
-                or len(content) > MAX_RESPONSE_BYTES):
-            raise ValueError()
-        obj = json.loads(content)
+        if not isinstance(content, str) or not content.strip():
+            raise CloudBlocked("CLOUD_CONTENT_MISSING")
+        if len(content) > MAX_RESPONSE_BYTES:
+            raise CloudBlocked("CLOUD_CONTENT_TOO_LARGE")
+        try:
+            obj = json.loads(content)
+        except (ValueError, UnicodeError):
+            # Deliberately do not scrape or invent a JSON object from free prose.
+            raise CloudBlocked("CLOUD_CONTENT_NOT_PURE_JSON") from None
         if not isinstance(obj, dict) or set(obj) != {"nodes", "edges"}:
-            raise ValueError()
-    except (KeyError, IndexError, TypeError, ValueError):
-        # Do not guess missing JSON/graph edges from chain-of-thought or prose.
-        raise CloudBlocked("CLOUD_GRAPH_JSON_NOT_ACCEPTED") from None
+            raise CloudBlocked("CLOUD_GRAPH_FIELDS_INVALID")
+    except (KeyError, IndexError, TypeError):
+        raise CloudBlocked("CLOUD_RESPONSE_ENVELOPE_INVALID") from None
     return obj
 
 
