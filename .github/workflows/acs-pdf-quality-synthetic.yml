@@ -38,6 +38,9 @@ jobs:
       - name: Install isolated benchmark dependencies with lifecycle scripts disabled
         working-directory: tools/pdf-parser-benchmark
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: MinerU figure-page evidence safety regressions (synthetic only)
+        working-directory: tools/pdf-parser-benchmark
+        run: python3 -m unittest discover -s python -p "test_mineru_figure_evidence.py" -v
       - name: Typecheck offline regrader
         working-directory: tools/pdf-parser-benchmark
         run: ./node_modules/.bin/tsc --noEmit --pretty false
