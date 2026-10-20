@@ -95,7 +95,8 @@ jobs:
             if (Test-Path -LiteralPath $serverStatusPath -PathType Leaf) {
               $serverStatusItem = Get-Item -LiteralPath $serverStatusPath
               if ($serverStatusItem.Length -gt 0 -and $serverStatusItem.Length -le 128) {
-                $serverStatusPreview = (([System.IO.File]::ReadAllText($serverStatusPath)) -replace '[^A-Za-z0-9{}":,_ -]','').Trim()
+                $serverStatusPreview = [System.IO.File]::ReadAllText($serverStatusPath).Trim()
+                if ($serverStatusPreview.Length -gt 64 -or $serverStatusPreview -match '[\\/:]') { $serverStatusPreview = 'BLOCKED_STATUS_FORMAT' }
               }
             }
             $versionPreview = 'UNAVAILABLE'
