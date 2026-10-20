@@ -19,7 +19,7 @@ jobs:
   mineru-synthetic:
     if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/ops/mineru-local-probe-20261020' && github.event_name == 'push' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
-    timeout-minutes: 15
+    timeout-minutes: 22
     steps:
       - name: Run one synthetic local-only PDF via MinerU
         shell: powershell
@@ -57,11 +57,24 @@ jobs:
               if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_REPARSE_POINT' }
             }
             if (-not (Test-Path -LiteralPath $mineru -PathType Leaf)) { throw 'MINERU_MISSING' }
-            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-            $memoryGiB = [Math]::Round(([double]$os.FreePhysicalMemory / 1048576.0), 2)
+            # Wait for a stable resource window; never kill unrelated processes.
+            # Two good readings 10 s apart guard against a short memory spike.
+            $memoryWindowReady = $false
+            for ($attempt = 0; $attempt -lt 18; $attempt++) {
+              $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+              $memoryGiB = [Math]::Round(([double]$os.FreePhysicalMemory / 1048576.0), 2)
+              if ($memoryGiB -ge 4) {
+                Start-Sleep -Seconds 10
+                $os2 = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+                $secondReading = [Math]::Round(([double]$os2.FreePhysicalMemory / 1048576.0), 2)
+                $memoryGiB = [Math]::Min($memoryGiB, $secondReading)
+                if ($memoryGiB -ge 4) { $memoryWindowReady = $true; break }
+              }
+              Start-Sleep -Seconds 20
+            }
             $c = [System.IO.DriveInfo]::new('C')
             $d = [System.IO.DriveInfo]::new('D')
-            if ($memoryGiB -lt 4 -or -not $c.IsReady -or -not $d.IsReady -or
+            if (-not $memoryWindowReady -or -not $c.IsReady -or -not $d.IsReady -or
                 $c.AvailableFreeSpace -lt 15GB -or $d.AvailableFreeSpace -lt 30GB) {
               $status = 'RESOURCE_GATE_BLOCKED'
               throw 'RESOURCE_GATE_BLOCKED'
