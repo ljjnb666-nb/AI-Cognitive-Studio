@@ -114,7 +114,7 @@ def validate_source(data_root: Path, fixture_id: str) -> tuple[Path, str, tuple[
                 or type(expected_size) is not int or expected_size <= 0):
             raise EvidenceBlocked("UNPINNED_INPUT")
         source = fixture_dir / (fid + ".pdf")
-        if not regular_file(source, 200_000_000) or source.stat().st_size != expected_size:
+        if not regular_file(source, 2_000_000_000) or source.stat().st_size != expected_size:
             raise EvidenceBlocked("INPUT_SIZE_OR_TYPE_MISMATCH")
         if sha256_path(source) != digest:
             raise EvidenceBlocked("INPUT_SHA_MISMATCH")
