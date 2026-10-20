@@ -1,0 +1,48 @@
+# Read-only Docker Engine capability probe, no images pulled, no containers started.
+name: ACS MinerU container network isolation capability
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-docker-isolation-capability.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 4
+    steps:
+      - name: Check existing Docker backend read-only
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $available = ($null -ne (Get-Command docker.exe -ErrorAction SilentlyContinue))
+          $daemon = $false
+          $osType = 'unavailable'
+          $suitableWindowsImageAlreadyPresent = $false
+          if ($available) {
+            try {
+              $info = & docker.exe info '--format={{.OSType}}' 2>$null
+              if ($LASTEXITCODE -eq 0) {
+                $osName = (($info -join '') -replace '[^a-zA-Z]','').ToLowerInvariant()
+                if ($osName -in @('linux','windows')) {
+                  $daemon = $true
+                  $osType = $osName
+                }
+              }
+            } catch {}
+          }
+          $summary = [ordered]@{
+            policy='ACS_MINERU_DOCKER_CAPABILITY_V1'
+            docker_cli_present=$available
+            docker_daemon_reachable=$daemon
+            backend_os=$osType
+            existing_usable_windows_mineru_image_confirmed=$suitableWindowsImageAlreadyPresent
+            no_images_pulled=$true
+            no_containers_started=$true
+            no_private_content_read=$true
+          }
+          Write-Output ('ACS_MINERU_DOCKER_CAPABILITY=' + ($summary | ConvertTo-Json -Compress))
