@@ -29,7 +29,7 @@ jobs:
           flags={n:importlib.util.find_spec(n) is not None for n in ("torch","transformers","PIL")}
           print("ACS_LOCAL_VISION_PY="+json.dumps(flags,sort_keys=True))
           '@
-            $out=@(& $python -I -B -c $code 2>$null)
+            try { $out=@($code | & $python -I -B - 2>$null) } catch { $out=@() }
             if($LASTEXITCODE -eq 0) {
               $entry=@($out | Where-Object { $_ -match '^ACS_LOCAL_VISION_PY=' } | Select-Object -First 1)
               if($entry.Count -eq 1) {
