@@ -1,0 +1,56 @@
+# Read-only, no private images or model inference. No installation or download.
+name: ACS local vision backend readiness
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-local-vision-model-capability-20261021.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect localhost multimodal model availability without image transfer
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $result=[ordered]@{ policy='ACS_LOCAL_VISION_BACKEND_V1';runner_windows=($env:RUNNER_OS -eq 'Windows');ollama_cli_present=$false;lmstudio_cli_present=$false;python_torch_present=$false;python_transformers_present=$false;python_pillow_present=$false;local_ollama_api_ready=$false;local_ollama_vision_model_available=$false;local_lmstudio_api_ready=$false;actual_inference_executed=$false;private_image_read=$false;private_image_transmitted=$false;no_download_or_install=$true }
+          $result.ollama_cli_present=[bool](Get-Command ollama.exe -ErrorAction SilentlyContinue)
+          $result.lmstudio_cli_present=[bool](Get-Command lms.exe -ErrorAction SilentlyContinue)
+          $python='D:\ai-cognitive-pdf-benchmark-data\python\mineru\Scripts\python.exe'
+          if(Test-Path -LiteralPath $python -PathType Leaf) {
+            $code=@'
+          import importlib.util,json
+          flags={n:importlib.util.find_spec(n) is not None for n in ("torch","transformers","PIL")}
+          print("ACS_LOCAL_VISION_PY="+json.dumps(flags,sort_keys=True))
+          '@
+            $out=@(& $python -I -B -c $code 2>$null)
+            if($LASTEXITCODE -eq 0) {
+              $entry=@($out | Where-Object { $_ -match '^ACS_LOCAL_VISION_PY=' } | Select-Object -First 1)
+              if($entry.Count -eq 1) {
+                try {
+                  $flags=($entry[0] -replace '^ACS_LOCAL_VISION_PY=','') | ConvertFrom-Json
+                  $result.python_torch_present=[bool]$flags.torch
+                  $result.python_transformers_present=[bool]$flags.transformers
+                  $result.python_pillow_present=[bool]$flags.PIL
+                } catch {}
+              }
+            }
+          }
+          try {
+            $response=Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -Method Get -TimeoutSec 3 -ErrorAction Stop
+            $result.local_ollama_api_ready=($null -ne $response.models)
+            if($result.local_ollama_api_ready) {
+              $result.local_ollama_vision_model_available=@($response.models | Where-Object { $_.name -match '(?i)llava|qwen.*vl|gemma3|moondream|bakllava|vision|pixtral|internvl|minicpm-v|granite3.*vision' }).Count -gt 0
+            }
+          } catch {}
+          try {
+            $response=Invoke-RestMethod -Uri 'http://127.0.0.1:1234/v1/models' -Method Get -TimeoutSec 3 -ErrorAction Stop
+            $result.local_lmstudio_api_ready=($null -ne $response.data)
+          } catch {}
+          Write-Output ('ACS_LOCAL_VISION_CAPABILITY='+($result | ConvertTo-Json -Compress))
