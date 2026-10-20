@@ -1,0 +1,78 @@
+# Read-only local metadata: do not print book text or any private filenames.
+name: ACS MinerU private asset persistence and ground truth gate
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-private-assets-gt-audit-20261020.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 6
+    steps:
+      - name: Inspect private report artifacts, GT review flags, and Tesseract availability
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $py=Get-Command python.exe -ErrorAction Stop
+          $code=@'
+          import json, pathlib, sys
+          ROOT=pathlib.Path(r"D:\ai-cognitive-pdf-benchmark-data")
+          F=ROOT/"fixtures"
+          R=ROOT/"reports"/"real-mineru-39440805765-1"
+          cases=["RB-PDF-12","RB-PDF-13"]
+          try:
+              if not R.is_dir() or R.is_symlink() or not F.is_dir() or F.is_symlink(): raise ValueError()
+              outputs=[]
+              for id in cases:
+                  ground=F/(id+".ground-truth.json")
+                  review=F/(id+".ground-truth.review.json")
+                  gt_exists=ground.is_file() and not ground.is_symlink()
+                  rv_exists=review.is_file() and not review.is_symlink()
+                  review_verified=False
+                  if gt_exists and rv_exists and ground.stat().st_size<4_194_304 and review.stat().st_size<65536:
+                      try:
+                          r=json.loads(review.read_text(encoding="utf-8"))
+                          review_verified=(r.get("schema")=="acs-real-book-human-ground-truth-review-v1" and
+                                           r.get("fixtureId")==id and
+                                           len(r.get("reviewers",[]))>=2 and
+                                           all(e.get("independentReview") is True for e in r["reviewers"]))
+                      except Exception: pass
+                  outputs.append({"fixture":id,"private_ground_truth_file_present":gt_exists,
+                                  "human_review_record_present":rv_exists,
+                                  "review_metadata_shape_plausible_not_certified":review_verified})
+              image_ext={".png",".jpg",".jpeg",".webp",".bmp",".svg",".gif",".tiff"}
+              binary_assets=0
+              uniqueExt=set()
+              for p in R.rglob("*"):
+                  if p.is_symlink():continue
+                  if p.is_file() and p.suffix.lower() in image_ext:
+                      binary_assets+=1
+                      uniqueExt.add(p.suffix.lower())
+              summary={"policy":"ACS_PRIVATE_ASSETS_GT_CHECK_V1",
+                       "source_run":39440805765,
+                       "real_book_cases":outputs,
+                       "image_files_persisted_with_report":binary_assets,
+                       "image_file_types_count":len(uniqueExt),
+                       "markdown_image_refs_found_in_previous_audit":6,
+                       "image_materialization_in_report_confirmed":binary_assets>=6,
+                       "structure_graph_reconstruction_verified":False,
+                       "human_ground_truth_review_independently_verified":False,
+                       "private_content_uploaded":False}
+              target=R/"private-asset-and-gt-audit-v1.json"
+              if target.exists() or target.is_symlink():raise ValueError()
+              target.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+              print("ACS_MINERU_ASSET_GT="+json.dumps(summary,ensure_ascii=True,separators=(",",":")))
+          except Exception:
+              print("ACS_MINERU_ASSET_GT_CHECK_BLOCKED")
+              sys.exit(1)
+          '@
+          $code | & $py.Source -I -B -
+          if($LASTEXITCODE -ne 0){throw 'ASSET_GT_METADATA_CHECK_FAILED'}
+          $t=(Get-Command tesseract.exe -ErrorAction SilentlyContinue)
+          Write-Output ('ACS_TESSERACT_EXECUTABLE_ON_WINDOWS_PATH=' + ([bool]($null -ne $t)).ToString().ToLowerInvariant())
