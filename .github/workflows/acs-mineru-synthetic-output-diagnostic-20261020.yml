@@ -82,5 +82,21 @@ jobs:
                 } catch { $jsonErrorCategory = 'unparseable' }
               }
             }
-            Write-Output ('SYNTHETIC_DEBUG=' + ([ordered]@{run=$id;present=$true;files=$files;checks=$checks;json_keys=$jsonKeys;json_scalar_tags=$jsonScalarTags;json_error_category=$jsonErrorCategory} | ConvertTo-Json -Compress -Depth 8))
+            $serverStatusPreview = 'UNAVAILABLE'
+            $serverStatusPath = Join-Path $dir 'status-before.stdout.log'
+            if (Test-Path -LiteralPath $serverStatusPath -PathType Leaf) {
+              $serverStatusItem = Get-Item -LiteralPath $serverStatusPath
+              if ($serverStatusItem.Length -gt 0 -and $serverStatusItem.Length -le 128) {
+                $serverStatusPreview = (([System.IO.File]::ReadAllText($serverStatusPath)) -replace '[^A-Za-z0-9{}":,_ -]','').Trim()
+              }
+            }
+            $versionPreview = 'UNAVAILABLE'
+            $versionPath = Join-Path $dir 'mineru-version.stdout.log'
+            if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
+              $versionItem = Get-Item -LiteralPath $versionPath
+              if ($versionItem.Length -gt 0 -and $versionItem.Length -le 128) {
+                $versionPreview = (([System.IO.File]::ReadAllText($versionPath)) -replace '[^A-Za-z0-9{}":._ -]','').Trim()
+              }
+            }
+            Write-Output ('SYNTHETIC_DEBUG=' + ([ordered]@{run=$id;present=$true;files=$files;checks=$checks;json_keys=$jsonKeys;json_scalar_tags=$jsonScalarTags;json_error_category=$jsonErrorCategory;server_status_preview=$serverStatusPreview;version_preview=$versionPreview} | ConvertTo-Json -Compress -Depth 8))
           }
