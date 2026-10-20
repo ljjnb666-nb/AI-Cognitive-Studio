@@ -54,6 +54,13 @@ describe('PDF-STRUCTURE-01: fail-closed structural evidence', () => {
     const result = evalFirst(reference,out([{text:'甲'}],{status:'MISSING',declaredTotalPages:1,source:'synthetic'}));
     expect(result.status).toBe('PAGE_BINDING_UNVERIFIED');
   });
+  it('requires explicit verified page markers for MinerU legacy outputs', () => {
+    const reference = ref([element('a','figure_label','甲')]);
+    const candidate = out([{text:'甲'}]); candidate.parser.name = 'mineru';
+    expect(evalFirst(reference,candidate).status).toBe('PAGE_BINDING_UNVERIFIED');
+    candidate.pageMarkers = {status:'VALID',declaredTotalPages:1,source:'synthetic'};
+    expect(evalFirst(reference,candidate).status).toBe('TEXT_EVIDENCE_ONLY');
+  });
   it('rejects unsupported source-physical-page mapping', () => {
     const reference = ref([element('a','paragraph','甲')]);
     reference.pages[0].sourcePhysicalPage = 127;
