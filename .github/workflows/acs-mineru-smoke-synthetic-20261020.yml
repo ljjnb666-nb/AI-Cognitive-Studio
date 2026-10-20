@@ -37,7 +37,7 @@ jobs:
           if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_REQUIRED' }
           $data = 'D:\ai-cognitive-pdf-benchmark-data'
           $mineru = Join-Path $data 'python\mineru\Scripts\mineru.exe'
-          $home = Join-Path $data 'cache\mineru\home'
+          $mineruHomeDir = Join-Path $data 'cache\mineru\home'
           $huggingface = Join-Path $data 'cache\huggingface'
           $tempRoot = Join-Path $data 'temp'
           $status = 'NOT_STARTED'
@@ -51,7 +51,7 @@ jobs:
           $memoryGiB = $null
           $scratch = Join-Path $tempRoot ("mineru-synthetic-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
           try {
-            foreach ($dir in @($data, $tempRoot, $home, $huggingface)) {
+            foreach ($dir in @($data, $tempRoot, $mineruHomeDir, $huggingface)) {
               if (-not (Test-Path -LiteralPath $dir -PathType Container)) { throw 'MODEL_CACHE_PREREQUISITE_MISSING' }
               $d = Get-Item -LiteralPath $dir -Force
               if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_REPARSE_POINT' }
@@ -68,7 +68,7 @@ jobs:
             }
             if (Test-Path -LiteralPath $scratch) { throw 'UNIQUE_SCRATCH_PATH_COLLISION' }
             New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
-            $env:MINERU_HOME = $home
+            $env:MINERU_HOME = $mineruHomeDir
             $env:HF_HOME = $huggingface
             $env:TEMP = $scratch
             $env:TMP = $scratch
