@@ -1,0 +1,161 @@
+# Trusted, synthetic-only smoke test. Does not check out or execute worktree code.
+# Never uses private PDF samples; all CLI stdout/stderr stay in D: private temp.
+name: ACS MinerU 4.0.3 synthetic offline smoke
+
+on:
+  push:
+    branches:
+      - ops/mineru-local-probe-20261020
+    paths:
+      - .github/workflows/acs-mineru-smoke-synthetic-20261020.yml
+
+permissions: {}
+
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+
+jobs:
+  mineru-synthetic:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/ops/mineru-local-probe-20261020' && github.event_name == 'push' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 15
+    steps:
+      - name: Run one synthetic local-only PDF via MinerU
+        shell: powershell
+        env:
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          HF_DATASETS_OFFLINE: '1'
+          MODELSCOPE_OFFLINE: '1'
+          MINERU_MODEL_SOURCE: 'local'
+          PIP_NO_INDEX: '1'
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+          NO_PROXY: '*'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_REQUIRED' }
+          $data = 'D:\ai-cognitive-pdf-benchmark-data'
+          $mineru = Join-Path $data 'python\mineru\Scripts\mineru.exe'
+          $home = Join-Path $data 'cache\mineru\home'
+          $huggingface = Join-Path $data 'cache\huggingface'
+          $tempRoot = Join-Path $data 'temp'
+          $status = 'NOT_STARTED'
+          $startExit = $null
+          $parseExit = $null
+          $stopExit = $null
+          $serverOwned = $false
+          $preexistingServer = $false
+          $resultPresent = $false
+          $resultBytes = 0
+          $memoryGiB = $null
+          $scratch = Join-Path $tempRoot ("mineru-synthetic-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          try {
+            foreach ($dir in @($data, $tempRoot, $home, $huggingface)) {
+              if (-not (Test-Path -LiteralPath $dir -PathType Container)) { throw 'MODEL_CACHE_PREREQUISITE_MISSING' }
+              $d = Get-Item -LiteralPath $dir -Force
+              if (($d.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_REPARSE_POINT' }
+            }
+            if (-not (Test-Path -LiteralPath $mineru -PathType Leaf)) { throw 'MINERU_MISSING' }
+            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            $memoryGiB = [Math]::Round(([double]$os.FreePhysicalMemory / 1048576.0), 2)
+            $c = [System.IO.DriveInfo]::new('C')
+            $d = [System.IO.DriveInfo]::new('D')
+            if ($memoryGiB -lt 4 -or -not $c.IsReady -or -not $d.IsReady -or
+                $c.AvailableFreeSpace -lt 15GB -or $d.AvailableFreeSpace -lt 30GB) {
+              $status = 'RESOURCE_GATE_BLOCKED'
+              throw 'RESOURCE_GATE_BLOCKED'
+            }
+            if (Test-Path -LiteralPath $scratch) { throw 'UNIQUE_SCRATCH_PATH_COLLISION' }
+            New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
+            $env:MINERU_HOME = $home
+            $env:HF_HOME = $huggingface
+            $env:TEMP = $scratch
+            $env:TMP = $scratch
+
+            function Run-PrivateCommand([string[]] $Arguments, [string] $Label, [int] $TimeoutSeconds) {
+              $out = Join-Path $scratch ($Label + ".stdout.log")
+              $err = Join-Path $scratch ($Label + ".stderr.log")
+              $p = Start-Process -FilePath $mineru -ArgumentList $Arguments -WorkingDirectory $scratch -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err -ErrorAction Stop
+              if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+                $null = & taskkill.exe /PID $p.Id /T /F 2>$null
+                return -2
+              }
+              return [int]$p.ExitCode
+            }
+
+            # Produce a deterministic one-page PDF from inlined *public* text.
+            # No PDF fixture, book, model blob, or repository file is read.
+            $line = 'BT /F1 18 Tf 50 160 Td (Hello MinerU 4.0.3 synthetic smoke test) Tj ET'
+            $objects = @(
+              '<< /Type /Catalog /Pages 2 0 R >>',
+              '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+              '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 250] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+              '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+              ('<< /Length ' + ([System.Text.Encoding]::ASCII.GetByteCount($line)) + " >>`nstream`n" + $line + "`nendstream")
+            )
+            $builder = New-Object System.Text.StringBuilder
+            [void]$builder.Append("%PDF-1.4`n")
+            $offsets = @()
+            for ($i = 0; $i -lt $objects.Count; $i++) {
+              $offsets += $builder.Length
+              [void]$builder.Append(($i + 1).ToString() + " 0 obj`n" + $objects[$i] + "`nendobj`n")
+            }
+            $xref = $builder.Length
+            [void]$builder.Append("xref`n0 6`n0000000000 65535 f `n")
+            foreach ($offset in $offsets) {
+              [void]$builder.Append($offset.ToString('D10') + " 00000 n `n")
+            }
+            [void]$builder.Append("trailer`n<< /Size 6 /Root 1 0 R >>`nstartxref`n" + $xref + "`n%%EOF`n")
+            $pdf = Join-Path $scratch 'synthetic-one-page.pdf'
+            [System.IO.File]::WriteAllBytes($pdf, [System.Text.Encoding]::ASCII.GetBytes($builder.ToString()))
+            $status = 'SERVER_PROBE'
+            $oldServer = Run-PrivateCommand -Arguments @('server','status') -Label 'status-before' -TimeoutSeconds 45
+            if ($oldServer -eq 0) {
+              $preexistingServer = $true
+              $status = 'PREEXISTING_SERVER_SKIPPED'
+            } else {
+              $status = 'SERVER_START'
+              $startExit = Run-PrivateCommand -Arguments @('server','start') -Label 'server-start' -TimeoutSeconds 180
+              if ($startExit -ne 0) { $status = 'SERVER_START_FAILED' }
+              else {
+                $serverOwned = $true
+                $status = 'PARSER_RUNNING'
+                $output = Join-Path $scratch 'mineru-result.md'
+                $parseExit = Run-PrivateCommand -Arguments @('parse',$pdf,'--tier','flash','--pages','all','--output',$output,'--json','--force') -Label 'parse' -TimeoutSeconds 600
+                if (Test-Path -LiteralPath $output -PathType Leaf) {
+                  $resultPresent = $true
+                  $resultBytes = (Get-Item -LiteralPath $output).Length
+                }
+                $status = if ($parseExit -eq 0 -and $resultPresent -and $resultBytes -gt 0) { 'SYNTHETIC_PARSE_OK' } else { 'SYNTHETIC_PARSE_FAILED' }
+              }
+            }
+          } catch {
+            if ($status -notin @('RESOURCE_GATE_BLOCKED','SERVER_START_FAILED','SYNTHETIC_PARSE_FAILED')) { $status = 'PRECHECK_OR_EXECUTION_FAILED' }
+          } finally {
+            if ($serverOwned) {
+              try { $stopExit = Run-PrivateCommand -Arguments @('server','stop') -Label 'server-stop' -TimeoutSeconds 120 }
+              catch { $stopExit = -3 }
+              if ($stopExit -ne 0) { $status = 'SERVER_CLEANUP_FAILED' }
+            }
+            $summary = [ordered]@{
+              policy = 'ACS_MINERU_SYNTHETIC_ONLY_V1'
+              status = $status
+              ram_gib_at_start = $memoryGiB
+              mineru_version_requested = '4.0.3'
+              private_pdf_read = $false
+              private_content_exported = $false
+              fixture_class = 'generated_synthetic'
+              model_download_instructed = $false
+              startup_exit = $startExit
+              parse_exit = $parseExit
+              stop_exit = $stopExit
+              preexisting_server = $preexistingServer
+              markdown_present = $resultPresent
+              markdown_bytes = $resultBytes
+              logs_only_on_private_d_drive = $true
+            }
+            Write-Output ('ACS_MINERU_SYNTHETIC=' + ($summary | ConvertTo-Json -Compress))
+            if ($status -ne 'SYNTHETIC_PARSE_OK') { throw 'ACS_MINERU_SYNTHETIC_GATE_FAILED' }
+            Write-Output 'ACS_MINERU_SYNTHETIC_PASS'
+          }
