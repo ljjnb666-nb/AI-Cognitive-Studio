@@ -113,14 +113,18 @@ class GLMTests(unittest.TestCase):
             p.write_bytes(b"SYNTHETIC")
             row=item(p)
             row["sha"]=hashlib.sha256(p.read_bytes()).hexdigest()
-            for text,reason in [("not JSON","GRAPH_JSON"),(json.dumps({"nodes":[],"edges":[],"verified":True}),"GRAPH_JSON")]:
+            for text,reason in [("not JSON","CONTENT_NOT_PURE_JSON"),(json.dumps({"nodes":[],"edges":[],"verified":True}),"GRAPH_FIELDS_INVALID")]:
                 reply={"choices":[{"finish_reason":"stop","message":{"content":text}}]}
                 with patch.object(glm,"request_glm",return_value=reply):
                     with self.assertRaisesRegex(glm.CloudBlocked,reason):
                         glm.infer_cloud_one(row,glm.DEFAULT_MODEL,"demo")
+            reply={"choices":[{"finish_reason":"stop","message":{"content":""}}]}
+            with patch.object(glm,"request_glm",return_value=reply):
+                with self.assertRaisesRegex(glm.CloudBlocked,"CONTENT_MISSING"):
+                    glm.infer_cloud_one(row,glm.DEFAULT_MODEL,"demo")
             reply={"choices":[{"finish_reason":"length","message":{"content":json.dumps(graph())}}]}
             with patch.object(glm,"request_glm",return_value=reply):
-                with self.assertRaisesRegex(glm.CloudBlocked,"GRAPH_JSON"):
+                with self.assertRaisesRegex(glm.CloudBlocked,"GENERATION_TRUNCATED"):
                     glm.infer_cloud_one(row,glm.DEFAULT_MODEL,"demo")
 
     def test_mock_cloud_result_unreviewed_and_no_replay(self):
