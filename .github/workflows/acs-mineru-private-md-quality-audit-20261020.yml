@@ -1,0 +1,160 @@
+# Read-only quality diagnostics for private Markdown created by MinerU run 39440805765.
+# No checkout; no stdout/stderr or private OCR text printed or uploaded.
+name: ACS MinerU private Markdown structure audit
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-private-md-quality-audit-20261020.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 10
+    steps:
+      - name: Validate offline real-book Markdown structure metadata only
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $data='D:\ai-cognitive-pdf-benchmark-data'
+          $report=Join-Path (Join-Path $data 'reports') 'real-mineru-39440805765-1'
+          $manifest=Join-Path (Join-Path $data 'fixtures') 'fixtures.manifest.json'
+          $out=Join-Path $report 'private-quality-audit-v1.json'
+          $pyCmd=Get-Command 'python.exe' -ErrorAction Stop
+          $py=@'
+          import json, os, re, hashlib, sys
+          from pathlib import Path
+          ROOT = Path(r"D:\ai-cognitive-pdf-benchmark-data")
+          REPORT = ROOT / "reports" / "real-mineru-39440805765-1"
+          MANIFEST = ROOT / "fixtures" / "fixtures.manifest.json"
+          OUT = REPORT / "private-quality-audit-v1.json"
+          MARK = re.compile(r"^<!--\s*page\s+(\d+)\s+of\s+(\d+)\s*-->\s*$", re.I)
+          MARKLIKE = re.compile(r"^\s*<!--\s*page\b", re.I)
+          REF = re.compile(r"^!\[Image block\]\(doc:([^\s)]+)/tier:([A-Za-z0-9._-]+)/page:(\d+)/block:(\d+)\)\s*$")
+          def safe_file(path, maxsize):
+              if path.is_symlink() or not path.is_file() or not (0 < path.stat().st_size <= maxsize):
+                  raise ValueError("FILE_NOT_AVAILABLE_OR_UNSAFE")
+          def characterize(file_id, physical, expected_byte_size, expected_sha):
+              path = REPORT / (file_id + ".md")
+              safe_file(path, 12_000_000)
+              raw=path.read_bytes()
+              s=raw.decode("utf-8-sig", "strict").replace("\r\n","\n").replace("\r","\n")
+              lines=s.split("\n")
+              outside_fence = []
+              inside=False
+              for idx,line in enumerate(lines):
+                  if re.match(r"^\s*"+chr(96)*3, line):
+                      outside_fence.append((idx,line,inside))
+                      inside=not inside
+                  elif not inside:
+                      outside_fence.append((idx,line,False))
+              marks=[]
+              malformed=0
+              for idx,line,_ in outside_fence:
+                  m=MARK.fullmatch(line)
+                  if m: marks.append((idx,int(m.group(1)),int(m.group(2))))
+                  elif MARKLIKE.match(line): malformed+=1
+              expected=[1,2,3]
+              valid = (
+                  malformed==0 and len(marks)==3 and
+                  [m[1] for m in marks]==expected and
+                  [m[2] for m in marks]==[3,3,3] and
+                  all(not lines[i].strip() for i in range(marks[0][0]))
+              ) if marks else False
+              mark_status="VALID" if valid else "MISSING" if not marks and not malformed else "INVALID"
+              refs=[]
+              image_lines=[]
+              for idx,line,_ in outside_fence:
+                  if line.lstrip().startswith("!["):
+                      image_lines.append((idx,line))
+                      m=REF.fullmatch(line)
+                      if m: refs.append((idx,m.group(1),m.group(2),int(m.group(3)),int(m.group(4))))
+              expected_sha=expected_sha.lower()
+              ref_valid=0
+              for idx,doc,tier,page,block in refs:
+                  bound=None
+                  if valid:
+                      for k,m in enumerate(marks):
+                          if idx>=m[0]:
+                              bound=k+1
+                  if doc and len(doc)>=6 and expected_sha.startswith(doc) and (bound is None or bound==page):
+                      ref_valid+=1
+              page_info=[]
+              if valid:
+                  for n in range(3):
+                      seg=lines[marks[n][0]+1:marks[n+1][0] if n<2 else len(lines)]
+                      txt="\n".join(seg)
+                      page_info.append({
+                          "source_physical_page":physical[n],
+                          "subset_page":n+1,
+                          "content_characters":len(txt.strip()),
+                          "chinese_characters":len(re.findall(r"[\u4e00-\u9fff]",txt)),
+                          "number_of_lines_with_text":sum(bool(v.strip()) for v in seg),
+                          "figure_refs":sum(1 for idx,line in image_lines if idx>marks[n][0] and (n==2 or idx<marks[n+1][0])),
+                          "headings":sum(1 for v in seg if re.match(r"^#{1,6}\s",v))
+                      })
+              # Distinguish page identity from inferred positional splits: never invent page-by-page counts.
+              result={
+                  "fixture":file_id,
+                  "source_physical_pages":physical,
+                  "markdown_bytes":len(raw),
+                  "expected_previous_markdown_bytes":expected_byte_size,
+                  "original_output_size_matches":len(raw)==expected_byte_size,
+                  "markdown_sha256":hashlib.sha256(raw).hexdigest(),
+                  "document_characters":len(s),
+                  "chinese_characters":len(re.findall(r"[\u4e00-\u9fff]",s)),
+                  "replacement_chars":s.count("\ufffd"),
+                  "control_nulls":s.count("\x00"),
+                  "lines":len(lines),
+                  "blank_lines":sum(not line.strip() for line in lines),
+                  "markdown_heading_lines":sum(bool(re.match(r"^#{1,6}\s",line)) for line in lines),
+                  "code_fence_lines":sum(bool(re.match(r"^\s*"+chr(96)*3,line)) for line in lines),
+                  "markdown_table_separator_lines":sum(bool(re.match(r"^\s*\|?[-:| ]{3,}\|",line)) for line in lines),
+                  "image_markdown_lines":len(image_lines),
+                  "validated_doc_image_refs":ref_valid,
+                  "invalid_or_unbound_image_refs":len(image_lines)-ref_valid,
+                  "page_markers_found":len(marks),
+                  "malformed_page_markers":malformed,
+                  "page_binding_status":mark_status,
+                  "per_page_stats_only_when_valid":page_info,
+                  "graph_relation_status":"NOT_VERIFIABLE_FROM_MARKDOWN_ONLY",
+                  "ocr_character_error_rate_status":"NOT_MEASURED_NO_INDEPENDENT_GT",
+                  "visual_reading_order_status":"NOT_MEASURED",
+              }
+              return result
+          try:
+              for directory in [ROOT, REPORT, MANIFEST.parent]:
+                  if directory.is_symlink() or not directory.is_dir():
+                      raise ValueError("DIRECTORY_NOT_READY")
+              safe_file(MANIFEST, 1048576)
+              data=json.loads(MANIFEST.read_text(encoding="utf-8"))
+              manifest_rows=data["fixtures"]
+              def lookup(fid):
+                  matched=[e for e in manifest_rows if isinstance(e,dict) and e.get("id")==fid]
+                  if len(matched)!=1: raise ValueError("MANIFEST_ENTRY_AMBIGUOUS")
+                  return matched[0]
+              cases=[("RB-PDF-12",[73,145,261],2224),("RB-PDF-13",[51,127,379],8113)]
+              results=[]
+              for id,pages,b in cases:
+                  row=lookup(id)
+                  if row.get("sourcePages1Based")!=pages or not isinstance(row.get("expectedSha256"),str):
+                      raise ValueError("SOURCE_LINEAGE_NOT_PINNED")
+                  results.append(characterize(id,pages,b,row["expectedSha256"]))
+              report={"policy":"ACS_MINERU_PRIVATE_QUALITY_METADATA_V1","source_run_id":39440805765,
+                      "cases":results,"structure_accuracy_certified":False,
+                      "machine_readable_graph_edges_present":False,
+                      "private_text_not_uploaded":True}
+              if OUT.exists() or OUT.is_symlink():raise ValueError("AUDIT_REPORT_NAME_COLLISION")
+              with OUT.open("x",encoding="utf-8") as f:
+                  json.dump(report,f,ensure_ascii=False,indent=2)
+              print("ACS_MINERU_PRIVATE_MD_METADATA="+json.dumps(report,ensure_ascii=True,separators=(",",":")))
+          except Exception:
+              print("ACS_MINERU_PRIVATE_MD_AUDIT_BLOCKED")
+              sys.exit(1)
+          '@
+          $py| & $pyCmd.Source -I -B -
+          if($LASTEXITCODE -ne 0) { throw 'PRIVATE_METADATA_AUDIT_FAILED' }
