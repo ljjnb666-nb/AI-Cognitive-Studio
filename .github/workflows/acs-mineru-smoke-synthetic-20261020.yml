@@ -125,23 +125,25 @@ jobs:
             $status = 'SERVER_PROBE'
             $oldServer = Run-PrivateCommand -Arguments @('server','status') -Label 'status-before' -TimeoutSeconds 45
             if ($oldServer -eq 0) {
+              # A running server is *not ours*. Do not stop or restart it.
+              # A synthetic-only parse may reuse the existing local service.
               $preexistingServer = $true
-              $status = 'PREEXISTING_SERVER_SKIPPED'
+              $status = 'SERVER_ALREADY_RUNNING'
             } else {
               $status = 'SERVER_START'
               $startExit = Run-PrivateCommand -Arguments @('server','start') -Label 'server-start' -TimeoutSeconds 180
               if ($startExit -ne 0) { $status = 'SERVER_START_FAILED' }
-              else {
-                $serverOwned = $true
-                $status = 'PARSER_RUNNING'
-                $output = Join-Path $scratch 'mineru-result.md'
-                $parseExit = Run-PrivateCommand -Arguments @('parse',$pdf,'--tier','flash','--pages','all','--output',$output,'--json','--force') -Label 'parse' -TimeoutSeconds 600
-                if (Test-Path -LiteralPath $output -PathType Leaf) {
-                  $resultPresent = $true
-                  $resultBytes = (Get-Item -LiteralPath $output).Length
-                }
-                $status = if ($parseExit -eq 0 -and $resultPresent -and $resultBytes -gt 0) { 'SYNTHETIC_PARSE_OK' } else { 'SYNTHETIC_PARSE_FAILED' }
+              else { $serverOwned = $true }
+            }
+            if ($preexistingServer -or $serverOwned) {
+              $status = 'PARSER_RUNNING'
+              $output = Join-Path $scratch 'mineru-result.md'
+              $parseExit = Run-PrivateCommand -Arguments @('parse',$pdf,'--tier','flash','--pages','all','--output',$output,'--json','--force') -Label 'parse' -TimeoutSeconds 600
+              if (Test-Path -LiteralPath $output -PathType Leaf) {
+                $resultPresent = $true
+                $resultBytes = (Get-Item -LiteralPath $output).Length
               }
+              $status = if ($parseExit -eq 0 -and $resultPresent -and $resultBytes -gt 0) { 'SYNTHETIC_PARSE_OK' } else { 'SYNTHETIC_PARSE_FAILED' }
             }
           } catch {
             if ($status -notin @('RESOURCE_GATE_BLOCKED','SERVER_START_FAILED','SYNTHETIC_PARSE_FAILED')) { $status = 'PRECHECK_OR_EXECUTION_FAILED' }
