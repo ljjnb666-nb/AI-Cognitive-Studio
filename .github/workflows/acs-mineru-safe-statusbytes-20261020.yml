@@ -1,0 +1,30 @@
+name: ACS MinerU synthetic status response diagnostic
+on:
+  push:
+    branches: [ops/mineru-local-probe-20261020]
+    paths: [.github/workflows/acs-mineru-safe-statusbytes-20261020.yml]
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  statusbytes:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/ops/mineru-local-probe-20261020' && github.event_name == 'push' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect 23-byte synthetic-only server status
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = 'D:\ai-cognitive-pdf-benchmark-data\temp'
+          $dir = Join-Path $root 'mineru-synthetic-39434331198-1'
+          $source = Join-Path $dir 'status-before.stdout.log'
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'SYNTHETIC_STATUS_FILE_MISSING' }
+          $di = Get-Item -LiteralPath $dir -Force
+          $info = Get-Item -LiteralPath $source -Force
+          if ((($di.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'UNSAFE_REPARSE_POINT' }
+          if ($info.Length -lt 1 -or $info.Length -gt 70) { throw 'SYNTHETIC_STATUS_LENGTH_INVALID' }
+          $bytes = [System.IO.File]::ReadAllBytes($source)
+          $hex = [System.BitConverter]::ToString($bytes).Replace('-','')
+          Write-Output ('ACS_SYNTHETIC_SERVER_STATUS_BYTES=' + ([ordered]@{original_run=39434331198;length=$bytes.Length;hex=$hex;private_pdf_read=$false;mineru_run=$false} | ConvertTo-Json -Compress))
