@@ -16,8 +16,9 @@ import shutil
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # exact-SHA-vetted adjacent helpers in -I mode
 from private_region_proposals import ROOT, SOURCE_RUN, PAGES, source_images, sha256_file
 from vision_graph_proposal_contract import validate_candidate, empty_template, SuggestionBlocked
 
@@ -162,6 +163,11 @@ def verify_regions(root: Path, fixture: str) -> tuple[dict, list[dict]]:
     return provenance, selected
 
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise LocalVisionBlocked("LOCAL_REDIRECT_REJECTED")
+
+
 def strict_local_request(path: str, payload: dict | None = None, timeout: int = 25) -> dict:
     """Fixed loopback; no proxy, redirects, external hostnames or URL from model output."""
     if path not in ("/v1/models", "/v1/chat/completions"):
@@ -172,7 +178,7 @@ def strict_local_request(path: str, payload: dict | None = None, timeout: int = 
         raise LocalVisionBlocked("VISION_REQUEST_BUDGET_EXCEEDED")
     request = Request(API_ROOT + path, data=raw if payload is not None else None,
                       headers={"Content-Type": "application/json"}, method=method)
-    opener = build_opener(ProxyHandler({}))
+    opener = build_opener(ProxyHandler({}), NoRedirect())
     try:
         with opener.open(request,timeout=timeout) as response:
             if response.status != 200:
