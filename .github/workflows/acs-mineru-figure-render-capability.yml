@@ -1,0 +1,30 @@
+name: ACS private figure render capability
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-figure-render-capability.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 4
+    steps:
+      - name: Probe installed PDF raster module only
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $python='D:\ai-cognitive-pdf-benchmark-data\python\mineru\Scripts\python.exe'
+          if(-not (Test-Path -LiteralPath $python -PathType Leaf)) {throw 'PYTHON_MISSING'}
+          $code=@'
+          import json,importlib.util
+          modules=("fitz","pymupdf","PIL")
+          available={m:importlib.util.find_spec(m) is not None for m in modules}
+          print("ACS_MINERU_RASTER_CAPABILITY="+json.dumps({"module_available":available,"no_pdf_opened":True,"no_packages_installed":True},sort_keys=True))
+          '@
+          $code|& $python -I -B -
+          if($LASTEXITCODE -ne 0) { throw 'CAPABILITY_FAILED' }
