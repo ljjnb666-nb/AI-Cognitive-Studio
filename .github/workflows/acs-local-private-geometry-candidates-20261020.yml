@@ -388,7 +388,14 @@ jobs:
                   cls = type(exc).__name__
                   if not re.fullmatch(r"[A-Za-z]{3,48}", cls):
                       cls = "Unknown"
+                  tb = exc.__traceback__
+                  while tb is not None and tb.tb_next is not None:
+                      tb = tb.tb_next
+                  fn = tb.tb_frame.f_code.co_name if tb is not None else "unknown"
+                  fn = fn if re.fullmatch(r"[A-Za-z_]{3,64}", fn) else "unknown"
+                  loc = tb.tb_lineno if tb is not None else 0
                   print("ACS_FIGURE_GEOMETRY_BLOCKED_RUNTIME_CLASS=" + cls)
+                  print("ACS_FIGURE_GEOMETRY_BLOCKED_LOCATION=" + fn + "_" + str(loc))
                   sys.exit(2)
               print("ACS_FIGURE_GEOMETRY_CANDIDATES="+json.dumps(result,sort_keys=True))
           
@@ -404,12 +411,12 @@ jobs:
           [Array]::Copy($header, 0, $total, 0, $header.Length)
           [Array]::Copy($payload, 0, $total, $header.Length, $payload.Length)
           $digest = ([BitConverter]::ToString(([System.Security.Cryptography.SHA1]::Create()).ComputeHash($total))).Replace('-', '').ToLowerInvariant()
-          if ($digest -cne '812a334700df067b72752e46caeb5539956941e5') { throw 'TRUSTED_GEOMETRY_SCRIPT_SHA_MISMATCH' }
+          if ($digest -cne '54e48528c7954478562f1ad32cc368b70c46efd9') { throw 'TRUSTED_GEOMETRY_SCRIPT_SHA_MISMATCH' }
           foreach ($fixture in @('RB-PDF-12','RB-PDF-13')) {
             $result = @(& $py -I -B $scriptPath --fixture $fixture 2>$null)
             if ($LASTEXITCODE -ne 0) {
               foreach ($line in $result) {
-                if ($line -match '^ACS_FIGURE_GEOMETRY_BLOCKED_(REASON|RUNTIME_CLASS)=[A-Za-z0-9_]{3,80}$') { Write-Output $line }
+                if ($line -match '^ACS_FIGURE_GEOMETRY_BLOCKED_(REASON|RUNTIME_CLASS|LOCATION)=[A-Za-z0-9_]{3,80}$') { Write-Output $line }
               }
               Write-Output ('ACS_FIGURE_GEOMETRY_EXECUTION_BLOCKED=' + $fixture)
               throw 'GEOMETRY_EXECUTION_FAILED'
