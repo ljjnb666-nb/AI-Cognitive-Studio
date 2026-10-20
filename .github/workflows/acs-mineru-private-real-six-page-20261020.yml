@@ -1,0 +1,174 @@
+name: ACS MinerU private six-page real-book rerun
+on:
+  push:
+    branches:
+      - ops/mineru-synthetic-retry-20261020-isolated
+    paths:
+      - .github/workflows/acs-mineru-private-real-six-page-20261020.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  mineru-real:
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 70
+    steps:
+      - name: Run two SHA-pinned private PDF subsets with local MinerU
+        shell: powershell
+        env:
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          HF_DATASETS_OFFLINE: '1'
+          MODELSCOPE_OFFLINE: '1'
+          MINERU_MODEL_SOURCE: 'local'
+          PIP_NO_INDEX: '1'
+          NO_PROXY: '*'
+        run: |
+          $ErrorActionPreference='Stop'
+          $data='D:\ai-cognitive-pdf-benchmark-data'
+          $fixtures=Join-Path $data 'fixtures'
+          $mineru=Join-Path $data 'python\mineru\Scripts\mineru.exe'
+          $report=Join-Path (Join-Path $data 'reports') ('real-mineru-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT)
+          $scratch=Join-Path (Join-Path $data 'temp') ('real-mineru-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT)
+          $status='PRECHECK'
+          $ram=$null
+          $owned=$false
+          $started=$null
+          $stopped=$null
+          $hashOK=$false
+          $verOK=$false
+          $items=@()
+          $reportReady=$false
+          try {
+            if($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_ONLY' }
+            foreach($d in @($data,$fixtures,(Join-Path $data 'reports'),(Join-Path $data 'temp'),(Join-Path $data 'cache\mineru\home'),(Join-Path $data 'cache\huggingface'))) {
+              if(-not (Test-Path -LiteralPath $d -PathType Container)) { throw 'DIRECTORY_NOT_READY' }
+              if(((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'UNSAFE_DIRECTORY' }
+            }
+            if(-not (Test-Path -LiteralPath $mineru -PathType Leaf)) { throw 'MINERU_MISSING' }
+            $manifest=Join-Path $fixtures 'fixtures.manifest.json'
+            $mf=Get-Item -LiteralPath $manifest -Force
+            if($mf.Length -lt 10 -or $mf.Length -gt 1048576 -or ($mf.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'MANIFEST_UNSAFE' }
+            $rows=@(([System.IO.File]::ReadAllText($manifest)|ConvertFrom-Json).fixtures)
+            $targets=@(
+              @{id='RB-PDF-12';parent='RB-PDF-02';pages='73,145,261'},
+              @{id='RB-PDF-13';parent='RB-PDF-03';pages='51,127,379'}
+            )
+            $inputs=@()
+            foreach($t in $targets) {
+              $a=@($rows|Where-Object { $_.id -ceq $t.id })
+              $b=@($rows|Where-Object { $_.id -ceq $t.parent })
+              if($a.Count -ne 1 -or $b.Count -ne 1) { throw 'MANIFEST_AMBIGUOUS' }
+              $sub=$a[0];$parent=$b[0]
+              if($sub.fixtureClass -cne 'private-real-page-subset' -or $sub.filename -cne ($t.id+'.pdf') -or $sub.sourceFixtureId -cne $t.parent -or $sub.sourceSha256 -cne $parent.expectedSha256 -or (@($sub.sourcePages1Based) -join ',') -cne $t.pages) { throw 'SOURCE_LINEAGE_INVALID' }
+              foreach($part in @(@{id=$t.id;row=$sub},@{id=$t.parent;row=$parent})) {
+                $file=Join-Path $fixtures ($part.id+'.pdf')
+                if($part.row.expectedSha256 -cnotmatch '^[0-9a-f]{64}$' -or [int64]$part.row.declaredBytes -lt 1 -or -not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'SOURCE_FILE_INVALID' }
+                $fi=Get-Item -LiteralPath $file -Force
+                if(($fi.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $fi.Length -ne [int64]$part.row.declaredBytes) { throw 'SOURCE_FILE_CHANGED' }
+                if((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $part.row.expectedSha256) { throw 'SOURCE_SHA_CHANGED' }
+              }
+              $inputs+=@{id=$t.id;pages=$t.pages;pdf=(Join-Path $fixtures ($t.id+'.pdf'))}
+            }
+            $hashOK=$true
+            if((Get-ChildItem -LiteralPath (Join-Path $data 'models') -Filter '*.onnx' -Recurse -File -ErrorAction SilentlyContinue|Measure-Object).Count -lt 1) { throw 'MODEL_NOT_READY' }
+            $c=[System.IO.DriveInfo]::new('C');$d=[System.IO.DriveInfo]::new('D')
+            if(-not $c.IsReady -or -not $d.IsReady -or $c.AvailableFreeSpace -lt 15GB -or $d.AvailableFreeSpace -lt 30GB) { throw 'DISK_GATE' }
+            $ready=$false
+            for($n=0;$n -lt 18;$n++){
+              $a=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+              $v1=[double]$a.FreePhysicalMemory/1048576.0
+              if($v1 -ge 4) {
+                Start-Sleep -Seconds 5
+                $b=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+                $v2=[double]$b.FreePhysicalMemory/1048576.0
+                $ram=[Math]::Round([Math]::Min($v1,$v2),2)
+                if($ram -ge 4) { $ready=$true;break }
+              }
+              Start-Sleep -Seconds 20
+            }
+            if(-not $ready) { throw 'RAM_GATE' }
+            if((Test-Path -LiteralPath $report) -or (Test-Path -LiteralPath $scratch)) { throw 'RUN_DIRECTORY_COLLISION' }
+            New-Item -ItemType Directory -Path $report -ErrorAction Stop|Out-Null
+            $reportReady=$true
+            New-Item -ItemType Directory -Path $scratch -ErrorAction Stop|Out-Null
+            $env:MINERU_HOME=Join-Path $data 'cache\mineru\home'
+            $env:HF_HOME=Join-Path $data 'cache\huggingface'
+            $env:TEMP=$scratch;$env:TMP=$scratch
+            function PrivateCli([string[]]$argv,[string]$tag,[int]$sec) {
+              $out=Join-Path $report ($tag+'.stdout.log')
+              $err=Join-Path $report ($tag+'.stderr.log')
+              if((Test-Path -LiteralPath $out) -or (Test-Path -LiteralPath $err)) { throw 'LOG_COLLISION' }
+              $p=Start-Process -FilePath $mineru -ArgumentList $argv -WorkingDirectory $scratch -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err -ErrorAction Stop
+              if(-not $p.WaitForExit($sec*1000)) {
+                $null=& taskkill.exe /PID $p.Id /T /F 2>$null
+                return -2
+              }
+              return [int]$p.ExitCode
+            }
+            $ve=PrivateCli @('--version') 'version' 40
+            $vf=Join-Path $report 'version.stdout.log'
+            if($ve -ne 0 -or -not (Test-Path -LiteralPath $vf -PathType Leaf)) { throw 'VERSION_MISSING' }
+            $vt=[System.IO.File]::ReadAllText($vf)
+            $verOK=($vt.Length -lt 2048 -and $vt -match '(^|\D)4\.0\.3(\D|$)')
+            if(-not $verOK) { throw 'VERSION_WRONG' }
+            $null=PrivateCli @('server','status') 'server-status' 50
+            $statusFile=Join-Path $report 'server-status.stdout.log'
+            $raw=''
+            if((Test-Path -LiteralPath $statusFile -PathType Leaf) -and (Get-Item -LiteralPath $statusFile).Length -lt 256) {
+              $raw=[System.IO.File]::ReadAllText($statusFile).Trim()
+            }
+            if($raw -notmatch '(?i)\u672a.{0,3}\u8fd0\u884c|\u6ca1\u6709.{0,3}\u8fd0\u884c|\u505c\u6b62|not running|not started|stopped|inactive|offline') { throw 'SERVER_UNOWNED_OR_UNKNOWN' }
+            $status='SERVER_START'
+            $started=PrivateCli @('server','start') 'server-start' 210
+            if($started -ne 0) { throw 'SERVER_START_FAILURE' }
+            $owned=$true
+            $status='PARSING'
+            foreach($entry in $inputs) {
+              $id=[string]$entry.id
+              $md=Join-Path $report ($id+'.md')
+              $watch=[System.Diagnostics.Stopwatch]::StartNew()
+              $code=PrivateCli @('parse',$entry.pdf,'--tier','flash','--pages','all','--output',$md,'--json','--force') ('parse-'+$id) 1500
+              $watch.Stop()
+              $bytes=0L
+              if(Test-Path -LiteralPath $md -PathType Leaf) {
+                $fo=Get-Item -LiteralPath $md -Force
+                if(($fo.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { $bytes=[int64]$fo.Length }
+              }
+              $errShape=$false
+              $stdout=Join-Path $report ('parse-'+$id+'.stdout.log')
+              if(Test-Path -LiteralPath $stdout -PathType Leaf) {
+                $li=Get-Item -LiteralPath $stdout
+                if($li.Length -gt 1048576) { $errShape=$true }
+                elseif($li.Length -gt 0) {
+                  $str=[System.IO.File]::ReadAllText($stdout).Trim()
+                  if($str.StartsWith('{')) {
+                    try { $p=$str|ConvertFrom-Json -ErrorAction Stop; $errShape=($null -ne $p.PSObject.Properties['error']) }
+                    catch { $errShape=$true }
+                  }
+                }
+              }
+              $accepted=($code -eq 0 -and $bytes -gt 0 -and -not $errShape)
+              $items+=@{id=$id;source_pages=$entry.pages;parse_exit=$code;markdown_bytes=$bytes;json_error=$errShape;seconds=[Math]::Round($watch.Elapsed.TotalSeconds,2);accepted=$accepted}
+              if(-not $accepted) { $status='PARSER_REJECTED';break }
+            }
+            if($items.Count -eq 2 -and @($items|Where-Object { -not $_.accepted }).Count -eq 0) { $status='TWO_SUBSETS_EXECUTION_PASS' }
+            else { $status='INCOMPLETE' }
+          } catch {
+            if($status -notin @('PARSER_REJECTED','INCOMPLETE')) { $status='PRECHECK_OR_EXECUTION_FAILED' }
+          } finally {
+            if($owned) {
+              try { $stopped=PrivateCli @('server','stop') 'server-stop' 150 }
+              catch { $stopped=-3 }
+              if($stopped -ne 0) { $status='SERVER_STOP_FAILED' }
+            }
+            $summary=[ordered]@{policy='ACS_MINERU_PRIVATE_V1';status=$status;sha_and_lineage_verified=$hashOK;version_4_0_3_verified=$verOK;ram_gib=$ram;cases=@($items);cases_completed=$items.Count;server_start_exit=$started;server_stop_exit=$stopped;private_output_created=$reportReady;no_worktree_source_executed=$true;no_firewall_change=$true;no_private_content_uploaded=$true;accuracy_not_measured=$true}
+            if($reportReady) {
+              try { [System.IO.File]::WriteAllText((Join-Path $report 'run-summary.json'),($summary|ConvertTo-Json -Compress -Depth 8),(New-Object System.Text.UTF8Encoding($false))) }
+              catch { $status='REPORT_PERSIST_FAILURE' }
+            }
+            Write-Output ('ACS_MINERU_PRIVATE_RESULT='+($summary|ConvertTo-Json -Compress -Depth 8))
+            if($status -ne 'TWO_SUBSETS_EXECUTION_PASS') { throw 'ACS_PRIVATE_MINERU_FAILED' }
+            Write-Output 'ACS_MINERU_PRIVATE_TWO_SUBSETS_PASS'
+          }
