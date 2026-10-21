@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { request } from "node:http";
 import { startAnnotationServer } from "../annotation/server.mjs";
 import { createGraphReviewDraft } from "../annotation/graph-review.mjs";
+import { verifyAutoGraphBundle } from "../annotation/graph-review-auto.mjs";
 import {
  PRIVATE_FILENAMES,readPrivateP127Bundle,readPrivateP127Draft,writePrivateP127Draft,PrivateGraphError,
 } from "../annotation/private-graph-local.mjs";
@@ -106,6 +107,23 @@ describe("03D P127 local auto import — strictly synthetic, no D: data",()=>{
     expect(Buffer.from(bundle.data.manifestBase64,"base64")).toEqual(x.files.manifest);
     expect(Buffer.from(bundle.data.cropBase64,"base64")).toEqual(x.files.crop);
     expect(JSON.stringify(bundle)).not.toContain("SYNTHETIC_PRIVATE_SENTINEL");
+  }));
+  it("browser raw-byte verifier accepts exact three SHA-pinned inputs and rejects substitution",()=>withFixture(async x=>{
+    const bundle=await readPrivateP127Bundle(x.root);
+    const data={...bundle.data,identity:bundle.identity,authority:bundle.authority};
+    const verified=await verifyAutoGraphBundle(data);
+    expect(verified.identity).toEqual(bundle.identity);
+    expect(verified.result.schemaVersion).toBe("acs-glm-cloud-vision-proposal-v1");
+    expect(verified.crop).toEqual(x.files.crop);
+    const changedCrop={...data,cropBase64:Buffer.from("synthetic_wrong_png").toString("base64")};
+    await expect(verifyAutoGraphBundle(changedCrop)).rejects.toMatchObject({code:"GRAPH_AUTO_SOURCE_SHA_INVALID"});
+    const modifiedManifest={...data,manifestBase64:Buffer.concat([x.files.manifest,Buffer.from(" ")]).toString("base64")};
+    await expect(verifyAutoGraphBundle(modifiedManifest)).rejects.toMatchObject({code:"GRAPH_AUTO_SOURCE_SHA_INVALID"});
+    const changedResult={...data,resultBase64:Buffer.from('{"fake":true}').toString("base64")};
+    await expect(verifyAutoGraphBundle(changedResult)).rejects.toMatchObject({code:"GRAPH_AUTO_SOURCE_SHA_INVALID"});
+    await expect(verifyAutoGraphBundle({...data,authority:"VERIFIED"})).rejects.toMatchObject({code:"GRAPH_AUTO_BUNDLE_INVALID"});
+    await expect(verifyAutoGraphBundle({...data,cropBase64:"x".repeat(12_000_000)}))
+      .rejects.toMatchObject({code:"GRAPH_AUTO_BUNDLE_TOO_LARGE"});
   }));
   it("fails closed if the crop bytes or manifest source SHA change",()=>withFixture(async x=>{
     const cropPath=join(x.root,...PRIVATE_FILENAMES.crop.split("/"));
