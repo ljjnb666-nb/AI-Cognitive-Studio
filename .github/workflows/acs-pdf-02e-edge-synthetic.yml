@@ -23,6 +23,12 @@ jobs:
     steps:
       - name: Checkout exact same-repository PR head without persistent credentials
         uses: actions/checkout@v4
+        env:
+          # The self-hosted runner has no direct github.com:443 route.
+          # Scoped to checkout; no persistent global Git proxy mutation.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
