@@ -47,9 +47,17 @@ function validateOne(raw){
        raw.resultSha256!==null||raw.cropSha256!==null||raw.manifestSha256!==null)
       reject("GRAPH_REGISTRY_LEGACY_PIN_INVALID");
   }else{
-    if(raw.id===LEGACY_ID||!raw.resultPath.startsWith(
-         "glm-cloud-v1-"+raw.fixtureId+"-"+raw.regionId+"-")||
-       !raw.resultPath.endsWith("/cloud-vision-proposals.json")||
+    // Python cloud_glm_vision.py writes the FIRST SINGLE-REGION attempt
+    // to glm-cloud-v1-<fixture>-<region>/cloud-vision-proposals.json.
+    // Preserve the previously reviewed suffix format for legacy synthetic
+    // tests and future separately reviewed attempts; never authorize by path alone.
+    const stem="glm-cloud-v1-"+raw.fixtureId+"-"+raw.regionId;
+    const expectedStem=stem+"/cloud-vision-proposals.json";
+    const isCanonical=raw.resultPath===expectedStem;
+    const hasReviewedSuffix=raw.resultPath.startsWith(stem+"-")&&
+       raw.resultPath.endsWith("/cloud-vision-proposals.json");
+    if(raw.id===LEGACY_ID||!(isCanonical||hasReviewedSuffix)||
+       (isCanonical&&raw.attemptClass!=="INITIAL_ATTEMPT")||
        ![raw.resultSha256,raw.cropSha256,raw.manifestSha256].every(
          x=>typeof x==="string"&&HASH.test(x)))
       reject("GRAPH_REGISTRY_EXACT_SHA_REQUIRED");
