@@ -1,0 +1,36 @@
+# Inspection only: no checkout, no API key, no paid request, no private book reads.
+name: ACS P127 Edge runtime read-only preflight
+on:
+  push:
+    branches: [ops/mineru-synthetic-retry-20261020-isolated]
+    paths:
+      - .github/workflows/acs-p127-edge-runtime-preflight-20261021.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  edge-runtime:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Check Node and Edge presence without exposing local files
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $node=(Get-Command node -ErrorAction Stop).Source
+          $version=(& $node -p "process.versions.node").Trim()
+          Write-Output ('ACS_P127_EDGE_NODE_MAJOR='+($version.Split('.')[0]))
+          $candidates=@(
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
+            "${env:LocalAppData}\Microsoft\Edge\Application\msedge.exe"
+          )
+          $edge=@($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+          Write-Output ('ACS_P127_EDGE_PRESENT='+[string]($edge.Count -gt 0).ToLowerInvariant())
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          Write-Output ('ACS_P127_EDGE_FREE_MEMORY_MB='+[math]::Floor([double]$os.FreePhysicalMemory/1024))
+          $project='D:\所有项目\90_Worktrees\AI-Cognitive-Studio-pdf-parser-benchmark'
+          Write-Output ('ACS_P127_EDGE_WORKTREE_PRESENT='+[string](Test-Path -LiteralPath $project -PathType Container).ToLowerInvariant())
+          Write-Output 'ACS_P127_EDGE_PREFLIGHT_DONE'
