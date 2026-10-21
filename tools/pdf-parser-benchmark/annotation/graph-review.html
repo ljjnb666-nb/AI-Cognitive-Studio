@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src blob: data:; font-src blob: data:; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'self'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<title>PDF P127 图表证据逐条审阅（仅本机）</title>
+<link rel="stylesheet" href="./graph-review.css"><script type="module" src="./graph-review-app.mjs"></script>
+</head><body>
+<header><div><strong>AI Cognitive Studio · P127 图表审阅</strong><span>原书物理第 127 页 · TCP 客户端/服务器图</span></div><strong class="privacy">仅本机 · 不上传</strong></header>
+<main>
+<section class="intro">
+<h1>对照原图，逐一复核模型候选</h1>
+<p>此页面只显示机器提出的节点、线段和箭头尖端，允许人工记录“肉眼一致 / 不一致 / 无法判断”。本工具不会确认知识图谱，不会写入 Ground Truth，也不会触发 GLM、OCR 或播客生成。</p>
+<p><b>注意：</b>裁剪图可能不包含整页上下文。可另外在原书阅读器打开物理 P127 辅助判断。只在图像中确实看清时选择“肉眼一致”；看不清方向应选“无法判断”。</p>
+</section>
+<section class="panel"><h2>1. 手动选择三份本机私人文件并校验</h2>
+<div class="inputs">
+<label>云端结果 cloud-vision-proposals.json<input id="result-file" type="file" accept=".json,application/json"></label>
+<label>区域来源 region-proposals.json<input id="manifest-file" type="file" accept=".json,application/json"></label>
+<label>局部图像 page-002-region-01.png<input id="crop-file" type="file" accept="image/png,.png"></label>
+</div>
+<p class="pathhelp">均来自 D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1 下已有文件。结果使用 glm-cloud-v1-RB-PDF-13-page-002-region-01-retry-p127-r02-20261021 目录，来源 JSON 与 PNG 在 region-proposals-v1-RB-PDF-13 目录。文件不会发送给任何服务器。</p>
+<div class="actions"><button id="load" type="button" class="primary">加载并校验 SHA</button>
+<button id="clear" type="button">清空本机会话</button></div>
+<p id="notice" class="notice" role="status" aria-live="polite">未加载证据；0 项人工审阅。</p>
+</section>
+<section class="workspace" id="work" hidden>
+<div class="panel imagepanel"><h2>2. 图像证据（叠加坐标仅为机器提议）</h2>
+<div class="image-scroller"><canvas id="diagram" aria-label="经过 SHA 验证的 P127 局部图像及几何候选"></canvas></div>
+<p class="pathhelp">绿色方框表示候选节点；橙色线段和圆点表示候选箭头线与尖端，均未确认存在。选择右侧条目可强调其几何位置。</p>
+<p id="counts" class="notice"></p>
+</div>
+<div class="panel reviews"><h2>3. 逐条肉眼判断</h2>
+<p>节点检查可见标签和边框位置；关系检查实际线段、尖端、两端关联及方向。全部条目默认未审阅；仅改变草稿，不代表正式验收。</p>
+<div id="entries"></div>
+</div>
+</section>
+<section class="panel" id="export-panel" hidden><h2>4. 导出私有审阅草稿</h2>
+<p>草稿永久保持 <code>REVIEW_DRAFT_UNATTESTED</code>、<code>humanVerified=false</code>、<code>graphVerified=false</code>。即使全部肉眼标记一致，也不能自动晋级已验证图谱。</p>
+<div class="actions"><button id="export" type="button" class="primary">导出草稿 JSON 到本机</button>
+<label class="restore">恢复已有私有草稿<input id="restore" type="file" accept=".json,application/json"></label></div>
+<p class="pathhelp">建议手动保存到 D:\ai-cognitive-pdf-benchmark-data。浏览器下载提示不代表文件已存到指定目录；请自行核实。关闭页面后内存草稿将丢失。</p>
+</section>
+</main></body></html>

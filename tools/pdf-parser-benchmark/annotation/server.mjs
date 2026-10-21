@@ -23,6 +23,10 @@ const ALLOWED_FILES = Object.freeze({
   "/vendor/pdf.mjs": ["../node_modules/pdfjs-dist/build/pdf.mjs", "text/javascript; charset=utf-8"],
   "/vendor/pdf.worker.mjs": ["../node_modules/pdfjs-dist/build/pdf.worker.mjs", "text/javascript; charset=utf-8"],
   "/styles.css": ["styles.css", "text/css; charset=utf-8"],
+  "/graph-review.html": ["graph-review.html", "text/html; charset=utf-8"],
+  "/graph-review.mjs": ["graph-review.mjs", "text/javascript; charset=utf-8"],
+  "/graph-review-app.mjs": ["graph-review-app.mjs", "text/javascript; charset=utf-8"],
+  "/graph-review.css": ["graph-review.css", "text/css; charset=utf-8"],
 });
 function securityHeaders() {
   return {
