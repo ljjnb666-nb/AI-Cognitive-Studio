@@ -215,7 +215,11 @@ export async function listPrivateGraphReviewQueue(root){
     for(const entry of entries){
       const cropRelative=`region-proposals-v1-${fixture}/crops/${entry.regionId}.png`;
       // Do not read or emit private pixels, labels, model responses or paths.
-      const bytes=await readBounded(root,cropRelative,MAX_CROP_BYTES,{missing:true});
+      let bytes=null;
+      // One bad/unsafe crop is a blocked queue item, not a reason to conceal
+      // all other verified regions. A forged manifest itself fails globally.
+      try{bytes=await readBounded(root,cropRelative,MAX_CROP_BYTES,{missing:true});}
+      catch(e){if(!(e instanceof PrivateGraphError))throw e;}
       let evidenceStatus="CROP_MISSING_OR_BLOCKED";
       if(bytes){
         let size;
