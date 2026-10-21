@@ -8,7 +8,7 @@ on:
       - "tools/pdf-parser-benchmark/**"
       - ".github/workflows/acs-pdf-02f-edge-synthetic.yml"
   pull_request:
-    branches: [feat/pdf-local-vision-proposals-03b]
+    branches: [feat/pdf-figure-03e04b02e-staged-review]
     paths:
       - "tools/pdf-parser-benchmark/**"
       - ".github/workflows/acs-pdf-02f-edge-synthetic.yml"
