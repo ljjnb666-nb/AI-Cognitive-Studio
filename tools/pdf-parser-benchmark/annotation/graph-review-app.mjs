@@ -3,6 +3,7 @@ import {
   validateGraphReviewSource, createGraphReviewDraft, parseGraphReviewDraft,
   updateGraphDecision, graphReviewProgress, GraphReviewError,
 } from "./graph-review.mjs";
+import { verifyAutoGraphBundle } from "./graph-review-auto.mjs";
 
 const $=id=>document.getElementById(id);
 const el=(tag,klass,text)=>{
@@ -232,35 +233,13 @@ async function loadAutomatically(){
     message("正在经授权的本机回环接口读取三份 P127 证据并核验 SHA…");
     const bundle=await autoRequest("/api/private-graph/p127/bundle");
     if(epoch!==loadEpoch)return;
-    if(bundle.authority!=="PROPOSED_UNVERIFIED"||!bundle.identity||
-      !/^[0-9a-f]{64}$/u.test(bundle.identity.resultSha256)||
-      !/^[0-9a-f]{64}$/u.test(bundle.identity.manifestSha256)||
-      !/^[0-9a-f]{64}$/u.test(bundle.identity.cropSha256))
-      throw new GraphReviewError("GRAPH_AUTO_BUNDLE_INVALID");
-    function decodeSource(value,max){
-      if(typeof value!=="string"||value.length>Math.ceil(max*4/3)+8)
-        throw new GraphReviewError("GRAPH_AUTO_BUNDLE_TOO_LARGE");
-      try{return Uint8Array.from(atob(value), c=>c.charCodeAt(0));}
-      catch{throw new GraphReviewError("GRAPH_AUTO_BUNDLE_DECODE_INVALID");}
-    }
-    const rb=decodeSource(bundle.resultBase64,MAX_RESULT_BYTES);
-    const mb=decodeSource(bundle.manifestBase64,MAX_MANIFEST_BYTES);
-    const crop=decodeSource(bundle.cropBase64,MAX_CROP_BYTES);
-    if([rb.length,mb.length,crop.length].some((n,i)=>n<8||
-      n>[MAX_RESULT_BYTES,MAX_MANIFEST_BYTES,MAX_CROP_BYTES][i]))
-      throw new GraphReviewError("GRAPH_AUTO_BUNDLE_TOO_LARGE");
-    const [resultSha,manifestSha,cropSha]=await Promise.all([digest(rb),digest(mb),digest(crop)]);
-    if(resultSha!==bundle.identity.resultSha256||
-      manifestSha!==bundle.identity.manifestSha256||
-      cropSha!==bundle.identity.cropSha256)
-      throw new GraphReviewError("GRAPH_AUTO_SOURCE_SHA_INVALID");
-    const result=parseJSON(rb),manifest=parseJSON(mb);
+    const {result,manifest,crop,identity}=await verifyAutoGraphBundle(bundle);
     const blob=new Blob([crop],{type:"image/png"});
     const image=await createImageBitmap(blob);
     try{
       if(epoch!==loadEpoch)return;
       const validated=validateGraphReviewSource(result,manifest,
-        {...bundle.identity,cropWidth:image.width,cropHeight:image.height});
+        {...identity,cropWidth:image.width,cropHeight:image.height});
       if(epoch!==loadEpoch)return;
       view=validated;draft=createGraphReviewDraft(view);bitmap=image;selected=null;
       const prior=await autoRequest("/api/private-graph/p127/draft");
