@@ -73,8 +73,14 @@ export async function reconcileBatchCandidates(root,plan){
   // The offline planner must still be rerun immediately before an actual
   // attempt in a future implementation. This is report-only reconciliation.
   const items=[];
-  for(const item of plan.planned){
-    items.push(await reconcileCloudEvidence(root,item.id));
+  // Crucial: inspection must include previously BLOCKED attempts, not only
+  // fresh planned candidates. Otherwise the most important unknown charge
+  // states disappear from the operator's forensic overview.
+  for(const item of [...plan.planned,...plan.excluded]){
+    const observed=await reconcileCloudEvidence(root,item.id);
+    items.push({...observed,planningStatus:plan.planned.some(p=>p.id===item.id)?
+      "WAITING_FOR_AUTHORIZATION":"EXCLUDED_FROM_PLAN",
+      exclusionReason:plan.excluded.find(p=>p.id===item.id)?.reason??null});
   }
   return {
     schemaVersion:"acs-cloud-batch-reconciliation-v1",
