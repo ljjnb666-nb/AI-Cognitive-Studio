@@ -546,7 +546,7 @@ const fakeQueue=(ids,statuses)=>({
 const fakeProof=(id,physical,cropSha,bytes=128)=>({
   id,sourcePhysicalPage1Based:physical,authority:"CROP_ONLY_UNVERIFIED",
   graphVerified:false,humanVerified:false,cropSha256:cropSha,
-  width:200,height:100,byteLength:bytes
+  width:200,height:100,byteLength:bytes,priorAttemptBlocked:false
 });
 describe("03E-04A paid inference batch PLANNING, strictly no dispatch",()=>{
   it("real inventory with only P127 returns zero payable work and does not write files",()=>withFixture(async x=>{
@@ -573,6 +573,11 @@ describe("03E-04A paid inference batch PLANNING, strictly no dispatch",()=>{
       blocked:0,limitExcluded:1});
     expect(one.planned[0]).toMatchObject({id:ids[0],cropSha256:"a".repeat(64),cropBytes:1000});
     expect(one.excluded.map(x=>x.reason)).toEqual(["EXCEEDS_BATCH_LIMIT","ALREADY_HAS_GRAPH"]);
+    const attempted=compileGraphBatchPlan(queue,[
+      {...proof[0],priorAttemptBlocked:true},proof[1],null
+    ],{maxRequests:2});
+    expect(attempted.planned.map(x=>x.id)).toEqual([ids[1]]);
+    expect(attempted.excluded[0].reason).toBe("PRIOR_ATTEMPT_OR_OUTPUT_PRESENT");
     expect(one.priceEstimate).toBe(null);
     expect(one.providerRequestsIssued).toBe(0);
     const same=compileGraphBatchPlan(queue,proof,{maxRequests:1,maxTotalBytes:10000});
@@ -603,7 +608,9 @@ describe("03E-04A paid inference batch PLANNING, strictly no dispatch",()=>{
     const queue=fakeQueue(ids,["CROP_READY_NO_GRAPH","CROP_READY_NO_GRAPH"]);
     const proofs=[fakeProof(ids[0],50,"a".repeat(64)),
       fakeProof(ids[1],51,"a".repeat(64))];
-    expect(()=>compileGraphBatchPlan(queue,proofs)).toThrow(BatchPlanError);
+    const duplicatePlan=compileGraphBatchPlan(queue,proofs);
+    expect(duplicatePlan.counts).toMatchObject({eligible:1,excluded:1,blocked:1});
+    expect(duplicatePlan.excluded[0].reason).toBe("DUPLICATE_IMAGE_SHA");
     expect(()=>compileGraphBatchPlan(queue,proofs,{maxRequests:15})).toThrow(BatchPlanError);
     expect(()=>compileGraphBatchPlan(queue,proofs,{maxTotalBytes:0})).toThrow(BatchPlanError);
     const oversized=compileGraphBatchPlan(fakeQueue([ids[0]],["CROP_READY_NO_GRAPH"]),
@@ -611,6 +618,35 @@ describe("03E-04A paid inference batch PLANNING, strictly no dispatch",()=>{
     expect(oversized.counts).toMatchObject({eligible:0,blocked:1});
     expect(oversized.excluded[0].reason).toBe("EXCEEDS_PER_REQUEST_LIMIT");
   });
+  it("forbids rerunning a reserved GLM request after receipt, stage or output exists",()=>withFixture(async x=>{
+    const doc=structuredClone(x.regions);
+    doc.fixtureId="RB-PDF-12";
+    doc.pages[0].subsetPageIndex=0;doc.pages[0].sourcePhysicalPage1Based=51;
+    doc.pages[0].regions[0].regionId="page-001-region-01";
+    const crop=x.files.crop;
+    const folder=join(x.root,"region-proposals-v1-RB-PDF-12");
+    await mkdir(join(folder,"crops"),{recursive:true});
+    await writeFile(join(folder,"region-proposals.json"),JSON.stringify(doc));
+    await writeFile(join(folder,"crops","page-001-region-01.png"),crop);
+    const first=await buildPrivateGraphBatchPlan(x.root);
+    expect(first.counts).toMatchObject({discovered:2,eligible:1,alreadyHasGraph:1});
+    const base="glm-cloud-v1-RB-PDF-12-page-001-region-01";
+    const receipt=join(x.root,"."+base+".cloud-attempted");
+    await writeFile(receipt,"RESERVED_NO_REPLAY");
+    const second=await buildPrivateGraphBatchPlan(x.root);
+    expect(second.counts).toMatchObject({eligible:0,blocked:1,alreadyHasGraph:1});
+    expect(second.excluded.find(row=>row.id==="RB-PDF-12:page-001-region-01").reason)
+      .toBe("PRIOR_ATTEMPT_OR_OUTPUT_PRESENT");
+    await rm(receipt);
+    const genericBatch=join(x.root,".glm-cloud-v1-RB-PDF-12-batch.cloud-attempted");
+    await writeFile(genericBatch,"PREVIOUS_BATCH_ATTEMPT");
+    const third=await buildPrivateGraphBatchPlan(x.root);
+    expect(third.counts.eligible).toBe(0);
+    await rm(genericBatch);
+    await mkdir(join(x.root,"."+base+"-stage"));
+    const fourth=await buildPrivateGraphBatchPlan(x.root);
+    expect(fourth.counts.eligible).toBe(0);
+  }));
   it("read-only HTTP plan requires capability and rejects request bodies or query parameters",()=>withFixture(async x=>{
     const off=await startAnnotationServer();
     try{expect((await send(off,"/api/private-graph/batch/plan")).status).toBe(404);}
