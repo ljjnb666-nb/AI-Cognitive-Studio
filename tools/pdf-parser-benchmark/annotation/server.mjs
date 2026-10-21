@@ -6,7 +6,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
-import { readPrivateP127Bundle, readPrivateP127Draft, writePrivateP127Draft, listPrivateGraphReviewQueue, PrivateGraphError } from "./private-graph-local.mjs";
+import { readPrivateP127Bundle, readPrivateP127Draft, writePrivateP127Draft, listPrivateGraphReviewQueue, readPrivateGraphCropPreview, PrivateGraphError } from "./private-graph-local.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -44,6 +44,7 @@ function securityHeaders(graphPage = false) {
   };
 }
 const PRIVATE_QUEUE = "/api/private-graph/queue";
+const PRIVATE_PREVIEW = "/api/private-graph/crop";
 const PRIVATE_BUNDLE = "/api/private-graph/p127/bundle";
 const PRIVATE_DRAFT = "/api/private-graph/p127/draft";
 const TOKEN = /^[0-9a-f]{64}$/u;
@@ -68,7 +69,8 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
       response.writeHead(403, securityHeaders()); response.end(); return;
     }
     const pathname = request.url?.split("?")[0];
-    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT || pathname === PRIVATE_QUEUE) {
+    const cropRoute = pathname === PRIVATE_PREVIEW;
+    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT || pathname === PRIVATE_QUEUE || cropRoute) {
       const headers = securityHeaders(true);
       const reply = (status, value) => {
         const body = Buffer.from(JSON.stringify(value),"utf8");
@@ -89,7 +91,8 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
       if (privateGraphReadOnly && pathname === PRIVATE_DRAFT && request.method === "PUT") {
         reply(405,{code:"PRIVATE_DRAFT_WRITE_DISABLED"}); return;
       }
-      if ((pathname === PRIVATE_QUEUE && request.method !== "GET") ||
+      if ((cropRoute && request.method !== "GET") ||
+          (pathname === PRIVATE_QUEUE && request.method !== "GET") ||
           (pathname === PRIVATE_BUNDLE && request.method !== "GET") ||
           (pathname === PRIVATE_DRAFT && !["GET","PUT"].includes(request.method)) ||
           (pathname === PRIVATE_DRAFT && request.method === "PUT" &&
@@ -99,6 +102,17 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
         reply(405,{code:"PRIVATE_IMPORT_METHOD_REJECTED"}); return;
       }
       try {
+        if (cropRoute) {
+          // Strict, singular query parameter: never permit paths or arbitrary selectors.
+          const url = new URL(request.url, "http://127.0.0.1:"+port);
+          if (request.url.length>150 || url.searchParams.size!==1 ||
+              !url.searchParams.has("item") || url.hash ||
+              !/^[A-Za-z0-9%:_-]+$/u.test(url.search.slice(1))) {
+            reply(400,{code:"PRIVATE_PREVIEW_QUERY_INVALID"}); return;
+          }
+          reply(200,await readPrivateGraphCropPreview(privateGraphRoot,url.searchParams.get("item")));
+          return;
+        }
         if (pathname === PRIVATE_QUEUE) {
           reply(200,await listPrivateGraphReviewQueue(privateGraphRoot));
           return;
