@@ -5,6 +5,8 @@
  * and explicit exclusions. All private images stay on the local Windows host.
  */
 import {createHash} from "node:crypto";
+import {lstat,realpath} from "node:fs/promises";
+import {resolve,join} from "node:path";
 import {listPrivateGraphReviewQueue,readPrivateGraphCropPreview} from "./private-graph-local.mjs";
 
 const MAX_REQUESTS=14;
@@ -53,12 +55,15 @@ export function compileGraphBatchPlan(queue,evidence,{
          proof.authority!=="CROP_ONLY_UNVERIFIED"||
          proof.graphVerified!==false||proof.humanVerified!==false||
          !HASH.test(proof.cropSha256??"")||
+         typeof proof.priorAttemptBlocked!=="boolean"||
          !positiveInt(proof.byteLength,33,MAX_IMAGE_BYTES*2)||
          !positiveInt(proof.width,20,12000)||
          !positiveInt(proof.height,20,12000)||
          proof.width*proof.height>18_000_000)
         block("BATCH_CROP_PROOF_INVALID");
-      if(seen.has(proof.cropSha256))block("BATCH_DUPLICATE_IMAGE_SHA");
+      // Two different regions may contain byte-identical crops. Do not bill
+      // twice or fail the entire book when only one row is duplicated.
+      const duplicate=seen.has(proof.cropSha256);
       seen.add(proof.cropSha256);
     }
     const identity={id:item.id,fixtureId:item.fixtureId,
@@ -70,6 +75,8 @@ export function compileGraphBatchPlan(queue,evidence,{
       continue;
     }
     if(!hasProof){excluded.push({...identity,reason:"CROP_PROOF_NOT_READY"});continue;}
+    if(proof.priorAttemptBlocked){excluded.push({...identity,reason:"PRIOR_ATTEMPT_OR_OUTPUT_PRESENT"});continue;}
+    if(duplicate){excluded.push({...identity,reason:"DUPLICATE_IMAGE_SHA"});continue;}
     const requestCeiling=4*Math.ceil(proof.byteLength/3)+REQUEST_OVERHEAD_BYTES;
     if(proof.byteLength>MAX_IMAGE_BYTES||requestCeiling>MAX_REQUEST_BYTES){
       excluded.push({...identity,reason:"EXCEEDS_PER_REQUEST_LIMIT"});continue;
@@ -99,9 +106,42 @@ export function compileGraphBatchPlan(queue,evidence,{
     counts:{discovered:covered,eligible:planned.length,
       excluded:excluded.length,alreadyHasGraph:excluded.filter(e=>e.reason==="ALREADY_HAS_GRAPH").length,
       blocked:excluded.filter(e=>e.reason==="SOURCE_BLOCKED"||
-        e.reason==="CROP_PROOF_NOT_READY"||e.reason==="EXCEEDS_PER_REQUEST_LIMIT").length,
+        e.reason==="CROP_PROOF_NOT_READY"||e.reason==="EXCEEDS_PER_REQUEST_LIMIT"||
+        e.reason==="PRIOR_ATTEMPT_OR_OUTPUT_PRESENT"||e.reason==="DUPLICATE_IMAGE_SHA").length,
       limitExcluded:excluded.filter(e=>e.reason==="EXCEEDS_BATCH_LIMIT").length}
   };
+}
+/**
+ * Read ONLY exact output/receipt/stage paths that the existing cloud adapter
+ * itself uses. An attempted network request can be billable even if its output
+ * never arrived. Never retry, move, remove, or overwrite such evidence.
+ * Batch-namespace markers block all regions in that fixture conservatively.
+ */
+async function priorAttemptPresent(root,fixture,regionId){
+  const base=resolve(root);
+  const suffixes=[
+    "glm-cloud-v1-"+fixture+"-"+regionId,
+    "glm-cloud-v1-"+fixture+"-batch"
+  ];
+  let rootReal;
+  try{rootReal=resolve(await realpath(base));}
+  catch{return true;}
+  if(rootReal.toLowerCase()!==base.toLowerCase())return true;
+  for(const item of suffixes){
+    for(const name of [
+      item,"."+item+".cloud-attempted","."+item+"-stage"
+    ]){
+      const pathname=join(base,name);
+      try{
+        const stat=await lstat(pathname);
+        // Any unexpected path type also blocks dispatch; do not follow links.
+        if(stat)return true;
+      }catch(e){
+        if(e?.code!=="ENOENT")return true;
+      }
+    }
+  }
+  return false;
 }
 export async function buildPrivateGraphBatchPlan(root,limits){
   const queue=await listPrivateGraphReviewQueue(root);
@@ -115,10 +155,12 @@ export async function buildPrivateGraphBatchPlan(root,limits){
       const image=await readPrivateGraphCropPreview(root,item.id);
       const bytes=Buffer.from(image.pngBase64,"base64");
       if(sha(bytes)!==image.cropSha256)block("BATCH_IMAGE_SHA_INVALID");
+      const priorAttemptBlocked=await priorAttemptPresent(root,item.fixtureId,item.regionId);
       proofs.push({id:item.id,sourcePhysicalPage1Based:item.sourcePhysicalPage1Based,
         authority:image.authority,graphVerified:image.graphVerified,
         humanVerified:image.humanVerified,cropSha256:image.cropSha256,
-        width:image.width,height:image.height,byteLength:bytes.length});
+        width:image.width,height:image.height,byteLength:bytes.length,
+        priorAttemptBlocked});
     }catch(e){
       if(e instanceof BatchPlanError)throw e;
       proofs.push(null);
