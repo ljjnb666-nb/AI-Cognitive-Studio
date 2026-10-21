@@ -315,7 +315,7 @@ describe("03E-04B-02B signed proof and permanent synthetic claim — NO provider
       now:"2026-10-21T02:00:00.000Z",trustedKeys:{synthetic_only:publicKey}
     });
     for(const mutation of [
-      {...evidence,signatureBase64:"A"+evidence.signatureBase64.slice(1)},
+      {...evidence,signatureBase64:(evidence.signatureBase64[0]==="A"?"B":"A")+evidence.signatureBase64.slice(1)},
       {...evidence,statement:{...evidence.statement,maxSpendMinorUnits:100000}},
       {...evidence,statement:{...evidence.statement,selectedCropSha256:["a".repeat(64)]}},
       {...evidence,statement:{...evidence.statement,providerExecutionApproved:true}}
