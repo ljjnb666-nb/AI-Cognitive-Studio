@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
 import { readPrivateP127Bundle, readPrivateP127Draft, writePrivateP127Draft, listPrivateGraphReviewQueue, readPrivateGraphCropPreview, readRegisteredGraphBundle, saveRegisteredGraphReviewDraft, PrivateGraphError } from "./private-graph-local.mjs";
-import { publicRegisteredGraphMetadata } from "./graph-result-registry.mjs";
+import { publicRegisteredGraphMetadata, compileTrustedGraphRegistry, TRUSTED_GRAPH_RESULTS } from "./graph-result-registry.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -53,7 +53,8 @@ const REGISTERED_DRAFT = "/api/private-graph/registered/draft";
 const PRIVATE_BUNDLE = "/api/private-graph/p127/bundle";
 const PRIVATE_DRAFT = "/api/private-graph/p127/draft";
 const TOKEN = /^[0-9a-f]{64}$/u;
-export async function startAnnotationServer({ privateGraphRoot = null, graphAccessToken = null, privateGraphReadOnly = false } = {}) {
+export async function startAnnotationServer({ privateGraphRoot = null, graphAccessToken = null, privateGraphReadOnly = false, trustedGraphRegistrations = TRUSTED_GRAPH_RESULTS } = {}) {
+  const registry=compileTrustedGraphRegistry(trustedGraphRegistrations);
   const enabled = privateGraphRoot !== null;
   if (enabled && (typeof privateGraphRoot !== "string" || !privateGraphRoot ||
       typeof graphAccessToken !== "string" || !TOKEN.test(graphAccessToken))) {
@@ -115,7 +116,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           if (request.url !== PRIVATE_REGISTRY) {
             reply(400,{code:"PRIVATE_REGISTRY_QUERY_INVALID"});return;
           }
-          reply(200,publicRegisteredGraphMetadata());return;
+          reply(200,publicRegisteredGraphMetadata(registry));return;
         }
         if (registeredRoute) {
           const url = new URL(request.url,"http://127.0.0.1:"+port);
@@ -126,7 +127,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           }
           const item=url.searchParams.get("item");
           if (pathname === REGISTERED_BUNDLE){
-            const bundle=await readRegisteredGraphBundle(privateGraphRoot,item);
+            const bundle=await readRegisteredGraphBundle(privateGraphRoot,item,registry);
             reply(200,{...bundle.data,identity:bundle.identity,
               authority:bundle.authority,reviewKind:bundle.reviewKind,
               sourcePhysicalPage1Based:bundle.view.physicalPage,
@@ -134,7 +135,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
             return;
           }
           if (request.method==="GET"){
-            const bundle=await readRegisteredGraphBundle(privateGraphRoot,item);
+            const bundle=await readRegisteredGraphBundle(privateGraphRoot,item,registry);
             reply(200,{...bundle.saved,reviewKind:bundle.reviewKind});
             return;
           }
@@ -158,7 +159,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           catch{throw new PrivateGraphError("PRIVATE_DRAFT_JSON_INVALID");}
           const revision=request.headers["x-acs-draft-revision"]==="none"?
             null:request.headers["x-acs-draft-revision"];
-          const work=()=>saveRegisteredGraphReviewDraft(privateGraphRoot,item,raw,revision);
+          const work=()=>saveRegisteredGraphReviewDraft(privateGraphRoot,item,raw,revision,registry);
           const next=writer.then(work,work);writer=next.catch(()=>{});
           reply(200,await next);
           return;
@@ -175,7 +176,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           return;
         }
         if (pathname === PRIVATE_QUEUE) {
-          reply(200,await listPrivateGraphReviewQueue(privateGraphRoot));
+          reply(200,await listPrivateGraphReviewQueue(privateGraphRoot,registry));
           return;
         }
         if (pathname === PRIVATE_BUNDLE) {

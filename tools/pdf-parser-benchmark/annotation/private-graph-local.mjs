@@ -208,7 +208,7 @@ function boundedManifest(doc,fixture){
   }
   return items;
 }
-export async function listPrivateGraphReviewQueue(root){
+export async function listPrivateGraphReviewQueue(root,registrations=TRUSTED_GRAPH_RESULTS){
   const discovered=[];
   for(const fixture of QUEUE_FIXTURES){
     const rel=`region-proposals-v1-${fixture}/region-proposals.json`;
@@ -245,11 +245,11 @@ export async function listPrivateGraphReviewQueue(root){
     // Crop-only evidence is never upgraded by a filename or model claim.
     // A source can become reviewable only through a reviewed code registry.
     let reg;
-    try{reg=lookupTrustedGraphResult(entry.id);}
+    try{reg=lookupTrustedGraphResult(entry.id,registrations);}
     catch{fail("PRIVATE_REGISTERED_ID_INVALID");}
     if(!reg || entry.evidenceStatus!=="CROP_READY_NO_GRAPH")continue;
     try{
-      const bundle=await readRegisteredGraphBundle(root,entry.id);
+      const bundle=await readRegisteredGraphBundle(root,entry.id,registrations);
       if(bundle.identity.cropSha256!==(
         // The queue already verified this exact crop's SHA.
         (await readPrivateGraphCropPreview(root,entry.id)).cropSha256
