@@ -1,0 +1,8 @@
+OWNER APPROVED INFRASTRUCTURE-ONLY RECOVERY OF P127 GLM R02
+Date: 2026-10-21
+Original authorized run 39551313574: checkout failed before GLM API call.
+Second-attempt receipt absent and private result absent in original run logs.
+Authorization scope remains exactly ONE P127 crop with glm-5.3-flash.
+Reviewed Git commit: d8e08c4c1b2ec7e15fec1d8ffa4af58205fc5e42.
+Pinned source blobs verified on trusted runner before any API call.
+Do not retry again automatically or delete either cloud-attempted receipt.
