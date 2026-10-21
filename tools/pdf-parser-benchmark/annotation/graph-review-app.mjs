@@ -421,6 +421,8 @@ let intakeEpoch=0;
 async function loadIntakeOverview(){
   const epoch=++intakeEpoch;
   const summary=$("intake-summary"),list=$("intake-items");
+  const workflow=$("review-progress-summary"),next=$("next-review");
+  next.disabled=true;next.onclick=null;workflow.textContent="正在核验各区域草稿的已保存进度…";
   list.replaceChildren();
   if(!hasLocalToken){
     summary.textContent="静态模式下不可读取本机接收状态。";return;
@@ -441,6 +443,7 @@ async function loadIntakeOverview(){
          doc.counts.registrationPending+doc.counts.blocked!==doc.counts.total)
       throw new GraphReviewError("GRAPH_INTAKE_RESPONSE_INVALID");
     const seen=new Set(),frag=document.createDocumentFragment();
+    let eligibleRegions=0,completedDraftRegions=0,totalDecisions=0,reviewedDecisions=0;
     for(const item of doc.items){
       if(!item||typeof item.id!=="string"||!/^RB-PDF-(?:12|13):page-[0-9]{3}-region-[0-9]{2}$/u.test(item.id)||
          typeof item.fixtureId!=="string"||typeof item.regionId!=="string"||
@@ -453,6 +456,25 @@ async function loadIntakeOverview(){
            (Number.isSafeInteger(item.nodeCount)&&item.nodeCount>=0&&item.nodeCount<=80&&
             Number.isSafeInteger(item.edgeCount)&&item.edgeCount>=0&&item.edgeCount<=120)))
         throw new GraphReviewError("GRAPH_INTAKE_ROW_INVALID");
+      const eligible=item.state==="SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED"||
+        item.state==="REGISTERED_PENDING_HUMAN_REVIEW";
+      if(eligible){
+        const expectedKind=item.state==="SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED"?
+          "STAGED_REGION":null;
+        if(!["LEGACY_P127","REGISTERED_REGION","STAGED_REGION"].includes(item.reviewKind)||
+           (expectedKind!==null&&item.reviewKind!==expectedKind)||
+           (item.state==="REGISTERED_PENDING_HUMAN_REVIEW"&&item.reviewKind==="STAGED_REGION")||
+           !Number.isSafeInteger(item.reviewedCount)||item.reviewedCount<0||
+           item.nodeCount===null||item.edgeCount===null||
+           item.reviewedCount>item.nodeCount+item.edgeCount)
+          throw new GraphReviewError("GRAPH_REVIEW_PROGRESS_INVALID");
+        eligibleRegions++;
+        totalDecisions+=item.nodeCount+item.edgeCount;
+        reviewedDecisions+=item.reviewedCount;
+        if(item.reviewedCount===item.nodeCount+item.edgeCount)completedDraftRegions++;
+      }else if(item.reviewKind!==null||item.reviewedCount!==null){
+        throw new GraphReviewError("GRAPH_REVIEW_UNAUTHORIZED_PROGRESS");
+      }
       seen.add(item.id);
       const card=el("div","queue-item"),title=el("div","queue-label");
       title.append(el("b","",item.fixtureId+" · 物理 P"+item.physicalPage),
@@ -471,13 +493,53 @@ async function loadIntakeOverview(){
       }else if(item.stagedAvailable!==false || item.stageState!==null){
         throw new GraphReviewError("GRAPH_STAGED_UNAUTHORIZED");
       }
-      if(item.nodeCount!==null)
+      if(eligible){
+        card.append(el("span","queue-status","已保存草稿处理 "+
+          item.reviewedCount+"/"+(item.nodeCount+item.edgeCount)+
+          " 项 · 认证 0 项"));
+        if(item.state==="REGISTERED_PENDING_HUMAN_REVIEW"){
+          const open=el("button","primary","进入本区域审核");
+          open.type="button";
+          open.addEventListener("click",()=>item.reviewKind==="LEGACY_P127"?
+            void loadAutomatically():void loadRegisteredRegion({
+              ...item,sourcePhysicalPage1Based:item.physicalPage
+            }));
+          card.append(open);
+        }
+      }else if(item.nodeCount!==null)
         card.append(el("span","queue-status",item.nodeCount+
           " 节点 / "+item.edgeCount+" 关系 · 未认证"));
       frag.append(card);
     }
     if(!doc.items.length)
       frag.append(el("p","pathhelp","尚未发现支持范围内的图结果，未调用模型。"));
+    const p=doc.progress;
+    if(!p||p.authority!=="DRAFT_PROGRESS_ONLY_NOT_HUMAN_VERIFICATION"||
+       p.certifiedRegions!==0||p.eligibleRegions!==eligibleRegions||
+       p.completedDraftRegions!==completedDraftRegions||
+       p.incompleteDraftRegions!==eligibleRegions-completedDraftRegions||
+       p.totalDecisions!==totalDecisions||p.reviewedDecisions!==reviewedDecisions||
+       !Number.isSafeInteger(p.totalDecisions)||p.totalDecisions<0||
+       !(p.nextItemId===null||typeof p.nextItemId==="string"))
+      throw new GraphReviewError("GRAPH_REVIEW_PROGRESS_RESPONSE_INVALID");
+    const pending=doc.items.filter(x=>x.reviewKind!==null&&
+      x.reviewedCount<x.nodeCount+x.edgeCount).sort((a,b)=>
+      Number(b.reviewedCount>0)-Number(a.reviewedCount>0)||
+      a.fixtureId.localeCompare(b.fixtureId)||a.physicalPage-b.physicalPage||
+      a.regionId.localeCompare(b.regionId));
+    const first=pending[0]??null;
+    if(p.nextItemId!==(first?.id??null))
+      throw new GraphReviewError("GRAPH_REVIEW_NEXT_ITEM_INVALID");
+    if(first){
+      next.disabled=false;
+      next.onclick=()=>first.reviewKind==="LEGACY_P127"?
+        void loadAutomatically():void loadRegisteredRegion({
+          ...first,sourcePhysicalPage1Based:first.physicalPage
+        },first.reviewKind==="STAGED_REGION");
+    }
+    workflow.textContent="私有草稿已处理 "+reviewedDecisions+"/"+totalDecisions+
+      " 项 · 涉及 "+eligibleRegions+" 个可审区域 · 全部标记 "+completedDraftRegions+
+      " 个（仅草稿、认证 0 个）";
     list.replaceChildren(frag);
     summary.textContent="总计 "+doc.counts.total+
       " · 已登记可人工复核 "+doc.counts.reviewable+
@@ -487,6 +549,8 @@ async function loadIntakeOverview(){
   }catch(e){
     if(epoch!==intakeEpoch)return;
     list.replaceChildren();
+    next.disabled=true;next.onclick=null;
+    workflow.textContent="审核进度不可核验；已阻止自动导航。";
     summary.textContent="结果接收核验停止："+(e instanceof GraphReviewError?e.code:"GRAPH_INTAKE_UNAVAILABLE");
   }
 }
