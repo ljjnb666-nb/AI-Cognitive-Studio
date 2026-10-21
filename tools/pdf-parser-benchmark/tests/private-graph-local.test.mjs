@@ -8,9 +8,11 @@ import { startAnnotationServer } from "../annotation/server.mjs";
 import { createGraphReviewDraft } from "../annotation/graph-review.mjs";
 import { verifyAutoGraphBundle } from "../annotation/graph-review-auto.mjs";
 import { verifyGraphCropPreview } from "../annotation/graph-crop-preview.mjs";
+import { createRegionReviewDraft } from "../annotation/region-graph-review.mjs";
+import {compileTrustedGraphRegistry,TRUSTED_GRAPH_RESULTS,publicRegisteredGraphMetadata,RegistryError} from "../annotation/graph-result-registry.mjs";
 import {
  PRIVATE_FILENAMES,readPrivateP127Bundle,readPrivateP127Draft,writePrivateP127Draft,
- listPrivateGraphReviewQueue,readPrivateGraphCropPreview,PrivateGraphError,
+ listPrivateGraphReviewQueue,readPrivateGraphCropPreview,readRegisteredGraphBundle,saveRegisteredGraphReviewDraft,PrivateGraphError,
 } from "../annotation/private-graph-local.mjs";
 
 const hash = content => createHash("sha256").update(content).digest("hex");
@@ -374,6 +376,157 @@ describe("03E-02 on-demand region crop preview — no graph authority",()=>{
         authority:"CROP_ONLY_UNVERIFIED"});
       expect(Buffer.from(answer.value.pngBase64,"base64")).toEqual(x.files.crop);
       expect((await send(app,"/api/private-graph/p127/draft")).value).toEqual({draft:null,revision:null});
+    }finally{await app.close();}
+  }));
+});
+
+function addSyntheticP51Registration(x){
+  const fixture="RB-PDF-12",regionId="page-001-region-01",physicalPage=51;
+  const doc=structuredClone(x.regions);
+  doc.fixtureId=fixture;
+  doc.pages[0].subsetPageIndex=0;doc.pages[0].sourcePhysicalPage1Based=physicalPage;
+  doc.pages[0].regions[0].regionId=regionId;
+  const m=Buffer.from(JSON.stringify(doc));
+  const result=structuredClone(x.resultDoc);
+  result.fixtureId=fixture;result.attemptClass="EXPLICIT_P51_INITIAL_ATTEMPT";
+  result.sourceRegionManifestSha256=hash(m);
+  const row=result.results[0];row.regionId=regionId;row.sourcePhysicalPage1Based=physicalPage;
+  row.proposal.fixtureId=fixture;row.proposal.regionId=regionId;
+  row.mappedPageEvidence.regionId=regionId;
+  row.mappedPageEvidence.sourcePhysicalPage1Based=physicalPage;
+  for(const node of row.mappedPageEvidence.mappedNodes)node.sourcePhysicalPage1Based=physicalPage;
+  for(const edge of row.mappedPageEvidence.mappedEdges)edge.sourcePhysicalPage1Based=physicalPage;
+  const r=Buffer.from(JSON.stringify(result));
+  const crop=x.files.crop;
+  const registration={
+    id:fixture+":"+regionId,fixtureId:fixture,regionId,physicalPage,
+    kind:"REGISTERED_REGION",sourceRun:"real-mineru-39440805765-1",
+    provider:"ZHIPU_GLMCLOUD_STANDARD_API",model:"glm-5.3-flash",
+    attemptClass:"EXPLICIT_P51_INITIAL_ATTEMPT",
+    resultPath:"glm-cloud-v1-"+fixture+"-"+regionId+"-synthetic/cloud-vision-proposals.json",
+    manifestPath:"region-proposals-v1-"+fixture+"/region-proposals.json",
+    cropPath:"region-proposals-v1-"+fixture+"/crops/"+regionId+".png",
+    resultSha256:hash(r),manifestSha256:hash(m),cropSha256:hash(crop)
+  };
+  return {registration,result:r,manifest:m,crop};
+}
+async function writeSyntheticRegistered(x,prepared){
+  const reg=prepared.registration;
+  for(const [path,bytes] of [
+    [reg.resultPath,prepared.result],
+    [reg.manifestPath,prepared.manifest],
+    [reg.cropPath,prepared.crop]
+  ]){
+    const output=join(x.root,...path.split("/"));
+    await mkdir(dirname(output),{recursive:true});
+    await writeFile(output,bytes);
+  }
+}
+describe("03E-03B code-pinned result registration and per-region HTTP fences",()=>{
+  it("defaults to exact legacy P127 and cannot invent generic results from crop-only evidence",()=>withFixture(async x=>{
+    const list=publicRegisteredGraphMetadata();
+    expect(list).toMatchObject({schemaVersion:"acs-trusted-graph-registration-v1",
+      authority:"REGISTERED_SOURCE_ONLY_NOT_GROUND_TRUTH"});
+    expect(list.entries).toHaveLength(1);
+    expect(list.entries[0]).toMatchObject({id:"RB-PDF-13:page-002-region-01",
+      reviewKind:"LEGACY_P127",graphVerified:false});
+    const queue=await listPrivateGraphReviewQueue(x.root);
+    expect(queue.counts).toMatchObject({total:1,ready:1});
+    expect(queue.items[0].reviewKind).toBe("LEGACY_P127");
+    await expectCode(readRegisteredGraphBundle(x.root,"RB-PDF-12:page-001-region-01"),
+      "PRIVATE_REGISTERED_RESULT_NOT_FOUND");
+  }));
+  it("rejects wrong source path, spoofed legacy, missing exact SHA, and duplicate registration",()=>{
+    const valid=structuredClone(TRUSTED_GRAPH_RESULTS[0]);
+    const changed=[
+      {...valid,id:"RB-PDF-12:page-001-region-01",fixtureId:"RB-PDF-12"},
+      {...valid,resultPath:"../outside/private.json"},
+      {...valid,manifestPath:"other/region-proposals.json"},
+      {...valid,kind:"REGISTERED_REGION"},
+    ];
+    for(const entry of changed)expect(()=>compileTrustedGraphRegistry([entry])).toThrow(RegistryError);
+    expect(()=>compileTrustedGraphRegistry([valid,valid])).toThrow(RegistryError);
+    expect(()=>compileTrustedGraphRegistry(Array(33).fill(valid))).toThrow(RegistryError);
+  });
+  it("can verify explicitly SHA-pinned second book, and save its draft without touching legacy",()=>withFixture(async x=>{
+    const prepared=addSyntheticP51Registration(x);
+    await writeSyntheticRegistered(x,prepared);
+    const registry=[...TRUSTED_GRAPH_RESULTS,prepared.registration];
+    const item=prepared.registration.id;
+    const bundle=await readRegisteredGraphBundle(x.root,item,registry);
+    expect(bundle).toMatchObject({reviewKind:"REGISTERED_REGION",
+      authority:"PROPOSED_UNVERIFIED",humanVerified:false});
+    expect(bundle.view).toMatchObject({fixtureId:"RB-PDF-12",physicalPage:51,
+      regionId:"page-001-region-01",graphVerified:false});
+    expect(bundle.saved).toEqual({draft:null,revision:null});
+    expect(bundle.view.nodes).toHaveLength(2);
+    const draft=createRegionReviewDraft(bundle.view);
+    draft.decisions[0].decision="UNCERTAIN";
+    const stored=await saveRegisteredGraphReviewDraft(x.root,item,draft,null,registry);
+    expect(stored).toMatchObject({status:"REVIEW_DRAFT_UNATTESTED",graphVerified:false});
+    expect((await readRegisteredGraphBundle(x.root,item,registry)).saved.draft.decisions[0].decision).toBe("UNCERTAIN");
+    expect((await readPrivateP127Draft(x.root,(await readPrivateP127Bundle(x.root)).view)).revision).toBe(null);
+    await expectCode(saveRegisteredGraphReviewDraft(x.root,item,draft,null,registry),
+      "PRIVATE_REGION_STORE_REVISION_CONFLICT");
+  }));
+  it("rejects mismatched pinned SHA, even if a new region model result is structurally plausible",()=>withFixture(async x=>{
+    const prepared=addSyntheticP51Registration(x);
+    await writeSyntheticRegistered(x,prepared);
+    const tampered={...prepared.registration,resultSha256:"e".repeat(64)};
+    await expectCode(readRegisteredGraphBundle(x.root,tampered.id,[...TRUSTED_GRAPH_RESULTS,tampered]),
+      "PRIVATE_REGISTERED_SOURCE_SHA_INVALID");
+    const queue=await listPrivateGraphReviewQueue(x.root,[...TRUSTED_GRAPH_RESULTS,tampered]);
+    expect(queue.counts).toMatchObject({total:2,ready:1,blocked:1});
+    expect(queue.items.find(item=>item.id===tampered.id)).toMatchObject({
+      reviewable:false,evidenceStatus:"GRAPH_EVIDENCE_BLOCKED"});
+  }));
+  it("registers a second region under local token and saves only its CAS draft",()=>withFixture(async x=>{
+    const prepared=addSyntheticP51Registration(x);
+    await writeSyntheticRegistered(x,prepared);
+    const registry=[...TRUSTED_GRAPH_RESULTS,prepared.registration];
+    const app=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token,
+      trustedGraphRegistrations:registry});
+    const item="RB-PDF-12%3Apage-001-region-01";
+    try{
+      const meta=await send(app,"/api/private-graph/registry");
+      expect(meta.status).toBe(200);
+      expect(meta.value.entries).toHaveLength(2);
+      expect(JSON.stringify(meta.value)).not.toContain("resultSha256");
+      expect((await send(app,"/api/private-graph/registry",{auth:false})).status).toBe(403);
+      expect((await send(app,"/api/private-graph/registry?item=x")).status).toBe(400);
+      const unauthorized=await send(app,"/api/private-graph/registered/bundle?item="+item,{auth:false});
+      expect(unauthorized.status).toBe(403);
+      expect((await send(app,"/api/private-graph/registered/bundle?item="+item+"&item="+item)).status).toBe(400);
+      const response=await send(app,"/api/private-graph/registered/bundle?item="+item);
+      expect(response.status).toBe(200);
+      expect(response.value.reviewKind).toBe("REGISTERED_REGION");
+      expect(response.value.saved).toEqual({draft:null,revision:null});
+      const bundle=await readRegisteredGraphBundle(x.root,prepared.registration.id,registry);
+      const draft=createRegionReviewDraft(bundle.view);
+      draft.decisions[0].decision="VISIBLE_MATCH";
+      const target="/api/private-graph/registered/draft?item="+item;
+      const first=await send(app,target,{method:"PUT",body:draft});
+      expect(first.status).toBe(200);
+      expect(first.value.graphVerified).toBe(false);
+      const concurrent=await send(app,target,{method:"PUT",body:draft});
+      expect(concurrent.status).toBe(409);
+      expect((await send(app,target)).value.draft.decisions[0].decision).toBe("VISIBLE_MATCH");
+      const P127="/api/private-graph/registered/draft?item=RB-PDF-13%3Apage-002-region-01";
+      expect((await send(app,P127,{method:"PUT",body:createGraphReviewDraft((await readPrivateP127Bundle(x.root)).view)})).status).toBe(422);
+      expect((await readPrivateP127Draft(x.root,(await readPrivateP127Bundle(x.root)).view)).revision).toBe(null);
+    }finally{await app.close();}
+  }));
+  it("hard-disables generic drafts in read-only mode with correct token",()=>withFixture(async x=>{
+    const prepared=addSyntheticP51Registration(x);
+    await writeSyntheticRegistered(x,prepared);
+    const registry=[...TRUSTED_GRAPH_RESULTS,prepared.registration];
+    const app=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token,
+      privateGraphReadOnly:true,trustedGraphRegistrations:registry});
+    try{
+      const target="/api/private-graph/registered/draft?item=RB-PDF-12%3Apage-001-region-01";
+      const bundle=await readRegisteredGraphBundle(x.root,prepared.registration.id,registry);
+      expect((await send(app,target,{method:"PUT",body:createRegionReviewDraft(bundle.view)})).status).toBe(405);
+      expect((await send(app,target)).value).toMatchObject({draft:null,revision:null});
     }finally{await app.close();}
   }));
 });
