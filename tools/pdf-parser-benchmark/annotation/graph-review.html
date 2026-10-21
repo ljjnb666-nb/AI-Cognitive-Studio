@@ -22,6 +22,15 @@
 </div>
 <p id="batch-plan-details" class="pathhelp">未授权；已调用 0 次。没有付费执行按钮。</p>
 </section>
+<section class="panel" id="intake-panel">
+<h2>0. 模型结果集中接收状态（自动只读核验）</h2>
+<p>自动核对已经产生的标准 GLM 图关系文件、请求回执和来源一致性。<b>通过来源核验不等于已获准登记或人工认证</b>；未获收费授权时不发起模型调用。</p>
+<div class="actions">
+<button type="button" id="refresh-intake">重新核对模型结果</button>
+<span id="intake-summary" role="status" aria-live="polite">结果接收状态尚未核对</span>
+</div>
+<div id="intake-items" class="queue-items"></div>
+</section>
 <section class="panel" id="queue-panel">
 <h2>0. 已有证据自动发现队列（只读）</h2>
 <p>自动识别允许范围内 RB-PDF-12/13 的已有局部裁剪。<b>仅已验证来源和已存在图关系结果的项目才能进入最终人工审核</b>；单有 PNG 的其他区域不会假装已经完成 GLM 识别，也不会自动发起付费请求。</p>

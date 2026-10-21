@@ -383,6 +383,78 @@ async function loadBatchPlan(){
 }
 $("refresh-batch-plan").addEventListener("click",()=>{void loadBatchPlan();});
 
+const intakeLabels=Object.freeze({
+  REGISTERED_PENDING_HUMAN_REVIEW:"已登记 · 等待人工复核",
+  SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED:"模型来源核验通过 · 尚未批准登记",
+  WAITING_FOR_EXPLICIT_PAID_AUTHORIZATION:"只有裁剪图片 · 未授权付费识别",
+  PRIOR_ATTEMPT_UNCERTAIN_NO_REPLAY:"历史模型请求结果不确定 · 禁止重发",
+  MODEL_RESULT_BLOCKED_MANUAL_INVESTIGATION:"模型输出残缺或来源不符 · 人工排查",
+  MODEL_EVIDENCE_UNSAFE:"模型证据访问异常 · 安全阻断",
+  SOURCE_BLOCKED:"原始图像/来源异常 · 安全阻断",
+  LEGACY_P127_EVIDENCE_BLOCKED:"旧 P127 证据异常 · 需要人工排查"
+});
+let intakeEpoch=0;
+async function loadIntakeOverview(){
+  const epoch=++intakeEpoch;
+  const summary=$("intake-summary"),list=$("intake-items");
+  list.replaceChildren();
+  if(!hasLocalToken){
+    summary.textContent="静态模式下不可读取本机接收状态。";return;
+  }
+  summary.textContent="正在只读核查已有图关系和历史请求…";
+  try{
+    const doc=await autoRequest("/api/private-graph/intake/overview");
+    if(epoch!==intakeEpoch)return;
+    if(doc?.schemaVersion!=="acs-safe-graph-intake-overview-v1"||
+       doc.authority!=="READ_ONLY_CANDIDATES_NO_DISPATCH"||
+       doc.dispatchEnabled!==false||doc.providerRequestsIssuedThisRun!==0||
+       doc.priceAuthorized!==false||doc.autoRegistered!==false||
+       doc.autoVerified!==false||!Array.isArray(doc.items)||doc.items.length>32||
+       !doc.counts||doc.counts.total!==doc.items.length||
+       !["reviewable","awaitingAuthorization","registrationPending","blocked"]
+         .every(k=>Number.isSafeInteger(doc.counts[k])&&doc.counts[k]>=0)||
+       doc.counts.reviewable+doc.counts.awaitingAuthorization+
+         doc.counts.registrationPending+doc.counts.blocked!==doc.counts.total)
+      throw new GraphReviewError("GRAPH_INTAKE_RESPONSE_INVALID");
+    const seen=new Set(),frag=document.createDocumentFragment();
+    for(const item of doc.items){
+      if(!item||typeof item.id!=="string"||!/^RB-PDF-(?:12|13):page-[0-9]{3}-region-[0-9]{2}$/u.test(item.id)||
+         typeof item.fixtureId!=="string"||typeof item.regionId!=="string"||
+         item.id!==item.fixtureId+":"+item.regionId||seen.has(item.id)||
+         !Number.isSafeInteger(item.physicalPage)||item.physicalPage<1||
+         !Object.hasOwn(intakeLabels,item.state)||item.graphVerified!==false||
+         item.humanVerified!==false||item.dispatchEnabled!==false||
+         item.providerRequestsIssuedThisRun!==0||
+         !((item.nodeCount===null&&item.edgeCount===null)||
+           (Number.isSafeInteger(item.nodeCount)&&item.nodeCount>=0&&item.nodeCount<=80&&
+            Number.isSafeInteger(item.edgeCount)&&item.edgeCount>=0&&item.edgeCount<=120)))
+        throw new GraphReviewError("GRAPH_INTAKE_ROW_INVALID");
+      seen.add(item.id);
+      const card=el("div","queue-item"),title=el("div","queue-label");
+      title.append(el("b","",item.fixtureId+" · 物理 P"+item.physicalPage),
+        el("small","",item.regionId));
+      card.append(title,el("span","queue-status",intakeLabels[item.state]));
+      if(item.nodeCount!==null)
+        card.append(el("span","queue-status",item.nodeCount+
+          " 节点 / "+item.edgeCount+" 关系 · 未认证"));
+      frag.append(card);
+    }
+    if(!doc.items.length)
+      frag.append(el("p","pathhelp","尚未发现支持范围内的图结果，未调用模型。"));
+    list.replaceChildren(frag);
+    summary.textContent="总计 "+doc.counts.total+
+      " · 已登记可人工复核 "+doc.counts.reviewable+
+      " · 待付费授权 "+doc.counts.awaitingAuthorization+
+      " · 仅待登记 "+doc.counts.registrationPending+
+      " · 异常 "+doc.counts.blocked+" · 新增模型调用 0";
+  }catch(e){
+    if(epoch!==intakeEpoch)return;
+    list.replaceChildren();
+    summary.textContent="结果接收核验停止："+(e instanceof GraphReviewError?e.code:"GRAPH_INTAKE_UNAVAILABLE");
+  }
+}
+$("refresh-intake").addEventListener("click",()=>{void loadIntakeOverview();});
+
 let queueEpoch=0,previewEpoch=0;
 function resetPreview(){
   ++previewEpoch;
@@ -526,4 +598,4 @@ for(const id of ["result-file","manifest-file","crop-file"]){
 $("restore").addEventListener("change",()=>{void restoreDraft();});
 $("export").addEventListener("click",exportDraft);
 
-if(hasLocalToken){void loadBatchPlan();void loadQueue();void loadAutomatically();}
+if(hasLocalToken){void loadBatchPlan();void loadIntakeOverview();void loadQueue();void loadAutomatically();}
