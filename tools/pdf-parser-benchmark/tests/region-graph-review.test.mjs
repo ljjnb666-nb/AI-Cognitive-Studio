@@ -1,0 +1,279 @@
+import {describe,it,expect} from "vitest";
+import {
+  validateRegionRegistration,validateRegionGraphCandidate,
+  createRegionReviewDraft,parseRegionReviewDraft,updateRegionReviewDraft,
+  regionReviewProgress,regionReviewDraftFilename,GraphReviewError
+} from "../annotation/region-graph-review.mjs";
+const hash = letter => letter.repeat(64);
+const input = () => {
+  const cropSha=hash("a"), manifestSha=hash("b"), resultSha=hash("c");
+  const nodes=[
+    {id:"n1",label:"客户端",bboxCropPixels:[10,20,50,30],proposalConfidence:.6,reviewStatus:"NOT_REVIEWED"},
+    {id:"n2",label:"服务器",bboxCropPixels:[120,25,55,35],proposalConfidence:.5,reviewStatus:"NOT_REVIEWED"},
+  ];
+  const edges=[
+    {id:"e1",fromNodeId:"n1",toNodeId:"n2",direction:"UNKNOWN",arrowTipCropPixels:[110,45],
+      shaftCropPixels:[[75,45],[104,45]],proposalConfidence:.4,reviewStatus:"NOT_REVIEWED"},
+  ];
+  const manifest={schemaVersion:"acs-pdf-private-region-evidence-v1",
+    sourceRun:"real-mineru-39440805765-1",fixtureId:"RB-PDF-13",
+    allRegionsAreUnverified:true,noSemanticGraphClaims:true,
+    pages:[{subsetPageIndex:1,sourcePhysicalPage1Based:127,regions:[{regionId:"page-002-region-01",
+      proposalStatus:"UNVERIFIED_REGION_SUGGESTION",nodes:null,directedEdges:null,timingRelations:null,
+      cropSha256:cropSha,bboxPixels:[100,200,200,100]}]}]};
+  const proposal={schemaVersion:"acs-vision-graph-proposal-v1",fixtureId:"RB-PDF-13",
+    regionId:"page-002-region-01",sourceCropSha256:cropSha,
+    coordinateSpace:"REGION_CROP_TOP_LEFT_PIXELS",graphStatus:"PROPOSED_UNVERIFIED",
+    reviewStatus:"NOT_REVIEWED",humanVerified:false,nodes,edges};
+  const mappedPageEvidence={regionId:"page-002-region-01",sourcePhysicalPage1Based:127,
+    sourceCropSha256:cropSha,graphVerified:false,needsIndependentHumanReview:true,
+    mappedNodes:nodes.map(n=>({id:n.id,bboxPagePixels:[100+n.bboxCropPixels[0],200+n.bboxCropPixels[1],n.bboxCropPixels[2],n.bboxCropPixels[3]],
+      sourcePhysicalPage1Based:127,claim:"MACHINE_SUGGESTION_NOT_VERIFIED"})),
+    mappedEdges:edges.map(e=>({id:e.id,arrowTipPagePixels:[100+e.arrowTipCropPixels[0],200+e.arrowTipCropPixels[1]],
+      shaftPagePixels:e.shaftCropPixels.map(p=>[100+p[0],200+p[1]]),
+      sourcePhysicalPage1Based:127,claim:"GEOMETRIC_WITNESS_AND_RELATION_UNVERIFIED"}))};
+  const result={schemaVersion:"acs-glm-cloud-vision-proposal-v1",
+    sourceRun:"real-mineru-39440805765-1",fixtureId:"RB-PDF-13",provider:"ZHIPU_GLMCLOUD_STANDARD_API",
+    model:"glm-5.3-flash",attemptClass:"EXPLICIT_P127_SECOND_ATTEMPT",
+    transferScope:"EXPLICITLY_SELECTED_CROP_IMAGES_ONLY",
+    sourceRegionManifestSha256:manifestSha,reviewStatus:"NOT_REVIEWED",graphVerified:false,
+    results:[{regionId:"page-002-region-01",sourcePhysicalPage1Based:127,cropSha256:cropSha,
+      proposal,mappedPageEvidence,humanReviewStatus:"NOT_REVIEWED",graphVerified:false}]};
+  return {result,manifest,identity:{cropSha256:cropSha,manifestSha256:manifestSha,resultSha256:resultSha,cropWidth:200,cropHeight:100}};
+};
+const reject=(work,code)=>{
+  try {work();throw new Error("SHOULD_HAVE_REJECTED");}
+  catch(e){expect(e).toBeInstanceOf(GraphReviewError);expect(e.code).toBe(code);}
+};
+const view=()=>{const {result,manifest,identity}=input();return validateGraphReviewSource(result,manifest,identity);};
+
+describe("P127 review — offline synthetic only, no private book or inference",()=>{
+  it("attaches SHA, P127 origin, exact mapped page geometry and unverified status",()=>{
+    const v=view();
+    expect(v).toMatchObject({fixtureId:"RB-PDF-13",physicalPage:127,regionId:"page-002-region-01",
+      width:200,height:100,offset:[100,200],graphVerified:false,reviewStatus:"NOT_REVIEWED"});
+    expect(v.nodes.map(n=>n.id)).toEqual(["n1","n2"]);
+    expect(v.edges[0]).toMatchObject({id:"e1",from:"n1",to:"n2",direction:"UNKNOWN"});
+    expect(v).not.toHaveProperty("humanVerified",true);
+  });
+  it("rejects untrusted model authority, wrong source, stale manifest or crop",()=>{
+    const cases=[
+      [(x)=>x.result.graphVerified=true,"GRAPH_RESULT_IDENTITY_MISMATCH"],
+      [(x)=>x.result.reviewStatus="VERIFIED","GRAPH_RESULT_IDENTITY_MISMATCH"],
+      [(x)=>x.result.results[0].proposal.humanVerified=true,"GRAPH_UNVERIFIED_CONTRACT_INVALID"],
+      [(x)=>x.result.results[0].proposal.graphStatus="VERIFIED","GRAPH_UNVERIFIED_CONTRACT_INVALID"],
+      [(x)=>x.result.results[0].sourcePhysicalPage1Based=379,"GRAPH_UNVERIFIED_CONTRACT_INVALID"],
+      [(x)=>x.manifest.pages[0].sourcePhysicalPage1Based=379,"GRAPH_CROP_EVIDENCE_MISMATCH"],
+      [(x)=>x.manifest.pages[0].regions[0].cropSha256=hash("e"),"GRAPH_CROP_EVIDENCE_MISMATCH"],
+      [(x)=>x.identity.manifestSha256=hash("e"),"GRAPH_RESULT_IDENTITY_MISMATCH"],
+      [(x)=>x.result.attemptClass="INITIAL_ATTEMPT","GRAPH_RESULT_IDENTITY_MISMATCH"],
+      [(x)=>x.result.results.push(x.result.results[0]),"GRAPH_RESULT_IDENTITY_MISMATCH"],
+      [(x)=>x.manifest.pages.push(x.manifest.pages[0]),"GRAPH_REGION_NOT_UNIQUE"],
+    ];
+    for(const [change,code] of cases){const x=input();change(x);reject(()=>validateGraphReviewSource(x.result,x.manifest,x.identity),code);}
+  });
+  it("rejects invented arrow tips, coordinate displacement, duplicate IDs and spoofed claims",()=>{
+    const cases=[
+      [(x)=>x.result.results[0].proposal.nodes[0].bboxCropPixels=[190,20,50,30],"GRAPH_NODE_OR_MAPPING_INVALID"],
+      [(x)=>x.result.results[0].mappedPageEvidence.mappedNodes[0].bboxPagePixels=[111,220,50,30],"GRAPH_NODE_OR_MAPPING_INVALID"],
+      [(x)=>x.result.results[0].proposal.nodes[1].id="n1","GRAPH_NODE_OR_MAPPING_INVALID"],
+      [(x)=>x.result.results[0].proposal.nodes[0].label="<script>\u0000</script>","GRAPH_TEXT_INVALID"],
+      [(x)=>x.result.results[0].proposal.edges[0].arrowTipCropPixels=[201,45],"GRAPH_EDGE_OR_MAPPING_INVALID"],
+      [(x)=>x.result.results[0].mappedPageEvidence.mappedEdges[0].shaftPagePixels[1][0]=999,"GRAPH_EDGE_OR_MAPPING_INVALID"],
+      [(x)=>x.result.results[0].proposal.edges[0].direction="GUARANTEED","GRAPH_EDGE_OR_MAPPING_INVALID"],
+      [(x)=>x.result.results[0].proposal.edges[0].toNodeId="n3","GRAPH_EDGE_OR_MAPPING_INVALID"],
+      [(x)=>x.result.results[0].mappedPageEvidence.mappedEdges[0].claim="HUMAN_CERTIFIED","GRAPH_EDGE_OR_MAPPING_INVALID"],
+    ];
+    for(const [change,code] of cases){const x=input();change(x);reject(()=>validateGraphReviewSource(x.result,x.manifest,x.identity),code);}
+  });
+  it("creates exactly one draft decision for each machine candidate, never truth",()=>{
+    const v=view(),d=createGraphReviewDraft(v),p=graphReviewProgress(d,v);
+    expect(p).toMatchObject({total:3,reviewed:0,unreviewed:3,certified:false,status:REVIEW_STATUS});
+    expect(d).toMatchObject({status:REVIEW_STATUS,humanVerified:false,graphVerified:false});
+    expect(d.decisions).toEqual([
+      {kind:"node",id:"n1",decision:"UNREVIEWED",note:""},
+      {kind:"node",id:"n2",decision:"UNREVIEWED",note:""},
+      {kind:"edge",id:"e1",decision:"UNREVIEWED",note:""},
+    ]);
+    const d2=updateGraphDecision(d,v,"edge","e1","VISIBLE_MISMATCH","没有看清箭头");
+    const d3=updateGraphDecision(d2,v,"node","n1","VISIBLE_MATCH","");
+    expect(d.decisions[2].decision).toBe("UNREVIEWED");
+    expect(graphReviewProgress(d3,v)).toMatchObject({total:3,reviewed:2,match:1,mismatch:1,unreviewed:1,certified:false});
+    expect(JSON.stringify(d3)).not.toMatch(/"VERIFIED":true/);
+  });
+  it("rejects forged human verification, source switching, duplicate decisions and unsafe text",()=>{
+    const v=view();
+    const mutate=[
+      [(d)=>d.humanVerified=true,"GRAPH_REVIEW_LINEAGE_INVALID"],
+      [(d)=>d.status="VERIFIED","GRAPH_REVIEW_LINEAGE_INVALID"],
+      [(d)=>d.resultSha256=hash("d"),"GRAPH_REVIEW_LINEAGE_INVALID"],
+      [(d)=>d.decisions[1].id="n1","GRAPH_DECISION_INVALID"],
+      [(d)=>d.decisions[0].kind="edge","GRAPH_DECISION_INVALID"],
+      [(d)=>d.decisions[0].decision="CERTIFIED","GRAPH_DECISION_INVALID"],
+      [(d)=>d.decisions[0].note="not allowed until reviewed","GRAPH_DECISION_INVALID"],
+      [(d)=>{d.decisions[0].decision="UNCERTAIN";d.decisions[0].note="A".repeat(281)},"GRAPH_TEXT_INVALID"],
+    ];
+    for(const [change,code] of mutate){const d=createGraphReviewDraft(v);change(d);reject(()=>parseGraphReviewDraft(d,v),code);}
+    reject(()=>updateGraphDecision(createGraphReviewDraft(v),v,"edge","e500","VISIBLE_MATCH"),"GRAPH_DECISION_INVALID");
+  });
+});
+
+describe("P127 graph reviewer server — no private-data endpoints",()=>{
+  it("serves only static P127 review files on loopback; rejects POST and arbitrary paths",async()=>{
+    const app=await startAnnotationServer();
+    const base=new URL(app.url);
+    const call=(pathname,method="GET",host=base.host)=>new Promise((resolve,reject)=>{
+      const req=request({hostname:"127.0.0.1",port:base.port,path:pathname,method,
+        headers:{Host:host}},res=>{
+        const chunks=[];res.on("data",x=>chunks.push(x));
+        res.on("end",()=>resolve({status:res.statusCode,headers:res.headers,body:Buffer.concat(chunks).toString("utf8")}));
+      });req.on("error",reject);req.end();
+    });
+    try{
+      for(const route of ["/graph-review.html","/graph-review.mjs","/graph-review-app.mjs","/graph-review.css"]){
+        const r=await call(route);
+        expect(r.status).toBe(200);
+        expect(r.headers["content-security-policy"]).toContain(route === "/graph-review.html" ?
+          "connect-src 'self'" : "connect-src 'none'");
+        expect(r.headers["cache-control"]).toBe("no-store");
+      }
+      expect((await call("/graph-review.html","POST")).status).toBe(404);
+      expect((await call("/private-book.pdf")).status).toBe(404);
+      expect((await call("/graph-review.html","GET","attacker.example")).status).toBe(403);
+      const r=await call("/graph-review.html");
+      expect(r.body).toContain("P127");
+      expect(r.body).not.toMatch(/<script[^>]+src="https?:/);
+    }finally{await app.close();}
+  });
+});
+const registration=()=>({
+  fixtureId:"RB-PDF-13",regionId:"page-002-region-01",
+  sourcePhysicalPage1Based:127,sourceRun:"real-mineru-39440805765-1",
+  provider:"ZHIPU_GLMCLOUD_STANDARD_API",model:"glm-5.3-flash",
+  attemptClass:"EXPLICIT_P127_SECOND_ATTEMPT"
+});
+const validate=(x=input(),reg=registration())=>validateRegionGraphCandidate(x.result,x.manifest,x.identity,reg);
+function fixture12(){
+  const x=input(), reg=registration();
+  reg.fixtureId="RB-PDF-12";reg.regionId="page-001-region-01";
+  reg.sourcePhysicalPage1Based=51;reg.attemptClass="EXPLICIT_P51_INITIAL_ATTEMPT";
+  x.result.fixtureId=reg.fixtureId;x.result.attemptClass=reg.attemptClass;
+  x.manifest.fixtureId=reg.fixtureId;
+  x.manifest.pages[0].sourcePhysicalPage1Based=51;
+  x.manifest.pages[0].subsetPageIndex=0;
+  x.manifest.pages[0].regions[0].regionId=reg.regionId;
+  const row=x.result.results[0];
+  row.regionId=reg.regionId;row.sourcePhysicalPage1Based=51;
+  row.proposal.fixtureId=reg.fixtureId;row.proposal.regionId=reg.regionId;
+  row.mappedPageEvidence.regionId=reg.regionId;
+  row.mappedPageEvidence.sourcePhysicalPage1Based=51;
+  for(const m of row.mappedPageEvidence.mappedNodes)m.sourcePhysicalPage1Based=51;
+  for(const m of row.mappedPageEvidence.mappedEdges)m.sourcePhysicalPage1Based=51;
+  x.identity.resultSha256=hash("d");
+  return {x,reg};
+}
+function throws(fn,code){
+  try{fn();throw Error("MUST_REJECT");}catch(e){
+    expect(e).toBeInstanceOf(GraphReviewError);
+    expect(e.code).toBe(code);
+  }
+}
+describe("03E-03 generic registered graph candidate, synthetic only",()=>{
+  it("preserves exact P127 source and every mapped page coordinate",()=>{
+    const v=validate();
+    expect(v).toMatchObject({fixtureId:"RB-PDF-13",physicalPage:127,
+      regionId:"page-002-region-01",graphVerified:false,reviewStatus:"NOT_REVIEWED"});
+    expect(v.nodes).toHaveLength(2);expect(v.edges).toHaveLength(1);
+    expect(v.edges[0].tip).toEqual([110,45]);
+  });
+  it("accepts another registered book and page without copying P127 constants",()=>{
+    const {x,reg}=fixture12();const v=validate(x,reg);
+    expect(v).toMatchObject({fixtureId:"RB-PDF-12",physicalPage:51,
+      regionId:"page-001-region-01",graphVerified:false});
+    expect(v.nodes[0].box).toEqual([10,20,50,30]);
+  });
+  it("rejects model attempting fixture/page/region/attempt substitution",()=>{
+    const changes=[
+      [x=>x.result.fixtureId="RB-PDF-12","GRAPH_RESULT_IDENTITY_MISMATCH"],
+      [x=>x.result.attemptClass="WRONG_ATTEMPT","GRAPH_RESULT_IDENTITY_MISMATCH"],
+      [x=>x.result.provider="OTHER","GRAPH_RESULT_IDENTITY_MISMATCH"],
+      [x=>x.result.graphVerified=true,"GRAPH_RESULT_IDENTITY_MISMATCH"],
+      [x=>x.result.results[0].regionId="page-001-region-01","GRAPH_UNVERIFIED_CONTRACT_INVALID"],
+      [x=>x.result.results[0].sourcePhysicalPage1Based=51,"GRAPH_UNVERIFIED_CONTRACT_INVALID"],
+      [x=>x.manifest.fixtureId="RB-PDF-12","GRAPH_MANIFEST_INVALID"],
+      [x=>x.manifest.pages[0].sourcePhysicalPage1Based=51,"GRAPH_CROP_EVIDENCE_MISMATCH"],
+      [x=>x.manifest.pages[0].subsetPageIndex=0,"REGION_GRAPH_MANIFEST_REGION_INVALID"],
+      [x=>x.manifest.pages.push(x.manifest.pages[0]),"REGION_GRAPH_MANIFEST_PAGE_INVALID"],
+      [x=>x.result.results[0].proposal.humanVerified=true,"GRAPH_UNVERIFIED_CONTRACT_INVALID"],
+      [x=>x.result.results[0].mappedPageEvidence.graphVerified=true,"GRAPH_UNVERIFIED_CONTRACT_INVALID"],
+    ];
+    for(const [change,code] of changes){
+      const x=input();change(x);throws(()=>validate(x),code);
+    }
+  });
+  it("rejects forged source SHAs and unregistered crop/result",()=>{
+    const x=input(),reg=registration();reg.expectedCropSha256=hash("e");
+    throws(()=>validate(x,reg),"REGION_GRAPH_PINNED_CROP_MISMATCH");
+    const reg2=registration();reg2.expectedResultSha256=hash("d");
+    throws(()=>validate(x,reg2),"REGION_GRAPH_PINNED_RESULT_MISMATCH");
+    const reg3=registration();reg3.model="malicious";
+    throws(()=>validateRegionRegistration(reg3),"REGION_GRAPH_REGISTRATION_INVALID");
+    const reg4=registration();reg4.regionId="../private";
+    throws(()=>validateRegionRegistration(reg4),"REGION_GRAPH_REGISTRATION_INVALID");
+  });
+  it("rejects invented arrows, shifted page evidence, duplicate IDs and confidence forgery",()=>{
+    const cases=[
+      [x=>x.result.results[0].proposal.nodes[0].bboxCropPixels=[185,20,50,30],"GRAPH_NODE_OR_MAPPING_INVALID"],
+      [x=>x.result.results[0].proposal.nodes[0].proposalConfidence=5,"GRAPH_NODE_OR_MAPPING_INVALID"],
+      [x=>x.result.results[0].proposal.nodes[1].id="n1","GRAPH_NODE_OR_MAPPING_INVALID"],
+      [x=>x.result.results[0].mappedPageEvidence.mappedNodes[0].bboxPagePixels=[111,220,50,30],"GRAPH_NODE_OR_MAPPING_INVALID"],
+      [x=>x.result.results[0].proposal.edges[0].toNodeId="n3","GRAPH_EDGE_OR_MAPPING_INVALID"],
+      [x=>x.result.results[0].proposal.edges[0].arrowTipCropPixels=[999,45],"GRAPH_EDGE_OR_MAPPING_INVALID"],
+      [x=>x.result.results[0].proposal.edges[0].direction="VERIFIED","GRAPH_EDGE_OR_MAPPING_INVALID"],
+      [x=>x.result.results[0].mappedPageEvidence.mappedEdges[0].claim="CERTIFIED","GRAPH_EDGE_OR_MAPPING_INVALID"],
+    ];
+    for(const [change,code] of cases){const x=input();change(x);throws(()=>validate(x),code);}
+  });
+  it("draft names are unique by book, region and full 256-bit result SHA",()=>{
+    const v1=validate(),{x,reg}=fixture12(),v2=validate(x,reg);
+    expect(regionReviewDraftFilename(v1)).toContain("RB-PDF-13-page-002-region-01-"+hash("c"));
+    expect(regionReviewDraftFilename(v2)).toContain("RB-PDF-12-page-001-region-01-"+hash("d"));
+    expect(regionReviewDraftFilename(v1)).not.toBe(regionReviewDraftFilename(v2));
+    const v3={...v1,resultSha256:hash("e")};
+    expect(regionReviewDraftFilename(v3)).not.toBe(regionReviewDraftFilename(v1));
+  });
+  it("each draft starts unreviewed and never grants semantic verification",()=>{
+    const v=validate(),d=createRegionReviewDraft(v);
+    expect(d).toMatchObject({status:"REVIEW_DRAFT_UNATTESTED",graphVerified:false,humanVerified:false,
+      physicalPage:127,regionId:v.regionId});
+    expect(regionReviewProgress(d,v)).toMatchObject({total:3,reviewed:0,certified:false});
+    const next=updateRegionReviewDraft(d,v,"edge","e1","UNCERTAIN","箭头尖端不清");
+    expect(regionReviewProgress(next,v)).toMatchObject({total:3,reviewed:1,uncertain:1,certified:false});
+    expect(d.decisions[2].decision).toBe("UNREVIEWED");
+  });
+  it("blocks cross-book, cross-page, cross-result and fake approvals",()=>{
+    const v=validate(),{x,reg}=fixture12(),v2=validate(x,reg);
+    const base=createRegionReviewDraft(v);
+    throws(()=>parseRegionReviewDraft(base,v2),"GRAPH_REVIEW_LINEAGE_INVALID");
+    const forged=[
+      d=>d.fixtureId="RB-PDF-12",d=>d.physicalPage=51,
+      d=>d.resultSha256=hash("f"),d=>d.cropSha256=hash("e"),
+      d=>d.humanVerified=true,d=>d.graphVerified=true,d=>d.status="VERIFIED"
+    ];
+    for(const mutate of forged){
+      const d=createRegionReviewDraft(v);mutate(d);
+      throws(()=>parseRegionReviewDraft(d,v),"GRAPH_REVIEW_LINEAGE_INVALID");
+    }
+  });
+  it("rejects duplicate decisions, fake IDs, invalid notes and out-of-range status",()=>{
+    const v=validate();
+    const cases=[
+      [d=>d.decisions[1].id="n1","GRAPH_DECISION_INVALID"],
+      [d=>d.decisions[0].decision="APPROVED","GRAPH_DECISION_INVALID"],
+      [d=>d.decisions[0].note="should not note unreviewed","GRAPH_DECISION_INVALID"],
+      [d=>{d.decisions[0].decision="UNCERTAIN";d.decisions[0].note="a".repeat(281);},"GRAPH_TEXT_INVALID"],
+    ];
+    for(const [fn,code] of cases){const d=createRegionReviewDraft(v);fn(d);throws(()=>parseRegionReviewDraft(d,v),code);}
+    throws(()=>updateRegionReviewDraft(createRegionReviewDraft(v),v,"node","n999","VISIBLE_MATCH"),"GRAPH_DECISION_INVALID");
+  });
+});
