@@ -1,4 +1,6 @@
 import { describe,it,expect } from "vitest";
+import { request } from "node:http";
+import { startAnnotationServer } from "../annotation/server.mjs";
 import {
   validateGraphReviewSource, createGraphReviewDraft, parseGraphReviewDraft,
   updateGraphDecision,graphReviewProgress,GraphReviewError,REVIEW_STATUS,
@@ -115,5 +117,33 @@ describe("P127 review — offline synthetic only, no private book or inference",
     ];
     for(const [change,code] of mutate){const d=createGraphReviewDraft(v);change(d);reject(()=>parseGraphReviewDraft(d,v),code);}
     reject(()=>updateGraphDecision(createGraphReviewDraft(v),v,"edge","e500","VISIBLE_MATCH"),"GRAPH_DECISION_INVALID");
+  });
+});
+
+describe("P127 graph reviewer server — no private-data endpoints",()=>{
+  it("serves only static P127 review files on loopback; rejects POST and arbitrary paths",async()=>{
+    const app=await startAnnotationServer();
+    const base=new URL(app.url);
+    const call=(pathname,method="GET",host=base.host)=>new Promise((resolve,reject)=>{
+      const req=request({hostname:"127.0.0.1",port:base.port,path:pathname,method,
+        headers:{Host:host}},res=>{
+        const chunks=[];res.on("data",x=>chunks.push(x));
+        res.on("end",()=>resolve({status:res.statusCode,headers:res.headers,body:Buffer.concat(chunks).toString("utf8")}));
+      });req.on("error",reject);req.end();
+    });
+    try{
+      for(const route of ["/graph-review.html","/graph-review.mjs","/graph-review-app.mjs","/graph-review.css"]){
+        const r=await call(route);
+        expect(r.status).toBe(200);
+        expect(r.headers["content-security-policy"]).toContain("connect-src 'none'");
+        expect(r.headers["cache-control"]).toBe("no-store");
+      }
+      expect((await call("/graph-review.html","POST")).status).toBe(404);
+      expect((await call("/private-book.pdf")).status).toBe(404);
+      expect((await call("/graph-review.html","GET","attacker.example")).status).toBe(403);
+      const r=await call("/graph-review.html");
+      expect(r.body).toContain("P127");
+      expect(r.body).not.toMatch(/<script[^>]+src="https?:/);
+    }finally{await app.close();}
   });
 });
