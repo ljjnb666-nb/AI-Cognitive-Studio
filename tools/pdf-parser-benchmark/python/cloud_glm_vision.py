@@ -198,15 +198,29 @@ def infer_cloud_one(item: dict, model: str, key: str, *, observer=None) -> dict:
             raise CloudBlocked("CLOUD_CONTENT_MISSING")
         if len(content) > MAX_RESPONSE_BYTES:
             raise CloudBlocked("CLOUD_CONTENT_TOO_LARGE")
-        try:
-            obj = json.loads(content)
-        except (ValueError, UnicodeError):
-            # Deliberately do not scrape or invent a JSON object from free prose.
-            raise CloudBlocked("CLOUD_CONTENT_NOT_PURE_JSON") from None
-        if not isinstance(obj, dict) or set(obj) != {"nodes", "edges"}:
-            raise CloudBlocked("CLOUD_GRAPH_FIELDS_INVALID")
+        obj = parse_complete_graph_json(content)
     except (KeyError, IndexError, TypeError):
         raise CloudBlocked("CLOUD_RESPONSE_ENVELOPE_INVALID") from None
+    return obj
+
+
+
+def parse_complete_graph_json(content: str) -> dict:
+    """One whole JSON object, optionally inside one complete json code fence."""
+    stripped = content.strip()
+    if stripped.startswith("""" + chr(96) * 3 + """"):
+        lines = stripped.splitlines()
+        fence = chr(96) * 3
+        if (len(lines) < 3 or lines[0] not in (fence + "json", fence + "JSON")
+                or lines[-1] != fence or any(fence in line for line in lines[1:-1])):
+            raise CloudBlocked("CLOUD_CONTENT_NOT_PURE_JSON")
+        stripped = "\n".join(lines[1:-1])
+    try:
+        obj = json.loads(stripped)
+    except (UnicodeError, ValueError):
+        raise CloudBlocked("CLOUD_CONTENT_NOT_PURE_JSON") from None
+    if not isinstance(obj, dict) or set(obj) != {"nodes", "edges"}:
+        raise CloudBlocked("CLOUD_GRAPH_FIELDS_INVALID")
     return obj
 
 
