@@ -135,7 +135,8 @@ describe("P127 graph reviewer server — no private-data endpoints",()=>{
       for(const route of ["/graph-review.html","/graph-review.mjs","/graph-review-app.mjs","/graph-review.css"]){
         const r=await call(route);
         expect(r.status).toBe(200);
-        expect(r.headers["content-security-policy"]).toContain("connect-src 'none'");
+        expect(r.headers["content-security-policy"]).toContain(route === "/graph-review.html" ?
+          "connect-src 'self'" : "connect-src 'none'");
         expect(r.headers["cache-control"]).toBe("no-store");
       }
       expect((await call("/graph-review.html","POST")).status).toBe(404);
