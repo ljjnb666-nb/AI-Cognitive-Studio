@@ -10,6 +10,7 @@ import { verifyAutoGraphBundle } from "../annotation/graph-review-auto.mjs";
 import { verifyGraphCropPreview } from "../annotation/graph-crop-preview.mjs";
 import {compileGraphBatchPlan,buildPrivateGraphBatchPlan,publicGraphBatchSummary,BatchPlanError} from "../annotation/graph-batch-plan.mjs";
 import {readOnlyCanonicalIntakeOverview} from "../annotation/graph-result-intake-queue.mjs";
+import {readStagedGraphBundle,saveStagedGraphReviewDraft,resolveStagedGraphRegistration} from "../annotation/graph-result-staged-review.mjs";
 import { createRegionReviewDraft } from "../annotation/region-graph-review.mjs";
 import {compileTrustedGraphRegistry,TRUSTED_GRAPH_RESULTS,publicRegisteredGraphMetadata,RegistryError} from "../annotation/graph-result-registry.mjs";
 import {
@@ -801,5 +802,102 @@ describe("03E-04B-02C canonical Python producer result -> unapproved registry pr
     expect(empty.counts).toMatchObject({awaitingAuthorization:1,blocked:0});
     expect(empty.items.find(i=>i.id===src.registration.id).state)
       .toBe("WAITING_FOR_EXPLICIT_PAID_AUTHORIZATION");
+  }));
+
+  it("02E stages canonical second-book bytes without modifying permanent registry or P127",()=>withFixture(async x=>{
+    const {src}=await canonical(x);
+    const before=await readPrivateP127Bundle(x.root);
+    const staged=await readStagedGraphBundle(x.root,src.registration.id);
+    expect(staged).toMatchObject({reviewKind:"STAGED_REGION",registered:false,
+      graphVerified:false,humanVerified:false,view:{physicalPage:51,graphVerified:false},
+      identity:{resultSha256:src.registration.resultSha256,
+        cropSha256:src.registration.cropSha256,manifestSha256:src.registration.manifestSha256}});
+    expect(staged.saved).toEqual({draft:null,revision:null});
+    expect((await readOnlyCanonicalIntakeOverview(x.root)).items.find(i=>i.id===src.registration.id))
+      .toMatchObject({state:"SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED",
+        stageState:"WAITING_FOR_REVIEW",stagedAvailable:true});
+    expect(publicRegisteredGraphMetadata().entries).toHaveLength(1);
+    await expectCode(readRegisteredGraphBundle(x.root,src.registration.id),
+      "PRIVATE_REGISTERED_RESULT_NOT_FOUND");
+    expect((await readPrivateP127Bundle(x.root)).identity).toEqual(before.identity);
+    await expectCode(resolveStagedGraphRegistration(x.root,"RB-PDF-13:page-002-region-01"),
+      "PRIVATE_STAGED_ITEM_INVALID");
+  }));
+  it("02E restricts all staging HTTP methods, local origin, token and readonly writes",()=>withFixture(async x=>{
+    const {src}=await canonical(x);
+    const path="/api/private-graph/intake/staged/bundle?item="+encodeURIComponent(src.registration.id);
+    const draftPath="/api/private-graph/intake/staged/draft?item="+encodeURIComponent(src.registration.id);
+    const disabled=await startAnnotationServer();
+    try{expect((await send(disabled,path)).status).toBe(404);}
+    finally{await disabled.close();}
+    const ro=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token,privateGraphReadOnly:true});
+    try{
+      expect((await send(ro,path,{auth:false})).status).toBe(403);
+      expect((await send(ro,path,{origin:"https://evil.example"})).status).toBe(403);
+      expect((await send(ro,path,{site:"cross-site"})).status).toBe(403);
+      expect((await send(ro,path+"?extra=x")).status).toBe(400);
+      expect((await send(ro,path.replace("RB-PDF-12","RB-PDF-14"))).status).toBe(400);
+      expect((await send(ro,path,{method:"POST",body:{approve:true}})).status).toBe(405);
+      expect((await send(ro,path)).value).toMatchObject({
+        reviewKind:"STAGED_REGION",registered:false,authority:"PROPOSED_UNVERIFIED"});
+      expect((await send(ro,draftPath,{method:"PUT",body:{}})).status).toBe(405);
+      expect((await send(ro,draftPath)).value).toEqual({
+        draft:null,revision:null,reviewKind:"STAGED_REGION"});
+      expect((await send(ro,"/api/private-graph/registry")).value.entries).toHaveLength(1);
+    }finally{await ro.close();}
+  }));
+  it("02E autosaves only isolated unattested drafts with multi-process CAS and restores them",()=>withFixture(async x=>{
+    const {src}=await canonical(x);
+    const app=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token});
+    const path="/api/private-graph/intake/staged/draft?item="+encodeURIComponent(src.registration.id);
+    try{
+      const staged=await readStagedGraphBundle(x.root,src.registration.id);
+      const draft=createRegionReviewDraft(staged.view);
+      const [a,b]=await Promise.all([
+        send(app,path,{method:"PUT",body:draft}),
+        send(app,path,{method:"PUT",body:draft})
+      ]);
+      expect([a.status,b.status].sort()).toEqual([200,409]);
+      const written=a.status===200?a:b;
+      expect(written.value).toMatchObject({
+        status:"REVIEW_DRAFT_UNATTESTED",humanVerified:false,graphVerified:false,registered:false});
+      const saved=await send(app,path);
+      expect(saved.value).toMatchObject({revision:written.value.revision,reviewKind:"STAGED_REGION"});
+      expect(saved.value.draft).toEqual(draft);
+      const overview=await readOnlyCanonicalIntakeOverview(x.root);
+      expect(overview.items.find(i=>i.id===src.registration.id)).toMatchObject({
+        stageState:"REVIEW_DRAFT_UNATTESTED",stagedAvailable:true});
+      expect((await send(app,path,{method:"PUT",body:draft,revision:"f".repeat(64)})).status).toBe(409);
+      expect((await send(app,"/api/private-graph/p127/draft")).value.draft).toBe(null);
+      expect((await send(app,"/api/private-graph/registry")).value.entries).toHaveLength(1);
+    }finally{await app.close();}
+  }));
+  it("02E fails closed on deleted receipt, altered pixels, changed results and cross-region forgery",()=>withFixture(async x=>{
+    const {src,receipt}=await canonical(x);
+    const original=await readStagedGraphBundle(x.root,src.registration.id);
+    const draft=createRegionReviewDraft(original.view);
+    const saved=await saveStagedGraphReviewDraft(x.root,src.registration.id,draft,null);
+    expect(saved.status).toBe("REVIEW_DRAFT_UNATTESTED");
+    await rm(receipt);
+    await expectCode(readStagedGraphBundle(x.root,src.registration.id),
+      "PRIVATE_INTAKE_ATTEMPT_RECEIPT_MISSING");
+    await writeFile(receipt,"Reserved exactly once by Python producer.\n");
+    const crop=join(x.root,...src.registration.cropPath.split("/"));
+    const before=await readFile(crop);
+    const modified=Buffer.from(before);modified[30]^=0xff;
+    await writeFile(crop,modified);
+    await expectCode(readStagedGraphBundle(x.root,src.registration.id),
+      "PRIVATE_STAGED_CROP_NOT_READY");
+    await writeFile(crop,before);
+    const output=join(x.root,...src.registration.resultPath.split("/"));
+    const forged=JSON.parse(src.result.toString("utf8"));
+    forged.results[0].sourcePhysicalPage1Based=127;
+    await writeFile(output,JSON.stringify(forged));
+    await expectCode(readStagedGraphBundle(x.root,src.registration.id),
+      "PRIVATE_INTAKE_GRAPH_CONTRACT_INVALID");
+    await writeFile(output,src.result);
+    const restored=await readStagedGraphBundle(x.root,src.registration.id);
+    expect(restored.saved.revision).toBe(saved.revision);
+    expect(restored.saved.draft).toEqual(draft);
   }));
 });
