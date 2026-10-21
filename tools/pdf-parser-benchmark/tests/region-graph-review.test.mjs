@@ -41,6 +41,39 @@ const input = () => {
       proposal,mappedPageEvidence,humanReviewStatus:"NOT_REVIEWED",graphVerified:false}]};
   return {result,manifest,identity:{cropSha256:cropSha,manifestSha256:manifestSha,resultSha256:resultSha,cropWidth:200,cropHeight:100}};
 };
+
+const registration=()=>({
+  fixtureId:"RB-PDF-13",regionId:"page-002-region-01",
+  sourcePhysicalPage1Based:127,sourceRun:"real-mineru-39440805765-1",
+  provider:"ZHIPU_GLMCLOUD_STANDARD_API",model:"glm-5.3-flash",
+  attemptClass:"EXPLICIT_P127_SECOND_ATTEMPT"
+});
+const validate=(x=input(),reg=registration())=>
+  validateRegionGraphCandidate(x.result,x.manifest,x.identity,reg);
+function fixture12(){
+  const x=input(),reg=registration();
+  reg.fixtureId="RB-PDF-12";reg.regionId="page-001-region-01";
+  reg.sourcePhysicalPage1Based=51;reg.attemptClass="EXPLICIT_P51_INITIAL_ATTEMPT";
+  x.result.fixtureId=reg.fixtureId;x.result.attemptClass=reg.attemptClass;
+  x.manifest.fixtureId=reg.fixtureId;
+  x.manifest.pages[0].sourcePhysicalPage1Based=51;
+  x.manifest.pages[0].subsetPageIndex=0;
+  x.manifest.pages[0].regions[0].regionId=reg.regionId;
+  const row=x.result.results[0];
+  row.regionId=reg.regionId;row.sourcePhysicalPage1Based=51;
+  row.proposal.fixtureId=reg.fixtureId;row.proposal.regionId=reg.regionId;
+  row.mappedPageEvidence.regionId=reg.regionId;
+  row.mappedPageEvidence.sourcePhysicalPage1Based=51;
+  for(const m of row.mappedPageEvidence.mappedNodes)m.sourcePhysicalPage1Based=51;
+  for(const m of row.mappedPageEvidence.mappedEdges)m.sourcePhysicalPage1Based=51;
+  x.identity.resultSha256=hash("d");
+  return {x,reg};
+}
+function throws(fn,code){
+  try{fn();throw Error("MUST_REJECT");}
+  catch(e){expect(e).toBeInstanceOf(GraphReviewError);expect(e.code).toBe(code);}
+}
+
 describe("03E-03 generic registered graph candidate, synthetic only",()=>{
   it("preserves exact P127 source and every mapped page coordinate",()=>{
     const v=validate();
