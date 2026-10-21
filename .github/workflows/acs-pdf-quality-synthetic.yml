@@ -3,7 +3,7 @@ name: ACS PDF Quality synthetic gate
 
 on:
   pull_request:
-    branches: [codex/pdf-parser-benchmark]
+    branches: [codex/pdf-parser-benchmark, feat/pdf-private-region-proposals-03]
     paths:
       - "tools/pdf-parser-benchmark/**"
       - ".github/workflows/acs-pdf-quality-synthetic.yml"
@@ -41,6 +41,12 @@ jobs:
       - name: Test private region provenance and vision graph suggestion gates
         working-directory: tools/pdf-parser-benchmark
         run: python3 -m unittest discover -s python -p "test_private_region_proposals.py" -v
+      - name: Local-only vision proposal and review authority regressions
+        working-directory: tools/pdf-parser-benchmark
+        run: python3 -m unittest discover -s python -p "test_local_vision_proposals.py" -v
+      - name: GLM cloud privacy, cost and provenance regressions (synthetic only)
+        working-directory: tools/pdf-parser-benchmark
+        run: python3 -m unittest discover -s python -p "test_cloud_glm_vision.py" -v
       - name: Typecheck offline regrader
         working-directory: tools/pdf-parser-benchmark
         run: ./node_modules/.bin/tsc --noEmit --pretty false
@@ -54,11 +60,29 @@ jobs:
           node --check annotation/review.mjs
           node --check annotation/preview.mjs
           node --check annotation/app.mjs
+          node --check annotation/graph-review.mjs
+          node --check annotation/region-graph-review.mjs
+          node --check annotation/graph-result-registry.mjs
+          node --check annotation/graph-batch-plan.mjs
+          node --check annotation/graph-batch-authorization.mjs
+          node --check annotation/graph-batch-offline-ledger.mjs
+          node --check annotation/graph-batch-pricing.mjs
+          node --check annotation/graph-batch-reconcile.mjs
+          node --check annotation/graph-result-intake-queue.mjs
+          node --check annotation/graph-batch-consent-proof.mjs
+          node --check annotation/graph-batch-simulated-attempt.mjs
+          node --check annotation/region-review-store.mjs
+          node --check annotation/graph-review-app.mjs
+          node --check annotation/graph-review-auto.mjs
+          node --check annotation/graph-crop-preview.mjs
+          node --check annotation/private-graph-local.mjs
           node --check annotation/server.mjs
           node --check scripts/serve_gt_annotation.mjs
+          node --check scripts/edge_p127_smoke.mjs
+          node --check scripts/edge_p127_real_readonly.mjs
       - name: Synthetic annotation schema and loopback guard tests
         working-directory: tools/pdf-parser-benchmark
-        run: ./node_modules/.bin/vitest run tests/gt-annotation.test.mjs tests/gt-annotation-review.test.mjs
+        run: ./node_modules/.bin/vitest run tests/gt-annotation.test.mjs tests/gt-annotation-review.test.mjs tests/graph-review.test.mjs tests/private-graph-local.test.mjs tests/region-graph-review.test.mjs tests/region-review-store.test.mjs tests/graph-batch-authorization.test.mjs
       - name: CLI fails closed without local human GT (cloud has no private books)
         shell: bash
         working-directory: tools/pdf-parser-benchmark
