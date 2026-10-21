@@ -216,9 +216,14 @@ function render(){
     const nlabel=el("label","","审阅备注（最多 280 字）");
     const field=el("input");field.type="text";field.maxLength=280;field.value=v.note;field.placeholder="例如：箭头尖端模糊，不可确定方向";
     field.disabled=v.decision==="UNREVIEWED";
-    field.addEventListener("change",()=>{
-      try{draft=currentUpdate(draft,view,r.kind,r.id,v.decision,field.value);render();scheduleAutoSave();message("已更新本机备注；"+(autoActive?"等待本机自动保存。":"请导出草稿。"),true);}
-      catch{message("备注格式不合法，未保存。");render();}
+    // A note typed but not blurred is still an unsaved human edit. Track
+    // each input event immediately; re-rendering here would steal focus.
+    field.addEventListener("input",()=>{
+      try{
+        draft=currentUpdate(draft,view,r.kind,r.id,v.decision,field.value);
+        scheduleAutoSave();
+        message("已更新本机备注；"+(autoActive?"等待本机自动保存。":"请导出草稿。"),true);
+      }catch{message("备注格式不合法，未保存。");}
     });
     nlabel.append(field);item.append(nlabel);fragment.append(item);
   }
@@ -748,5 +753,14 @@ for(const id of ["result-file","manifest-file","crop-file"]){
 }
 $("restore").addEventListener("change",()=>{void restoreDraft();});
 $("export").addEventListener("click",exportDraft);
+
+// Browser refresh/close is an independent escape path from in-app navigation.
+// Warn while a local edit or CAS write may still be in flight. Browsers decide
+// whether a confirmation dialog can be displayed.
+window.addEventListener("beforeunload",event=>{
+  if(!hasUnpersistedEdits()&&saveActiveWrites===0)return;
+  event.preventDefault();
+  event.returnValue="";
+});
 
 if(hasLocalToken){void loadBatchPlan();void loadIntakeOverview();void loadQueue();void loadAutomatically();}
