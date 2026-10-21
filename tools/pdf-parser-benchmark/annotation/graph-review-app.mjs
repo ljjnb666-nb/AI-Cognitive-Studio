@@ -18,6 +18,14 @@ const token=new URLSearchParams(location.hash.slice(1)).get("review-token");
 const hasLocalToken=typeof token==="string"&&/^[0-9a-f]{64}$/u.test(token);
 let autoActive=false,saveRevision=null,saveTimer=null,saveQueue=Promise.resolve(),saveEpoch=0;
 let activeReviewKind="LEGACY_P127",activeItemId=null;
+let localEditSerial=0,persistedEditSerial=0;
+function hasUnpersistedEdits(){return localEditSerial!==persistedEditSerial||saveTimer!==null;}
+function allowReviewSwitch(){
+  if(!hasUnpersistedEdits())return true;
+  message("当前区域仍有未完成的草稿保存。请等待“已保存到本机 D 盘”，若保存失败请先导出 JSON；为防止丢失修改，已阻止切换。");
+  return false;
+}
+function resetEditTracking(){localEditSerial=0;persistedEditSerial=0;}
 const useGeneric=()=>["REGISTERED_REGION","STAGED_REGION"].includes(activeReviewKind);
 const currentParse=(raw,v)=>useGeneric()?parseRegionReviewDraft(raw,v):parseGraphReviewDraft(raw,v);
 const currentUpdate=(raw,v,kind,id,decision,note)=>useGeneric()?
@@ -47,13 +55,16 @@ function cancelAutoSave(){
   saveStatus("未启用");
 }
 function scheduleAutoSave(){
-  if(!autoActive||!view||!draft)return;
+  if(!view||!draft)return;
+  ++localEditSerial;
+  if(!autoActive){saveStatus("本地草稿未自动保存 · 请导出 JSON");return;}
   if(saveTimer!==null)clearTimeout(saveTimer);
   const epoch=saveEpoch;
   saveStatus("有待保存的修改");
   saveTimer=setTimeout(()=>{
     saveTimer=null;
     const stored=structuredClone(draft);
+    const storedSerial=localEditSerial;
     const lineage=view.resultSha256;
     const sourceItem=activeItemId,reviewMode=activeReviewKind;
     const next=saveQueue.then(async()=>{
@@ -71,7 +82,9 @@ function scheduleAutoSave(){
         if(!/^[0-9a-f]{64}$/u.test(result.revision)||result.status!=="REVIEW_DRAFT_UNATTESTED")
           throw new GraphReviewError("PRIVATE_DRAFT_RECEIPT_INVALID");
         saveRevision=result.revision;
-        saveStatus("已保存到本机 D 盘（未认证草稿）");
+        persistedEditSerial=storedSerial;
+        saveStatus(hasUnpersistedEdits()?"新修改等待保存":"已保存到本机 D 盘（未认证草稿）");
+        if(!hasUnpersistedEdits()){void loadIntakeOverview();void loadQueue();}
       }catch(error){
         if(saveEpoch!==epoch)return;
         autoActive=false;
@@ -88,7 +101,8 @@ const options=[
 ];
 function message(text,good=false){$("notice").textContent=text;$("notice").classList.toggle("ok",good);}
 function reset(clearFiles=false){
-  ++loadEpoch;cancelAutoSave();activeReviewKind="LEGACY_P127";activeItemId=null;
+  if(!allowReviewSwitch())return;
+  ++loadEpoch;cancelAutoSave();resetEditTracking();activeReviewKind="LEGACY_P127";activeItemId=null;
   if(bitmap){bitmap.close();bitmap=null;}
   if(clearFiles)for(const id of ["result-file","manifest-file","crop-file","restore"])$(id).value="";
   view=null;draft=null;selected=null;$("work").hidden=true;$("export-panel").hidden=true;
@@ -178,7 +192,8 @@ function render(){
   container.replaceChildren(fragment);
 }
 async function load(){
-  cancelAutoSave();
+  if(!allowReviewSwitch())return;
+  cancelAutoSave();resetEditTracking();
   const epoch=++loadEpoch;
   if(bitmap){bitmap.close();bitmap=null;}
   view=null;draft=null;$("work").hidden=true;$("export-panel").hidden=true;
@@ -211,7 +226,7 @@ async function load(){
   }
 }
 async function restoreDraft(){
-  if(!view)return;
+  if(!view||!allowReviewSwitch())return;
   const expectedEpoch=loadEpoch;
   const expectedSha=view.resultSha256;
   const f=$("restore").files?.[0];
@@ -239,12 +254,13 @@ function exportDraft(){
   }catch{message("草稿导出失败，未标记任何内容已验证。");}
 }
 async function loadAutomatically(){
+  if(!allowReviewSwitch())return;
   if(!hasLocalToken){
     message("当前地址没有本机自动导入权限；请使用启动命令输出的专用地址，或继续手动选择文件。");
     return;
   }
   const epoch=++loadEpoch;
-  cancelAutoSave();
+  cancelAutoSave();resetEditTracking();
   if(bitmap){bitmap.close();bitmap=null;}
   view=null;draft=null;selected=null;$("work").hidden=true;$("export-panel").hidden=true;
   try{
@@ -283,10 +299,11 @@ async function loadAutomatically(){
 }
 
 async function loadRegisteredRegion(item,staged=false){
+  if(!allowReviewSwitch())return;
   if(!hasLocalToken||(!staged&&item.reviewKind!=="REGISTERED_REGION")||
      item.id==="RB-PDF-13:page-002-region-01")return;
   const epoch=++loadEpoch;
-  cancelAutoSave();
+  cancelAutoSave();resetEditTracking();
   if(bitmap){bitmap.close();bitmap=null;}
   view=null;draft=null;selected=null;
   $("work").hidden=true;$("export-panel").hidden=true;
