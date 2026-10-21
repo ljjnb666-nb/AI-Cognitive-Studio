@@ -28,9 +28,9 @@ jobs:
             "${env:LocalAppData}\Microsoft\Edge\Application\msedge.exe"
           )
           $edge=@($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
-          Write-Output ('ACS_P127_EDGE_PRESENT='+[string]($edge.Count -gt 0).ToLowerInvariant())
+          Write-Output ('ACS_P127_EDGE_PRESENT='+([string]($edge.Count -gt 0)).ToLowerInvariant())
           $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
           Write-Output ('ACS_P127_EDGE_FREE_MEMORY_MB='+[math]::Floor([double]$os.FreePhysicalMemory/1024))
           $project='D:\所有项目\90_Worktrees\AI-Cognitive-Studio-pdf-parser-benchmark'
-          Write-Output ('ACS_P127_EDGE_WORKTREE_PRESENT='+[string](Test-Path -LiteralPath $project -PathType Container).ToLowerInvariant())
+          Write-Output ('ACS_P127_EDGE_WORKTREE_PRESENT='+([string](Test-Path -LiteralPath $project -PathType Container)).ToLowerInvariant())
           Write-Output 'ACS_P127_EDGE_PREFLIGHT_DONE'
