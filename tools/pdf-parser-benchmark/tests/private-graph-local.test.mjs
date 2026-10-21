@@ -9,6 +9,7 @@ import { createGraphReviewDraft } from "../annotation/graph-review.mjs";
 import { verifyAutoGraphBundle } from "../annotation/graph-review-auto.mjs";
 import { verifyGraphCropPreview } from "../annotation/graph-crop-preview.mjs";
 import {compileGraphBatchPlan,buildPrivateGraphBatchPlan,publicGraphBatchSummary,BatchPlanError} from "../annotation/graph-batch-plan.mjs";
+import {readOnlyCanonicalIntakeOverview} from "../annotation/graph-result-intake-queue.mjs";
 import { createRegionReviewDraft } from "../annotation/region-graph-review.mjs";
 import {compileTrustedGraphRegistry,TRUSTED_GRAPH_RESULTS,publicRegisteredGraphMetadata,RegistryError} from "../annotation/graph-result-registry.mjs";
 import {
@@ -751,5 +752,47 @@ describe("03E-04B-02C canonical Python producer result -> unapproved registry pr
     await expectCode(inspectCanonicalGraphResultForRegistration(x.root,
       "../outside"),"PRIVATE_INTAKE_ITEM_INVALID");
     expect((await readPrivateP127Bundle(x.root)).view.nodes).toHaveLength(2);
+  }));
+  it("reports canonical result as unapproved intake only through token-gated GET",()=>withFixture(async x=>{
+    const {src}=await canonical(x);
+    const overview=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(overview).toMatchObject({
+      schemaVersion:"acs-safe-graph-intake-overview-v1",
+      counts:{total:2,reviewable:1,registrationPending:1,awaitingAuthorization:0,blocked:0},
+      dispatchEnabled:false,providerRequestsIssuedThisRun:0,
+      priceAuthorized:false,autoRegistered:false,autoVerified:false
+    });
+    expect(overview.items.find(i=>i.id===src.registration.id)).toMatchObject({
+      state:"SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED",
+      nodeCount:2,edgeCount:1,graphVerified:false,humanVerified:false});
+    expect(JSON.stringify(overview)).not.toContain(src.registration.resultPath);
+    expect(JSON.stringify(overview)).not.toContain("cropSha256");
+    expect(JSON.stringify(overview)).not.toContain("客户端");
+    const app=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token});
+    try{
+      const route="/api/private-graph/intake/overview";
+      expect((await send(app,route,{auth:false})).status).toBe(403);
+      expect((await send(app,route,{method:"POST",body:{register:true}})).status).toBe(405);
+      expect((await send(app,route+"?authorize=true")).status).toBe(400);
+      const res=await send(app,route);
+      expect(res.status).toBe(200);
+      expect(res.value.counts).toMatchObject({registrationPending:1,reviewable:1});
+      expect(res.bytes.toString("utf8")).not.toContain("pngBase64");
+      expect((await send(app,"/api/private-graph/registry")).value.entries).toHaveLength(1);
+    }finally{await app.close();}
+  }));
+  it("records uncertain request separately and never declares it safe to retry",()=>withFixture(async x=>{
+    const {src,receipt}=await canonical(x);
+    const output=join(x.root,...src.registration.resultPath.split("/"));
+    await rm(output);
+    const overview=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(overview.counts).toMatchObject({total:2,reviewable:1,blocked:1});
+    expect(overview.items.find(i=>i.id===src.registration.id)).toMatchObject({
+      state:"PRIOR_ATTEMPT_UNCERTAIN_NO_REPLAY",dispatchEnabled:false});
+    await rm(receipt);
+    const empty=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(empty.counts).toMatchObject({awaitingAuthorization:1,blocked:0});
+    expect(empty.items.find(i=>i.id===src.registration.id).state)
+      .toBe("WAITING_FOR_EXPLICIT_PAID_AUTHORIZATION");
   }));
 });
