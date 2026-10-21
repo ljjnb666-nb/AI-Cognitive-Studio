@@ -3,7 +3,7 @@ name: ACS PDF Quality synthetic gate
 
 on:
   pull_request:
-    branches: [codex/pdf-parser-benchmark, feat/pdf-private-region-proposals-03, feat/pdf-local-vision-proposals-03b]
+    branches: [codex/pdf-parser-benchmark, feat/pdf-private-region-proposals-03, feat/pdf-local-vision-proposals-03b, feat/pdf-figure-03e04b02e-staged-review]
     paths:
       - "tools/pdf-parser-benchmark/**"
       - ".github/workflows/acs-pdf-quality-synthetic.yml"

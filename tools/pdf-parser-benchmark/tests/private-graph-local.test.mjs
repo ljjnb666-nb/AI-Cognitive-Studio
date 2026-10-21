@@ -900,4 +900,70 @@ describe("03E-04B-02C canonical Python producer result -> unapproved registry pr
     expect(restored.saved.revision).toBe(saved.revision);
     expect(restored.saved.draft).toEqual(draft);
   }));
+  it("02F aggregates only persisted human draft decisions; never confuses completion with certification",()=>withFixture(async x=>{
+    const {src}=await canonical(x);
+    const first=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(first.progress).toEqual({eligibleRegions:2,completedDraftRegions:0,
+      incompleteDraftRegions:2,totalDecisions:6,reviewedDecisions:0,
+      nextItemId:src.registration.id,certifiedRegions:0,
+      authority:"DRAFT_PROGRESS_ONLY_NOT_HUMAN_VERIFICATION"});
+    expect(first.items.find(i=>i.id===src.registration.id)).toMatchObject({
+      reviewKind:"STAGED_REGION",reviewedCount:0,graphVerified:false,humanVerified:false});
+    const stage=await readStagedGraphBundle(x.root,src.registration.id);
+    const stageDraft=createRegionReviewDraft(stage.view);
+    stageDraft.decisions[0].decision="VISIBLE_MATCH";
+    await saveStagedGraphReviewDraft(x.root,src.registration.id,stageDraft,null);
+    const second=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(second.progress).toMatchObject({
+      eligibleRegions:2,reviewedDecisions:1,totalDecisions:6,
+      nextItemId:src.registration.id,certifiedRegions:0});
+    // Completing every machine-suggested element is still only an unattested draft.
+    const completed=structuredClone(stageDraft);
+    completed.decisions.forEach(x=>{x.decision="UNCERTAIN";});
+    const latest=(await readStagedGraphBundle(x.root,src.registration.id)).saved.revision;
+    await saveStagedGraphReviewDraft(x.root,src.registration.id,completed,latest);
+    const third=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(third.progress).toMatchObject({
+      eligibleRegions:2,completedDraftRegions:1,incompleteDraftRegions:1,
+      totalDecisions:6,reviewedDecisions:3,
+      nextItemId:"RB-PDF-13:page-002-region-01",certifiedRegions:0});
+    expect(third.items.find(i=>i.id===src.registration.id)).toMatchObject({
+      reviewedCount:3,graphVerified:false,humanVerified:false});
+    const legacy=await readPrivateP127Bundle(x.root);
+    const draft=createGraphReviewDraft(legacy.view);
+    draft.decisions.forEach(x=>{x.decision="VISIBLE_MISMATCH";});
+    await writePrivateP127Draft(x.root,legacy.view,draft,null);
+    const full=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(full.progress).toMatchObject({
+      completedDraftRegions:2,incompleteDraftRegions:0,
+      reviewedDecisions:6,nextItemId:null,certifiedRegions:0});
+    expect(full.autoRegistered).toBe(false);
+    expect(full.autoVerified).toBe(false);
+    expect(publicRegisteredGraphMetadata().entries).toHaveLength(1);
+    expect(JSON.stringify(full)).not.toContain("客户端");
+  }));
+  it("02F blocks forged/missing model results from progress and next navigation; no retry",()=>withFixture(async x=>{
+    const {src}=await canonical(x);
+    const before=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(before.progress.eligibleRegions).toBe(2);
+    const output=join(x.root,...src.registration.resultPath.split("/"));
+    await rm(output);
+    const blocked=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(blocked.progress).toMatchObject({
+      eligibleRegions:1,totalDecisions:3,reviewedDecisions:0,
+      nextItemId:"RB-PDF-13:page-002-region-01",certifiedRegions:0});
+    expect(blocked.items.find(i=>i.id===src.registration.id)).toMatchObject({
+      reviewKind:null,reviewedCount:null,stagedAvailable:false,
+      graphVerified:false,humanVerified:false,dispatchEnabled:false});
+    expect(blocked.counts.registrationPending).toBe(0);
+    const app=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token,privateGraphReadOnly:true});
+    try{
+      expect((await send(app,"/api/private-graph/intake/overview")).value.progress)
+        .toMatchObject({eligibleRegions:1,certifiedRegions:0});
+      expect((await send(app,"/api/private-graph/intake/overview",
+        {method:"POST",body:{nextItemId:src.registration.id,graphVerified:true}})).status).toBe(405);
+      expect((await send(app,"/api/private-graph/intake/overview",{auth:false})).status).toBe(403);
+    }finally{await app.close();}
+  }));
+
 });

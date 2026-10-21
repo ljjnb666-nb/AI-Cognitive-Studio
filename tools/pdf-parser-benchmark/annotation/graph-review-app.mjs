@@ -18,6 +18,23 @@ const token=new URLSearchParams(location.hash.slice(1)).get("review-token");
 const hasLocalToken=typeof token==="string"&&/^[0-9a-f]{64}$/u.test(token);
 let autoActive=false,saveRevision=null,saveTimer=null,saveQueue=Promise.resolve(),saveEpoch=0;
 let activeReviewKind="LEGACY_P127",activeItemId=null;
+let localEditSerial=0,persistedEditSerial=0,restoreEpoch=0,saveActiveWrites=0;
+let discardStamp=null;
+function currentDraftStamp(){
+  return JSON.stringify([loadEpoch,saveEpoch,localEditSerial,saveRevision,
+    activeReviewKind,activeItemId,view?.resultSha256??null]);
+}
+function clearDiscardConfirmation(){
+  discardStamp=null;
+  $("discard-local").textContent="放弃未保存草稿（双重确认）";
+}
+function hasUnpersistedEdits(){return localEditSerial!==persistedEditSerial||saveTimer!==null;}
+function allowReviewSwitch(){
+  if(!hasUnpersistedEdits())return true;
+  message("当前区域仍有未完成的草稿保存。请等待“已保存到本机 D 盘”，若保存失败请先导出 JSON；为防止丢失修改，已阻止切换。");
+  return false;
+}
+function resetEditTracking(){localEditSerial=0;persistedEditSerial=0;}
 const useGeneric=()=>["REGISTERED_REGION","STAGED_REGION"].includes(activeReviewKind);
 const currentParse=(raw,v)=>useGeneric()?parseRegionReviewDraft(raw,v):parseGraphReviewDraft(raw,v);
 const currentUpdate=(raw,v,kind,id,decision,note)=>useGeneric()?
@@ -47,13 +64,16 @@ function cancelAutoSave(){
   saveStatus("未启用");
 }
 function scheduleAutoSave(){
-  if(!autoActive||!view||!draft)return;
+  if(!view||!draft)return;
+  ++localEditSerial;clearDiscardConfirmation();
+  if(!autoActive){saveStatus("本地草稿未自动保存 · 请导出 JSON");return;}
   if(saveTimer!==null)clearTimeout(saveTimer);
   const epoch=saveEpoch;
   saveStatus("有待保存的修改");
   saveTimer=setTimeout(()=>{
     saveTimer=null;
     const stored=structuredClone(draft);
+    const storedSerial=localEditSerial;
     const lineage=view.resultSha256;
     const sourceItem=activeItemId,reviewMode=activeReviewKind;
     const next=saveQueue.then(async()=>{
@@ -61,6 +81,7 @@ function scheduleAutoSave(){
          activeItemId!==sourceItem||activeReviewKind!==reviewMode)return;
       saveStatus("保存中…");
       try{
+        ++saveActiveWrites;
         const result=await autoRequest(draftEndpoint(),{
           method:"PUT",
           headers:{"Content-Type":"application/json","x-acs-draft-revision":saveRevision??"none"},
@@ -71,13 +92,15 @@ function scheduleAutoSave(){
         if(!/^[0-9a-f]{64}$/u.test(result.revision)||result.status!=="REVIEW_DRAFT_UNATTESTED")
           throw new GraphReviewError("PRIVATE_DRAFT_RECEIPT_INVALID");
         saveRevision=result.revision;
-        saveStatus("已保存到本机 D 盘（未认证草稿）");
+        persistedEditSerial=storedSerial;
+        saveStatus(hasUnpersistedEdits()?"新修改等待保存":"已保存到本机 D 盘（未认证草稿）");
+        if(!hasUnpersistedEdits()){void loadIntakeOverview();void loadQueue();}
       }catch(error){
         if(saveEpoch!==epoch)return;
         autoActive=false;
         saveStatus("保存失败／版本冲突：已停止自动保存");
         message("自动保存失败（"+(error instanceof GraphReviewError?error.code:"PRIVATE_DRAFT_SAVE_FAILED")+"）。本页人工草稿仍保留，可立即手动导出 JSON。");
-      }
+      }finally{saveActiveWrites--;}
     });
     saveQueue=next.catch(()=>{});
   },450);
@@ -87,13 +110,37 @@ const options=[
   ["VISIBLE_MISMATCH","与可见图像不一致"],["UNCERTAIN","无法判断／局部图像不清晰"],
 ];
 function message(text,good=false){$("notice").textContent=text;$("notice").classList.toggle("ok",good);}
-function reset(clearFiles=false){
-  ++loadEpoch;cancelAutoSave();activeReviewKind="LEGACY_P127";activeItemId=null;
+function reset(clearFiles=false,explicitDiscard=false){
+  if(explicitDiscard){
+    if(!hasUnpersistedEdits()||autoActive||saveTimer!==null||saveActiveWrites!==0)
+      return;
+  }else if(!allowReviewSwitch())return;
+  clearDiscardConfirmation();
+  ++loadEpoch;cancelAutoSave();resetEditTracking();activeReviewKind="LEGACY_P127";activeItemId=null;
   if(bitmap){bitmap.close();bitmap=null;}
   if(clearFiles)for(const id of ["result-file","manifest-file","crop-file","restore"])$(id).value="";
   view=null;draft=null;selected=null;$("work").hidden=true;$("export-panel").hidden=true;
   $("entries").replaceChildren();const c=$("diagram");c.width=0;c.height=0;
   message("未加载私人证据。所有本地审阅草稿已从页面内存清空。");
+}
+function discardUnpersistedDraft(){
+  if(!hasUnpersistedEdits()){reset(true);return;}
+  // No discard while a network write is pending, still active, or queued.
+  // A failed autosave or offline manual draft can be explicitly abandoned,
+  // but never silently lost by ordinary navigation/clear/reset.
+  if(autoActive||saveTimer!==null||saveActiveWrites!==0){
+    message("草稿保存仍在进行或可继续自动保存，不允许放弃；请等待结果或手动导出。");
+    return;
+  }
+  const stamp=currentDraftStamp();
+  if(discardStamp!==stamp){
+    discardStamp=stamp;
+    $("discard-local").textContent="再次点击确认放弃（不可恢复）";
+    message("请先导出草稿 JSON 并核对本机文件；再次点击才会放弃当前未保存的浏览器内存修改，不会更改已持久化的私有草稿。");
+    return;
+  }
+  reset(true,true);
+  message("已通过双次确认放弃本页未保存修改；本机已有私有草稿没有被删除。");
 }
 function fileCheck(id,name,max){
   const f=$(id).files?.[0];
@@ -178,7 +225,8 @@ function render(){
   container.replaceChildren(fragment);
 }
 async function load(){
-  cancelAutoSave();
+  if(!allowReviewSwitch())return;
+  cancelAutoSave();resetEditTracking();
   const epoch=++loadEpoch;
   if(bitmap){bitmap.close();bitmap=null;}
   view=null;draft=null;$("work").hidden=true;$("export-panel").hidden=true;
@@ -211,15 +259,24 @@ async function load(){
   }
 }
 async function restoreDraft(){
-  if(!view)return;
+  if(!view||!allowReviewSwitch())return;
   const expectedEpoch=loadEpoch;
   const expectedSha=view.resultSha256;
+  const expectedSerial=localEditSerial,expectedRevision=saveRevision;
+  const expectedKind=activeReviewKind,expectedItem=activeItemId;
+  const requestEpoch=++restoreEpoch;
   const f=$("restore").files?.[0];
   if(!f||f.size<8||f.size>MAX_REVIEW_BYTES){message("已有草稿文件无效或过大。");return;}
   try{
     const raw=parseJSON(await f.arrayBuffer());
-    if(loadEpoch!==expectedEpoch||!view||view.resultSha256!==expectedSha)
-      throw new GraphReviewError("GRAPH_RESTORE_STALE_SELECTION");
+    // File.arrayBuffer() is asynchronous: a new edit, later restore or
+    // source/revision change must invalidate this pending file read. Otherwise
+    // a slow disk picker could overwrite a newer human decision in memory.
+    if(loadEpoch!==expectedEpoch||!view||view.resultSha256!==expectedSha||
+       localEditSerial!==expectedSerial||saveRevision!==expectedRevision||
+       activeReviewKind!==expectedKind||activeItemId!==expectedItem||
+       requestEpoch!==restoreEpoch||hasUnpersistedEdits())
+      throw new GraphReviewError("GRAPH_RESTORE_STALE_SELECTION_OR_EDIT");
     draft=currentParse(raw,view);
     selected=null;render();draw();scheduleAutoSave();
     message("仅恢复了同一 SHA 来源下的未认证草稿；请继续独立核对。",true);
@@ -239,12 +296,13 @@ function exportDraft(){
   }catch{message("草稿导出失败，未标记任何内容已验证。");}
 }
 async function loadAutomatically(){
+  if(!allowReviewSwitch())return;
   if(!hasLocalToken){
     message("当前地址没有本机自动导入权限；请使用启动命令输出的专用地址，或继续手动选择文件。");
     return;
   }
   const epoch=++loadEpoch;
-  cancelAutoSave();
+  cancelAutoSave();resetEditTracking();
   if(bitmap){bitmap.close();bitmap=null;}
   view=null;draft=null;selected=null;$("work").hidden=true;$("export-panel").hidden=true;
   try{
@@ -283,10 +341,11 @@ async function loadAutomatically(){
 }
 
 async function loadRegisteredRegion(item,staged=false){
+  if(!allowReviewSwitch())return;
   if(!hasLocalToken||(!staged&&item.reviewKind!=="REGISTERED_REGION")||
      item.id==="RB-PDF-13:page-002-region-01")return;
   const epoch=++loadEpoch;
-  cancelAutoSave();
+  cancelAutoSave();resetEditTracking();
   if(bitmap){bitmap.close();bitmap=null;}
   view=null;draft=null;selected=null;
   $("work").hidden=true;$("export-panel").hidden=true;
@@ -404,6 +463,8 @@ let intakeEpoch=0;
 async function loadIntakeOverview(){
   const epoch=++intakeEpoch;
   const summary=$("intake-summary"),list=$("intake-items");
+  const workflow=$("review-progress-summary"),next=$("next-review");
+  next.disabled=true;next.onclick=null;workflow.textContent="正在核验各区域草稿的已保存进度…";
   list.replaceChildren();
   if(!hasLocalToken){
     summary.textContent="静态模式下不可读取本机接收状态。";return;
@@ -424,6 +485,7 @@ async function loadIntakeOverview(){
          doc.counts.registrationPending+doc.counts.blocked!==doc.counts.total)
       throw new GraphReviewError("GRAPH_INTAKE_RESPONSE_INVALID");
     const seen=new Set(),frag=document.createDocumentFragment();
+    let eligibleRegions=0,completedDraftRegions=0,totalDecisions=0,reviewedDecisions=0;
     for(const item of doc.items){
       if(!item||typeof item.id!=="string"||!/^RB-PDF-(?:12|13):page-[0-9]{3}-region-[0-9]{2}$/u.test(item.id)||
          typeof item.fixtureId!=="string"||typeof item.regionId!=="string"||
@@ -436,6 +498,25 @@ async function loadIntakeOverview(){
            (Number.isSafeInteger(item.nodeCount)&&item.nodeCount>=0&&item.nodeCount<=80&&
             Number.isSafeInteger(item.edgeCount)&&item.edgeCount>=0&&item.edgeCount<=120)))
         throw new GraphReviewError("GRAPH_INTAKE_ROW_INVALID");
+      const eligible=item.state==="SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED"||
+        item.state==="REGISTERED_PENDING_HUMAN_REVIEW";
+      if(eligible){
+        const expectedKind=item.state==="SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED"?
+          "STAGED_REGION":null;
+        if(!["LEGACY_P127","REGISTERED_REGION","STAGED_REGION"].includes(item.reviewKind)||
+           (expectedKind!==null&&item.reviewKind!==expectedKind)||
+           (item.state==="REGISTERED_PENDING_HUMAN_REVIEW"&&item.reviewKind==="STAGED_REGION")||
+           !Number.isSafeInteger(item.reviewedCount)||item.reviewedCount<0||
+           item.nodeCount===null||item.edgeCount===null||
+           item.reviewedCount>item.nodeCount+item.edgeCount)
+          throw new GraphReviewError("GRAPH_REVIEW_PROGRESS_INVALID");
+        eligibleRegions++;
+        totalDecisions+=item.nodeCount+item.edgeCount;
+        reviewedDecisions+=item.reviewedCount;
+        if(item.reviewedCount===item.nodeCount+item.edgeCount)completedDraftRegions++;
+      }else if(item.reviewKind!==null||item.reviewedCount!==null){
+        throw new GraphReviewError("GRAPH_REVIEW_UNAUTHORIZED_PROGRESS");
+      }
       seen.add(item.id);
       const card=el("div","queue-item"),title=el("div","queue-label");
       title.append(el("b","",item.fixtureId+" · 物理 P"+item.physicalPage),
@@ -454,13 +535,60 @@ async function loadIntakeOverview(){
       }else if(item.stagedAvailable!==false || item.stageState!==null){
         throw new GraphReviewError("GRAPH_STAGED_UNAUTHORIZED");
       }
-      if(item.nodeCount!==null)
+      if(eligible){
+        card.append(el("span","queue-status","已保存草稿处理 "+
+          item.reviewedCount+"/"+(item.nodeCount+item.edgeCount)+
+          " 项 · 认证 0 项"));
+        if(item.state==="REGISTERED_PENDING_HUMAN_REVIEW"){
+          const open=el("button","primary","进入本区域审核");
+          open.type="button";
+          open.addEventListener("click",()=>item.reviewKind==="LEGACY_P127"?
+            void loadAutomatically():void loadRegisteredRegion({
+              ...item,sourcePhysicalPage1Based:item.physicalPage
+            }));
+          card.append(open);
+        }
+      }else if(item.nodeCount!==null)
         card.append(el("span","queue-status",item.nodeCount+
           " 节点 / "+item.edgeCount+" 关系 · 未认证"));
       frag.append(card);
     }
     if(!doc.items.length)
       frag.append(el("p","pathhelp","尚未发现支持范围内的图结果，未调用模型。"));
+    const p=doc.progress;
+    if(!p||p.authority!=="DRAFT_PROGRESS_ONLY_NOT_HUMAN_VERIFICATION"||
+       p.certifiedRegions!==0||p.eligibleRegions!==eligibleRegions||
+       p.completedDraftRegions!==completedDraftRegions||
+       p.incompleteDraftRegions!==eligibleRegions-completedDraftRegions||
+       p.totalDecisions!==totalDecisions||p.reviewedDecisions!==reviewedDecisions||
+       !Number.isSafeInteger(p.totalDecisions)||p.totalDecisions<0||
+       !(p.nextItemId===null||typeof p.nextItemId==="string"))
+      throw new GraphReviewError("GRAPH_REVIEW_PROGRESS_RESPONSE_INVALID");
+    const pending=doc.items.filter(x=>x.reviewKind!==null&&
+      x.reviewedCount<x.nodeCount+x.edgeCount).sort((a,b)=>
+      Number(b.reviewedCount>0)-Number(a.reviewedCount>0)||
+      a.fixtureId.localeCompare(b.fixtureId)||a.physicalPage-b.physicalPage||
+      a.regionId.localeCompare(b.regionId));
+    const first=pending[0]??null;
+    if(p.nextItemId!==(first?.id??null))
+      throw new GraphReviewError("GRAPH_REVIEW_NEXT_ITEM_INVALID");
+    if(first){
+      next.disabled=false;
+      // Prefer an *other* incomplete region when one exists, so a reviewer
+      // is not sent back to the currently open incomplete book.
+      next.onclick=()=>{
+        const current=activeItemId??(activeReviewKind==="LEGACY_P127"&&view?
+          "RB-PDF-13:page-002-region-01":null);
+        const target=first.id===current?(pending[1]??first):first;
+        return target.reviewKind==="LEGACY_P127"?
+          void loadAutomatically():void loadRegisteredRegion({
+            ...target,sourcePhysicalPage1Based:target.physicalPage
+          },target.reviewKind==="STAGED_REGION");
+      };
+    }
+    workflow.textContent="私有草稿已处理 "+reviewedDecisions+"/"+totalDecisions+
+      " 项 · 涉及 "+eligibleRegions+" 个可审区域 · 全部标记 "+completedDraftRegions+
+      " 个（仅草稿、认证 0 个）";
     list.replaceChildren(frag);
     summary.textContent="总计 "+doc.counts.total+
       " · 已登记可人工复核 "+doc.counts.reviewable+
@@ -470,6 +598,8 @@ async function loadIntakeOverview(){
   }catch(e){
     if(epoch!==intakeEpoch)return;
     list.replaceChildren();
+    next.disabled=true;next.onclick=null;
+    workflow.textContent="审核进度不可核验；已阻止自动导航。";
     summary.textContent="结果接收核验停止："+(e instanceof GraphReviewError?e.code:"GRAPH_INTAKE_UNAVAILABLE");
   }
 }
@@ -612,6 +742,7 @@ $("refresh-queue").addEventListener("click",()=>{void loadQueue();});
 $("auto-load").addEventListener("click",()=>{void loadAutomatically();});
 $("load").addEventListener("click",()=>{void load();});
 $("clear").addEventListener("click",()=>reset(true));
+$("discard-local").addEventListener("click",discardUnpersistedDraft);
 for(const id of ["result-file","manifest-file","crop-file"]){
   $(id).addEventListener("change",()=>reset(false));
 }
