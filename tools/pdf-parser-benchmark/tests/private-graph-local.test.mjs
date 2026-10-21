@@ -8,6 +8,7 @@ import { startAnnotationServer } from "../annotation/server.mjs";
 import { createGraphReviewDraft } from "../annotation/graph-review.mjs";
 import { verifyAutoGraphBundle } from "../annotation/graph-review-auto.mjs";
 import { verifyGraphCropPreview } from "../annotation/graph-crop-preview.mjs";
+import {compileGraphBatchPlan,buildPrivateGraphBatchPlan,publicGraphBatchSummary,BatchPlanError} from "../annotation/graph-batch-plan.mjs";
 import { createRegionReviewDraft } from "../annotation/region-graph-review.mjs";
 import {compileTrustedGraphRegistry,TRUSTED_GRAPH_RESULTS,publicRegisteredGraphMetadata,RegistryError} from "../annotation/graph-result-registry.mjs";
 import {
@@ -527,6 +528,107 @@ describe("03E-03B code-pinned result registration and per-region HTTP fences",()
       const bundle=await readRegisteredGraphBundle(x.root,prepared.registration.id,registry);
       expect((await send(app,target,{method:"PUT",body:createRegionReviewDraft(bundle.view)})).status).toBe(405);
       expect((await send(app,target)).value).toMatchObject({draft:null,revision:null});
+    }finally{await app.close();}
+  }));
+});
+
+const fakeQueue=(ids,statuses)=>({
+  schemaVersion:"acs-private-graph-review-queue-v1",
+  authority:"DISCOVERY_ONLY_NOT_GROUND_TRUTH",
+  items:ids.map((id,i)=>({
+    id,fixtureId:id.split(":")[0],regionId:id.split(":")[1],
+    sourcePhysicalPage1Based:i+50,
+    reviewable:statuses[i]==="GRAPH_READY_FOR_HUMAN_REVIEW",
+    evidenceStatus:statuses[i],graphVerified:false,humanVerified:false
+  })),
+  counts:{total:ids.length}
+});
+const fakeProof=(id,physical,cropSha,bytes=128)=>({
+  id,sourcePhysicalPage1Based:physical,authority:"CROP_ONLY_UNVERIFIED",
+  graphVerified:false,humanVerified:false,cropSha256:cropSha,
+  width:200,height:100,byteLength:bytes
+});
+describe("03E-04A paid inference batch PLANNING, strictly no dispatch",()=>{
+  it("real inventory with only P127 returns zero payable work and does not write files",()=>withFixture(async x=>{
+    const before=await readFile(join(x.root,...PRIVATE_FILENAMES.result.split("/")));
+    const plan=await buildPrivateGraphBatchPlan(x.root);
+    expect(plan).toMatchObject({
+      schemaVersion:"acs-offline-graph-batch-plan-v1",
+      authority:"PREVIEW_ONLY_NO_PROVIDER_DISPATCH",
+      needsExplicitPaidAuthorization:true,providerRequestsIssued:0,dispatchEnabled:false,
+      priceEstimate:null,counts:{discovered:1,eligible:0,alreadyHasGraph:1}
+    });
+    expect(plan.excluded[0].reason).toBe("ALREADY_HAS_GRAPH");
+    expect(await readFile(join(x.root,...PRIVATE_FILENAMES.result.split("/")))).toEqual(before);
+  }));
+  it("plans distinct crop-only regions exactly once by SHA with fixed model and no credentials",()=>{
+    const ids=["RB-PDF-12:page-001-region-01","RB-PDF-12:page-001-region-02",
+      "RB-PDF-13:page-002-region-01"];
+    const queue=fakeQueue(ids,["CROP_READY_NO_GRAPH","CROP_READY_NO_GRAPH",
+      "GRAPH_READY_FOR_HUMAN_REVIEW"]);
+    const proof=[fakeProof(ids[0],50,"a".repeat(64),1000),
+      fakeProof(ids[1],51,"b".repeat(64),2000),null];
+    const one=compileGraphBatchPlan(queue,proof,{maxRequests:1,maxTotalBytes:10000});
+    expect(one.counts).toEqual({discovered:3,eligible:1,excluded:2,alreadyHasGraph:1,
+      blocked:0,limitExcluded:1});
+    expect(one.planned[0]).toMatchObject({id:ids[0],cropSha256:"a".repeat(64),cropBytes:1000});
+    expect(one.excluded.map(x=>x.reason)).toEqual(["EXCEEDS_BATCH_LIMIT","ALREADY_HAS_GRAPH"]);
+    expect(one.priceEstimate).toBe(null);
+    expect(one.providerRequestsIssued).toBe(0);
+    const same=compileGraphBatchPlan(queue,proof,{maxRequests:1,maxTotalBytes:10000});
+    expect(same.planSha256).toBe(one.planSha256);
+    const bigger=compileGraphBatchPlan(queue,proof,{maxRequests:2,maxTotalBytes:10000});
+    expect(bigger.planSha256).not.toBe(one.planSha256);
+    expect(bigger.planned).toHaveLength(2);
+    const publicView=publicGraphBatchSummary(one);
+    expect(JSON.stringify(publicView)).not.toContain("cropSha256");
+    expect(JSON.stringify(publicView)).not.toContain("resultPath");
+    expect(publicView.items[0].status).toBe("WAITING_FOR_AUTHORIZATION");
+  });
+  it("rejects approval forged as verified, corrupted source identity or duplicate IDs",()=>{
+    const id="RB-PDF-12:page-001-region-01",q=fakeQueue([id],["CROP_READY_NO_GRAPH"]);
+    const p=fakeProof(id,50,"a".repeat(64));
+    for(const forged of [
+      {...p,graphVerified:true},
+      {...p,sourcePhysicalPage1Based:999},
+      {...p,cropSha256:"not-a-sha"},
+      {...p,authority:"HUMAN_VERIFIED"},
+      {...p,byteLength:0}
+    ])expect(()=>compileGraphBatchPlan(q,[forged])).toThrow(BatchPlanError);
+    expect(()=>compileGraphBatchPlan(fakeQueue([id,id],[
+      "CROP_READY_NO_GRAPH","CROP_READY_NO_GRAPH"]),[p,p])).toThrow(BatchPlanError);
+  });
+  it("rejects duplicate image SHA, excess request bytes, and invalid operator limits",()=>{
+    const ids=["RB-PDF-12:page-001-region-01","RB-PDF-13:page-001-region-01"];
+    const queue=fakeQueue(ids,["CROP_READY_NO_GRAPH","CROP_READY_NO_GRAPH"]);
+    const proofs=[fakeProof(ids[0],50,"a".repeat(64)),
+      fakeProof(ids[1],51,"a".repeat(64))];
+    expect(()=>compileGraphBatchPlan(queue,proofs)).toThrow(BatchPlanError);
+    expect(()=>compileGraphBatchPlan(queue,proofs,{maxRequests:15})).toThrow(BatchPlanError);
+    expect(()=>compileGraphBatchPlan(queue,proofs,{maxTotalBytes:0})).toThrow(BatchPlanError);
+    const oversized=compileGraphBatchPlan(fakeQueue([ids[0]],["CROP_READY_NO_GRAPH"]),
+      [fakeProof(ids[0],50,"b".repeat(64),7_000_001)]);
+    expect(oversized.counts).toMatchObject({eligible:0,blocked:1});
+    expect(oversized.excluded[0].reason).toBe("EXCEEDS_PER_REQUEST_LIMIT");
+  });
+  it("read-only HTTP plan requires capability and rejects request bodies or query parameters",()=>withFixture(async x=>{
+    const off=await startAnnotationServer();
+    try{expect((await send(off,"/api/private-graph/batch/plan")).status).toBe(404);}
+    finally{await off.close();}
+    const app=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token});
+    try{
+      const path="/api/private-graph/batch/plan";
+      expect((await send(app,path,{auth:false})).status).toBe(403);
+      expect((await send(app,path,{origin:"https://attacker.invalid"})).status).toBe(403);
+      expect((await send(app,path,{method:"POST",body:{approve:true}})).status).toBe(405);
+      expect((await send(app,path+"?approve=true")).status).toBe(400);
+      const res=await send(app,path);
+      expect(res.status).toBe(200);
+      expect(res.value).toMatchObject({authority:"PREVIEW_ONLY_NO_PROVIDER_DISPATCH",
+        counts:{discovered:1,eligible:0},dispatchEnabled:false,
+        providerRequestsIssued:0,needsExplicitPaidAuthorization:true});
+      expect(res.bytes.toString("utf8")).not.toContain("合成客户端");
+      expect(res.bytes.toString("utf8")).not.toContain("pngBase64");
     }finally{await app.close();}
   }));
 });
