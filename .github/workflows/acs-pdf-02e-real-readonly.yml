@@ -1,0 +1,56 @@
+# Real D: private corpus is read only by local Edge; never committed, logged or uploaded.
+# One explicitly pinned PR commit, isolated ops branch; no GLM/paid calls.
+name: ACS 02E real-private Edge read-only acceptance
+on:
+  push:
+    branches: [ops/pdf-02e-real-readonly-20261021]
+    paths:
+      - ".github/workflows/acs-pdf-02e-real-readonly.yml"
+
+permissions:
+  contents: read
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+
+jobs:
+  real-readonly:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.ref == 'refs/heads/ops/pdf-02e-real-readonly-20261021' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout pinned 02E PR head without persistent credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: 862558f35da9bfee060036e2f1ccf629609a61f1
+      - name: Verify exact SHA, Node 24, Edge, and safe RAM
+        shell: powershell
+        env:
+          EXPECTED_SHA: 862558f35da9bfee060036e2f1ccf629609a61f1
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) {throw 'PRIVATE_EDGE_EXACT_SHA_INVALID'}
+          $node=(Get-Command node -ErrorAction Stop).Source
+          if ((& $node -p "Number(process.versions.node.split('.')[0]) >= 24").Trim() -ne 'true') {throw 'PRIVATE_EDGE_NODE_VERSION_BLOCKED'}
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ([double]$os.FreePhysicalMemory -lt 1572864) {throw 'PRIVATE_EDGE_MEMORY_GUARD_BLOCKED'}
+          $root='D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1'
+          if (-not (Test-Path -LiteralPath $root -PathType Container)) {throw 'PRIVATE_EDGE_SOURCE_NOT_READY'}
+          Write-Output 'ACS_02E_REAL_EDGE_EXACT_SHA_AND_RESOURCES_VERIFIED=true'
+      - name: Run actual local Windows Edge with hard-disabled draft PUT and no private logs
+        shell: powershell
+        env:
+          NODE_OPTIONS: '--no-warnings'
+        run: |
+          $ErrorActionPreference='Stop'
+          $paths=@("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
+            "${env:LOCALAPPDATA}\Microsoft\Edge\Application\msedge.exe")
+          $edge=@($paths | Where-Object {Test-Path -LiteralPath $_ -PathType Leaf} | Select-Object -First 1)
+          if ($edge.Count -ne 1) {throw 'PRIVATE_EDGE_BINARY_NOT_AVAILABLE'}
+          node --check tools/pdf-parser-benchmark/scripts/edge_p127_real_readonly.mjs
+          if ($LASTEXITCODE -ne 0) {throw 'PRIVATE_EDGE_SCRIPT_INVALID'}
+          node tools/pdf-parser-benchmark/scripts/edge_p127_real_readonly.mjs ('--edge='+$edge[0]) ('--root=D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1')
+          if ($LASTEXITCODE -ne 0) {throw 'PRIVATE_EDGE_READONLY_ACCEPTANCE_FAILED'}
+          Write-Output 'ACS_02E_EDGE_15_REAL_PRIVATE_CROPS_READONLY_ACCEPTED=true'
