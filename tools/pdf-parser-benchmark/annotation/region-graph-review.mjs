@@ -75,7 +75,7 @@ export function validateRegionGraphCandidate(doc, manifest, identity, registrati
       doc.fixtureId !== reg.fixtureId ||
       doc.provider !== reg.provider ||
       doc.model !== reg.model ||
-      doc.attemptClass !== "EXPLICIT_multiple-book_SECOND_ATTEMPT" ||
+      doc.attemptClass !== reg.attemptClass ||
       doc.sourceRegionManifestSha256 !== identity.manifestSha256 ||
       doc.reviewStatus !== "NOT_REVIEWED" || doc.graphVerified !== false ||
       doc.transferScope !== "EXPLICITLY_SELECTED_CROP_IMAGES_ONLY" ||
@@ -83,12 +83,28 @@ export function validateRegionGraphCandidate(doc, manifest, identity, registrati
   if (manifest.schemaVersion !== "acs-pdf-private-region-evidence-v1" ||
       manifest.sourceRun !== doc.sourceRun || manifest.fixtureId !== doc.fixtureId ||
       manifest.allRegionsAreUnverified !== true || manifest.noSemanticGraphClaims !== true ||
-      !Array.isArray(manifest.pages)) fail("GRAPH_MANIFEST_INVALID");
-  const regionCandidates = [];
+      !Array.isArray(manifest.pages) || manifest.pages.length > 3) fail("GRAPH_MANIFEST_INVALID");
+  const regionCandidates = [], seenPages = new Set(), seenRegions = new Set();
   for (const page of manifest.pages) {
-    if (!OBJECT(page) || !Array.isArray(page.regions)) fail("GRAPH_MANIFEST_INVALID");
-    for (const region of page.regions) {
-      if (region?.regionId === reg.regionId) regionCandidates.push({page,region});
+    if (!OBJECT(page) || !Array.isArray(page.regions) || page.regions.length > 4 ||
+        !Number.isSafeInteger(page.subsetPageIndex) ||
+        page.subsetPageIndex < 0 || page.subsetPageIndex > 2 ||
+        seenPages.has(page.subsetPageIndex) ||
+        !Number.isSafeInteger(page.sourcePhysicalPage1Based) ||
+        page.sourcePhysicalPage1Based < 1 || page.sourcePhysicalPage1Based > 5000)
+      fail("REGION_GRAPH_MANIFEST_PAGE_INVALID");
+    seenPages.add(page.subsetPageIndex);
+    for (const [i,region] of page.regions.entries()) {
+      if (!OBJECT(region) || typeof region.regionId !== "string" ||
+          region.regionId !== "page-"+String(page.subsetPageIndex+1).padStart(3,"0")+
+             "-region-"+String(i+1).padStart(2,"0") ||
+          seenRegions.has(region.regionId) ||
+          region.proposalStatus !== "UNVERIFIED_REGION_SUGGESTION" ||
+          region.nodes != null || region.directedEdges != null ||
+          region.timingRelations != null)
+        fail("REGION_GRAPH_MANIFEST_REGION_INVALID");
+      seenRegions.add(region.regionId);
+      if (region.regionId === reg.regionId) regionCandidates.push({page,region});
     }
   }
   if (regionCandidates.length !== 1) fail("GRAPH_REGION_NOT_UNIQUE");
@@ -167,7 +183,15 @@ export function validateRegionGraphCandidate(doc, manifest, identity, registrati
   });
 }
 export function createRegionReviewDraft(view) {
-  if (!view || !FIXTURE.test(view.fixtureId ?? "") || !REGION.test(view.regionId ?? "") || !Number.isSafeInteger(view.physicalPage) || view.physicalPage < 1 || view.physicalPage > 5000 || !hex(view.resultSha256)) fail("GRAPH_VIEW_INVALID");
+  if (!OBJECT(view) || !FIXTURE.test(view.fixtureId ?? "") ||
+      !REGION.test(view.regionId ?? "") ||
+      !Number.isSafeInteger(view.physicalPage) || view.physicalPage < 1 ||
+      view.physicalPage > 5000 ||
+      ![view.resultSha256,view.cropSha256,view.manifestSha256].every(hex) ||
+      view.graphVerified !== false || view.reviewStatus !== "NOT_REVIEWED" ||
+      !Array.isArray(view.nodes) || !Array.isArray(view.edges) ||
+      view.nodes.length > 80 || view.edges.length > 120)
+    fail("GRAPH_VIEW_INVALID");
   return { schema:REVIEW_SCHEMA,status:REVIEW_STATUS,
     resultSha256:view.resultSha256,cropSha256:view.cropSha256,manifestSha256:view.manifestSha256,
     fixtureId:view.fixtureId,physicalPage:view.physicalPage,regionId:view.regionId,
