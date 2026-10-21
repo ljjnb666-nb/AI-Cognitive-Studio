@@ -6,7 +6,8 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
-import { readPrivateP127Bundle, readPrivateP127Draft, writePrivateP127Draft, listPrivateGraphReviewQueue, readPrivateGraphCropPreview, PrivateGraphError } from "./private-graph-local.mjs";
+import { readPrivateP127Bundle, readPrivateP127Draft, writePrivateP127Draft, listPrivateGraphReviewQueue, readPrivateGraphCropPreview, readRegisteredGraphBundle, saveRegisteredGraphReviewDraft, PrivateGraphError } from "./private-graph-local.mjs";
+import { publicRegisteredGraphMetadata } from "./graph-result-registry.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -46,6 +47,9 @@ function securityHeaders(graphPage = false) {
 }
 const PRIVATE_QUEUE = "/api/private-graph/queue";
 const PRIVATE_PREVIEW = "/api/private-graph/crop";
+const PRIVATE_REGISTRY = "/api/private-graph/registry";
+const REGISTERED_BUNDLE = "/api/private-graph/registered/bundle";
+const REGISTERED_DRAFT = "/api/private-graph/registered/draft";
 const PRIVATE_BUNDLE = "/api/private-graph/p127/bundle";
 const PRIVATE_DRAFT = "/api/private-graph/p127/draft";
 const TOKEN = /^[0-9a-f]{64}$/u;
@@ -71,7 +75,8 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
     }
     const pathname = request.url?.split("?")[0];
     const cropRoute = pathname === PRIVATE_PREVIEW;
-    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT || pathname === PRIVATE_QUEUE || cropRoute) {
+    const registeredRoute = pathname === REGISTERED_BUNDLE || pathname === REGISTERED_DRAFT;
+    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT || pathname === PRIVATE_QUEUE || cropRoute || registeredRoute || pathname === PRIVATE_REGISTRY) {
       const headers = securityHeaders(true);
       const reply = (status, value) => {
         const body = Buffer.from(JSON.stringify(value),"utf8");
@@ -89,20 +94,75 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           (fetchSite && !["same-origin","none"].includes(fetchSite))) {
         reply(403,{code:"PRIVATE_IMPORT_ACCESS_DENIED"}); return;
       }
-      if (privateGraphReadOnly && pathname === PRIVATE_DRAFT && request.method === "PUT") {
+      if (privateGraphReadOnly && (pathname === PRIVATE_DRAFT || pathname === REGISTERED_DRAFT) && request.method === "PUT") {
         reply(405,{code:"PRIVATE_DRAFT_WRITE_DISABLED"}); return;
       }
-      if ((cropRoute && request.method !== "GET") ||
+      if ((pathname === PRIVATE_REGISTRY && request.method !== "GET") ||
+          (pathname === REGISTERED_BUNDLE && request.method !== "GET") ||
+          (pathname === REGISTERED_DRAFT && !["GET","PUT"].includes(request.method)) ||
+          (cropRoute && request.method !== "GET") ||
           (pathname === PRIVATE_QUEUE && request.method !== "GET") ||
           (pathname === PRIVATE_BUNDLE && request.method !== "GET") ||
           (pathname === PRIVATE_DRAFT && !["GET","PUT"].includes(request.method)) ||
-          (pathname === PRIVATE_DRAFT && request.method === "PUT" &&
+          ([PRIVATE_DRAFT,REGISTERED_DRAFT].includes(pathname) && request.method === "PUT" &&
            (!/^application\/json(?:;|$)/iu.test(request.headers["content-type"]??"") ||
             !["none"].includes(request.headers["x-acs-draft-revision"]) &&
             !TOKEN.test(request.headers["x-acs-draft-revision"]??"")))) {
         reply(405,{code:"PRIVATE_IMPORT_METHOD_REJECTED"}); return;
       }
       try {
+        if (pathname === PRIVATE_REGISTRY) {
+          if (request.url !== PRIVATE_REGISTRY) {
+            reply(400,{code:"PRIVATE_REGISTRY_QUERY_INVALID"});return;
+          }
+          reply(200,publicRegisteredGraphMetadata());return;
+        }
+        if (registeredRoute) {
+          const url = new URL(request.url,"http://127.0.0.1:"+port);
+          if (request.url.length>150 || url.searchParams.size!==1 ||
+              !url.searchParams.has("item") || url.hash ||
+              !/^item=RB-PDF-(?:12|13)(?::|%3[Aa])page-[0-9]{3}-region-[0-9]{2}$/u.test(url.search.slice(1))){
+            reply(400,{code:"PRIVATE_REGISTERED_QUERY_INVALID"});return;
+          }
+          const item=url.searchParams.get("item");
+          if (pathname === REGISTERED_BUNDLE){
+            const bundle=await readRegisteredGraphBundle(privateGraphRoot,item);
+            reply(200,{...bundle.data,identity:bundle.identity,
+              authority:bundle.authority,reviewKind:bundle.reviewKind,
+              sourcePhysicalPage1Based:bundle.view.physicalPage,
+              saved:bundle.saved});
+            return;
+          }
+          if (request.method==="GET"){
+            const bundle=await readRegisteredGraphBundle(privateGraphRoot,item);
+            reply(200,{...bundle.saved,reviewKind:bundle.reviewKind});
+            return;
+          }
+          // Only a code-pinned generic region can use the new draft route.
+          // P127 always uses its preexisting path and exact legacy draft.
+          const rawLength=request.headers["content-length"];
+          if (!rawLength || !/^[0-9]{1,6}$/u.test(rawLength) ||
+              Number(rawLength)>100_000){
+            reply(413,{code:"PRIVATE_DRAFT_BODY_TOO_LARGE"});return;
+          }
+          const chunks=[];let total=0;
+          for await (const part of request){
+            total+=part.length;
+            if(total>100_000)throw new PrivateGraphError("PRIVATE_DRAFT_BODY_TOO_LARGE");
+            chunks.push(part);
+          }
+          if(total!==Number(rawLength))
+            throw new PrivateGraphError("PRIVATE_DRAFT_LENGTH_CHANGED");
+          let raw;
+          try{raw=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(Buffer.concat(chunks)));}
+          catch{throw new PrivateGraphError("PRIVATE_DRAFT_JSON_INVALID");}
+          const revision=request.headers["x-acs-draft-revision"]==="none"?
+            null:request.headers["x-acs-draft-revision"];
+          const work=()=>saveRegisteredGraphReviewDraft(privateGraphRoot,item,raw,revision);
+          const next=writer.then(work,work);writer=next.catch(()=>{});
+          reply(200,await next);
+          return;
+        }
         if (cropRoute) {
           // Strict, singular query parameter: never permit paths or arbitrary selectors.
           const url = new URL(request.url, "http://127.0.0.1:"+port);
@@ -155,7 +215,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
         reply(200,await next);
       } catch(e) {
         const code=e instanceof PrivateGraphError ? e.code : "PRIVATE_IMPORT_INTERNAL_ERROR";
-        reply(code==="PRIVATE_DRAFT_CONFLICT"?409:
+        reply(["PRIVATE_DRAFT_CONFLICT","PRIVATE_REGION_STORE_REVISION_CONFLICT","PRIVATE_REGION_STORE_LOCKED"].includes(code)?409:
           code==="PRIVATE_DRAFT_BODY_TOO_LARGE"?413:
           code==="PRIVATE_EVIDENCE_NOT_READY"?404:422,{code});
       }
