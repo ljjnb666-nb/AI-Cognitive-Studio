@@ -217,6 +217,31 @@ describe("03E-04B-02A exact list-rate estimation and uncertain-result fail-close
     await mkdir(join(root,"glm-cloud-v1-RB-PDF-13-batch"));
     expect((await reconcileCloudEvidence(root,id)).state).toBe("OUTPUT_PRESENT_REQUIRES_PRIVATE_VALIDATION");
   }));
+  it("reconciles excluded uncertain attempts as well as eligible new crops",()=>onTemp(async root=>{
+    const id=ids[0];
+    const queue={schemaVersion:"acs-private-graph-review-queue-v1",
+      authority:"DISCOVERY_ONLY_NOT_GROUND_TRUTH",
+      counts:{total:2},
+      items:ids.map((v,i)=>({id:v,fixtureId:v.split(":")[0],
+        regionId:v.split(":")[1],sourcePhysicalPage1Based:i+51,
+        evidenceStatus:"CROP_READY_NO_GRAPH",reviewable:false,
+        graphVerified:false,humanVerified:false}))};
+    const proofs=ids.map((v,i)=>({id:v,sourcePhysicalPage1Based:i+51,
+      authority:"CROP_ONLY_UNVERIFIED",graphVerified:false,humanVerified:false,
+      cropSha256:(i?"b":"a").repeat(64),byteLength:120,
+      width:120,height:80,priorAttemptBlocked:i===0}));
+    const plan=compileGraphBatchPlan(queue,proofs);
+    expect(plan.counts).toMatchObject({eligible:1,excluded:1,blocked:1});
+    const marker=join(root,".glm-cloud-v1-RB-PDF-12-page-001-region-01.cloud-attempted");
+    await writeFile(marker,"CHARGE_OUTCOME_UNKNOWN");
+    const result=await reconcileBatchCandidates(root,plan);
+    expect(result).toMatchObject({inspected:2,unsafeToReplay:1,noPreviousEvidence:1,
+      dispatchEnabled:false});
+    expect(result.items.find(x=>x.id===id)).toMatchObject({
+      state:"PRIOR_ATTEMPT_OUTCOME_UNCERTAIN",planningStatus:"EXCLUDED_FROM_PLAN",
+      exclusionReason:"PRIOR_ATTEMPT_OR_OUTPUT_PRESENT",canAutoRetry:false});
+    expect(JSON.stringify(result)).not.toContain("CHARGE_OUTCOME_UNKNOWN");
+  }));
   it("fails closed on symlink and unknown item, never suggests auto-replay",()=>onTemp(async root=>{
     const marker=join(root,".glm-cloud-v1-RB-PDF-12-page-001-region-01.cloud-attempted");
     const outside=join(root,"other.txt");
