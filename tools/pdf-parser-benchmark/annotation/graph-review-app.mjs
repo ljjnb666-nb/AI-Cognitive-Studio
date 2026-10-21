@@ -532,10 +532,17 @@ async function loadIntakeOverview(){
       throw new GraphReviewError("GRAPH_REVIEW_NEXT_ITEM_INVALID");
     if(first){
       next.disabled=false;
-      next.onclick=()=>first.reviewKind==="LEGACY_P127"?
-        void loadAutomatically():void loadRegisteredRegion({
-          ...first,sourcePhysicalPage1Based:first.physicalPage
-        },first.reviewKind==="STAGED_REGION");
+      // Prefer an *other* incomplete region when one exists, so a reviewer
+      // is not sent back to the currently open incomplete book.
+      next.onclick=()=>{
+        const current=activeItemId??(activeReviewKind==="LEGACY_P127"&&view?
+          "RB-PDF-13:page-002-region-01":null);
+        const target=first.id===current?(pending[1]??first):first;
+        return target.reviewKind==="LEGACY_P127"?
+          void loadAutomatically():void loadRegisteredRegion({
+            ...target,sourcePhysicalPage1Based:target.physicalPage
+          },target.reviewKind==="STAGED_REGION");
+      };
     }
     workflow.textContent="私有草稿已处理 "+reviewedDecisions+"/"+totalDecisions+
       " 项 · 涉及 "+eligibleRegions+" 个可审区域 · 全部标记 "+completedDraftRegions+
