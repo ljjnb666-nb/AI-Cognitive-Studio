@@ -166,6 +166,21 @@ describe("03D P127 local auto import — strictly synthetic, no D: data",()=>{
       expect(legacy.headers["content-security-policy"]).toContain("connect-src 'none'");
     }finally{await app.close();}
   }));
+  it("read-only real-data mode exposes no draft writes despite valid token",()=>withFixture(async x=>{
+    const app=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token,privateGraphReadOnly:true});
+    try{
+      const b=await send(app,"/api/private-graph/p127/bundle");
+      expect(b.status).toBe(200);
+      const d=await send(app,"/api/private-graph/p127/draft");
+      expect(d.status).toBe(200);
+      expect(d.value).toEqual({draft:null,revision:null});
+      const raw=createGraphReviewDraft((await readPrivateP127Bundle(x.root)).view);
+      const denied=await send(app,"/api/private-graph/p127/draft",{method:"PUT",body:raw,revision:"none"});
+      expect(denied.status).toBe(405);
+      expect(denied.value.code).toBe("PRIVATE_DRAFT_WRITE_DISABLED");
+      expect((await readPrivateP127Draft(x.root,(await readPrivateP127Bundle(x.root)).view)).revision).toBe(null);
+    }finally{await app.close();}
+  }));
   it("restores and revision-writes an unattested draft; stale revision cannot overwrite",()=>withFixture(async x=>{
     const v=(await readPrivateP127Bundle(x.root)).view;
     const none=await readPrivateP127Draft(x.root,v);
