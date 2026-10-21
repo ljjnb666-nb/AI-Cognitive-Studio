@@ -180,6 +180,36 @@ async function main(){
     await cdp.command("Page.reload",{ignoreCache:true});
     await until(cdp,'document.querySelector("#autosave-state")?.textContent.includes("已恢复") && document.querySelector("#entries select")?.value==="UNCERTAIN"',"EDGE_REFRESH_RESTORE_TIMEOUT");
     console.log("ACS_P127_EDGE_SYNTHETIC_RELOAD_RESTORE_PASS");
+    // Hold an otherwise valid synthetic P127 restore in File.arrayBuffer().
+    // A new human edit must win over a stale restore that resolves later.
+    const pendingRestorePayload=JSON.stringify(checked.draft);
+    const armRestore='(()=>{const payload='+JSON.stringify(pendingRestorePayload)+';'+
+      'const original=File.prototype.arrayBuffer;window.__acsFileReader=original;'+
+      'File.prototype.arrayBuffer=function(){if(this.name==="acs-delayed-restore.json")'+
+      'return new Promise((resolve,reject)=>{window.__acsReleaseRestore=()=>original.call(this).then(resolve,reject);});'+
+      'return original.call(this);};'+
+      'const data=new DataTransfer();'+
+      'data.items.add(new File([payload],"acs-delayed-restore.json",{type:"application/json"}));'+
+      'const input=document.querySelector("#restore");input.files=data.files;'+
+      'input.dispatchEvent(new Event("change",{bubbles:true}));return true;})()';
+    if(!await cdp.value(armRestore))stop("EDGE_02F_RESTORE_RACE_SETUP_FAILED");
+    await until(cdp,'typeof window.__acsReleaseRestore==="function"',
+      "EDGE_02F_RESTORE_RACE_NOT_ARMED");
+    await cdp.value('(()=>{const s=document.querySelector("#entries select");s.value="VISIBLE_MATCH";s.dispatchEvent(new Event("change",{bubbles:true}));window.__acsReleaseRestore();File.prototype.arrayBuffer=window.__acsFileReader;return true;})()');
+    await until(cdp,'document.querySelector("#notice")?.textContent.includes("GRAPH_RESTORE_STALE_SELECTION_OR_EDIT")',
+      "EDGE_02F_STALE_RESTORE_NOT_BLOCKED");
+    if(!await cdp.value('document.querySelector("#entries select")?.value==="VISIBLE_MATCH"'))
+      stop("EDGE_02F_NEW_HUMAN_EDIT_OVERWRITTEN");
+    await until(cdp,'document.querySelector("#autosave-state")?.textContent.includes("已保存到本机 D 盘")',
+      "EDGE_02F_RACE_EDIT_AUTOSAVE_TIMEOUT");
+    // Restore the expected single-decision baseline before the cross-book test.
+    await cdp.value('(()=>{const s=document.querySelector("#entries select");s.value="UNCERTAIN";s.dispatchEvent(new Event("change",{bubbles:true}));return true;})()');
+    await until(cdp,'document.querySelector("#autosave-state")?.textContent.includes("已保存到本机 D 盘")',
+      "EDGE_02F_RACE_BASELINE_RESTORE_TIMEOUT");
+    const afterRestoreRace=await readPrivateP127Draft(root,(await readPrivateP127Bundle(root)).view);
+    if(afterRestoreRace.draft?.decisions[0]?.decision!=="UNCERTAIN")
+      stop("EDGE_02F_RACE_FINAL_DRAFT_INVALID");
+    console.log("ACS_02F_EDGE_ASYNC_STALE_RESTORE_FENCED=true");
     // Exercise second-book registered graph review via the actual unified UI,
     // separate CAS-backed draft and refresh recovery.
     await until(cdp,'document.querySelector("#review-progress-summary")?.textContent.includes("已处理 1/6")',
