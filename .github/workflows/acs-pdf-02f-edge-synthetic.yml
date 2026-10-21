@@ -1,5 +1,5 @@
 # 03E-04B-02F: synthetic-only Windows Edge; never reads the private D: dataset.
-# Only the owner's exact same-repository 02F branch may use the local runner.
+# Only the owner's exact same-repository 02F/02G review branches may use the local runner.
 name: ACS PDF review progress Edge synthetic acceptance
 on:
   push:
@@ -8,7 +8,7 @@ on:
       - "tools/pdf-parser-benchmark/**"
       - ".github/workflows/acs-pdf-02f-edge-synthetic.yml"
   pull_request:
-    branches: [feat/pdf-figure-03e04b02e-staged-review]
+    branches: [feat/pdf-figure-03e04b02e-staged-review, feat/pdf-figure-03e04b02f-review-workflow]
     paths:
       - "tools/pdf-parser-benchmark/**"
       - ".github/workflows/acs-pdf-02f-edge-synthetic.yml"
@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   staged-edge:
-    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && ((github.event_name == 'push' && github.ref == 'refs/heads/feat/pdf-figure-03e04b02f-review-workflow') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-figure-03e04b02f-review-workflow' && github.event.pull_request.user.login == 'ljjnb666-nb')) }}
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && ((github.event_name == 'push' && github.ref == 'refs/heads/feat/pdf-figure-03e04b02f-review-workflow') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.pull_request.head.ref == 'feat/pdf-figure-03e04b02f-review-workflow' || github.event.pull_request.head.ref == 'feat/pdf-figure-03e04b02g-note-draft-guard') && github.event.pull_request.user.login == 'ljjnb666-nb')) }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 10
     steps:
