@@ -43,6 +43,64 @@ class CloudBlocked(ValueError):
     pass
 
 
+
+def response_metadata(answer: dict, expected_model: str) -> dict:
+    """Only bounded categorical telemetry. No provider text or reasoning is recorded."""
+    choices = answer.get("choices")
+    count = len(choices) if isinstance(choices, list) else -1
+    choice = choices[0] if count > 0 and isinstance(choices[0], dict) else {}
+    message = choice.get("message")
+    message = message if isinstance(message, dict) else {}
+    finish = choice.get("finish_reason")
+    content = message.get("content")
+    actual_model = answer.get("model")
+    usage = answer.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    def tokens(field):
+        value = usage.get(field)
+        return value if type(value) is int and 0 <= value <= 2000000 else -1
+    return {
+        "modelMatchesRequested": actual_model == expected_model,
+        "modelFieldPresent": isinstance(actual_model, str),
+        "choicesCount": min(count, 2000000),
+        "finishStatus": "STOP" if finish == "stop" else ("LENGTH" if finish == "length" else ("MISSING" if finish is None else "OTHER")),
+        "contentKind": "TEXT" if isinstance(content, str) else ("MISSING" if content is None else "OTHER"),
+        "contentChars": min(len(content), 2000000) if isinstance(content, str) else -1,
+        "reasoningPresent": isinstance(message.get("reasoning_content"), str) and bool(message["reasoning_content"]),
+        "promptTokens": tokens("prompt_tokens"),
+        "completionTokens": tokens("completion_tokens"),
+    }
+
+
+def record_attempt(receipt: Path, event: str, **fields) -> None:
+    """Append fixed-shape metadata to a PRIVATE local receipt. Never add raw strings."""
+    permitted = {
+        "REQUEST_DISPATCHED": set(),
+        "HTTP_200": {"responseBytes"},
+        "RESPONSE_META": set(response_metadata({}, DEFAULT_MODEL)),
+        "MODEL_RESULT_ACCEPTED": {"nodeCount", "edgeCount"},
+        "FAILED": {"errorCode"},
+        "OUTPUT_SAVED": set(),
+    }
+    if event not in permitted or set(fields) != permitted[event]:
+        raise CloudBlocked("CLOUD_RECEIPT_FIELD_INVALID")
+    for name, value in fields.items():
+        if name == "errorCode":
+            if not isinstance(value, str) or not re.fullmatch(r"CLOUD_[A-Z0-9_]{3,70}", value):
+                raise CloudBlocked("CLOUD_RECEIPT_FIELD_INVALID")
+        elif name in ("finishStatus", "contentKind"):
+            if value not in (("STOP", "LENGTH", "MISSING", "OTHER") if name == "finishStatus" else ("TEXT", "MISSING", "OTHER")):
+                raise CloudBlocked("CLOUD_RECEIPT_FIELD_INVALID")
+        elif type(value) is bool:
+            pass
+        elif type(value) is not int or not -1 <= value <= 2000000:
+            raise CloudBlocked("CLOUD_RECEIPT_FIELD_INVALID")
+    with receipt.open("a", encoding="utf-8") as out:
+        out.write(json.dumps({"event": event, **fields}, sort_keys=True) + "\n")
+        out.flush()
+        os.fsync(out.fileno())
+
+
 class NeverFollowRedirect(HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         raise CloudBlocked("CLOUD_API_REDIRECT_REJECTED")
@@ -55,7 +113,7 @@ def secret_from_environment() -> str:
     return key
 
 
-def request_glm(payload: dict, key: str) -> dict:
+def request_glm(payload: dict, key: str, *, observer=None) -> dict:
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     if len(raw) > MAX_REQUEST_BYTES:
         raise CloudBlocked("CLOUD_REQUEST_SIZE_LIMIT")
@@ -64,6 +122,8 @@ def request_glm(payload: dict, key: str) -> dict:
                            "Authorization": "Bearer " + key})
     # No proxies, no redirects; only TLS to the pinned Zhipu API endpoint.
     opener = build_opener(ProxyHandler({}), NeverFollowRedirect())
+    if observer is not None:
+        observer("REQUEST_DISPATCHED")
     try:
         with opener.open(req, timeout=120) as response:
             if response.status != 200:
@@ -78,6 +138,8 @@ def request_glm(payload: dict, key: str) -> dict:
         raise CloudBlocked("CLOUD_HTTP_REJECTED") from None
     except (URLError, OSError, TimeoutError):
         raise CloudBlocked("CLOUD_API_UNREACHABLE") from None
+    if observer is not None:
+        observer("HTTP_200", responseBytes=min(len(body), 2000000))
     if len(body) > MAX_RESPONSE_BYTES:
         raise CloudBlocked("CLOUD_RESPONSE_TOO_LARGE")
     try:
@@ -89,7 +151,7 @@ def request_glm(payload: dict, key: str) -> dict:
     return answer
 
 
-def infer_cloud_one(item: dict, model: str, key: str) -> dict:
+def infer_cloud_one(item: dict, model: str, key: str, *, observer=None) -> dict:
     if model not in MODELS:
         raise CloudBlocked("VISION_MODEL_NOT_ALLOWLISTED")
     crop = item["crop"]
@@ -117,7 +179,11 @@ def infer_cloud_one(item: dict, model: str, key: str) -> dict:
             ]},
         ],
     }
-    answer = request_glm(payload, key)
+    answer = request_glm(payload, key) if observer is None else request_glm(payload, key, observer=observer)
+    if observer is not None:
+        observer("RESPONSE_META", **response_metadata(answer, model))
+    if isinstance(answer.get("model"), str) and answer["model"] != model:
+        raise CloudBlocked("CLOUD_RETURNED_MODEL_MISMATCH")
     try:
         choice = answer["choices"][0]
         if not isinstance(choice, dict):
@@ -186,6 +252,8 @@ def execute_cloud(root: Path, fixture: str, model: str, *,
     except FileExistsError:
         raise CloudBlocked("CLOUD_RESULT_ALREADY_EXISTS") from None
     stage.mkdir()
+    def observe(event, **fields):
+        record_attempt(receipt, event, **fields)
     try:
         templates = {entry["regionId"]:entry for entry in empty_template(provenance)}
         results = []
@@ -194,7 +262,8 @@ def execute_cloud(root: Path, fixture: str, model: str, *,
             if not isinstance(template, dict) or template["sourceCropSha256"] != item["sha"]:
                 raise CloudBlocked("SOURCE_TEMPLATE_SHA_MISMATCH")
             proposal = dict(template)
-            model_result = infer_cloud_one(item, model, secret)
+            model_result = infer_cloud_one(item, model, secret, observer=observe)
+            observe("MODEL_RESULT_ACCEPTED", nodeCount=len(model_result["nodes"]), edgeCount=len(model_result["edges"]))
             proposal["nodes"] = model_result["nodes"]
             proposal["edges"] = model_result["edges"]
             try:
@@ -230,7 +299,16 @@ def execute_cloud(root: Path, fixture: str, model: str, *,
             handle.flush()
             os.fsync(handle.fileno())
         os.rename(stage, output)
-    except BaseException:
+        observe("OUTPUT_SAVED")
+    except BaseException as exc:
+        # Retain first-failure diagnostics while preserving the original error.
+        code = str(exc) if isinstance(exc, CloudBlocked) else "CLOUD_RUNTIME_BLOCKED"
+        if not re.fullmatch(r"CLOUD_[A-Z0-9_]{3,70}", code):
+            code = "CLOUD_RUNTIME_BLOCKED"
+        try:
+            observe("FAILED", errorCode=code)
+        except (OSError, CloudBlocked):
+            pass
         # Durable receipt remains even when output is incomplete. No auto retries.
         if stage.is_dir() and not stage.is_symlink():
             shutil.rmtree(stage)
