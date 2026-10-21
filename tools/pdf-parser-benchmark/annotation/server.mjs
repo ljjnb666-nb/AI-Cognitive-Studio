@@ -130,6 +130,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
             const bundle=await readRegisteredGraphBundle(privateGraphRoot,item,registry);
             reply(200,{...bundle.data,identity:bundle.identity,
               authority:bundle.authority,reviewKind:bundle.reviewKind,
+              registration:bundle.registration??null,
               sourcePhysicalPage1Based:bundle.view.physicalPage,
               saved:bundle.saved});
             return;
