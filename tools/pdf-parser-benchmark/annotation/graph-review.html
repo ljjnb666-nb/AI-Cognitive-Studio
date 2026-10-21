@@ -18,6 +18,12 @@
 <p>自动识别允许范围内 RB-PDF-12/13 的已有局部裁剪。<b>仅已验证来源和已存在图关系结果的项目才能进入最终人工审核</b>；单有 PNG 的其他区域不会假装已经完成 GLM 识别，也不会自动发起付费请求。</p>
 <div class="actions"><button id="refresh-queue" type="button">重新扫描已有证据</button><span id="queue-summary" role="status" aria-live="polite">队列尚未读取</span></div>
 <div id="queue-items" class="queue-items"></div>
+<div id="crop-preview" class="crop-preview" hidden>
+<h3 id="crop-preview-title">裁剪图只读预览</h3>
+<p id="crop-preview-status" role="status" aria-live="polite">尚未选择区域</p>
+<div class="image-scroller"><canvas id="crop-preview-canvas" aria-label="经过 SHA 验证的原始局部裁剪图"></canvas></div>
+<p class="pathhelp">此处只展示经过来源核验的裁剪图；没有图关系结果的区域无法进行箭头、方向或知识内容的最终确认。不会调用 GLM。</p>
+</div>
 </section>
 <section class="panel">
 <h2>1. 自动导入本机已生成的 P127 证据</h2>

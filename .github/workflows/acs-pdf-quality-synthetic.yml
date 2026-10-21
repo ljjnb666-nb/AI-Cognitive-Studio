@@ -63,6 +63,7 @@ jobs:
           node --check annotation/graph-review.mjs
           node --check annotation/graph-review-app.mjs
           node --check annotation/graph-review-auto.mjs
+          node --check annotation/graph-crop-preview.mjs
           node --check annotation/private-graph-local.mjs
           node --check annotation/server.mjs
           node --check scripts/serve_gt_annotation.mjs

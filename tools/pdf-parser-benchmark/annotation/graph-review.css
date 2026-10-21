@@ -5,3 +5,9 @@
 .queue-label b{font-size:13px;color:#234a43}.queue-label small{font-size:11px;color:#668079}
 .queue-status{font-size:12px;color:#627975}
 .queue-item button{width:max-content;max-width:100%}
+
+.crop-preview{border-top:1px solid #e0ebe5;margin-top:18px;padding-top:17px}
+.crop-preview h3{font-size:15px;color:#244c44}
+.crop-preview .image-scroller{max-height:60vh}
+.crop-preview canvas{display:block;max-width:100%;width:100%;height:auto}
+.queue-item .crop-preview-button{background:#fff;border:1px solid #a4c9c0;color:#176d5d;width:max-content;max-width:100%}

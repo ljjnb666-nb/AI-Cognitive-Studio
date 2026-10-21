@@ -4,6 +4,7 @@ import {
   updateGraphDecision, graphReviewProgress, GraphReviewError,
 } from "./graph-review.mjs";
 import { verifyAutoGraphBundle } from "./graph-review-auto.mjs";
+import { verifyGraphCropPreview } from "./graph-crop-preview.mjs";
 
 const $=id=>document.getElementById(id);
 const el=(tag,klass,text)=>{
@@ -261,7 +262,44 @@ async function loadAutomatically(){
   }
 }
 
-let queueEpoch=0;
+let queueEpoch=0,previewEpoch=0;
+function resetPreview(){
+  ++previewEpoch;
+  $("crop-preview").hidden=true;
+  const c=$("crop-preview-canvas");c.width=0;c.height=0;
+  $("crop-preview-status").textContent="尚未选择区域";
+}
+async function showCropPreview(item){
+  const epoch=++previewEpoch;
+  const panel=$("crop-preview"),status=$("crop-preview-status");
+  panel.hidden=false;
+  $("crop-preview-title").textContent=item.fixtureId+" · 物理 P"+item.sourcePhysicalPage1Based+" · "+item.regionId;
+  status.textContent="正在读取本机原始局部图片并核对 SHA…";
+  const canvas=$("crop-preview-canvas");canvas.width=0;canvas.height=0;
+  try{
+    const data=await autoRequest("/api/private-graph/crop?item="+encodeURIComponent(item.id));
+    if(epoch!==previewEpoch)return;
+    const verified=await verifyGraphCropPreview(data,item);
+    if(epoch!==previewEpoch)return;
+    const image=await createImageBitmap(new Blob([verified.bytes],{type:"image/png"}));
+    try{
+      if(epoch!==previewEpoch)return;
+      if(image.width!==verified.width||image.height!==verified.height)
+        throw new GraphReviewError("GRAPH_CROP_PREVIEW_DIMENSIONS_MISMATCH");
+      const scale=Math.min(1,Math.sqrt(4_000_000/(image.width*image.height)));
+      canvas.width=Math.max(1,Math.floor(image.width*scale));
+      canvas.height=Math.max(1,Math.floor(image.height*scale));
+      const ctx=canvas.getContext("2d");
+      if(!ctx)throw new GraphReviewError("GRAPH_CROP_PREVIEW_CANVAS_UNAVAILABLE");
+      ctx.drawImage(image,0,0,canvas.width,canvas.height);
+      status.textContent="SHA、来源与图像尺寸校验通过 · 仅供查看（不代表图关系识别完成）";
+    }finally{image.close();}
+  }catch(e){
+    if(epoch!==previewEpoch)return;
+    canvas.width=0;canvas.height=0;
+    status.textContent="预览已阻止："+(e instanceof GraphReviewError?e.code:"GRAPH_CROP_PREVIEW_FAILED");
+  }
+}
 const evidenceLabels={
   GRAPH_READY_FOR_HUMAN_REVIEW:"图关系已存在 · 待人工复核",
   CROP_READY_NO_GRAPH:"局部图像已校验 · 尚无图关系候选",
@@ -270,6 +308,7 @@ const evidenceLabels={
 };
 async function loadQueue(){
   const epoch=++queueEpoch;
+  resetPreview();
   const summary=$("queue-summary"),list=$("queue-items");
   list.replaceChildren();
   if(!hasLocalToken){summary.textContent="未启用自动导入权限；可使用下方手动选择。";return;}
@@ -301,6 +340,12 @@ async function loadQueue(){
       label.append(el("b","",item.fixtureId+" · 物理 P"+item.sourcePhysicalPage1Based),
         el("small","",item.regionId));
       card.append(label,el("span","queue-status",evidenceLabels[item.evidenceStatus]));
+      if(item.evidenceStatus==="CROP_READY_NO_GRAPH"||item.reviewable){
+        const preview=el("button","crop-preview-button","查看局部图片");
+        preview.type="button";
+        preview.addEventListener("click",()=>{void showCropPreview(item);});
+        card.append(preview);
+      }
       if(item.reviewable){
         if(!Number.isSafeInteger(item.nodeCount)||!Number.isSafeInteger(item.edgeCount)||
            !Number.isSafeInteger(item.reviewedCount)||item.reviewedCount<0||
