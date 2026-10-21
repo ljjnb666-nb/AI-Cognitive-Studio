@@ -68,7 +68,10 @@ export function verifyConsentEvidence(plan,draft,evidence,{
     deny("CONSENT_SCOPE_OR_EXPIRY_INVALID");
   let key,ok=false;
   try{
-    key=createPublicKey(trustedKeys[evidence.keyId]);
+    const sourceKey=trustedKeys[evidence.keyId];
+    // Node's createPublicKey(public-KeyObject) can reject an already-public
+    // KeyObject; accept the verified object directly or import PEM/SPKI.
+    key=sourceKey?.type==="public"?sourceKey:createPublicKey(sourceKey);
     if(key.asymmetricKeyType!=="ed25519")
       deny("CONSENT_SIGNER_KEY_TYPE_INVALID");
     const signed=Buffer.from(JSON.stringify(statement),"utf8");
