@@ -107,7 +107,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           const url = new URL(request.url, "http://127.0.0.1:"+port);
           if (request.url.length>150 || url.searchParams.size!==1 ||
               !url.searchParams.has("item") || url.hash ||
-              !/^[A-Za-z0-9%:_-]+$/u.test(url.search.slice(1))) {
+              !/^item=RB-PDF-(?:12|13)(?::|%3[Aa])page-[0-9]{3}-region-[0-9]{2}$/u.test(url.search.slice(1))) {
             reply(400,{code:"PRIVATE_PREVIEW_QUERY_INVALID"}); return;
           }
           reply(200,await readPrivateGraphCropPreview(privateGraphRoot,url.searchParams.get("item")));
