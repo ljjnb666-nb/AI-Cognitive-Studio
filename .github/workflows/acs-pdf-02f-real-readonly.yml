@@ -31,11 +31,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: dfcace0a9560148a8fe8b3a96bb08a5ab10ac613
+          ref: d7f037f94dbd783fdd974e6e76ebd6472db6aaca
       - name: Verify exact SHA, Node 24, Edge, and safe RAM
         shell: powershell
         env:
-          EXPECTED_SHA: dfcace0a9560148a8fe8b3a96bb08a5ab10ac613
+          EXPECTED_SHA: d7f037f94dbd783fdd974e6e76ebd6472db6aaca
         run: |
           $ErrorActionPreference='Stop'
           if ((git rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) {throw 'PRIVATE_EDGE_EXACT_SHA_INVALID'}
