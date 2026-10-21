@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: acs-windows-pdf-local-ownership
+  group: acs-windows-pdf-02e-synthetic-acceptance
   cancel-in-progress: false
 
 jobs:
