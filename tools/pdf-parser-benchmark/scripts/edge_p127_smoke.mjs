@@ -10,7 +10,9 @@ import {tmpdir} from "node:os";
 import {join,dirname} from "node:path";
 import {deflateSync} from "node:zlib";
 import {startAnnotationServer} from "../annotation/server.mjs";
-import {PRIVATE_FILENAMES,readPrivateP127Draft,readPrivateP127Bundle} from "../annotation/private-graph-local.mjs";
+import {PRIVATE_FILENAMES,readPrivateP127Draft,readPrivateP127Bundle,
+  readRegisteredGraphBundle} from "../annotation/private-graph-local.mjs";
+import {TRUSTED_GRAPH_RESULTS} from "../annotation/graph-result-registry.mjs";
 
 const sha=b=>createHash("sha256").update(b).digest("hex");
 const delay=ms=>new Promise(ok=>setTimeout(ok,ms));
@@ -40,6 +42,37 @@ async function fixture(root){
   for(const [name,data] of Object.entries({result:Buffer.from(JSON.stringify(result)),manifest,crop})){
     const p=join(root,...PRIVATE_FILENAMES[name].split("/"));await mkdir(dirname(p),{recursive:true});await writeFile(p,data);
   }
+  // A second book and its graph model result exist only inside this isolated
+  // temporary synthetic fixture. It never sends any real image to a model.
+  const f2="RB-PDF-12",id2="page-001-region-01",page2=51;
+  const m2=structuredClone(regions);
+  m2.fixtureId=f2;m2.pages[0].subsetPageIndex=0;m2.pages[0].sourcePhysicalPage1Based=page2;
+  m2.pages[0].regions[0].regionId=id2;
+  const mb2=Buffer.from(JSON.stringify(m2));
+  const r2=structuredClone(result);
+  r2.fixtureId=f2;r2.attemptClass="EXPLICIT_P51_INITIAL_ATTEMPT";
+  r2.sourceRegionManifestSha256=sha(mb2);
+  r2.results[0].regionId=id2;r2.results[0].sourcePhysicalPage1Based=page2;
+  r2.results[0].proposal.fixtureId=f2;r2.results[0].proposal.regionId=id2;
+  r2.results[0].mappedPageEvidence.regionId=id2;
+  r2.results[0].mappedPageEvidence.sourcePhysicalPage1Based=page2;
+  for(const n of r2.results[0].mappedPageEvidence.mappedNodes)n.sourcePhysicalPage1Based=page2;
+  for(const e of r2.results[0].mappedPageEvidence.mappedEdges)e.sourcePhysicalPage1Based=page2;
+  const rb2=Buffer.from(JSON.stringify(r2));
+  const reg={
+    id:f2+":"+id2,fixtureId:f2,regionId:id2,physicalPage:page2,
+    kind:"REGISTERED_REGION",sourceRun:"real-mineru-39440805765-1",
+    provider:"ZHIPU_GLMCLOUD_STANDARD_API",model:"glm-5.3-flash",
+    attemptClass:"EXPLICIT_P51_INITIAL_ATTEMPT",
+    resultPath:"glm-cloud-v1-"+f2+"-"+id2+"-synthetic/cloud-vision-proposals.json",
+    manifestPath:"region-proposals-v1-"+f2+"/region-proposals.json",
+    cropPath:"region-proposals-v1-"+f2+"/crops/"+id2+".png",
+    resultSha256:sha(rb2),manifestSha256:sha(mb2),cropSha256:ch
+  };
+  for(const [path,data] of [[reg.resultPath,rb2],[reg.manifestPath,mb2],[reg.cropPath,crop]]){
+    const p=join(root,...path.split("/"));await mkdir(dirname(p),{recursive:true});await writeFile(p,data);
+  }
+  return reg;
 }
 class CDP {
   constructor(ws){
@@ -100,17 +133,19 @@ async function main(){
   const root=join(temp,"fake-private-reports","real-mineru-39440805765-1"),profile=join(temp,"edge-profile");
   let app,child,cdp;
   try{
-    await mkdir(root,{recursive:true});await fixture(root);
+    await mkdir(root,{recursive:true});
+    const registration=await fixture(root),registrations=[...TRUSTED_GRAPH_RESULTS,registration];
     const token=randomBytes(32).toString("hex");
-    app=await startAnnotationServer({privateGraphRoot:root,graphAccessToken:token});
+    app=await startAnnotationServer({privateGraphRoot:root,graphAccessToken:token,
+      trustedGraphRegistrations:registrations});
     child=spawn(edge,["--headless=new","--disable-gpu","--disable-extensions","--disable-background-networking","--no-first-run","--no-default-browser-check","--remote-debugging-port=0","--remote-allow-origins=*","--user-data-dir="+profile,"--window-size=1280,900",app.url+"graph-review.html#review-token="+token],{stdio:"ignore",windowsHide:true});
     cdp=await connect(profile);
     await cdp.command("Runtime.enable");
     await until(cdp,'document.querySelector("#work")?.hidden === false',"EDGE_AUTO_IMPORT_TIMEOUT");
     const state=await cdp.value('({canvas:document.querySelector("#diagram").width>0,nodes:document.querySelector("#counts").textContent.includes("节点 2 个"),edges:document.querySelector("#counts").textContent.includes("关系 1 条"),choices:document.querySelectorAll("#entries select").length===3,unverified:document.querySelector("#export-panel").textContent.includes("graphVerified=false")})');
     if(!state||!Object.values(state).every(Boolean))stop("EDGE_AUTO_IMPORT_DISPLAY_REJECTED");
-    await until(cdp,'document.querySelectorAll("#queue-items .queue-item").length===1',"EDGE_SYNTHETIC_QUEUE_TIMEOUT");
-    const queued=await cdp.value('({total:document.querySelector("#queue-summary")?.textContent.includes("已发现 1 个区域"),ready:document.querySelector("#queue-summary")?.textContent.includes("可审核 1"),entry:document.querySelectorAll("#queue-items button.primary").length===1})');
+    await until(cdp,'document.querySelectorAll("#queue-items .queue-item").length===2',"EDGE_SYNTHETIC_QUEUE_TIMEOUT");
+    const queued=await cdp.value('({total:document.querySelector("#queue-summary")?.textContent.includes("已发现 2 个区域"),ready:document.querySelector("#queue-summary")?.textContent.includes("可审核 2"),entry:document.querySelectorAll("#queue-items button.primary").length===2})');
     if(!queued||!Object.values(queued).every(Boolean))stop("EDGE_SYNTHETIC_QUEUE_REJECTED");
 
     await cdp.value('(()=>{const button=document.querySelector("#queue-items .crop-preview-button");if(!button)return false;button.click();return true;})()');
@@ -126,6 +161,29 @@ async function main(){
     await cdp.command("Page.reload",{ignoreCache:true});
     await until(cdp,'document.querySelector("#autosave-state")?.textContent.includes("已恢复") && document.querySelector("#entries select")?.value==="UNCERTAIN"',"EDGE_REFRESH_RESTORE_TIMEOUT");
     console.log("ACS_P127_EDGE_SYNTHETIC_RELOAD_RESTORE_PASS");
+    // Exercise second-book registered graph review via the actual unified UI,
+    // separate CAS-backed draft and refresh recovery.
+    const picked=await cdp.value('(()=>{const cards=[...document.querySelectorAll("#queue-items .queue-item")];const b=cards.find(c=>c.textContent.includes("RB-PDF-12"))?.querySelector("button.primary");if(!b)return false;b.click();return true;})()');
+    if(!picked)stop("EDGE_GENERIC_ENTRY_NOT_AVAILABLE");
+    await until(cdp,'document.querySelector("#review-scope")?.textContent.includes("RB-PDF-12") && document.querySelector("#work")?.hidden===false',"EDGE_GENERIC_REGION_LOAD_TIMEOUT");
+    const generic=await cdp.value('({scope:document.querySelector("#review-scope")?.textContent.includes("物理 P51"),entries:document.querySelectorAll("#entries select").length===3,unverified:document.querySelector("#export-panel")?.textContent.includes("graphVerified=false")})');
+    if(!generic||!Object.values(generic).every(Boolean))stop("EDGE_GENERIC_REGION_DISPLAY_REJECTED");
+    console.log("ACS_03E03_EDGE_GENERIC_SECOND_BOOK_IMPORT_PASS=true");
+    await cdp.value('(()=>{const s=document.querySelector("#entries select");s.value="VISIBLE_MATCH";s.dispatchEvent(new Event("change",{bubbles:true}));return true;})()');
+    await until(cdp,'document.querySelector("#autosave-state")?.textContent.includes("已保存到本机 D 盘")',"EDGE_GENERIC_AUTOSAVE_TIMEOUT");
+    const savedGeneric=await readRegisteredGraphBundle(root,registration.id,registrations);
+    if(savedGeneric.saved.draft?.decisions[0]?.decision!=="VISIBLE_MATCH"||
+       savedGeneric.saved.draft.graphVerified!==false)
+      stop("EDGE_GENERIC_DRAFT_NOT_PERSISTED");
+    const pinnedLegacy=await readPrivateP127Draft(root,(await readPrivateP127Bundle(root)).view);
+    if(pinnedLegacy.draft?.decisions[0]?.decision!=="UNCERTAIN")
+      stop("EDGE_GENERIC_CHANGED_LEGACY_DRAFT");
+    await cdp.command("Page.reload",{ignoreCache:true});
+    await until(cdp,'document.querySelectorAll("#queue-items .queue-item").length===2 && document.querySelector("#work")?.hidden===false',"EDGE_GENERIC_RELOAD_QUEUE_TIMEOUT");
+    await cdp.value('(()=>{const c=[...document.querySelectorAll("#queue-items .queue-item")].find(x=>x.textContent.includes("RB-PDF-12"));c?.querySelector("button.primary")?.click();return true;})()');
+    await until(cdp,'document.querySelector("#review-scope")?.textContent.includes("RB-PDF-12") && document.querySelector("#entries select")?.value==="VISIBLE_MATCH" && document.querySelector("#autosave-state")?.textContent.includes("已恢复")',"EDGE_GENERIC_REFRESH_RESTORE_TIMEOUT");
+    console.log("ACS_03E03_EDGE_GENERIC_SECOND_BOOK_SAVE_RESTORE_PASS=true");
+    console.log("ACS_03E03_EDGE_LEGACY_DRAFT_NOT_OVERWRITTEN=true");
     console.log("ACS_P127_EDGE_GRAPH_VERIFIED=false");
     console.log("ACS_P127_EDGE_REAL_PRIVATE_DATA_TOUCHED=false");
   }finally{
