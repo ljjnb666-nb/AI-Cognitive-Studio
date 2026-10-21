@@ -71,3 +71,54 @@ jobs:
           }
           if ($code -ne 0) {throw 'ACS_GLM_P127_R02_NOT_ACCEPTED'}
           Write-Output 'ACS_GLM_P127_R02_RESULT_PRIVATE_AND_UNVERIFIED'
+
+      - name: Report bounded private receipt state without book data
+        if: always()
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $root='D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1'
+          $name='glm-cloud-v1-RB-PDF-13-page-002-region-01-retry-p127-r02-20261021'
+          $receipt=Join-Path $root ('.'+$name+'.cloud-attempted')
+          $final=Join-Path $root $name
+          if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) {
+            Write-Output 'ACS_GLM_R02_RECEIPT_PRESENT=false'
+          } else {
+            Write-Output 'ACS_GLM_R02_RECEIPT_PRESENT=true'
+            $info=Get-Item -LiteralPath $receipt -Force
+            if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {throw 'R02_RECEIPT_UNSAFE'}
+            if ($info.Length -gt 65536) {throw 'R02_RECEIPT_TOO_LARGE'}
+            $events=@()
+            foreach ($line in (Get-Content -LiteralPath $receipt | Select-Object -Skip 1)) {
+              try { $obj=ConvertFrom-Json -InputObject $line -ErrorAction Stop } catch {continue}
+              if ($obj.event -in @('REQUEST_DISPATCHED','HTTP_200','RESPONSE_META','MODEL_RESULT_ACCEPTED','FAILED','OUTPUT_SAVED')) {
+                $events+=([string]$obj.event)
+                if ($obj.event -eq 'RESPONSE_META') {
+                  if ($obj.finishStatus -in @('STOP','LENGTH','MISSING','OTHER')) {
+                    Write-Output ('ACS_GLM_R02_FINISH='+$obj.finishStatus)
+                  }
+                  if ($obj.contentKind -in @('TEXT','MISSING','OTHER')) {
+                    Write-Output ('ACS_GLM_R02_CONTENT_KIND='+$obj.contentKind)
+                  }
+                  if ($obj.modelMatchesRequested -is [bool]) {
+                    Write-Output ('ACS_GLM_R02_MODEL_MATCH='+([string]$obj.modelMatchesRequested).ToLowerInvariant())
+                  }
+                  foreach ($field in @('contentChars','promptTokens','completionTokens')) {
+                    $value=$obj.$field
+                    if ($value -is [int] -and $value -ge -1 -and $value -le 2000000) {
+                      Write-Output ('ACS_GLM_R02_'+$field.ToUpperInvariant()+'='+$value)
+                    }
+                  }
+                }
+                if ($obj.event -eq 'FAILED' -and $obj.errorCode -match '^CLOUD_[A-Z0-9_]{3,70}$') {
+                  Write-Output ('ACS_GLM_R02_FAILURE='+$obj.errorCode)
+                }
+              }
+            }
+            Write-Output ('ACS_GLM_R02_EVENT_COUNT='+$events.Count)
+          }
+          if (Test-Path -LiteralPath $final -PathType Container) {
+            Write-Output 'ACS_GLM_R02_PRIVATE_OUTPUT_PRESENT=true'
+          } else {
+            Write-Output 'ACS_GLM_R02_PRIVATE_OUTPUT_PRESENT=false'
+          }
