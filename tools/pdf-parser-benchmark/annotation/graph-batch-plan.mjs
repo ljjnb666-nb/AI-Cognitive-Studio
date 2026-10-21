@@ -50,6 +50,7 @@ export function compileGraphBatchPlan(queue,evidence,{
       block("BATCH_ITEM_INVALID");
     ids.add(item.id);
     const hasProof=proof!==null;
+    let duplicate=false;
     if(proof!==null){
       if(!proof||proof.id!==item.id||proof.sourcePhysicalPage1Based!==item.sourcePhysicalPage1Based||
          proof.authority!=="CROP_ONLY_UNVERIFIED"||
@@ -63,7 +64,7 @@ export function compileGraphBatchPlan(queue,evidence,{
         block("BATCH_CROP_PROOF_INVALID");
       // Two different regions may contain byte-identical crops. Do not bill
       // twice or fail the entire book when only one row is duplicated.
-      const duplicate=seen.has(proof.cropSha256);
+      duplicate=seen.has(proof.cropSha256);
       seen.add(proof.cropSha256);
     }
     const identity={id:item.id,fixtureId:item.fixtureId,
