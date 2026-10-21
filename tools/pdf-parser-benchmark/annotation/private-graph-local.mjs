@@ -9,7 +9,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { resolve, join, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import {lookupTrustedGraphResult,TRUSTED_GRAPH_RESULTS,RegistryError} from "./graph-result-registry.mjs";
-import {validateRegionGraphCandidate,RegionReviewError} from "./region-graph-review.mjs";
+import {validateRegionGraphCandidate,GraphReviewError as RegionReviewError} from "./region-graph-review.mjs";
 import {readRegionReviewDraft,saveRegionReviewDraft,RegionStoreError} from "./region-review-store.mjs";
 import {
   validateGraphReviewSource, parseGraphReviewDraft,
