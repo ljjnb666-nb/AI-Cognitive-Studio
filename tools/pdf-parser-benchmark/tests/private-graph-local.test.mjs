@@ -738,7 +738,8 @@ describe("03E-04B-02C canonical Python producer result -> unapproved registry pr
       "PRIVATE_INTAKE_GRAPH_CONTRACT_INVALID");
     await writeFile(output,src.result);
     const crop=join(x.root,...src.registration.cropPath.split("/"));
-    await writeFile(crop,Buffer.from(src.crop).fill(0,30,31));
+    const altered=Buffer.from(src.crop);altered[30]^=0xff;
+    await writeFile(crop,altered);
     await expectCode(inspectCanonicalGraphResultForRegistration(x.root,src.registration.id),
       "PRIVATE_INTAKE_GRAPH_CONTRACT_INVALID");
   }));
