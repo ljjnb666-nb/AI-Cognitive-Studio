@@ -252,6 +252,26 @@ async function main(){
     console.log("ACS_P127_EDGE_GRAPH_VERIFIED=false");
     if((await readStagedGraphBundle(root,registration.id)).registered!==false)stop("EDGE_STAGED_PROMOTED_TO_REGISTRY");
     console.log("ACS_03E04B02E_EDGE_GRAPH_VERIFIED=false");
+    // Losing connectivity must not trap the reviewer permanently in a dirty
+    // offline draft: an explicit two-click abandon leaves persisted CAS alone.
+    const persistedBeforeDiscard=(await readStagedGraphBundle(root,registration.id)).saved.revision;
+    const started=await cdp.value('(()=>{const original=window.fetch;window.__acsSavedFetch=original;window.fetch=(url,config)=>config?.method==="PUT"?Promise.reject(Error("SYNTHETIC_SAVE_OFFLINE")):original(url,config);const s=document.querySelectorAll("#entries select")[1];if(!s)return false;s.value="UNCERTAIN";s.dispatchEvent(new Event("change",{bubbles:true}));return true;})()');
+    if(!started)stop("EDGE_02F_OFFLINE_DISCARD_SETUP_FAILED");
+    await until(cdp,'document.querySelector("#autosave-state")?.textContent.includes("保存失败")',
+      "EDGE_02F_OFFLINE_SAVE_FAILURE_NOT_DETECTED");
+    const failSafe=await cdp.value('(()=>{document.querySelector("#clear").click();return {active:document.querySelector("#work").hidden===false,denied:document.querySelector("#notice").textContent.includes("已阻止切换")};})()');
+    if(!failSafe||!Object.values(failSafe).every(Boolean))
+      stop("EDGE_02F_OFFLINE_DRAFT_LOST_BY_NORMAL_CLEAR");
+    const oneClick=await cdp.value('(()=>{document.querySelector("#discard-local").click();return {active:document.querySelector("#work").hidden===false,confirm:document.querySelector("#discard-local").textContent.includes("再次点击确认放弃")};})()');
+    if(!oneClick||!Object.values(oneClick).every(Boolean))
+      stop("EDGE_02F_SINGLE_CLICK_DISCARDED_UNSAVED_DRAFT");
+    const twoClicks=await cdp.value('(()=>{document.querySelector("#discard-local").click();window.fetch=window.__acsSavedFetch;return {cleared:document.querySelector("#work").hidden===true,notice:document.querySelector("#notice").textContent.includes("双次确认放弃")};})()');
+    if(!twoClicks||!Object.values(twoClicks).every(Boolean))
+      stop("EDGE_02F_EXPLICIT_OFFLINE_DISCARD_FAILED");
+    const persistedAfterDiscard=(await readStagedGraphBundle(root,registration.id)).saved.revision;
+    if(persistedBeforeDiscard!==persistedAfterDiscard)
+      stop("EDGE_02F_OFFLINE_DISCARD_CHANGED_PERSISTED_DRAFT");
+    console.log("ACS_02F_EDGE_OFFLINE_FAILED_SAVE_DOUBLE_CONFIRM_DISCARD_PASS=true");
     console.log("ACS_P127_EDGE_REAL_PRIVATE_DATA_TOUCHED=false");
   }finally{
     try{cdp?.ws.close();}catch{}
