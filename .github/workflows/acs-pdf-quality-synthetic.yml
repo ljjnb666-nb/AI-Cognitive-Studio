@@ -62,11 +62,12 @@ jobs:
           node --check annotation/app.mjs
           node --check annotation/graph-review.mjs
           node --check annotation/graph-review-app.mjs
+          node --check annotation/private-graph-local.mjs
           node --check annotation/server.mjs
           node --check scripts/serve_gt_annotation.mjs
       - name: Synthetic annotation schema and loopback guard tests
         working-directory: tools/pdf-parser-benchmark
-        run: ./node_modules/.bin/vitest run tests/gt-annotation.test.mjs tests/gt-annotation-review.test.mjs tests/graph-review.test.mjs
+        run: ./node_modules/.bin/vitest run tests/gt-annotation.test.mjs tests/gt-annotation-review.test.mjs tests/graph-review.test.mjs tests/private-graph-local.test.mjs
       - name: CLI fails closed without local human GT (cloud has no private books)
         shell: bash
         working-directory: tools/pdf-parser-benchmark
