@@ -1,0 +1,113 @@
+# Real Windows NTFS filesystem synthetic test only. No GLM access or book reads.
+name: ACS 04B01 Windows isolated offline authorization ledger
+on:
+  push:
+    branches: [ops/mineru-synthetic-retry-20261020-isolated]
+    paths:
+      - .github/workflows/acs-p127-04b01-windows-synthetic-offline-reservation-20261021.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  synthetic-ledger:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 6
+    steps:
+      - name: Stage immutable exact Git blobs offline
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $dir=Join-Path $env:RUNNER_TEMP ('acs-04b01-synthetic-'+$env:GITHUB_RUN_ID)
+          if (Test-Path -LiteralPath $dir) {throw 'REUSED_STAGING_NOT_ALLOWED'}
+          [IO.Directory]::CreateDirectory($dir) | Out-Null
+          $git=(Get-Command git -ErrorAction Stop).Source
+          # Exact pinned SHA dc175e65a943fbba70e9d277d4051654adda26eb
+          $parts=@(
+            'LyoqCiAqIDAzRS0wNEItMDE6IGNvbnNlbnQgUkVRVUVTVCBkcmFmdHMsIE5PVCBhcHByb3ZhbHMuCiAqIE5vIG5ldHdvcmsgZXhlY3V0aW9uIG9yIHByb21vdGlvbiBmdW5jdGlvbiBleGlzdHMgaW4gdGhpcyBtb2R1bGUuCiAqIFZlcmlmaWVkIHByaWNlcyBhbmQgYSBzZXBhcmF0ZWx5IGFwcHJvdmVkIGF1dGhvcml6YXRpb24gYXJlIHByZXJlcXVpc2l0ZXMKICogdG8gYW55IGZ1dHVyZSBkaXNwYXRjaCBpbXBsZW1lbnRhdGlvbjsgYSB1c2VyLWNvbnRyb2xsZWQgSlNPTiBvYmplY3QgYWxvbmUKICogbXVzdCBuZXZlciBiZSBhY2NlcHRlZCBhcyBncmFudCBvZiBzcGVuZCBhdXRob3JpdHkuCiAqLwppbXBvcnQge2NyZWF0ZUhhc2h9IGZyb20gIm5vZGU6Y3J5cHRvIjsKZXhwb3J0IGNsYXNzIEJhdGNoQXV0aG9yaXphdGlvbkVycm9yIGV4dGVuZHMgRXJyb3J7CiAgY29uc3RydWN0b3IoY29kZSl7c3VwZXIoY29kZSk7dGhpcy5jb2RlPWNvZGU7dGhpcy5uYW1lPSJCYXRjaEF1dGhvcml6YXRpb25FcnJvciI7fQp9CmNvbnN0IGJsb2NrPWNvZGU9Pnt0aHJvdyBuZXcgQmF0Y2hBdXRob3JpemF0aW9uRXJyb3IoY29kZSk7fTsKY29uc3QgaGV4PS9eWzAtOWEtZl17NjR9JC91Owpjb25zdCBpZFBhdHRlcm49L15SQi1QREYtKD86MTJ8MTMpOnBhZ2UtWzAtOV17M30tcmVnaW9uLVswLTldezJ9JC91Owpjb25zdCBhbW91bnQ9dj0+TnVtYmVyLmlzU2FmZUludG'
+            'VnZXIodikmJnY+MCYmdjw9MTBfMDAwXzAwMF8wMDsKY29uc3QgZGlnZXN0PXY9PmNyZWF0ZUhhc2goInNoYTI1NiIpLnVwZGF0ZShKU09OLnN0cmluZ2lmeSh2KSkuZGlnZXN0KCJoZXgiKTsKZXhwb3J0IGZ1bmN0aW9uIHZlcmlmeU9mZmxpbmVCYXRjaFBsYW4ocGxhbil7CiAgaWYoIXBsYW58fHR5cGVvZiBwbGFuIT09Im9iamVjdCJ8fEFycmF5LmlzQXJyYXkocGxhbil8fAogICAgIHBsYW4uc2NoZW1hVmVyc2lvbiE9PSJhY3Mtb2ZmbGluZS1ncmFwaC1iYXRjaC1wbGFuLXYxInx8CiAgICAgcGxhbi5zb3VyY2VSdW4hPT0icmVhbC1taW5lcnUtMzk0NDA4MDU3NjUtMSJ8fAogICAgIHBsYW4ubW9kZWwhPT0iZ2xtLTUuMy1mbGFzaCJ8fAogICAgIHBsYW4uYXV0aG9yaXR5IT09IlBSRVZJRVdfT05MWV9OT19QUk9WSURFUl9ESVNQQVRDSCJ8fAogICAgIHBsYW4uZGlzcGF0Y2hFbmFibGVkIT09ZmFsc2V8fHBsYW4ucHJvdmlkZXJSZXF1ZXN0c0lzc3VlZCE9PTB8fAogICAgIHBsYW4ubmVlZHNFeHBsaWNpdFBhaWRBdXRob3JpemF0aW9uIT09dHJ1ZXx8cGxhbi5wcmljZUVzdGltYXRlIT09bnVsbHx8CiAgICAgIWhleC50ZXN0KHBsYW4ucGxhblNoYTI1Nj8/IiIpfHwKICAgICAhTnVtYmVyLmlzU2FmZUludGVnZXIocGxhbi5tYXhSZXF1ZXN0cyl8fHBsYW4ubWF4UmVxdWVzdHM8MXx8cGxhbi5tYXhSZXF1ZXN0cz4xNHx8CiAgICAgIU51bWJlci5pc1Nh'
+            'ZmVJbnRlZ2VyKHBsYW4ubWF4VG90YWxCeXRlcyl8fHBsYW4ubWF4VG90YWxCeXRlczwxfHxwbGFuLm1heFRvdGFsQnl0ZXM+NDhfMDAwXzAwMHx8CiAgICAgIUFycmF5LmlzQXJyYXkocGxhbi5wbGFubmVkKXx8cGxhbi5wbGFubmVkLmxlbmd0aD4xNHx8CiAgICAgIUFycmF5LmlzQXJyYXkocGxhbi5leGNsdWRlZCl8fHBsYW4uZXhjbHVkZWQubGVuZ3RoPjMyfHwKICAgICAhTnVtYmVyLmlzU2FmZUludGVnZXIocGxhbi50b3RhbENyb3BCeXRlcyl8fHBsYW4udG90YWxDcm9wQnl0ZXM8MHx8CiAgICAgIXBsYW4uY291bnRzfHxwbGFuLmNvdW50cy5lbGlnaWJsZSE9PXBsYW4ucGxhbm5lZC5sZW5ndGh8fAogICAgIHBsYW4uY291bnRzLmRpc2NvdmVyZWQhPT1wbGFuLnBsYW5uZWQubGVuZ3RoK3BsYW4uZXhjbHVkZWQubGVuZ3RoKQogICAgYmxvY2soIkJBVENIX0FVVEhfUExBTl9JTlZBTElEIik7CiAgY29uc3QgdXNlZD1uZXcgU2V0KCksY3JvcEhhc2hlcz1uZXcgU2V0KCk7CiAgbGV0IGJ5dGVzPTA7CiAgZm9yKGNvbnN0IGl0ZW0gb2YgcGxhbi5wbGFubmVkKXsKICAgIGlmKCFpdGVtfHwhaWRQYXR0ZXJuLnRlc3QoaXRlbS5pZD8/IiIpfHwKICAgICAgIGl0ZW0uaWQhPT1pdGVtLmZpeHR1cmVJZCsiOiIraXRlbS5yZWdpb25JZHx8dXNlZC5oYXMoaXRlbS5pZCl8fAogICAgICAgIU51bWJlci5pc1NhZmVJbnRlZ2VyKGl0ZW0uc291cmNlUGh5c2ljYW'
+            'xQYWdlMUJhc2VkKXx8CiAgICAgICBpdGVtLnNvdXJjZVBoeXNpY2FsUGFnZTFCYXNlZDwxfHxpdGVtLnNvdXJjZVBoeXNpY2FsUGFnZTFCYXNlZD41MDAwfHwKICAgICAgICFoZXgudGVzdChpdGVtLmNyb3BTaGEyNTY/PyIiKXx8Y3JvcEhhc2hlcy5oYXMoaXRlbS5jcm9wU2hhMjU2KXx8CiAgICAgICAhTnVtYmVyLmlzU2FmZUludGVnZXIoaXRlbS5jcm9wQnl0ZXMpfHxpdGVtLmNyb3BCeXRlczwzM3x8aXRlbS5jcm9wQnl0ZXM+N18wMDBfMDAwfHwKICAgICAgICFOdW1iZXIuaXNTYWZlSW50ZWdlcihpdGVtLnJlcXVlc3RVcHBlckJvdW5kQnl0ZXMpfHwKICAgICAgIGl0ZW0ucmVxdWVzdFVwcGVyQm91bmRCeXRlcyE9PTQqTWF0aC5jZWlsKGl0ZW0uY3JvcEJ5dGVzLzMpKzEwMF8wMDB8fAogICAgICAgaXRlbS5yZXF1ZXN0VXBwZXJCb3VuZEJ5dGVzPjEyXzAwMF8wMDApCiAgICAgIGJsb2NrKCJCQVRDSF9BVVRIX1JFR0lPTl9JTlZBTElEIik7CiAgICB1c2VkLmFkZChpdGVtLmlkKTtjcm9wSGFzaGVzLmFkZChpdGVtLmNyb3BTaGEyNTYpO2J5dGVzKz1pdGVtLmNyb3BCeXRlczsKICB9CiAgZm9yKGNvbnN0IGUgb2YgcGxhbi5leGNsdWRlZCl7CiAgICBpZighZXx8IWlkUGF0dGVybi50ZXN0KGUuaWQ/PyIiKXx8dXNlZC5oYXMoZS5pZCl8fAogICAgICAgIVsiQUxSRUFEWV9IQVNfR1JBUEgiLCJTT1VSQ0VfQkxPQ0tFRCIsIkNST1BfUFJPT0ZfTk9U'
+            'X1JFQURZIiwKICAgICAgICAgIlBSSU9SX0FUVEVNUFRfT1JfT1VUUFVUX1BSRVNFTlQiLCJEVVBMSUNBVEVfSU1BR0VfU0hBIiwKICAgICAgICAgIkVYQ0VFRFNfUEVSX1JFUVVFU1RfTElNSVQiLCJFWENFRURTX0JBVENIX0xJTUlUIl0uaW5jbHVkZXMoZS5yZWFzb24pKQogICAgICBibG9jaygiQkFUQ0hfQVVUSF9FWENMVVNJT05fSU5WQUxJRCIpOwogICAgdXNlZC5hZGQoZS5pZCk7CiAgfQogIGlmKGJ5dGVzIT09cGxhbi50b3RhbENyb3BCeXRlc3x8Ynl0ZXM+cGxhbi5tYXhUb3RhbEJ5dGVzfHwKICAgICBwbGFuLnBsYW5uZWQubGVuZ3RoPnBsYW4ubWF4UmVxdWVzdHMpYmxvY2soIkJBVENIX0FVVEhfVE9UQUxfTUlTTUFUQ0giKTsKICBjb25zdCBjb250ZW50PXsKICAgIHNjaGVtYVZlcnNpb246cGxhbi5zY2hlbWFWZXJzaW9uLHNvdXJjZVJ1bjpwbGFuLnNvdXJjZVJ1biwKICAgIG1vZGVsOnBsYW4ubW9kZWwsYXV0aG9yaXR5OnBsYW4uYXV0aG9yaXR5LAogICAgbWF4UmVxdWVzdHM6cGxhbi5tYXhSZXF1ZXN0cyxtYXhUb3RhbEJ5dGVzOnBsYW4ubWF4VG90YWxCeXRlcywKICAgIHRvdGFsQ3JvcEJ5dGVzOnBsYW4udG90YWxDcm9wQnl0ZXMscGxhbm5lZDpwbGFuLnBsYW5uZWQsZXhjbHVkZWQ6cGxhbi5leGNsdWRlZAogIH07CiAgaWYoZGlnZXN0KGNvbnRlbnQpIT09cGxhbi5wbGFuU2hhMjU2KWJsb2NrKCJCQVRDSF9BVVRIX1BMQU5fU0hBX0'
+            '1JU01BVENIIik7CiAgcmV0dXJuIHBsYW47Cn0KZXhwb3J0IGZ1bmN0aW9uIGRyYWZ0QmF0Y2hBdXRob3JpemF0aW9uKHBsYW4sewogIHNlbGVjdGVkSWRzLG1heENhbGxzLG1heFNwZW5kTWlub3JVbml0cyxjdXJyZW5jeSxleHBpcmVzQXQKfT17fSl7CiAgdmVyaWZ5T2ZmbGluZUJhdGNoUGxhbihwbGFuKTsKICBpZighQXJyYXkuaXNBcnJheShzZWxlY3RlZElkcyl8fHNlbGVjdGVkSWRzLmxlbmd0aDwxfHwKICAgICBzZWxlY3RlZElkcy5sZW5ndGg+cGxhbi5tYXhSZXF1ZXN0c3x8CiAgICAgIU51bWJlci5pc1NhZmVJbnRlZ2VyKG1heENhbGxzKXx8bWF4Q2FsbHM8MXx8CiAgICAgbWF4Q2FsbHM+cGxhbi5tYXhSZXF1ZXN0c3x8bWF4Q2FsbHM8c2VsZWN0ZWRJZHMubGVuZ3RofHwKICAgICAhYW1vdW50KG1heFNwZW5kTWlub3JVbml0cyl8fCFbIkNOWSIsIlVTRCJdLmluY2x1ZGVzKGN1cnJlbmN5KXx8CiAgICAgdHlwZW9mIGV4cGlyZXNBdCE9PSJzdHJpbmcifHwKICAgICAhL15cZHs0fS1cZHsyfS1cZHsyfVRcZHsyfTpcZHsyfTpcZHsyfVwuMDAwWiQvdS50ZXN0KGV4cGlyZXNBdCl8fAogICAgICFOdW1iZXIuaXNGaW5pdGUoRGF0ZS5wYXJzZShleHBpcmVzQXQpKXx8CiAgICAgbmV3IERhdGUoZXhwaXJlc0F0KS50b0lTT1N0cmluZygpIT09ZXhwaXJlc0F0KQogICAgYmxvY2soIkJBVENIX0FVVEhfUkVRVUVTVF9JTlZBTElEIik7CiAgY29uc3Qg'
+            'YWxsb3dlZD1uZXcgTWFwKHBsYW4ucGxhbm5lZC5tYXAocj0+W3IuaWQscl0pKTsKICBjb25zdCBpZHM9bmV3IFNldCgpOwogIGNvbnN0IHNlbGVjdGVkPXNlbGVjdGVkSWRzLm1hcChpZD0+ewogICAgaWYodHlwZW9mIGlkIT09InN0cmluZyJ8fGlkcy5oYXMoaWQpfHwhYWxsb3dlZC5oYXMoaWQpKQogICAgICBibG9jaygiQkFUQ0hfQVVUSF9TRUxFQ1RJT05fSU5WQUxJRCIpOwogICAgaWRzLmFkZChpZCk7CiAgICBjb25zdCBpPWFsbG93ZWQuZ2V0KGlkKTsKICAgIHJldHVybiB7aWQ6aS5pZCxjcm9wU2hhMjU2OmkuY3JvcFNoYTI1NiwKICAgICAgc291cmNlUGh5c2ljYWxQYWdlMUJhc2VkOmkuc291cmNlUGh5c2ljYWxQYWdlMUJhc2VkLAogICAgICByZXF1ZXN0VXBwZXJCb3VuZEJ5dGVzOmkucmVxdWVzdFVwcGVyQm91bmRCeXRlc307CiAgfSk7CiAgY29uc3QgcmVxdWVzdD17CiAgICBzY2hlbWFWZXJzaW9uOiJhY3MtY2xvdWQtYmF0Y2gtYXV0aG9yaXphdGlvbi1yZXF1ZXN0LXYxIiwKICAgIHN0YXR1czoiRFJBRlRfTk9UX0FVVEhPUklaRUQiLAogICAgcGxhblNoYTI1NjpwbGFuLnBsYW5TaGEyNTYsCiAgICBtb2RlbDpwbGFuLm1vZGVsLGN1cnJlbmN5LG1heENhbGxzLG1heFNwZW5kTWlub3JVbml0cyxleHBpcmVzQXQsCiAgICBpdGVtczpzZWxlY3RlZCxwcmljaW5nVmVyaWZpY2F0aW9uOiJOT1RfVkVSSUZJRUQiLAogICAgcHJvdmlkZXJSZX'
+            'F1ZXN0c0lzc3VlZDowLGRpc3BhdGNoRW5hYmxlZDpmYWxzZSwKICAgIG5lZWRzRXhwbGljaXRIdW1hbkNvbnNlbnQ6dHJ1ZSxhcHByb3ZhbFJlY2VpcHQ6bnVsbAogIH07CiAgcmV0dXJuIE9iamVjdC5mcmVlemUoey4uLnJlcXVlc3QscmVxdWVzdFNoYTI1NjpkaWdlc3QocmVxdWVzdCl9KTsKfQpleHBvcnQgZnVuY3Rpb24gdmVyaWZ5QmF0Y2hBdXRob3JpemF0aW9uRHJhZnQocGxhbixkcmFmdCl7CiAgdmVyaWZ5T2ZmbGluZUJhdGNoUGxhbihwbGFuKTsKICBpZighZHJhZnR8fHR5cGVvZiBkcmFmdCE9PSJvYmplY3QifHxBcnJheS5pc0FycmF5KGRyYWZ0KXx8CiAgICAgIWhleC50ZXN0KGRyYWZ0LnJlcXVlc3RTaGEyNTY/PyIiKXx8CiAgICAgZHJhZnQucGxhblNoYTI1NiE9PXBsYW4ucGxhblNoYTI1Nnx8CiAgICAgZHJhZnQuc3RhdHVzIT09IkRSQUZUX05PVF9BVVRIT1JJWkVEInx8CiAgICAgZHJhZnQucHJpY2luZ1ZlcmlmaWNhdGlvbiE9PSJOT1RfVkVSSUZJRUQifHwKICAgICBkcmFmdC5wcm92aWRlclJlcXVlc3RzSXNzdWVkIT09MHx8ZHJhZnQuZGlzcGF0Y2hFbmFibGVkIT09ZmFsc2V8fAogICAgIGRyYWZ0Lm5lZWRzRXhwbGljaXRIdW1hbkNvbnNlbnQhPT10cnVlfHxkcmFmdC5hcHByb3ZhbFJlY2VpcHQhPT1udWxsfHwKICAgICAhQXJyYXkuaXNBcnJheShkcmFmdC5pdGVtcykpCiAgICBibG9jaygiQkFUQ0hfQVVUSF9OT1RfQV9TUEVO'
+            'RF9BUFBST1ZBTCIpOwogIGNvbnN0IHJlYnVpbHQ9ZHJhZnRCYXRjaEF1dGhvcml6YXRpb24ocGxhbix7CiAgICBzZWxlY3RlZElkczpkcmFmdC5pdGVtcy5tYXAoeD0+eD8uaWQpLG1heENhbGxzOmRyYWZ0Lm1heENhbGxzLAogICAgbWF4U3BlbmRNaW5vclVuaXRzOmRyYWZ0Lm1heFNwZW5kTWlub3JVbml0cywKICAgIGN1cnJlbmN5OmRyYWZ0LmN1cnJlbmN5LGV4cGlyZXNBdDpkcmFmdC5leHBpcmVzQXQKICB9KTsKICBpZihyZWJ1aWx0LnJlcXVlc3RTaGEyNTYhPT1kcmFmdC5yZXF1ZXN0U2hhMjU2fHwKICAgICBKU09OLnN0cmluZ2lmeShyZWJ1aWx0KSE9PUpTT04uc3RyaW5naWZ5KGRyYWZ0KSkKICAgIGJsb2NrKCJCQVRDSF9BVVRIX1RBTVBFUkVEIik7CiAgcmV0dXJuIHJlYnVpbHQ7Cn0KZXhwb3J0IGZ1bmN0aW9uIGd1YXJkQmF0Y2hEaXNwYXRjaChfcGxhbixfZHJhZnQpewogIC8vIFRoaXMgc2xpY2UgZG9lcyBub3QgaW1wbGVtZW50IHZlcmlmaWNhdGlvbiBvZiBsaXZlIG1vZGVsIHRhcmlmZiwgc2lnbmVkCiAgLy8gYXBwcm92YWwgYW5kIGR1cmFibGUgYmlsbGFibGUgcmVzZXJ2YXRpb24uIEl0IGhhcyBOTyBkaXNwYXRjaCBjYXBhYmlsaXR5LgogIGJsb2NrKCJCQVRDSF9ESVNQQVRDSF9SRVFVSVJFU19WRVJJRklFRF9QUklDRV9BTkRfRVhQTElDSVRfQVBQUk9WQUwiKTsKfQo='
+          )
+          $dest=Join-Path $dir 'graph-batch-authorization.mjs'
+          [IO.File]::WriteAllBytes($dest,[Convert]::FromBase64String(($parts -join '')))
+          $got=(& $git hash-object --no-filters -- $dest).Trim()
+          if ($LASTEXITCODE -ne 0 -or $got -ne 'dc175e65a943fbba70e9d277d4051654adda26eb') {throw 'PUBLIC_SOURCE_SHA_MISMATCH'}
+          # Exact pinned SHA 97d07b0396590f7c76473e22a83882b9645b5585
+          $parts=@(
+            'LyoqCiAqIDAzRS0wNEItMDE6IHBlcnNpc3RlbnQgT0ZGTElORSBwcmVwYXJhdGlvbiBtYXJrcywgbmV2ZXIgYmlsbGFibGUgYXR0ZW1wdHMuCiAqIE5vIHByb3ZpZGVyIGltcG9ydHMsIG5vIHJlcXVlc3QgbWV0aG9kLCBubyB3YXkgdG8gZWxldmF0ZSB0aGlzIHJlY29yZC4KICogRGVsaWJlcmF0ZWx5IGZhaWwtY2xvc2VkIG9uIGNyYXNoL2R1cGxpY2F0ZSBjbGFpbTogbWFudWFsIGludmVzdGlnYXRpb24gb25seS4KICovCmltcG9ydCB7Y29uc3RhbnRzfSBmcm9tICJub2RlOmZzIjsKaW1wb3J0IHtta2Rpcixsc3RhdCxyZWFscGF0aCxvcGVufSBmcm9tICJub2RlOmZzL3Byb21pc2VzIjsKaW1wb3J0IHtyZXNvbHZlLGpvaW59IGZyb20gIm5vZGU6cGF0aCI7CmltcG9ydCB7Y3JlYXRlSGFzaH0gZnJvbSAibm9kZTpjcnlwdG8iOwppbXBvcnQge3ZlcmlmeUJhdGNoQXV0aG9yaXphdGlvbkRyYWZ0LEJhdGNoQXV0aG9yaXphdGlvbkVycm9yfSBmcm9tICIuL2dyYXBoLWJhdGNoLWF1dGhvcml6YXRpb24ubWpzIjsKCmV4cG9ydCBjbGFzcyBCYXRjaExlZGdlckVycm9yIGV4dGVuZHMgRXJyb3IgewogIGNvbnN0cnVjdG9yKGNvZGUpe3N1cGVyKGNvZGUpO3RoaXMubmFtZT0iQmF0Y2hMZWRnZXJFcnJvciI7dGhpcy5jb2RlPWNvZGU7fQp9CmNvbnN0IHJlamVjdD1jb2RlPT57dGhyb3cgbmV3IEJhdGNoTGVkZ2VyRXJyb3IoY29kZSk7fTsKY29uc3Qgc2hhPX'
+            'Y9PmNyZWF0ZUhhc2goInNoYTI1NiIpLnVwZGF0ZSh2KS5kaWdlc3QoImhleCIpOwpjb25zdCB2ZXJpZmllZFRpbWU9bm93PT57CiAgaWYodHlwZW9mIG5vdyE9PSJzdHJpbmcifHwhL15cZHs0fS1cZHsyfS1cZHsyfVRcZHsyfTpcZHsyfTpcZHsyfVwuMDAwWiQvdS50ZXN0KG5vdyl8fAogICAgICFOdW1iZXIuaXNGaW5pdGUoRGF0ZS5wYXJzZShub3cpKXx8bmV3IERhdGUobm93KS50b0lTT1N0cmluZygpIT09bm93KQogICAgcmVqZWN0KCJCQVRDSF9MRURHRVJfVElNRV9JTlZBTElEIik7CiAgcmV0dXJuIERhdGUucGFyc2Uobm93KTsKfTsKYXN5bmMgZnVuY3Rpb24gdmVyaWZpZWREaXIocGF0aCxhbGxvd01pc3Npbmc9ZmFsc2UpewogIHRyeXsKICAgIGNvbnN0IHN0PWF3YWl0IGxzdGF0KHBhdGgpOwogICAgaWYoIXN0LmlzRGlyZWN0b3J5KCl8fHN0LmlzU3ltYm9saWNMaW5rKCl8fAogICAgICAgcmVzb2x2ZShhd2FpdCByZWFscGF0aChwYXRoKSkudG9Mb3dlckNhc2UoKSE9PXJlc29sdmUocGF0aCkudG9Mb3dlckNhc2UoKSkKICAgICAgcmVqZWN0KCJCQVRDSF9MRURHRVJfRElSX1VOU0FGRSIpOwogICAgcmV0dXJuIHRydWU7CiAgfWNhdGNoKGUpewogICAgaWYoYWxsb3dNaXNzaW5nJiZlLmNvZGU9PT0iRU5PRU5UIilyZXR1cm4gZmFsc2U7CiAgICBpZihlIGluc3RhbmNlb2YgQmF0Y2hMZWRnZXJFcnJvcil0aHJvdyBlOwogICAgcmVqZWN0KCJC'
+            'QVRDSF9MRURHRVJfRElSX05PVF9SRUFEWSIpOwogIH0KfQphc3luYyBmdW5jdGlvbiBkaXJlY3Rvcnkocm9vdCxjcmVhdGUpewogIGlmKHR5cGVvZiByb290IT09InN0cmluZyJ8fCFyb290fHxyb290Lmxlbmd0aD4xMDI0KXJlamVjdCgiQkFUQ0hfTEVER0VSX1JPT1RfSU5WQUxJRCIpOwogIGNvbnN0IGJhc2U9cmVzb2x2ZShyb290KTsKICBhd2FpdCB2ZXJpZmllZERpcihiYXNlKTsKICBjb25zdCBkc3Q9am9pbihiYXNlLCJwcml2YXRlLWNsb3VkLWJhdGNoLW9mZmxpbmUtdjEiKTsKICBpZihjcmVhdGUpewogICAgdHJ5e2F3YWl0IG1rZGlyKGRzdCx7cmVjdXJzaXZlOmZhbHNlLG1vZGU6MG83MDB9KTt9CiAgICBjYXRjaChlKXtpZihlPy5jb2RlIT09IkVFWElTVCIpcmVqZWN0KCJCQVRDSF9MRURHRVJfRElSX05PVF9SRUFEWSIpO30KICB9CiAgaWYoIWF3YWl0IHZlcmlmaWVkRGlyKGRzdCwhY3JlYXRlKSlyZXR1cm4gbnVsbDsKICByZXR1cm4gZHN0Owp9CmZ1bmN0aW9uIG5hbWVGb3IoZHJhZnQsaWQpewogIGNvbnN0IGl0ZW09ZHJhZnQuaXRlbXMuZmluZCh4PT54LmlkPT09aWQpOwogIGlmKCFpdGVtKXJlamVjdCgiQkFUQ0hfTEVER0VSX0lURU1fTk9UX1NFTEVDVEVEIik7CiAgLy8gV2luZG93cy1zYWZlLCBubyBjb2xvbiwgbm8gdXNlciBwYXRoczsgZXhhY3QgU0hBIHRpZXMgdGhlIHdob2xlIHJlcXVlc3QuCiAgcmV0dXJuIHtuYW1lOiJvZm'
+            'ZsaW5lLSIrZHJhZnQucmVxdWVzdFNoYTI1NisiLSIraWQucmVwbGFjZSgiOiIsIi0iKSsiLmpzb24iLGl0ZW19Owp9CmV4cG9ydCBhc3luYyBmdW5jdGlvbiByZXNlcnZlT2ZmbGluZVJldmlld0l0ZW0ocm9vdCxwbGFuLGRyYWZ0LGlkLHtub3d9PXt9KXsKICB0cnl7dmVyaWZ5QmF0Y2hBdXRob3JpemF0aW9uRHJhZnQocGxhbixkcmFmdCk7fQogIGNhdGNoKGUpewogICAgaWYoZSBpbnN0YW5jZW9mIEJhdGNoQXV0aG9yaXphdGlvbkVycm9yKXJlamVjdCgiQkFUQ0hfTEVER0VSX0RSQUZUX0lOVkFMSUQiKTsKICAgIHRocm93IGU7CiAgfQogIGNvbnN0IGVwb2NoPXZlcmlmaWVkVGltZShub3cpOwogIGNvbnN0IGV4cGlyeT1EYXRlLnBhcnNlKGRyYWZ0LmV4cGlyZXNBdCk7CiAgaWYoZXhwaXJ5PD1lcG9jaHx8ZXhwaXJ5PmVwb2NoKzcqMjQqNjAqNjAqMTAwMCkKICAgIHJlamVjdCgiQkFUQ0hfTEVER0VSX0RSQUZUX0VYUElSRURfT1JfVE9PX0xPTkciKTsKICBjb25zdCB7bmFtZSxpdGVtfT1uYW1lRm9yKGRyYWZ0LGlkKTsKICBjb25zdCBkaXI9YXdhaXQgZGlyZWN0b3J5KHJvb3QsdHJ1ZSksZGVzdD1qb2luKGRpcixuYW1lKTsKICBjb25zdCBib2R5PXsKICAgIHNjaGVtYVZlcnNpb246ImFjcy1vZmZsaW5lLWdyYXBoLWJhdGNoLXJlc2VydmF0aW9uLXYxIiwKICAgIHN0YXR1czoiT0ZGTElORV9QUkVQQVJFRF9OT1RfRElTUEFUQ0hFRCIsCiAgICBw'
+            'bGFuU2hhMjU2OnBsYW4ucGxhblNoYTI1NixyZXF1ZXN0U2hhMjU2OmRyYWZ0LnJlcXVlc3RTaGEyNTYsCiAgICBpZCxjcm9wU2hhMjU2Oml0ZW0uY3JvcFNoYTI1NixwcmVwYXJlZEF0Om5vdywKICAgIHByb3ZpZGVyUmVxdWVzdHNJc3N1ZWQ6MCxkaXNwYXRjaEVuYWJsZWQ6ZmFsc2UsCiAgICBuZWVkc1JlYWxQcmljZUFuZFNlcGFyYXRlQXBwcm92YWw6dHJ1ZQogIH07CiAgY29uc3QgYnl0ZXM9QnVmZmVyLmZyb20oSlNPTi5zdHJpbmdpZnkoYm9keSkrIlxuIiwidXRmOCIpOwogIGxldCBoYW5kbGU7CiAgdHJ5ewogICAgaGFuZGxlPWF3YWl0IG9wZW4oZGVzdCxjb25zdGFudHMuT19DUkVBVHxjb25zdGFudHMuT19FWENMfGNvbnN0YW50cy5PX1dST05MWSwwbzYwMCk7CiAgICBhd2FpdCBoYW5kbGUud3JpdGVGaWxlKGJ5dGVzKTthd2FpdCBoYW5kbGUuc3luYygpOwogIH1jYXRjaChlKXsKICAgIGlmKGU/LmNvZGU9PT0iRUVYSVNUIilyZWplY3QoIkJBVENIX0xFREdFUl9JVEVNX0FMUkVBRFlfUkVTRVJWRUQiKTsKICAgIHJlamVjdCgiQkFUQ0hfTEVER0VSX1JFU0VSVkFUSU9OX1VOQ0VSVEFJTiIpOwogIH1maW5hbGx5e2F3YWl0IGhhbmRsZT8uY2xvc2UoKS5jYXRjaCgoKT0+e30pO30KICByZXR1cm4ge3N0YXR1czpib2R5LnN0YXR1cyxwcm92aWRlclJlcXVlc3RzSXNzdWVkOjAsZGlzcGF0Y2hFbmFibGVkOmZhbHNlLAogICAgcmVzZXJ2YXRpb2'
+            '5TaGEyNTY6c2hhKGJ5dGVzKSxpZH07Cn0KZXhwb3J0IGFzeW5jIGZ1bmN0aW9uIGluc3BlY3RPZmZsaW5lUmV2aWV3SXRlbShyb290LHBsYW4sZHJhZnQsaWQpewogIHRyeXt2ZXJpZnlCYXRjaEF1dGhvcml6YXRpb25EcmFmdChwbGFuLGRyYWZ0KTt9CiAgY2F0Y2h7cmVqZWN0KCJCQVRDSF9MRURHRVJfRFJBRlRfSU5WQUxJRCIpO30KICBjb25zdCB7bmFtZSxpdGVtfT1uYW1lRm9yKGRyYWZ0LGlkKTsKICBjb25zdCBkaXI9YXdhaXQgZGlyZWN0b3J5KHJvb3QsZmFsc2UpOwogIGlmKCFkaXIpcmV0dXJuIHtzdGF0dXM6Ik5PVF9QUkVQQVJFRCJ9OwogIGNvbnN0IHBhdGg9am9pbihkaXIsbmFtZSk7CiAgbGV0IGZkOwogIHRyeXsKICAgIGNvbnN0IHN0PWF3YWl0IGxzdGF0KHBhdGgpOwogICAgaWYoIXN0LmlzRmlsZSgpfHxzdC5pc1N5bWJvbGljTGluaygpfHxzdC5zaXplPDgwfHxzdC5zaXplPjQwMDApCiAgICAgIHJlamVjdCgiQkFUQ0hfTEVER0VSX1JFU0VSVkFUSU9OX1VOU0FGRSIpOwogICAgZmQ9YXdhaXQgb3BlbihwYXRoLGNvbnN0YW50cy5PX1JET05MWXwoY29uc3RhbnRzLk9fTk9GT0xMT1d8fDApKTsKICAgIGNvbnN0IHN0Mj1hd2FpdCBmZC5zdGF0KCk7CiAgICBpZighc3QyLmlzRmlsZSgpfHxzdDIuaW5vIT09c3QuaW5vfHxzdDIuZGV2IT09c3QuZGV2fHxzdDIuc2l6ZSE9PXN0LnNpemUpCiAgICAgIHJlamVjdCgiQkFUQ0hfTEVER0VS'
+            'X1JBQ0UiKTsKICAgIGNvbnN0IGJ5dGVzPUJ1ZmZlci5hbGxvYyhzdC5zaXplKTtsZXQgbj0wOwogICAgd2hpbGUobjxieXRlcy5sZW5ndGgpewogICAgICBjb25zdCBnb3Q9YXdhaXQgZmQucmVhZChieXRlcyxuLGJ5dGVzLmxlbmd0aC1uLG4pOwogICAgICBpZighZ290LmJ5dGVzUmVhZClyZWplY3QoIkJBVENIX0xFREdFUl9UUlVOQ0FURUQiKTsKICAgICAgbis9Z290LmJ5dGVzUmVhZDsKICAgIH0KICAgIGNvbnN0IGNoZWNrPWF3YWl0IGZkLnN0YXQoKTsKICAgIGlmKGNoZWNrLnNpemUhPT1zdC5zaXplfHxjaGVjay5tdGltZU1zIT09c3QubXRpbWVNcylyZWplY3QoIkJBVENIX0xFREdFUl9SQUNFIik7CiAgICBsZXQgZG9jOwogICAgdHJ5e2RvYz1KU09OLnBhcnNlKGJ5dGVzLnRvU3RyaW5nKCJ1dGY4IikpO30KICAgIGNhdGNoe3JlamVjdCgiQkFUQ0hfTEVER0VSX0NPUlJVUFQiKTt9CiAgICBpZighZG9jfHxkb2Muc2NoZW1hVmVyc2lvbiE9PSJhY3Mtb2ZmbGluZS1ncmFwaC1iYXRjaC1yZXNlcnZhdGlvbi12MSJ8fAogICAgICAgZG9jLnN0YXR1cyE9PSJPRkZMSU5FX1BSRVBBUkVEX05PVF9ESVNQQVRDSEVEInx8CiAgICAgICBkb2MucGxhblNoYTI1NiE9PXBsYW4ucGxhblNoYTI1Nnx8ZG9jLnJlcXVlc3RTaGEyNTYhPT1kcmFmdC5yZXF1ZXN0U2hhMjU2fHwKICAgICAgIGRvYy5pZCE9PWlkfHxkb2MuY3JvcFNoYTI1NiE9PWl0ZW0uY3JvcF'
+            'NoYTI1Nnx8CiAgICAgICBkb2MucHJvdmlkZXJSZXF1ZXN0c0lzc3VlZCE9PTB8fGRvYy5kaXNwYXRjaEVuYWJsZWQhPT1mYWxzZXx8CiAgICAgICBkb2MubmVlZHNSZWFsUHJpY2VBbmRTZXBhcmF0ZUFwcHJvdmFsIT09dHJ1ZXx8CiAgICAgICB0eXBlb2YgZG9jLnByZXBhcmVkQXQhPT0ic3RyaW5nIikKICAgICAgcmVqZWN0KCJCQVRDSF9MRURHRVJfQ09SUlVQVCIpOwogICAgdmVyaWZpZWRUaW1lKGRvYy5wcmVwYXJlZEF0KTsKICAgIHJldHVybiB7c3RhdHVzOmRvYy5zdGF0dXMsaWQscmVzZXJ2YXRpb25TaGEyNTY6c2hhKGJ5dGVzKSwKICAgICAgcHJvdmlkZXJSZXF1ZXN0c0lzc3VlZDowLGRpc3BhdGNoRW5hYmxlZDpmYWxzZX07CiAgfWNhdGNoKGUpewogICAgaWYoZT8uY29kZT09PSJFTk9FTlQiKXJldHVybiB7c3RhdHVzOiJOT1RfUFJFUEFSRUQifTsKICAgIGlmKGUgaW5zdGFuY2VvZiBCYXRjaExlZGdlckVycm9yKXRocm93IGU7CiAgICByZWplY3QoIkJBVENIX0xFREdFUl9SRUFEX0ZBSUxFRCIpOwogIH1maW5hbGx5e2F3YWl0IGZkPy5jbG9zZSgpO30KfQo='
+          )
+          $dest=Join-Path $dir 'graph-batch-offline-ledger.mjs'
+          [IO.File]::WriteAllBytes($dest,[Convert]::FromBase64String(($parts -join '')))
+          $got=(& $git hash-object --no-filters -- $dest).Trim()
+          if ($LASTEXITCODE -ne 0 -or $got -ne '97d07b0396590f7c76473e22a83882b9645b5585') {throw 'PUBLIC_SOURCE_SHA_MISMATCH'}
+          Write-Output 'ACS_04B01_PINNED_SOURCE_OK=true'
+      - name: Test synthetic offline approval and immutable lock on NTFS
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $dir=Join-Path $env:RUNNER_TEMP ('acs-04b01-synthetic-'+$env:GITHUB_RUN_ID)
+          $script=@'
+          import {pathToFileURL} from 'node:url';
+          import {join} from 'node:path';
+          import {mkdtemp,rm} from 'node:fs/promises';
+          import {tmpdir} from 'node:os';
+          import {createHash} from 'node:crypto';
+          const source=process.argv[2];
+          const auth=await import(pathToFileURL(join(source,'graph-batch-authorization.mjs')).href);
+          const ledger=await import(pathToFileURL(join(source,'graph-batch-offline-ledger.mjs')).href);
+          const root=await mkdtemp(join(tmpdir(),'acs-04b01-offline-only-'));
+          const id='RB-PDF-12:page-001-region-01';
+          const item={id,fixtureId:'RB-PDF-12',regionId:'page-001-region-01',
+            sourcePhysicalPage1Based:51,cropSha256:'a'.repeat(64),cropBytes:1024,
+            requestUpperBoundBytes:4*Math.ceil(1024/3)+100000};
+          const data={schemaVersion:'acs-offline-graph-batch-plan-v1',
+            sourceRun:'real-mineru-39440805765-1',model:'glm-5.3-flash',
+            authority:'PREVIEW_ONLY_NO_PROVIDER_DISPATCH',maxRequests:14,
+            maxTotalBytes:48000000,totalCropBytes:1024,planned:[item],excluded:[]};
+          const sha=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
+          const plan={...data,planSha256:sha(data),needsExplicitPaidAuthorization:true,
+            providerRequestsIssued:0,dispatchEnabled:false,priceEstimate:null,
+            counts:{discovered:1,eligible:1,excluded:0,alreadyHasGraph:0,blocked:0,limitExcluded:0}};
+          let ok=false;
+          try{
+            const draft=auth.draftBatchAuthorization(plan,{selectedIds:[id],maxCalls:1,
+              currency:'CNY',maxSpendMinorUnits:500,expiresAt:'2026-10-22T00:00:00.000Z'});
+            if(draft.status!=='DRAFT_NOT_AUTHORIZED')throw Error('UNSAFE_APPROVAL');
+            let noDispatch=false;try{auth.guardBatchDispatch(plan,draft);}catch(e){
+              noDispatch=e.code==='BATCH_DISPATCH_REQUIRES_VERIFIED_PRICE_AND_EXPLICIT_APPROVAL';}
+            if(!noDispatch)throw Error('UNSAFE_DISPATCH');
+            const now='2026-10-21T00:00:00.000Z';
+            const first=await ledger.reserveOfflineReviewItem(root,plan,draft,id,{now});
+            if(first.dispatchEnabled!==false||first.providerRequestsIssued!==0)throw Error('NOT_OFFLINE');
+            const read=await ledger.inspectOfflineReviewItem(root,plan,draft,id);
+            if(read.status!=='OFFLINE_PREPARED_NOT_DISPATCHED')throw Error('READBACK');
+            let noReplay=false;try{await ledger.reserveOfflineReviewItem(root,plan,draft,id,{now});}
+              catch(e){noReplay=e.code==='BATCH_LEDGER_ITEM_ALREADY_RESERVED';}
+            if(!noReplay)throw Error('DUPLICATE_ALLOWED');
+            ok=true;
+          }finally{await rm(root,{recursive:true,force:true,maxRetries:6,retryDelay:300});}
+          if(!ok)process.exit(2);
+          console.log('ACS_04B01_WIN_SYNTHETIC_DRAFT_NOT_AUTHORIZED=true');
+          console.log('ACS_04B01_WIN_SYNTHETIC_OFFLINE_CAS_PASS=true');
+          console.log('ACS_04B01_WIN_SYNTHETIC_DUPLICATE_BLOCKED=true');
+          console.log('ACS_04B01_WIN_REAL_PRIVATE_DATA_TOUCHED=false');
+          console.log('ACS_04B01_WIN_PROVIDER_CALLS=0');
+          '@
+          $file=Join-Path $dir 'synthetic-ledger.mjs'
+          [IO.File]::WriteAllText($file,$script,[Text.UTF8Encoding]::new($false))
+          & node $file $dir
+          if ($LASTEXITCODE -ne 0) {throw 'WINDOWS_SYNTHETIC_LEDGER_FAILED'}
