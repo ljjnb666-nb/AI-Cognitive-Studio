@@ -207,7 +207,12 @@ function render(){
     }
     select.addEventListener("change",()=>{
       try{
-        draft=currentUpdate(draft,view,r.kind,r.id,select.value,select.value==="UNREVIEWED"?"":v.note);
+        // The note input can have changed without a blur or re-render.
+        // Use the latest in-memory draft, never the note captured by render().
+        const latest=draft.decisions.find(d=>d.kind===r.kind&&d.id===r.id);
+        if(!latest)throw new GraphReviewError("GRAPH_REVIEW_DECISION_MISSING");
+        draft=currentUpdate(draft,view,r.kind,r.id,select.value,
+          select.value==="UNREVIEWED"?"":latest.note);
         render();scheduleAutoSave();
         message("已更新本机草稿；"+(autoActive?"等待本机自动保存。":"请手动导出草稿。"),true);
       }catch{message("审阅状态不合法，未修改草稿。");render();}
