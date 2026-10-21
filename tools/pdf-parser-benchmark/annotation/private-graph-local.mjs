@@ -8,7 +8,7 @@ import { lstat, realpath, open, mkdir, rename, rm } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { resolve, join, sep } from "node:path";
 import { TextDecoder } from "node:util";
-import {lookupTrustedGraphResult,TRUSTED_GRAPH_RESULTS,RegistryError} from "./graph-result-registry.mjs";
+import {lookupTrustedGraphResult,compileTrustedGraphRegistry,TRUSTED_GRAPH_RESULTS,RegistryError} from "./graph-result-registry.mjs";
 import {validateRegionGraphCandidate,GraphReviewError as RegionReviewError} from "./region-graph-review.mjs";
 import {readRegionReviewDraft,saveRegionReviewDraft,RegionStoreError} from "./region-review-store.mjs";
 import {
@@ -369,4 +369,76 @@ export async function saveRegisteredGraphReviewDraft(root,itemId,raw,revision,re
       fail(e.code.replace(/^REGION_/u,"PRIVATE_REGION_"));
     throw e;
   }
+}
+
+/**
+ * 04B-02C: read a completed canonical INITIAL_ATTEMPT from the EXACT output
+ * filename used by the existing Python cloud adapter. It is only a proposal
+ * for a future reviewed code-registry change; this function NEVER registers
+ * an item, grants review, signs an approval, or calls the model.
+ */
+export async function inspectCanonicalGraphResultForRegistration(root,itemId){
+  if(typeof itemId!=="string"||itemId.length>70||!CROP_ID.test(itemId))
+    fail("PRIVATE_INTAKE_ITEM_INVALID");
+  if(itemId==="RB-PDF-13:page-002-region-01")
+    fail("PRIVATE_INTAKE_P127_LEGACY_ONLY");
+  const match=CROP_ID.exec(itemId);
+  const [,fixture,regionId]=match;
+  const stem="glm-cloud-v1-"+fixture+"-"+regionId;
+  const rel=stem+"/cloud-vision-proposals.json";
+  const receiptPath="."+stem+".cloud-attempted";
+  // The producer always reserves before it sends. An output missing its
+  // receipt is not sufficient to establish the expected request lineage.
+  const receipt=await readBounded(root,receiptPath,16_384,{missing:true});
+  if(!receipt)fail("PRIVATE_INTAKE_ATTEMPT_RECEIPT_MISSING");
+  const [result,manifest,crop]=await Promise.all([
+    readBounded(root,rel,MAX_RESULT_BYTES),
+    readBounded(root,"region-proposals-v1-"+fixture+"/region-proposals.json",MAX_MANIFEST_BYTES),
+    readBounded(root,"region-proposals-v1-"+fixture+"/crops/"+regionId+".png",MAX_CROP_BYTES)
+  ]);
+  const identity={resultSha256:sha(result),manifestSha256:sha(manifest),
+    cropSha256:sha(crop),...dimensions(crop)};
+  const doc=json(result),evidence=json(manifest);
+  const region=evidence.pages?.flatMap(page=>(page.regions??[]).map(x=>({
+    id:x.regionId,page:page.sourcePhysicalPage1Based
+  }))).filter(x=>x.id===regionId);
+  if(!Array.isArray(region)||region.length!==1)
+    fail("PRIVATE_INTAKE_REGION_NOT_UNIQUE");
+  const reg={
+    id:itemId,fixtureId:fixture,regionId,physicalPage:region[0].page,
+    kind:"REGISTERED_REGION",sourceRun:SOURCE,
+    provider:"ZHIPU_GLMCLOUD_STANDARD_API",model:"glm-5.3-flash",
+    attemptClass:"INITIAL_ATTEMPT",
+    resultPath:rel,manifestPath:"region-proposals-v1-"+fixture+"/region-proposals.json",
+    cropPath:"region-proposals-v1-"+fixture+"/crops/"+regionId+".png",
+    resultSha256:identity.resultSha256,manifestSha256:identity.manifestSha256,
+    cropSha256:identity.cropSha256
+  };
+  let view,compiled;
+  try{
+    view=validateRegionGraphCandidate(doc,evidence,identity,{
+      fixtureId:fixture,regionId,sourcePhysicalPage1Based:reg.physicalPage,
+      sourceRun:SOURCE,provider:reg.provider,model:reg.model,
+      attemptClass:"INITIAL_ATTEMPT",
+      expectedCropSha256:identity.cropSha256,expectedResultSha256:identity.resultSha256
+    });
+    compiled=compileTrustedGraphRegistry([...TRUSTED_GRAPH_RESULTS,reg]);
+  }catch(e){
+    if(e instanceof RegionReviewError||e instanceof RegistryError)
+      fail("PRIVATE_INTAKE_GRAPH_CONTRACT_INVALID");
+    throw e;
+  }
+  if(view.graphVerified!==false||view.physicalPage!==reg.physicalPage||
+     !compiled.some(x=>x.id===itemId))
+    fail("PRIVATE_INTAKE_AUTHORITY_MISMATCH");
+  return {
+    schemaVersion:"acs-canonical-graph-result-intake-v1",
+    state:"REGISTRATION_CANDIDATE_NOT_APPROVED",
+    authority:"SOURCE_CHECKED_NOT_HUMAN_REVIEWED",
+    registration:reg,modelCandidateNodes:view.nodes.length,
+    modelCandidateEdges:view.edges.length,
+    sourceSha256:identity,
+    humanVerified:false,graphVerified:false,
+    registered:false,publishable:false,providerRequestsIssuedThisRun:0
+  };
 }
