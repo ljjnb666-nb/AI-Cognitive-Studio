@@ -154,6 +154,10 @@ async function main(){
     await until(cdp,'document.querySelector("#batch-plan-state")?.textContent.includes("已发现 2 个区域") && document.querySelector("#batch-plan-state")?.textContent.includes("需推理 0")',"EDGE_SYNTHETIC_BATCH_PLAN_TIMEOUT");
     const noPaid=await cdp.value('document.querySelector("#batch-plan-details")?.textContent.includes("实际付费调用 0 次")');
     if(!noPaid)stop("EDGE_SYNTHETIC_BATCH_DISPATCH_NOT_DISABLED");
+    await until(cdp,'document.querySelectorAll("#intake-items .queue-item").length===2 && document.querySelector("#intake-summary")?.textContent.includes("已登记可人工复核 2")',"EDGE_SYNTHETIC_INTAKE_UI_TIMEOUT");
+    const intake=await cdp.value('({entries:document.querySelectorAll("#intake-items .queue-item").length===2,registered:document.querySelector("#intake-summary")?.textContent.includes("仅待登记 0"),paid:document.querySelector("#intake-summary")?.textContent.includes("新增模型调用 0"),noButtons:document.querySelectorAll("#intake-items button").length===0})');
+    if(!intake||!Object.values(intake).every(Boolean))stop("EDGE_SYNTHETIC_INTAKE_UI_AUTHORITY");
+    console.log("ACS_04B02D_EDGE_SYNTHETIC_INTAKE_PANEL_PASS=true");
     console.log("ACS_03E04_EDGE_SYNTHETIC_ZERO_COST_PLAN_PASS=true");
     console.log("ACS_P127_EDGE_SYNTHETIC_QUEUE_PASS");
     console.log("ACS_P127_EDGE_SYNTHETIC_IMPORT_AND_OVERLAY_PASS");

@@ -125,6 +125,16 @@ async function main(){
       await delay(160);
     }
     if(!planReady)fail("EDGE_REAL_BATCH_PLAN_NOT_VERIFIED");
+    let intakeVisible=false;
+    for(let n=0;n<110;n++){
+      const ok=await cdp.evaluate('document.querySelectorAll("#intake-items .queue-item").length===15 && document.querySelector("#intake-summary")?.textContent.includes("已登记可人工复核 1") && document.querySelector("#intake-summary")?.textContent.includes("待付费授权 14") && document.querySelector("#intake-summary")?.textContent.includes("仅待登记 0") && document.querySelector("#intake-summary")?.textContent.includes("新增模型调用 0")');
+      if(ok){intakeVisible=true;break;}
+      await delay(160);
+    }
+    if(!intakeVisible)fail("EDGE_REAL_INTAKE_UI_NOT_READY");
+    if(await cdp.evaluate('document.querySelectorAll("#intake-items button").length !== 0'))
+      fail("EDGE_REAL_INTAKE_UI_EXPOSED_ACTION");
+    console.log("ACS_04B02D_EDGE_REAL_INTAKE_PANEL_PASS=true");
     console.log("ACS_03E04_EDGE_REAL_BATCH_ELIGIBLE=14");
     console.log("ACS_03E04_EDGE_REAL_BATCH_PROVIDER_CALLS=0");
     console.log("ACS_P127_EDGE_REAL_QUEUE_TOTAL=15");
