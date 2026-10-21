@@ -42,3 +42,12 @@ Windows 终端会显示 `ACS_P127_GRAPH_REVIEW_LOCAL_URL=http://127.0.0.1:<动�
 - 完整主 CI：以 **准确 HEAD** 的成功结论为准，不用旧运行替代新运行。
 - 实机：仍需可信 Windows Edge 打开上方 URL，核对 9 个候选节点/10 条候选关系确实加载，修改第一项并等待显示“已保存到本机 D 盘”，刷新后确认恢复。这个过程需用户在本机真实执行或使用明确授权的浏览器控制；**不能用云 CI 或 synthetic Node 测试冒充实机**。
 - **尚未完成**：第二名人工复核、箭头方向逐条语义验收、准确率计算、正式 Ground Truth 或播客发布。
+
+
+## 2026-10-21 Windows Edge 实机证据（准确区分三层结论）
+
+- **环境核验**：Windows 自托管 Runner [#39557879731](https://github.com/ljjnb666-nb/AI-Cognitive-Studio/actions/runs/39557879731) SUCCESS，Node 24 与 Microsoft Edge 均存在，当时空闲内存约 5.3GB。原先假定的 `D:\所有项目\90_Worktrees\AI-Cognitive-Studio-pdf-parser-benchmark` 在 Runner 本机 **不存在**，不能把已经推送的代码误报为已同步该本机路径。此前探测 #39557801470 有 PowerShell 布尔类型错误，修正后成功；该首次失败保留。
+- **真实 Edge + 完整 UI 交互（完全合成）**：[#39558450616](https://github.com/ljjnb666-nb/AI-Cognitive-Studio/actions/runs/39558450616) SUCCESS。隔离 Edge profile 和 Runner 临时 P127 模拟 PNG/JSON 下，实测页面自动导入、图像叠加、一个 `UNCERTAIN` 审阅修改、私有临时目录自动保存，以及刷新后恢复；无外部模型、无原书、无真实私有草稿修改。
+- **真实 Edge + 真实私人 P127 只读展示**：[#39558856690](https://github.com/ljjnb666-nb/AI-Cognitive-Studio/actions/runs/39558856690) SUCCESS。用准确 Git Blob SHA 在可信 Windows Runner 离线暂存审阅源，浏览器实际自动读取真实 P127 图像及候选，确认 **9 个节点 / 10 条关系**、绘制画布非空及 `graphVerified=false`。为了避免意外污染用户审阅证据，本次服务使用 `privateGraphReadOnly:true`，服务端拒绝任何草稿 PUT；前后私有草稿 SHA 或缺失状态保持一致。图片、文字、坐标及临时本地访问 token 未发往 GitHub；只有脱敏状态写入 Actions 日志。
+- **最终保留门禁**：上述两种浏览器验证都无法代替用户本人认真查看原图并确认文字、连线、箭头尖端、方向。没有人工点击确认真实 P127 的任一节点或关系，没有生成准确率、正式 GT 或播客事实。
+- **运行维护**：`scripts/edge_p127_smoke.mjs` 与 `scripts/edge_p127_real_readonly.mjs` 是必须由操作者显式运行的验收脚本，普通用户启动审阅台不执行它们。生产/CI 仍以默认不启用私有 API 为原则。
