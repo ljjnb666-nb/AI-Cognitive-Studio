@@ -1,0 +1,73 @@
+# Does NOT trigger when this workflow file is added/edited.
+# A separate, explicit owner-authorized approval-marker commit is necessary.
+# At most ONE SHA-verified P127 crop sent with a unique r02 receipt. No bulk upload.
+name: ACS GLM P127 second single-crop approval gate
+on:
+  push:
+    branches: [ops/mineru-synthetic-retry-20261020-isolated]
+    paths:
+      - tools/pdf-parser-benchmark/ops/authorize-p127-r02-20261021.txt
+permissions:
+  contents: read
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  approved-paid-retry:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/ops/mineru-synthetic-retry-20261020-isolated' && github.event_name == 'push' && github.event.head_commit.message == 'APPROVE ONE PAID P127 GLM RETRY' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 12
+    steps:
+      - name: Checkout reviewed exact SHA, never remote PR head
+        uses: actions/checkout@v4
+        with:
+          ref: d8e08c4c1b2ec7e15fec1d8ffa4af58205fc5e42
+          persist-credentials: false
+      - name: Verify code identity and inspect previous receipt only
+        shell: powershell
+        env:
+          EXPECTED_SHA: d8e08c4c1b2ec7e15fec1d8ffa4af58205fc5e42
+        run: |
+          $ErrorActionPreference='Stop'
+          if ($env:RUNNER_OS -ne 'Windows') {throw 'WINDOWS_RUNNER_REQUIRED'}
+          if ((git rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) {throw 'CODE_SHA_MISMATCH'}
+          $root='D:\ai-cognitive-pdf-benchmark-data'
+          $report=Join-Path $root 'reports\real-mineru-39440805765-1'
+          $py=Join-Path $root 'python\mineru\Scripts\python.exe'
+          $initial='glm-cloud-v1-RB-PDF-13-page-002-region-01'
+          $retry=$initial+'-retry-p127-r02-20261021'
+          $old=Join-Path $report ('.'+$initial+'.cloud-attempted')
+          $new=Join-Path $report ('.'+$retry+'.cloud-attempted')
+          $result=Join-Path $report $retry
+          $stage=Join-Path $report ('.'+$retry+'-stage')
+          if (-not (Test-Path -LiteralPath $py -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $old -PathType Leaf)) {throw 'PRIOR_ATTEMPT_OR_PYTHON_MISSING'}
+          foreach ($path in @($new,$result,$stage)) {
+            if (Test-Path -LiteralPath $path) {throw 'SECOND_ATTEMPT_ALREADY_EXISTS'}
+          }
+          $c=[System.IO.DriveInfo]::new('C')
+          $d=[System.IO.DriveInfo]::new('D')
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if (-not $c.IsReady -or -not $d.IsReady -or
+              $c.AvailableFreeSpace -lt 15GB -or $d.AvailableFreeSpace -lt 25GB -or
+              [double]$os.FreePhysicalMemory -lt 3145728) {throw 'LOCAL_RESOURCE_GUARD_BLOCKED'}
+          Write-Output 'ACS_GLM_P127_R02_PREFLIGHT_PASS'
+      - name: Execute at most one authorized cropped-image request
+        shell: powershell
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONIOENCODING: utf-8
+        run: |
+          $ErrorActionPreference='Stop'
+          if ([string]::IsNullOrWhiteSpace($env:ZHIPU_API_KEY)) {throw 'ZHIPU_SECRET_MISSING'}
+          $py='D:\ai-cognitive-pdf-benchmark-data\python\mineru\Scripts\python.exe'
+          $script='tools/pdf-parser-benchmark/python/cloud_glm_vision.py'
+          $lines=@(& $py -I $script --fixture RB-PDF-13 --model glm-5.3-flash --region-id page-002-region-01 --max-regions 1 --allow-cloud-upload --retry-p127-once 2>&1)
+          $code=$LASTEXITCODE
+          foreach ($line in $lines) {
+            $s=[string]$line
+            if ($s -match '^ACS_GLM_CLOUD_BLOCKED=CLOUD_[A-Z0-9_]+$') {Write-Output $s}
+          }
+          if ($code -ne 0) {throw 'ACS_GLM_P127_R02_NOT_ACCEPTED'}
+          Write-Output 'ACS_GLM_P127_R02_RESULT_PRIVATE_AND_UNVERIFIED'
