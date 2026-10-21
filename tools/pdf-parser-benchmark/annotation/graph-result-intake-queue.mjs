@@ -8,6 +8,7 @@ import {
   inspectCanonicalGraphResultForRegistration
 } from "./private-graph-local.mjs";
 import {reconcileCloudEvidence} from "./graph-batch-reconcile.mjs";
+import {readStagedGraphBundle} from "./graph-result-staged-review.mjs";
 
 export class IntakeQueueError extends Error{
   constructor(code){super(code);this.code=code;this.name="IntakeQueueError";}
@@ -23,6 +24,7 @@ export async function readOnlyCanonicalIntakeOverview(root,registrations){
   for(const item of queue.items){
     let state="SOURCE_BLOCKED";
     let nodeCount=null,edgeCount=null;
+    let stageState=null,stagedAvailable=false;
     if(item.reviewable&&item.evidenceStatus==="GRAPH_READY_FOR_HUMAN_REVIEW"){
       state="REGISTERED_PENDING_HUMAN_REVIEW";
       nodeCount=item.nodeCount;
@@ -47,9 +49,18 @@ export async function readOnlyCanonicalIntakeOverview(root,registrations){
               if(candidate?.state!=="REGISTRATION_CANDIDATE_NOT_APPROVED"||
                  candidate.registered!==false||candidate.graphVerified!==false)
                 reject("INTAKE_CANDIDATE_AUTHORITY_INVALID");
+              const staged=await readStagedGraphBundle(root,item.id,registrations);
+              if(staged.reviewKind!=="STAGED_REGION"||staged.graphVerified!==false||
+                 staged.humanVerified!==false||staged.registered!==false||
+                 staged.identity.resultSha256!==candidate.sourceSha256.resultSha256||
+                 staged.identity.manifestSha256!==candidate.sourceSha256.manifestSha256||
+                 staged.identity.cropSha256!==candidate.sourceSha256.cropSha256)
+                reject("INTAKE_STAGED_SOURCE_INVALID");
               state="SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED";
               nodeCount=candidate.modelCandidateNodes;
               edgeCount=candidate.modelCandidateEdges;
+              stageState=staged.saved.draft?"REVIEW_DRAFT_UNATTESTED":"WAITING_FOR_REVIEW";
+              stagedAvailable=true;
             }catch{
               state="MODEL_RESULT_BLOCKED_MANUAL_INVESTIGATION";
             }
@@ -60,7 +71,7 @@ export async function readOnlyCanonicalIntakeOverview(root,registrations){
     items.push({
       id:item.id,fixtureId:item.fixtureId,regionId:item.regionId,
       physicalPage:item.sourcePhysicalPage1Based,
-      state,nodeCount,edgeCount,
+      state,nodeCount,edgeCount,stageState,stagedAvailable,
       humanVerified:false,graphVerified:false,
       dispatchEnabled:false,providerRequestsIssuedThisRun:0
     });
