@@ -13,7 +13,7 @@ import { createRegionReviewDraft } from "../annotation/region-graph-review.mjs";
 import {compileTrustedGraphRegistry,TRUSTED_GRAPH_RESULTS,publicRegisteredGraphMetadata,RegistryError} from "../annotation/graph-result-registry.mjs";
 import {
  PRIVATE_FILENAMES,readPrivateP127Bundle,readPrivateP127Draft,writePrivateP127Draft,
- listPrivateGraphReviewQueue,readPrivateGraphCropPreview,readRegisteredGraphBundle,saveRegisteredGraphReviewDraft,PrivateGraphError,
+ listPrivateGraphReviewQueue,readPrivateGraphCropPreview,readRegisteredGraphBundle,saveRegisteredGraphReviewDraft,inspectCanonicalGraphResultForRegistration,PrivateGraphError,
 } from "../annotation/private-graph-local.mjs";
 
 const hash = content => createHash("sha256").update(content).digest("hex");
@@ -670,5 +670,85 @@ describe("03E-04A paid inference batch PLANNING, strictly no dispatch",()=>{
       expect(res.bytes.toString("utf8")).not.toContain("合成客户端");
       expect(res.bytes.toString("utf8")).not.toContain("pngBase64");
     }finally{await app.close();}
+  }));
+});
+
+
+describe("03E-04B-02C canonical Python producer result -> unapproved registry proposal",()=>{
+  async function canonical(x){
+    const src=addSyntheticP51Registration(x);
+    const doc=JSON.parse(src.result.toString("utf8"));
+    doc.attemptClass="INITIAL_ATTEMPT";
+    src.result=Buffer.from(JSON.stringify(doc));
+    src.registration.attemptClass="INITIAL_ATTEMPT";
+    src.registration.resultPath=
+      "glm-cloud-v1-RB-PDF-12-page-001-region-01/cloud-vision-proposals.json";
+    src.registration.resultSha256=hash(src.result);
+    await writeSyntheticRegistered(x,src);
+    const prefix="glm-cloud-v1-RB-PDF-12-page-001-region-01";
+    const receipt=join(x.root,"."+prefix+".cloud-attempted");
+    await writeFile(receipt,"Reserved exactly once by Python producer.\n");
+    return {src,receipt};
+  }
+  it("accepts canonical INITIAL_ATTEMPT bytes, but does not register or attest them",()=>withFixture(async x=>{
+    const {src}=await canonical(x);
+    const before=await listPrivateGraphReviewQueue(x.root);
+    expect(before.counts).toMatchObject({total:2,ready:1,cropOnly:1});
+    const inspected=await inspectCanonicalGraphResultForRegistration(x.root,src.registration.id);
+    expect(inspected).toMatchObject({
+      schemaVersion:"acs-canonical-graph-result-intake-v1",
+      state:"REGISTRATION_CANDIDATE_NOT_APPROVED",
+      modelCandidateNodes:2,modelCandidateEdges:1,
+      registered:false,publishable:false,humanVerified:false,graphVerified:false,
+      providerRequestsIssuedThisRun:0,
+      registration:{
+        resultPath:"glm-cloud-v1-RB-PDF-12-page-001-region-01/cloud-vision-proposals.json",
+        attemptClass:"INITIAL_ATTEMPT",
+        resultSha256:src.registration.resultSha256,
+        manifestSha256:src.registration.manifestSha256,
+        cropSha256:src.registration.cropSha256
+      }
+    });
+    expect(inspected.registration).toEqual(src.registration);
+    // Candidate alone must NEVER appear in server's production registration.
+    expect((await listPrivateGraphReviewQueue(x.root)).counts)
+      .toMatchObject({total:2,ready:1,cropOnly:1});
+    await expectCode(readRegisteredGraphBundle(x.root,src.registration.id),
+      "PRIVATE_REGISTERED_RESULT_NOT_FOUND");
+    // After a separately reviewed code registration, the exact same validated
+    // file would become available for human DRAFT review only.
+    const registry=[...TRUSTED_GRAPH_RESULTS,inspected.registration];
+    const accepted=await readRegisteredGraphBundle(x.root,src.registration.id,registry);
+    expect(accepted).toMatchObject({
+      reviewKind:"REGISTERED_REGION",authority:"PROPOSED_UNVERIFIED",
+      humanVerified:false,view:{graphVerified:false,physicalPage:51}
+    });
+    expect(accepted.saved.draft).toBe(null);
+  }));
+  it("rejects missing attempt receipt, model mismatch, and stale result bytes",()=>withFixture(async x=>{
+    const {src,receipt}=await canonical(x);
+    await rm(receipt);
+    await expectCode(inspectCanonicalGraphResultForRegistration(x.root,src.registration.id),
+      "PRIVATE_INTAKE_ATTEMPT_RECEIPT_MISSING");
+    await writeFile(receipt,"Reserved exactly once by Python producer.\n");
+    const output=join(x.root,...src.registration.resultPath.split("/"));
+    const bad=JSON.parse(src.result.toString("utf8"));bad.attemptClass="FORGED_TRUSTED";
+    await writeFile(output,JSON.stringify(bad));
+    await expectCode(inspectCanonicalGraphResultForRegistration(x.root,src.registration.id),
+      "PRIVATE_INTAKE_GRAPH_CONTRACT_INVALID");
+    await writeFile(output,src.result);
+    const crop=join(x.root,...src.registration.cropPath.split("/"));
+    await writeFile(crop,Buffer.from(src.crop).fill(0,30,31));
+    await expectCode(inspectCanonicalGraphResultForRegistration(x.root,src.registration.id),
+      "PRIVATE_INTAKE_GRAPH_CONTRACT_INVALID");
+  }));
+  it("rejects legacy P127 takeover and missing result without modifying any evidence",()=>withFixture(async x=>{
+    await expectCode(inspectCanonicalGraphResultForRegistration(x.root,
+      "RB-PDF-13:page-002-region-01"),"PRIVATE_INTAKE_P127_LEGACY_ONLY");
+    await expectCode(inspectCanonicalGraphResultForRegistration(x.root,
+      "RB-PDF-12:page-001-region-01"),"PRIVATE_INTAKE_ATTEMPT_RECEIPT_MISSING");
+    await expectCode(inspectCanonicalGraphResultForRegistration(x.root,
+      "../outside"),"PRIVATE_INTAKE_ITEM_INVALID");
+    expect((await readPrivateP127Bundle(x.root)).view.nodes).toHaveLength(2);
   }));
 });
