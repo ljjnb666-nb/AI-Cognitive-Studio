@@ -3,7 +3,7 @@ name: ACS PDF Quality synthetic gate
 
 on:
   pull_request:
-    branches: [codex/pdf-parser-benchmark, feat/pdf-private-region-proposals-03]
+    branches: [codex/pdf-parser-benchmark, feat/pdf-private-region-proposals-03, feat/pdf-local-vision-proposals-03b]
     paths:
       - "tools/pdf-parser-benchmark/**"
       - ".github/workflows/acs-pdf-quality-synthetic.yml"
@@ -69,6 +69,7 @@ jobs:
           node --check annotation/graph-batch-pricing.mjs
           node --check annotation/graph-batch-reconcile.mjs
           node --check annotation/graph-result-intake-queue.mjs
+          node --check annotation/graph-result-staged-review.mjs
           node --check annotation/graph-batch-consent-proof.mjs
           node --check annotation/graph-batch-simulated-attempt.mjs
           node --check annotation/region-review-store.mjs

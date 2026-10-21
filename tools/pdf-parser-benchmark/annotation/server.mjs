@@ -8,6 +8,7 @@ import { readFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
 import { readPrivateP127Bundle, readPrivateP127Draft, writePrivateP127Draft, listPrivateGraphReviewQueue, readPrivateGraphCropPreview, readRegisteredGraphBundle, saveRegisteredGraphReviewDraft, PrivateGraphError } from "./private-graph-local.mjs";
 import { publicRegisteredGraphMetadata, compileTrustedGraphRegistry, TRUSTED_GRAPH_RESULTS } from "./graph-result-registry.mjs";
+import {readStagedGraphBundle,saveStagedGraphReviewDraft} from "./graph-result-staged-review.mjs";
 import {buildPrivateGraphBatchPlan,publicGraphBatchSummary,BatchPlanError} from "./graph-batch-plan.mjs";
 import {readOnlyCanonicalIntakeOverview,IntakeQueueError} from "./graph-result-intake-queue.mjs";
 import { fileURLToPath } from "node:url";
@@ -55,6 +56,8 @@ const PRIVATE_PREVIEW = "/api/private-graph/crop";
 const PRIVATE_REGISTRY = "/api/private-graph/registry";
 const REGISTERED_BUNDLE = "/api/private-graph/registered/bundle";
 const REGISTERED_DRAFT = "/api/private-graph/registered/draft";
+const STAGED_BUNDLE = "/api/private-graph/intake/staged/bundle";
+const STAGED_DRAFT = "/api/private-graph/intake/staged/draft";
 const PRIVATE_BUNDLE = "/api/private-graph/p127/bundle";
 const PRIVATE_DRAFT = "/api/private-graph/p127/draft";
 const TOKEN = /^[0-9a-f]{64}$/u;
@@ -82,7 +85,8 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
     const pathname = request.url?.split("?")[0];
     const cropRoute = pathname === PRIVATE_PREVIEW;
     const registeredRoute = pathname === REGISTERED_BUNDLE || pathname === REGISTERED_DRAFT;
-    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT || pathname === PRIVATE_QUEUE || cropRoute || registeredRoute || pathname === PRIVATE_REGISTRY || pathname === PRIVATE_BATCH_PLAN || pathname === PRIVATE_INTAKE_OVERVIEW) {
+    const stagedRoute = pathname === STAGED_BUNDLE || pathname === STAGED_DRAFT;
+    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT || pathname === PRIVATE_QUEUE || cropRoute || registeredRoute || stagedRoute || pathname === PRIVATE_REGISTRY || pathname === PRIVATE_BATCH_PLAN || pathname === PRIVATE_INTAKE_OVERVIEW) {
       const headers = securityHeaders(true);
       const reply = (status, value) => {
         const body = Buffer.from(JSON.stringify(value),"utf8");
@@ -100,19 +104,21 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           (fetchSite && !["same-origin","none"].includes(fetchSite))) {
         reply(403,{code:"PRIVATE_IMPORT_ACCESS_DENIED"}); return;
       }
-      if (privateGraphReadOnly && (pathname === PRIVATE_DRAFT || pathname === REGISTERED_DRAFT) && request.method === "PUT") {
+      if (privateGraphReadOnly && (pathname === PRIVATE_DRAFT || pathname === REGISTERED_DRAFT || pathname === STAGED_DRAFT) && request.method === "PUT") {
         reply(405,{code:"PRIVATE_DRAFT_WRITE_DISABLED"}); return;
       }
       if ((pathname === PRIVATE_INTAKE_OVERVIEW && request.method !== "GET") ||
           (pathname === PRIVATE_BATCH_PLAN && request.method !== "GET") ||
           (pathname === PRIVATE_REGISTRY && request.method !== "GET") ||
           (pathname === REGISTERED_BUNDLE && request.method !== "GET") ||
+          (pathname === STAGED_BUNDLE && request.method !== "GET") ||
+          (pathname === STAGED_DRAFT && !["GET","PUT"].includes(request.method)) ||
           (pathname === REGISTERED_DRAFT && !["GET","PUT"].includes(request.method)) ||
           (cropRoute && request.method !== "GET") ||
           (pathname === PRIVATE_QUEUE && request.method !== "GET") ||
           (pathname === PRIVATE_BUNDLE && request.method !== "GET") ||
           (pathname === PRIVATE_DRAFT && !["GET","PUT"].includes(request.method)) ||
-          ([PRIVATE_DRAFT,REGISTERED_DRAFT].includes(pathname) && request.method === "PUT" &&
+          ([PRIVATE_DRAFT,REGISTERED_DRAFT,STAGED_DRAFT].includes(pathname) && request.method === "PUT" &&
            (!/^application\/json(?:;|$)/iu.test(request.headers["content-type"]??"") ||
             !["none"].includes(request.headers["x-acs-draft-revision"]) &&
             !TOKEN.test(request.headers["x-acs-draft-revision"]??"")))) {
@@ -140,7 +146,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           }
           reply(200,publicRegisteredGraphMetadata(registry));return;
         }
-        if (registeredRoute) {
+        if (registeredRoute || stagedRoute) {
           const url = new URL(request.url,"http://127.0.0.1:"+port);
           if (request.url.length>150 || url.searchParams.size!==1 ||
               !url.searchParams.has("item") || url.hash ||
@@ -148,17 +154,22 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
             reply(400,{code:"PRIVATE_REGISTERED_QUERY_INVALID"});return;
           }
           const item=url.searchParams.get("item");
-          if (pathname === REGISTERED_BUNDLE){
-            const bundle=await readRegisteredGraphBundle(privateGraphRoot,item,registry);
+          if (pathname === REGISTERED_BUNDLE || pathname === STAGED_BUNDLE){
+            const bundle=stagedRoute?
+              await readStagedGraphBundle(privateGraphRoot,item,registry):
+              await readRegisteredGraphBundle(privateGraphRoot,item,registry);
             reply(200,{...bundle.data,identity:bundle.identity,
               authority:bundle.authority,reviewKind:bundle.reviewKind,
               registration:bundle.registration??null,
+              registered:stagedRoute?false:true,
               sourcePhysicalPage1Based:bundle.view.physicalPage,
               saved:bundle.saved});
             return;
           }
           if (request.method==="GET"){
-            const bundle=await readRegisteredGraphBundle(privateGraphRoot,item,registry);
+            const bundle=stagedRoute?
+              await readStagedGraphBundle(privateGraphRoot,item,registry):
+              await readRegisteredGraphBundle(privateGraphRoot,item,registry);
             reply(200,{...bundle.saved,reviewKind:bundle.reviewKind});
             return;
           }
@@ -182,7 +193,9 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           catch{throw new PrivateGraphError("PRIVATE_DRAFT_JSON_INVALID");}
           const revision=request.headers["x-acs-draft-revision"]==="none"?
             null:request.headers["x-acs-draft-revision"];
-          const work=()=>saveRegisteredGraphReviewDraft(privateGraphRoot,item,raw,revision,registry);
+          const work=()=>stagedRoute?
+            saveStagedGraphReviewDraft(privateGraphRoot,item,raw,revision,registry):
+            saveRegisteredGraphReviewDraft(privateGraphRoot,item,raw,revision,registry);
           const next=writer.then(work,work);writer=next.catch(()=>{});
           reply(200,await next);
           return;

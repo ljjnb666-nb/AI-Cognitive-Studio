@@ -1,0 +1,71 @@
+# 03E-04B-02E: synthetic-only Windows Edge; never reads the private D: dataset.
+# Only the owner's exact same-repository feature branch may use the local runner.
+name: ACS PDF staged graph Edge synthetic acceptance
+on:
+  push:
+    branches: [feat/pdf-figure-03e04b02e-staged-review]
+    paths:
+      - "tools/pdf-parser-benchmark/**"
+      - ".github/workflows/acs-pdf-02e-edge-synthetic.yml"
+  pull_request:
+    branches: [feat/pdf-local-vision-proposals-03b]
+    paths:
+      - "tools/pdf-parser-benchmark/**"
+      - ".github/workflows/acs-pdf-02e-edge-synthetic.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acs-windows-pdf-02e-synthetic-acceptance
+  cancel-in-progress: false
+
+jobs:
+  staged-edge:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && ((github.event_name == 'push' && github.ref == 'refs/heads/feat/pdf-figure-03e04b02e-staged-review') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-figure-03e04b02e-staged-review' && github.event.pull_request.user.login == 'ljjnb666-nb')) }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact same-repository PR head without persistent credentials
+        uses: actions/checkout@v4
+        env:
+          # The self-hosted runner has no direct github.com:443 route.
+          # Scoped to checkout; no persistent global Git proxy mutation.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          persist-credentials: false
+          clean: false
+          path: acs-02e-stage
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact SHA and machine resource guard
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git -C acs-02e-stage rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'EDGE_EXACT_SHA_CHECK_FAILED' }
+          $node=(Get-Command node -ErrorAction Stop).Source
+          if ((& $node -p "Number(process.versions.node.split('.')[0]) >= 24").Trim() -ne 'true') { throw 'EDGE_NODE24_REQUIRED' }
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ([double]$os.FreePhysicalMemory -lt 1572864) { throw 'EDGE_MEMORY_GUARD_BLOCKED' }
+          Write-Output 'ACS_02E_EDGE_RUNNER_SHA_AND_RESOURCES_VERIFIED'
+      - name: Real Microsoft Edge with temporary synthetic two-book fixture only
+        shell: powershell
+        env:
+          NODE_OPTIONS: '--no-warnings'
+        run: |
+          $ErrorActionPreference='Stop'
+          $paths=@(
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
+            "${env:LOCALAPPDATA}\Microsoft\Edge\Application\msedge.exe"
+          )
+          $edge=@($paths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+          if ($edge.Count -ne 1) { throw 'EDGE_BINARY_NOT_AVAILABLE' }
+          node --check acs-02e-stage/tools/pdf-parser-benchmark/scripts/edge_graph_staged_smoke.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'EDGE_SCRIPT_SYNTAX_INVALID' }
+          node acs-02e-stage/tools/pdf-parser-benchmark/scripts/edge_graph_staged_smoke.mjs ('--edge='+$edge[0])
+          if ($LASTEXITCODE -ne 0) { throw 'EDGE_STAGED_SYNTHETIC_ACCEPTANCE_FAILED' }
+          Write-Output 'ACS_03E04B02E_EDGE_STAGED_SYNTHETIC_ACCEPTED=true'

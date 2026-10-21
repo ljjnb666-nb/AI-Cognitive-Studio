@@ -6,7 +6,7 @@
 <title>PDF 多区域图表证据集中审阅（仅本机）</title>
 <link rel="stylesheet" href="./graph-review.css"><script type="module" src="./graph-review-app.mjs"></script>
 </head><body>
-<header><div><strong>AI Cognitive Studio · 多区域图表审核</strong><span>现有 P127 及以后明确登记的图关系候选 · 严格未认证</span></div><strong class="privacy">仅本机 · 不上传</strong></header>
+<header><div><strong>AI Cognitive Studio · 多区域图表审核</strong><span>已有 P127、已登记与来源核验后的自动隔离待审候选 · 严格未认证</span></div><strong class="privacy">仅本机 · 不上传</strong></header>
 <main>
 <section class="intro">
 <h1>对照原图，逐一复核模型候选</h1>
@@ -24,7 +24,7 @@
 </section>
 <section class="panel" id="intake-panel">
 <h2>0. 模型结果集中接收状态（自动只读核验）</h2>
-<p>自动核对已经产生的标准 GLM 图关系文件、请求回执和来源一致性。<b>通过来源核验不等于已获准登记或人工认证</b>；未获收费授权时不发起模型调用。</p>
+<p>自动核对已经产生的标准 GLM 图关系文件、请求回执和来源一致性。<b>通过来源核验的候选自动进入独立的未认证待审区域；不等于永久可信登记或人工认证</b>。仅在本机已授权访问凭据内提供草稿编辑；无付费识别按钮，也不发送模型请求。</p>
 <div class="actions">
 <button type="button" id="refresh-intake">重新核对模型结果</button>
 <span id="intake-summary" role="status" aria-live="polite">结果接收状态尚未核对</span>
@@ -32,8 +32,8 @@
 <div id="intake-items" class="queue-items"></div>
 </section>
 <section class="panel" id="queue-panel">
-<h2>0. 已有证据自动发现队列（只读）</h2>
-<p>自动识别允许范围内 RB-PDF-12/13 的已有局部裁剪。<b>仅已验证来源和已存在图关系结果的项目才能进入最终人工审核</b>；单有 PNG 的其他区域不会假装已经完成 GLM 识别，也不会自动发起付费请求。</p>
+<h2>0. 已有图像证据自动发现队列（只读）</h2>
+<p>自动识别允许范围内 RB-PDF-12/13 的已有局部裁剪。<b>已有 P127、明确登记结果及自动隔离候选均须先验证来源才能进入未认证的人工草稿审核</b>；单有 PNG 的其他区域不会假装已经完成 GLM 识别，也不会自动发起付费请求。</p>
 <div class="actions"><button id="refresh-queue" type="button">重新扫描已有证据</button><span id="queue-summary" role="status" aria-live="polite">队列尚未读取</span></div>
 <div id="queue-items" class="queue-items"></div>
 <div id="crop-preview" class="crop-preview" hidden>
@@ -76,6 +76,6 @@
 <p>草稿永久保持 <code>REVIEW_DRAFT_UNATTESTED</code>、<code>humanVerified=false</code>、<code>graphVerified=false</code>。即使全部肉眼标记一致，也不能自动晋级已验证图谱。</p>
 <div class="actions"><button id="export" type="button" class="primary">导出草稿 JSON 到本机</button>
 <label class="restore">恢复已有私有草稿<input id="restore" type="file" accept=".json,application/json"></label></div>
-<p class="pathhelp">建议手动保存到 D:\ai-cognitive-pdf-benchmark-data。浏览器下载提示不代表文件已存到指定目录；请自行核实。关闭页面后内存草稿将丢失。</p>
+<p class="pathhelp">建议手动保存到 D:\ai-cognitive-pdf-benchmark-data。浏览器下载提示不代表文件已存到指定目录；请自行核实。本机私有工作台连接正常且允许写入时支持自动保存；若连接断开，可手动导出，勿丢弃尚未保存的修改。</p>
 </section>
 </main></body></html>

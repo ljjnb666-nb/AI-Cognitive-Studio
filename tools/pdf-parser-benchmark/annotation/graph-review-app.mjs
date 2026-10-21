@@ -18,14 +18,15 @@ const token=new URLSearchParams(location.hash.slice(1)).get("review-token");
 const hasLocalToken=typeof token==="string"&&/^[0-9a-f]{64}$/u.test(token);
 let autoActive=false,saveRevision=null,saveTimer=null,saveQueue=Promise.resolve(),saveEpoch=0;
 let activeReviewKind="LEGACY_P127",activeItemId=null;
-const useGeneric=()=>activeReviewKind==="REGISTERED_REGION";
+const useGeneric=()=>["REGISTERED_REGION","STAGED_REGION"].includes(activeReviewKind);
 const currentParse=(raw,v)=>useGeneric()?parseRegionReviewDraft(raw,v):parseGraphReviewDraft(raw,v);
 const currentUpdate=(raw,v,kind,id,decision,note)=>useGeneric()?
   updateRegionReviewDraft(raw,v,kind,id,decision,note):
   updateGraphDecision(raw,v,kind,id,decision,note);
 const currentProgress=(raw,v)=>useGeneric()?regionReviewProgress(raw,v):graphReviewProgress(raw,v);
-const draftEndpoint=()=>useGeneric()?
-  "/api/private-graph/registered/draft?item="+encodeURIComponent(activeItemId):
+const draftEndpoint=()=>activeReviewKind==="STAGED_REGION"?
+  "/api/private-graph/intake/staged/draft?item="+encodeURIComponent(activeItemId):
+  useGeneric()?"/api/private-graph/registered/draft?item="+encodeURIComponent(activeItemId):
   "/api/private-graph/p127/draft";
 function saveStatus(value){$("autosave-state").textContent="自动保存："+value;}
 function autoHeaders(extra={}){return {...extra,"x-acs-review-token":hasLocalToken?token:""};}
@@ -281,8 +282,8 @@ async function loadAutomatically(){
   }
 }
 
-async function loadRegisteredRegion(item){
-  if(!hasLocalToken||item.reviewKind!=="REGISTERED_REGION"||
+async function loadRegisteredRegion(item,staged=false){
+  if(!hasLocalToken||(!staged&&item.reviewKind!=="REGISTERED_REGION")||
      item.id==="RB-PDF-13:page-002-region-01")return;
   const epoch=++loadEpoch;
   cancelAutoSave();
@@ -290,10 +291,12 @@ async function loadRegisteredRegion(item){
   view=null;draft=null;selected=null;
   $("work").hidden=true;$("export-panel").hidden=true;
   try{
-    message("正在校验已授权区域 "+item.fixtureId+" · P"+item.sourcePhysicalPage1Based+" 的机器候选…");
-    const bundle=await autoRequest("/api/private-graph/registered/bundle?item="+encodeURIComponent(item.id));
+    message("正在校验"+(staged?"隔离待审":"已登记")+"区域 "+item.fixtureId+" · P"+item.sourcePhysicalPage1Based+" 的机器候选…");
+    const bundle=await autoRequest((staged?"/api/private-graph/intake/staged/bundle?item=":
+      "/api/private-graph/registered/bundle?item=")+encodeURIComponent(item.id));
     if(epoch!==loadEpoch)return;
-    if(bundle.reviewKind!=="REGISTERED_REGION"||
+    if(bundle.reviewKind!==(staged?"STAGED_REGION":"REGISTERED_REGION")||
+       (staged&&bundle.registered!==false)||
        bundle.registration?.id!==item.id||
        bundle.registration?.fixtureId!==item.fixtureId||
        bundle.registration?.regionId!==item.regionId||
@@ -326,12 +329,12 @@ async function loadRegisteredRegion(item){
       const restored=saved.draft===null?createRegionReviewDraft(verified):
         parseRegionReviewDraft(saved.draft,verified);
       if(epoch!==loadEpoch)return;
-      activeReviewKind="REGISTERED_REGION";activeItemId=item.id;
+      activeReviewKind=staged?"STAGED_REGION":"REGISTERED_REGION";activeItemId=item.id;
       view=verified;draft=restored;bitmap=image;selected=null;
       saveRevision=saved.revision;autoActive=true;
       $("review-scope").textContent="当前审核："+item.fixtureId+
         " · 物理 P"+verified.physicalPage+" · "+item.regionId+
-        " · 结果 SHA 绑定的私有未认证草稿";
+        " · "+(staged?"自动隔离待审（未登记）":"已登记")+" · 结果 SHA 绑定的私有未认证草稿";
       $("work").hidden=false;$("export-panel").hidden=false;
       draw();render();
       saveStatus("已连接本机私有区域草稿"+(saved.draft?"（已恢复）":"（等待首次修改）"));
@@ -383,6 +386,10 @@ async function loadBatchPlan(){
 }
 $("refresh-batch-plan").addEventListener("click",()=>{void loadBatchPlan();});
 
+const stagedLabels=Object.freeze({
+  WAITING_FOR_REVIEW:"来源校验完成 · 等待人工审核",
+  REVIEW_DRAFT_UNATTESTED:"私有未认证草稿 · 可继续审核"
+});
 const intakeLabels=Object.freeze({
   REGISTERED_PENDING_HUMAN_REVIEW:"已登记 · 等待人工复核",
   SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED:"模型来源核验通过 · 尚未批准登记",
@@ -434,6 +441,19 @@ async function loadIntakeOverview(){
       title.append(el("b","",item.fixtureId+" · 物理 P"+item.physicalPage),
         el("small","",item.regionId));
       card.append(title,el("span","queue-status",intakeLabels[item.state]));
+      if(item.state==="SOURCE_VERIFIED_REGISTRATION_NOT_APPROVED"){
+        if(!Object.hasOwn(stagedLabels,item.stageState)||item.stagedAvailable!==true)
+          throw new GraphReviewError("GRAPH_STAGED_RESPONSE_INVALID");
+        card.append(el("span","queue-status",stagedLabels[item.stageState]));
+        const reviewButton=el("button","primary","进入隔离待审 · 未认证");
+        reviewButton.type="button";
+        reviewButton.addEventListener("click",()=>void loadRegisteredRegion({
+          ...item,sourcePhysicalPage1Based:item.physicalPage,reviewKind:"STAGED_REGION"
+        },true));
+        card.append(reviewButton);
+      }else if(item.stagedAvailable!==false || item.stageState!==null){
+        throw new GraphReviewError("GRAPH_STAGED_UNAUTHORIZED");
+      }
       if(item.nodeCount!==null)
         card.append(el("span","queue-status",item.nodeCount+
           " 节点 / "+item.edgeCount+" 关系 · 未认证"));
