@@ -1,0 +1,88 @@
+# Read-only independent audit of one private P127 model proposal. No secrets or network.
+name: ACS GLM P127 r02 private result read-only audit
+on:
+  push:
+    branches: [ops/mineru-synthetic-retry-20261020-isolated]
+    paths:
+      - .github/workflows/acs-glm-p127-r02-private-result-audit-20261021.yml
+permissions: {}
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+jobs:
+  audit:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.ref == 'refs/heads/ops/mineru-synthetic-retry-20261020-isolated' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 5
+    steps:
+      - name: Verify private SHA lineage and unverified graph state
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          if ($env:RUNNER_OS -ne 'Windows') {throw 'WINDOWS_RUNNER_REQUIRED'}
+          $report='D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1'
+          $basename='glm-cloud-v1-RB-PDF-13-page-002-region-01'
+          $output=Join-Path $report ($basename+'-retry-p127-r02-20261021\cloud-vision-proposals.json')
+          $receipt=Join-Path $report ('.'+$basename+'-retry-p127-r02-20261021.cloud-attempted')
+          $oldReceipt=Join-Path $report ('.'+$basename+'.cloud-attempted')
+          $manifest=Join-Path $report 'region-proposals-v1-RB-PDF-13\region-proposals.json'
+          foreach ($p in @($output,$receipt,$oldReceipt,$manifest)) {
+            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {throw 'PRIVATE_EVIDENCE_FILE_MISSING'}
+            $f=Get-Item -LiteralPath $p -Force
+            if (($f.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {throw 'PRIVATE_EVIDENCE_UNSAFE_LINK'}
+          }
+          if ((Get-Item -LiteralPath $output).Length -gt 2000000) {throw 'PRIVATE_RESULT_OVERSIZED'}
+          try {
+            $doc=Get-Content -LiteralPath $output -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            $regions=Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+          } catch {throw 'PRIVATE_RESULT_JSON_INVALID'}
+          $manifestSha=(Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifestSha -ne $doc.sourceRegionManifestSha256) {throw 'SOURCE_MANIFEST_SHA_MISMATCH'}
+          if ($doc.schemaVersion -ne 'acs-glm-cloud-vision-proposal-v1' -or
+              $doc.fixtureId -ne 'RB-PDF-13' -or
+              $doc.model -ne 'glm-5.3-flash' -or
+              $doc.attemptClass -ne 'EXPLICIT_P127_SECOND_ATTEMPT' -or
+              $doc.reviewStatus -ne 'NOT_REVIEWED' -or
+              $doc.graphVerified -ne $false) {throw 'PRIVATE_RESULT_AUTHORITY_INVALID'}
+          $entries=@($doc.results)
+          if ($entries.Count -ne 1) {throw 'PRIVATE_RESULT_COUNT_INVALID'}
+          $result=$entries[0]
+          if ($result.regionId -ne 'page-002-region-01' -or
+              $result.sourcePhysicalPage1Based -ne 127 -or
+              $result.humanReviewStatus -ne 'NOT_REVIEWED' -or
+              $result.graphVerified -ne $false -or
+              $result.proposal.humanVerified -ne $false -or
+              $result.proposal.graphStatus -ne 'PROPOSED_UNVERIFIED' -or
+              $result.proposal.reviewStatus -ne 'NOT_REVIEWED') {throw 'PRIVATE_RESULT_IDENTITY_OR_REVIEW_INVALID'}
+          $selected=@(
+            foreach ($page in $regions.pages) {
+              foreach ($region in $page.regions) {
+                if ($page.sourcePhysicalPage1Based -eq 127 -and
+                    $region.regionId -eq 'page-002-region-01') { $region }
+              }
+            }
+          )
+          if ($selected.Count -ne 1) {throw 'SOURCE_REGION_NOT_UNIQUE'}
+          $crop=Join-Path $report 'region-proposals-v1-RB-PDF-13\crops\page-002-region-01.png'
+          if (-not (Test-Path -LiteralPath $crop -PathType Leaf)) {throw 'CROP_EVIDENCE_MISSING'}
+          if (((Get-FileHash -LiteralPath $crop -Algorithm SHA256).Hash.ToLowerInvariant()) -ne $selected[0].cropSha256 -or
+              $result.cropSha256 -ne $selected[0].cropSha256 -or
+              $result.proposal.sourceCropSha256 -ne $selected[0].cropSha256) {throw 'CROP_SHA_MISMATCH'}
+          $nodes=@($result.proposal.nodes)
+          $edges=@($result.proposal.edges)
+          $mappedNodes=@($result.mappedPageEvidence.mappedNodes)
+          $mappedEdges=@($result.mappedPageEvidence.mappedEdges)
+          if ($nodes.Count -ne $mappedNodes.Count -or $edges.Count -ne $mappedEdges.Count -or
+              $result.mappedPageEvidence.graphVerified -ne $false -or
+              $result.mappedPageEvidence.needsIndependentHumanReview -ne $true) {
+            throw 'PAGE_EVIDENCE_MAP_OR_REVIEW_INVALID'
+          }
+          Write-Output 'ACS_GLM_R02_PRIVATE_RESULT_AUDIT=PASS'
+          Write-Output 'ACS_GLM_R02_SOURCE_PHYSICAL_PAGE=127'
+          Write-Output ('ACS_GLM_R02_NODE_PROPOSALS='+$nodes.Count)
+          Write-Output ('ACS_GLM_R02_EDGE_PROPOSALS='+$edges.Count)
+          Write-Output ('ACS_GLM_R02_MAPPED_NODE_COUNT='+$mappedNodes.Count)
+          Write-Output ('ACS_GLM_R02_MAPPED_EDGE_COUNT='+$mappedEdges.Count)
+          Write-Output 'ACS_GLM_R02_REVIEW_STATUS=NOT_REVIEWED'
+          Write-Output 'ACS_GLM_R02_GRAPH_VERIFIED=false'
+          Write-Output 'ACS_GLM_R02_PRIVATE_DATA_NOT_PRINTED=true'
