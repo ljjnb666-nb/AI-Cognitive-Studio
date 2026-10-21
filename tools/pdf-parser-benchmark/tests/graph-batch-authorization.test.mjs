@@ -125,7 +125,7 @@ describe("03E-04B-01 nonbillable authorization request and durable OFFLINE only 
     const filename="offline-"+draft.requestSha256+"-"+ids[0].replace(":","-")+".json";
     await writeFile(join(folder,filename),"{ corrupt", {flag:"w"});
     await rejectAsync(()=>inspectOfflineReviewItem(root,plan,draft,ids[0]),
-      "BATCH_LEDGER_CORRUPT");
+      "BATCH_LEDGER_RESERVATION_UNSAFE");
     expect(receipt.dispatchEnabled).toBe(false);
     await rejectAsync(()=>reserveOfflineReviewItem(root,plan,draft,ids[0],
       {now:"2026-10-21T00:00:00.000Z"}),"BATCH_LEDGER_ITEM_ALREADY_RESERVED");
