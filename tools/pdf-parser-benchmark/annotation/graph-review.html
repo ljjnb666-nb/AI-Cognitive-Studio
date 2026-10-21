@@ -13,6 +13,15 @@
 <p>此页面只显示机器提出的节点、线段和箭头尖端，允许人工记录“肉眼一致 / 不一致 / 无法判断”。本工具不会确认知识图谱，不会写入 Ground Truth，也不会触发 GLM、OCR 或播客生成。</p>
 <p><b>注意：</b>裁剪图可能不包含整页上下文。可另外在原书阅读器打开物理 P127 辅助判断。只在图像中确实看清时选择“肉眼一致”；看不清方向应选“无法判断”。</p>
 </section>
+<section class="panel" id="batch-plan-panel">
+<h2>0. 批量图关系识别预检（只生成计划，不收费）</h2>
+<p>从已有图像裁剪和可信来源建立批量识别候选清单。<b>目前禁止自动发起 GLM 付费调用</b>；价格尚未核实，不显示虚假的费用估算。已存在的真实 P127 图关系不会重复识别。</p>
+<div class="actions">
+  <button id="refresh-batch-plan" type="button">核对待识别区域</button>
+  <span id="batch-plan-state" role="status" aria-live="polite">批量计划尚未读取</span>
+</div>
+<p id="batch-plan-details" class="pathhelp">未授权；已调用 0 次。没有付费执行按钮。</p>
+</section>
 <section class="panel" id="queue-panel">
 <h2>0. 已有证据自动发现队列（只读）</h2>
 <p>自动识别允许范围内 RB-PDF-12/13 的已有局部裁剪。<b>仅已验证来源和已存在图关系结果的项目才能进入最终人工审核</b>；单有 PNG 的其他区域不会假装已经完成 GLM 识别，也不会自动发起付费请求。</p>

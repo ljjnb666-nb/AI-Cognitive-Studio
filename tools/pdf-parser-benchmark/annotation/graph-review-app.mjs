@@ -346,6 +346,43 @@ async function loadRegisteredRegion(item){
   }
 }
 
+let batchEpoch=0;
+async function loadBatchPlan(){
+  const epoch=++batchEpoch;
+  const summary=$("batch-plan-state"),details=$("batch-plan-details");
+  if(!hasLocalToken){
+    summary.textContent="静态模式下不可访问私有识别计划";
+    details.textContent="未授权；已调用 0 次。";return;
+  }
+  summary.textContent="正在核验已有裁剪 SHA 并计算零费用计划…";
+  details.textContent="不会调用 GLM；不会保存授权或任务回执。";
+  try{
+    const p=await autoRequest("/api/private-graph/batch/plan");
+    if(epoch!==batchEpoch)return;
+    if(p?.schemaVersion!=="acs-offline-graph-batch-plan-v1"||
+       p.authority!=="PREVIEW_ONLY_NO_PROVIDER_DISPATCH"||
+       p.dispatchEnabled!==false||p.providerRequestsIssued!==0||
+       p.needsExplicitPaidAuthorization!==true||p.priceEstimate!==null||
+       typeof p.planSha256!=="string"||!/^[0-9a-f]{64}$/u.test(p.planSha256)||
+       !p.counts||!Number.isSafeInteger(p.counts.discovered)||
+       !Number.isSafeInteger(p.counts.eligible)||
+       !Array.isArray(p.items)||p.items.length!==p.counts.eligible||
+       !Array.isArray(p.exclusions)||p.exclusions.length+p.items.length!==p.counts.discovered)
+      throw new GraphReviewError("BATCH_PLAN_RESPONSE_INVALID");
+    summary.textContent="已发现 "+p.counts.discovered+" 个区域 · 需推理 "+
+      p.counts.eligible+" · 已有图关系 "+p.counts.alreadyHasGraph;
+    details.textContent="计划校验码："+p.planSha256.slice(0,16)+
+      "… · 单次上限 "+p.maxRequests+" 张 · 待重新授权 "+
+      p.counts.eligible+" 张 · 本轮实际付费调用 0 次。"+
+      "识别费用未核实；计划不能执行。";
+  }catch(e){
+    if(epoch!==batchEpoch)return;
+    summary.textContent="识别计划安全停止";
+    details.textContent=e instanceof GraphReviewError?e.code:"BATCH_PLAN_UNAVAILABLE";
+  }
+}
+$("refresh-batch-plan").addEventListener("click",()=>{void loadBatchPlan();});
+
 let queueEpoch=0,previewEpoch=0;
 function resetPreview(){
   ++previewEpoch;
@@ -489,4 +526,4 @@ for(const id of ["result-file","manifest-file","crop-file"]){
 $("restore").addEventListener("change",()=>{void restoreDraft();});
 $("export").addEventListener("click",exportDraft);
 
-if(hasLocalToken){void loadQueue();void loadAutomatically();}
+if(hasLocalToken){void loadBatchPlan();void loadQueue();void loadAutomatically();}

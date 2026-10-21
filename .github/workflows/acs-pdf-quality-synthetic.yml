@@ -63,6 +63,7 @@ jobs:
           node --check annotation/graph-review.mjs
           node --check annotation/region-graph-review.mjs
           node --check annotation/graph-result-registry.mjs
+          node --check annotation/graph-batch-plan.mjs
           node --check annotation/region-review-store.mjs
           node --check annotation/graph-review-app.mjs
           node --check annotation/graph-review-auto.mjs
