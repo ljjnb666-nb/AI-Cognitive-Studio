@@ -83,6 +83,17 @@ async function main(){
     if(!reached)fail("EDGE_REAL_P127_AUTO_IMPORT_TIMEOUT");
     const v=await cdp.evaluate('({canvas:document.querySelector("#diagram").width>0,nodes:document.querySelector("#counts").textContent.includes("节点 9 个"),edges:document.querySelector("#counts").textContent.includes("关系 10 条"),choices:document.querySelectorAll("#entries select").length===19,privateLink:document.querySelector("#export-panel").textContent.includes("graphVerified=false")})');
     if(!v||!Object.values(v).every(Boolean))fail("EDGE_REAL_P127_RENDER_OR_COUNT_REJECTED");
+    for(let n=0;n<110;n++){
+      const done=await cdp.evaluate('document.querySelectorAll("#queue-items .queue-item").length === 15');
+      if(done)break;
+      if(n===109)fail("EDGE_REAL_P127_QUEUE_TIMEOUT");
+      await delay(160);
+    }
+    const queueReady=await cdp.evaluate('({total:document.querySelector("#queue-summary")?.textContent.includes("已发现 15 个区域"),ready:document.querySelector("#queue-summary")?.textContent.includes("可审核 1"),cropOnly:document.querySelector("#queue-summary")?.textContent.includes("只有裁剪 14"),blocked:document.querySelector("#queue-summary")?.textContent.includes("证据异常 0"),reviewEntry:document.querySelectorAll("#queue-items button.primary").length===1})');
+    if(!queueReady||!Object.values(queueReady).every(Boolean))fail("EDGE_REAL_P127_QUEUE_REJECTED");
+    console.log("ACS_P127_EDGE_REAL_QUEUE_TOTAL=15");
+    console.log("ACS_P127_EDGE_REAL_QUEUE_REVIEWABLE=1");
+    console.log("ACS_P127_EDGE_REAL_QUEUE_CROP_ONLY=14");
     console.log("ACS_P127_EDGE_REAL_PRIVATE_READONLY_LOADED=true");
     console.log("ACS_P127_EDGE_REAL_PRIVATE_NODES=9");
     console.log("ACS_P127_EDGE_REAL_PRIVATE_EDGES=10");
