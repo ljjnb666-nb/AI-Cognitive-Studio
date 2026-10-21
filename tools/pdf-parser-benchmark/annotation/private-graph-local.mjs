@@ -265,3 +265,36 @@ export async function listPrivateGraphReviewQueue(root){
         x.evidenceStatus==="GRAPH_EVIDENCE_BLOCKED").length
     }};
 }
+
+/**
+ * 03E-02: on-demand preview of exactly one previously inventoried crop.
+ * The client submits ONLY a canonical fixture:region ID, never a path.
+ * No directory scans, no inference, no review-state changes.
+ */
+const CROP_ID = /^(RB-PDF-(?:12|13)):(page-[0-9]{3}-region-[0-9]{2})$/u;
+export async function readPrivateGraphCropPreview(root, itemId){
+  if(typeof itemId!=="string" || itemId.length>48) fail("PRIVATE_PREVIEW_ID_INVALID");
+  const match=CROP_ID.exec(itemId);
+  if(!match) fail("PRIVATE_PREVIEW_ID_INVALID");
+  const [,fixture,regionId]=match;
+  const manifestPath=`region-proposals-v1-${fixture}/region-proposals.json`;
+  const manifestBytes=await readBounded(root,manifestPath,MAX_MANIFEST_BYTES);
+  const entries=boundedManifest(json(manifestBytes),fixture);
+  const region=entries.find(e=>e.regionId===regionId);
+  if(!region) fail("PRIVATE_PREVIEW_REGION_NOT_FOUND");
+  const cropPath=`region-proposals-v1-${fixture}/crops/${regionId}.png`;
+  const bytes=await readBounded(root,cropPath,MAX_CROP_BYTES);
+  const size=dimensions(bytes),cropSha256=sha(bytes);
+  if(cropSha256!==region.cropSha256 ||
+      size.cropWidth!==region.width || size.cropHeight!==region.height)
+    fail("PRIVATE_PREVIEW_PROVENANCE_MISMATCH");
+  return {
+    schemaVersion:"acs-private-crop-preview-v1",
+    id:itemId,fixtureId:fixture,regionId,
+    sourcePhysicalPage1Based:region.sourcePhysicalPage1Based,
+    cropSha256,width:region.width,height:region.height,
+    authority:"CROP_ONLY_UNVERIFIED",
+    graphVerified:false,humanVerified:false,
+    pngBase64:bytes.toString("base64")
+  };
+}
