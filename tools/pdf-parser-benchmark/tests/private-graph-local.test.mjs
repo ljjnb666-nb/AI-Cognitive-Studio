@@ -7,9 +7,10 @@ import { request } from "node:http";
 import { startAnnotationServer } from "../annotation/server.mjs";
 import { createGraphReviewDraft } from "../annotation/graph-review.mjs";
 import { verifyAutoGraphBundle } from "../annotation/graph-review-auto.mjs";
+import { verifyGraphCropPreview } from "../annotation/graph-crop-preview.mjs";
 import {
  PRIVATE_FILENAMES,readPrivateP127Bundle,readPrivateP127Draft,writePrivateP127Draft,
- listPrivateGraphReviewQueue,PrivateGraphError,
+ listPrivateGraphReviewQueue,readPrivateGraphCropPreview,PrivateGraphError,
 } from "../annotation/private-graph-local.mjs";
 
 const hash = content => createHash("sha256").update(content).digest("hex");
@@ -307,6 +308,72 @@ describe("03E-01 multiple fixture evidence queue — safe bounded inventory only
       expect(queue.status).toBe(200);
       expect(queue.value.counts).toMatchObject({total:1,ready:1});
       expect(queue.bytes.toString("utf8")).not.toContain("合成客户端");
+    }finally{await app.close();}
+  }));
+});
+
+describe("03E-02 on-demand region crop preview — no graph authority",()=>{
+  it("returns only selected P127 private crop and proves PNG SHA in the browser",()=>withFixture(async x=>{
+    const id="RB-PDF-13:page-002-region-01";
+    const preview=await readPrivateGraphCropPreview(x.root,id);
+    expect(preview).toMatchObject({id,sourcePhysicalPage1Based:127,
+      width:200,height:100,authority:"CROP_ONLY_UNVERIFIED",graphVerified:false,humanVerified:false});
+    expect(preview.cropSha256).toBe(hash(x.files.crop));
+    const verified=await verifyGraphCropPreview(preview,{id,sourcePhysicalPage1Based:127});
+    expect(Buffer.from(verified.bytes)).toEqual(x.files.crop);
+    expect(verified.graphVerified).toBe(false);
+    expect(JSON.stringify(preview)).not.toContain("合成客户端");
+    expect(JSON.stringify(preview)).not.toContain("graphStatus");
+  }));
+  it("strictly rejects traversal, forged book names and invented region IDs",()=>withFixture(async x=>{
+    for(const id of ["../do-not-read-private.txt","RB-PDF-11:page-002-region-01",
+      "RB-PDF-13:../page-002-region-01","RB-PDF-13:page-002-region-99",
+      "RB-PDF-13:page-002-region-01/../../","RB-PDF-13:page-002-region-01%2fsecret"]){
+      await expectCode(readPrivateGraphCropPreview(x.root,id),
+        id==="RB-PDF-13:page-002-region-99"?"PRIVATE_PREVIEW_REGION_NOT_FOUND":"PRIVATE_PREVIEW_ID_INVALID");
+    }
+  }));
+  it("rejects altered PNG and changed physical page instead of displaying a misleading preview",()=>withFixture(async x=>{
+    const id="RB-PDF-13:page-002-region-01";
+    const preview=await readPrivateGraphCropPreview(x.root,id);
+    await expect(verifyGraphCropPreview({...preview,pngBase64:Buffer.from("not-valid-PNG").toString("base64")},
+      {id,sourcePhysicalPage1Based:127})).rejects.toMatchObject({code:"GRAPH_CROP_PREVIEW_PNG_INVALID"});
+    const modified=Buffer.from(x.files.crop);modified[32]=7;
+    await expect(verifyGraphCropPreview({...preview,pngBase64:modified.toString("base64")},
+      {id,sourcePhysicalPage1Based:127})).rejects.toMatchObject({code:"GRAPH_CROP_PREVIEW_SHA_MISMATCH"});
+    await expect(verifyGraphCropPreview(preview,{id,sourcePhysicalPage1Based:379}))
+      .rejects.toMatchObject({code:"GRAPH_CROP_PREVIEW_METADATA_INVALID"});
+    await expect(verifyGraphCropPreview({...preview,authority:"HUMAN_VERIFIED"},
+      {id,sourcePhysicalPage1Based:127})).rejects.toMatchObject({code:"GRAPH_CROP_PREVIEW_METADATA_INVALID"});
+    const crop=join(x.root,...PRIVATE_FILENAMES.crop.split("/"));
+    await writeFile(crop,modified);
+    await expectCode(readPrivateGraphCropPreview(x.root,id),"PRIVATE_PREVIEW_PROVENANCE_MISMATCH");
+  }));
+  it("never follows a linked crop or reads sibling files",()=>withFixture(async x=>{
+    const crop=join(x.root,...PRIVATE_FILENAMES.crop.split("/"));
+    await rm(crop);
+    const outside=join(x.tmp,"outside.png");await writeFile(outside,x.files.crop);
+    await symlink(outside,crop);
+    await expectCode(readPrivateGraphCropPreview(x.root,"RB-PDF-13:page-002-region-01"),"PRIVATE_EVIDENCE_UNSAFE");
+  }));
+  it("requires local token and canonical single GET query, with no draft writes",()=>withFixture(async x=>{
+    const id="RB-PDF-13%3Apage-002-region-01",path="/api/private-graph/crop?item="+id;
+    const off=await startAnnotationServer();
+    try{expect((await send(off,path)).status).toBe(404);}finally{await off.close();}
+    const app=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token,privateGraphReadOnly:true});
+    try{
+      expect((await send(app,path,{auth:false})).status).toBe(403);
+      expect((await send(app,path,{site:"cross-site"})).status).toBe(403);
+      expect((await send(app,path,{origin:"https://attacker.invalid"})).status).toBe(403);
+      expect((await send(app,path,{method:"POST"})).status).toBe(405);
+      expect((await send(app,path+"&item="+id)).status).toBe(400);
+      expect((await send(app,"/api/private-graph/crop?item=..%2fsecret")).status).toBe(400);
+      const answer=await send(app,path);
+      expect(answer.status).toBe(200);
+      expect(answer.value).toMatchObject({id:"RB-PDF-13:page-002-region-01",graphVerified:false,
+        authority:"CROP_ONLY_UNVERIFIED"});
+      expect(Buffer.from(answer.value.pngBase64,"base64")).toEqual(x.files.crop);
+      expect((await send(app,"/api/private-graph/p127/draft")).value).toEqual({draft:null,revision:null});
     }finally{await app.close();}
   }));
 });
