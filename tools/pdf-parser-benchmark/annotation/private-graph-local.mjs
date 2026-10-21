@@ -154,3 +154,110 @@ export async function writePrivateP127Draft(root,view,raw,expectedRevision){
     fail("PRIVATE_DRAFT_WRITE_FAILED");
   }finally{await fd?.close();await rm(temp,{force:true}).catch(()=>{});}
 }
+
+/**
+ * 03E-01: bounded, deterministic inventory of ALREADY generated region crops.
+ * The only source directories are two hard-coded figure manifests. This does
+ * NOT enumerate arbitrary private directories, infer graphs, or call a model.
+ * Only the audited P127 r02 has a currently supported review detail view.
+ */
+const QUEUE_FIXTURES = Object.freeze(["RB-PDF-12","RB-PDF-13"]);
+const QUEUE_SCHEMA = "acs-private-graph-review-queue-v1";
+const REGION_ID = /^page-([0-9]{3})-region-([0-9]{2})$/u;
+const MAX_QUEUE_ITEMS = 32;
+function boundedManifest(doc,fixture){
+  if (!doc || typeof doc!=="object" || Array.isArray(doc) ||
+      doc.schemaVersion!=="acs-pdf-private-region-evidence-v1" ||
+      doc.sourceRun!==SOURCE || doc.fixtureId!==fixture ||
+      doc.allRegionsAreUnverified!==true || doc.noSemanticGraphClaims!==true ||
+      !Array.isArray(doc.pages) || doc.pages.length>3) fail("PRIVATE_QUEUE_MANIFEST_INVALID");
+  const items=[], seen=new Set(), pageNumbers=new Set();
+  for(const page of doc.pages){
+    if(!page||typeof page!=="object"||Array.isArray(page)||
+        !Number.isSafeInteger(page.sourcePhysicalPage1Based) ||
+        page.sourcePhysicalPage1Based<1 || page.sourcePhysicalPage1Based>5000 ||
+        !Number.isSafeInteger(page.subsetPageIndex) || page.subsetPageIndex<0 ||
+        page.subsetPageIndex>2 || pageNumbers.has(page.subsetPageIndex) ||
+        !Array.isArray(page.regions)||page.regions.length>4) fail("PRIVATE_QUEUE_PAGE_INVALID");
+    pageNumbers.add(page.subsetPageIndex);
+    for(const region of page.regions){
+      if(!region || typeof region!=="object" || Array.isArray(region) ||
+          typeof region.regionId!=="string" ||
+          !REGION_ID.test(region.regionId) ||
+          region.regionId!==`page-${String(page.subsetPageIndex+1).padStart(3,"0")}-region-${String(page.regions.indexOf(region)+1).padStart(2,"0")}` ||
+          seen.has(region.regionId) ||
+          region.proposalStatus!=="UNVERIFIED_REGION_SUGGESTION" ||
+          region.nodes != null || region.directedEdges != null ||
+          region.timingRelations != null ||
+          typeof region.cropSha256!=="string" ||
+          !/^[0-9a-f]{64}$/u.test(region.cropSha256) ||
+          !Array.isArray(region.bboxPixels) ||
+          region.bboxPixels.length!==4 ||
+          !region.bboxPixels.every(x=>Number.isSafeInteger(x)) ||
+          region.bboxPixels[0]<0||region.bboxPixels[1]<0||
+          region.bboxPixels[2]<20||region.bboxPixels[3]<20) fail("PRIVATE_QUEUE_REGION_INVALID");
+      seen.add(region.regionId);
+      items.push({fixtureId:fixture,sourcePhysicalPage1Based:page.sourcePhysicalPage1Based,
+        regionId:region.regionId,cropSha256:region.cropSha256,
+        width:region.bboxPixels[2],height:region.bboxPixels[3]});
+      if(items.length>MAX_QUEUE_ITEMS)fail("PRIVATE_QUEUE_CAP_EXCEEDED");
+    }
+  }
+  return items;
+}
+export async function listPrivateGraphReviewQueue(root){
+  const discovered=[];
+  for(const fixture of QUEUE_FIXTURES){
+    const rel=`region-proposals-v1-${fixture}/region-proposals.json`;
+    const contents=await readBounded(root,rel,MAX_MANIFEST_BYTES,{missing:true});
+    if(!contents)continue;
+    const entries=boundedManifest(json(contents),fixture);
+    for(const entry of entries){
+      const cropRelative=`region-proposals-v1-${fixture}/crops/${entry.regionId}.png`;
+      // Do not read or emit private pixels, labels, model responses or paths.
+      const bytes=await readBounded(root,cropRelative,MAX_CROP_BYTES,{missing:true});
+      let evidenceStatus="CROP_MISSING_OR_BLOCKED";
+      if(bytes){
+        let size;
+        try{size=dimensions(bytes);}catch{/* isolate the single crop */}
+        if(sha(bytes)===entry.cropSha256 &&
+            size?.cropWidth===entry.width && size?.cropHeight===entry.height){
+          evidenceStatus="CROP_READY_NO_GRAPH";
+        }
+      }
+      discovered.push({id:fixture+":"+entry.regionId,
+        fixtureId:fixture,sourcePhysicalPage1Based:entry.sourcePhysicalPage1Based,
+        regionId:entry.regionId,evidenceStatus,reviewable:false,
+        graphVerified:false,humanVerified:false});
+      if(discovered.length>MAX_QUEUE_ITEMS)fail("PRIVATE_QUEUE_CAP_EXCEEDED");
+    }
+  }
+  // The single known model result is checked by the same contract as manual
+  // import; a corrupt/missing graph cannot turn into a 'ready to review' item.
+  const pinned=discovered.find(x=>x.id==="RB-PDF-13:page-002-region-01");
+  if(pinned&&pinned.evidenceStatus==="CROP_READY_NO_GRAPH"){
+    try{
+      const bundle=await readPrivateP127Bundle(root);
+      const review=await readPrivateP127Draft(root,bundle.view);
+      pinned.evidenceStatus="GRAPH_READY_FOR_HUMAN_REVIEW";
+      pinned.reviewable=true;
+      pinned.nodeCount=bundle.view.nodes.length;
+      pinned.edgeCount=bundle.view.edges.length;
+      pinned.reviewedCount=review.draft?.decisions.filter(x=>x.decision!=="UNREVIEWED").length??0;
+    }catch{
+      pinned.evidenceStatus="GRAPH_EVIDENCE_BLOCKED";
+    }
+  }
+  discovered.sort((a,b)=>
+    a.fixtureId.localeCompare(b.fixtureId) ||
+    a.sourcePhysicalPage1Based-b.sourcePhysicalPage1Based ||
+    a.regionId.localeCompare(b.regionId));
+  return {schemaVersion:QUEUE_SCHEMA,authority:"DISCOVERY_ONLY_NOT_GROUND_TRUTH",
+    items:discovered,counts:{
+      total:discovered.length,
+      ready:discovered.filter(x=>x.reviewable).length,
+      cropOnly:discovered.filter(x=>x.evidenceStatus==="CROP_READY_NO_GRAPH").length,
+      blocked:discovered.filter(x=>x.evidenceStatus==="CROP_MISSING_OR_BLOCKED"||
+        x.evidenceStatus==="GRAPH_EVIDENCE_BLOCKED").length
+    }};
+}
