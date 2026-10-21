@@ -351,7 +351,7 @@ export async function readRegisteredGraphBundle(root,itemId,registrations=TRUSTE
   let saved;
   try{saved=await readRegionReviewDraft(root,view);}
   catch(e){if(e instanceof RegionStoreError)fail(e.code.replace(/^REGION_/u,"PRIVATE_REGION_"));throw e;}
-  return {source:SOURCE,identity,view,reviewKind:"REGISTERED_REGION",saved,
+  return {source:SOURCE,identity,view,reviewKind:"REGISTERED_REGION",registration:reg,saved,
     authority:"PROPOSED_UNVERIFIED",humanVerified:false,
     data:{resultBase64:resultBytes.toString("base64"),
       manifestBase64:manifestBytes.toString("base64"),
