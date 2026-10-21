@@ -101,6 +101,22 @@ async function main(){
       await delay(160);
     }
     if(!previewReady)fail("EDGE_REAL_CROP_ONLY_PREVIEW_TIMEOUT");
+    // Sequentially preview all inventoried crops, one at a time. No snapshots,
+    // labels or image bytes may appear in logs or runner artifacts.
+    const totalButtons=await cdp.evaluate('document.querySelectorAll("#queue-items .crop-preview-button").length');
+    if(totalButtons!==15)fail("EDGE_REAL_PREVIEW_TOTAL_NOT_EXPECTED");
+    for(let index=0;index<totalButtons;index++){
+      const clicked=await cdp.evaluate('(()=>{const buttons=document.querySelectorAll("#queue-items .crop-preview-button");const b=buttons['+index+'];if(!b)return false;b.click();return true;})()');
+      if(!clicked)fail("EDGE_REAL_PREVIEW_SELECTION_FAILED");
+      let complete=false;
+      for(let attempt=0;attempt<110;attempt++){
+        const ready=await cdp.evaluate('document.querySelector("#crop-preview")?.hidden === false && document.querySelector("#crop-preview-canvas")?.width > 0 && document.querySelector("#crop-preview-status")?.textContent.includes("校验通过")');
+        if(ready){complete=true;break;}
+        await delay(160);
+      }
+      if(!complete)fail("EDGE_REAL_ONE_CROP_PREVIEW_FAILED");
+    }
+    console.log("ACS_P127_EDGE_REAL_CROP_PREVIEWS_VERIFIED=15");
     console.log("ACS_P127_EDGE_REAL_CROP_ONLY_SHA_PREVIEW_PASS=true");
     console.log("ACS_P127_EDGE_REAL_QUEUE_TOTAL=15");
     console.log("ACS_P127_EDGE_REAL_QUEUE_REVIEWABLE=1");
