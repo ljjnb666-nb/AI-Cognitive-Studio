@@ -1,4 +1,10 @@
 import {describe,it,expect} from "vitest";
+import {generateKeyPairSync,sign as edSign} from "node:crypto";
+import {consentStatement,verifyConsentEvidence,assertBillableReady,
+  TRUSTED_PRODUCTION_SIGNERS,ConsentProofError}
+  from "../annotation/graph-batch-consent-proof.mjs";
+import {claimSyntheticAttempt,inspectSyntheticAttempt,SyntheticAttemptError}
+  from "../annotation/graph-batch-simulated-attempt.mjs";
 import {mkdtemp,rm,readFile,writeFile,mkdir,symlink} from "node:fs/promises";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
@@ -262,5 +268,131 @@ describe("03E-04B-02A exact list-rate estimation and uncertain-result fail-close
     },"RECONCILE_SYMLINK_UNSAFE");
     await expect(reconcileCloudEvidence(root,"../secrets")).rejects
       .toMatchObject({code:"RECONCILE_ITEM_INVALID"});
+  }));
+});
+
+
+describe("03E-04B-02B signed proof and permanent synthetic claim — NO provider calls",()=>{
+  const makeEvidence=(plan,draft,overrides={})=>{
+    const keys=generateKeyPairSync("ed25519");
+    const statement=consentStatement(plan,draft,{
+      issuedAt:"2026-10-21T01:00:00.000Z"});
+    const signatureBase64=edSign(null,Buffer.from(JSON.stringify(statement),"utf8"),
+      keys.privateKey).toString("base64");
+    const evidence={statement,keyId:"synthetic_only",signatureBase64,...overrides};
+    return {evidence,publicKey:keys.publicKey};
+  };
+  const testRoot=async root=>{
+    await writeFile(join(root,"ACS_SYNTHETIC_ONLY.marker"),
+      "ACS_SYNTHETIC_CLOUD_ROOT_V1\n");
+  };
+  const mustReject=async(job,code)=>{
+    try{await job();throw new Error("EXPECTED_REJECTION");}
+    catch(e){expect(e).toBeInstanceOf(SyntheticAttemptError);expect(e.code).toBe(code);}
+  };
+  it("proves Ed25519 signature in synthetic keyring without granting spend",()=>{
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    const {evidence,publicKey}=makeEvidence(plan,draft);
+    expect(Object.keys(TRUSTED_PRODUCTION_SIGNERS)).toHaveLength(0);
+    rejectCode(()=>verifyConsentEvidence(plan,draft,evidence,{
+      now:"2026-10-21T02:00:00.000Z"}),ConsentProofError,
+      "CONSENT_TRUSTED_SIGNER_NOT_CONFIGURED");
+    const verified=verifyConsentEvidence(plan,draft,evidence,{
+      now:"2026-10-21T02:00:00.000Z",
+      trustedKeys:{synthetic_only:publicKey}
+    });
+    expect(verified).toMatchObject({operatorSignatureVerified:true,
+      providerExecutionApproved:false,dispatchEnabled:false,
+      billableBudgetVerified:false,accountPriceVerified:false,
+      imageTokenMaximumVerified:false,productionSignerProvisioned:false});
+    rejectCode(()=>assertBillableReady(verified),ConsentProofError,
+      "CONSENT_BILLABLE_APPROVAL_NOT_IMPLEMENTED");
+  });
+  it("refuses wrong signer, changed amount, changed crop SHA and fake approval",()=>{
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    const {evidence,publicKey}=makeEvidence(plan,draft);
+    const verify=e=>verifyConsentEvidence(plan,draft,e,{
+      now:"2026-10-21T02:00:00.000Z",trustedKeys:{synthetic_only:publicKey}
+    });
+    for(const mutation of [
+      {...evidence,signatureBase64:"A"+evidence.signatureBase64.slice(1)},
+      {...evidence,statement:{...evidence.statement,maxSpendMinorUnits:100000}},
+      {...evidence,statement:{...evidence.statement,selectedCropSha256:["a".repeat(64)]}},
+      {...evidence,statement:{...evidence.statement,providerExecutionApproved:true}}
+    ])expect(()=>verify(mutation)).toThrow(ConsentProofError);
+    const other=generateKeyPairSync("ed25519");
+    rejectCode(()=>verifyConsentEvidence(plan,draft,evidence,{
+      now:"2026-10-21T02:00:00.000Z",
+      trustedKeys:{synthetic_only:other.publicKey}
+    }),ConsentProofError,"CONSENT_SIGNATURE_INVALID");
+  });
+  it("refuses expired signature, before-issue and bad public key type",()=>{
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    const {evidence,publicKey}=makeEvidence(plan,draft);
+    for(const now of ["2026-10-20T23:59:59.000Z","2026-10-22T00:00:00.000Z"]){
+      rejectCode(()=>verifyConsentEvidence(plan,draft,evidence,{
+        trustedKeys:{synthetic_only:publicKey},now
+      }),ConsentProofError,"CONSENT_SCOPE_OR_EXPIRY_INVALID");
+    }
+    const wrong=generateKeyPairSync("rsa",{modulusLength:2048});
+    rejectCode(()=>verifyConsentEvidence(plan,draft,evidence,{
+      trustedKeys:{synthetic_only:wrong.publicKey},now:"2026-10-21T02:00:00.000Z"
+    }),ConsentProofError,"CONSENT_SIGNER_KEY_TYPE_INVALID");
+  });
+  it("uses one permanent per-region simulation claim across concurrent processes",()=>onTemp(async root=>{
+    await testRoot(root);
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    const all=await Promise.allSettled([
+      claimSyntheticAttempt(root,plan,draft,ids[0]),
+      claimSyntheticAttempt(root,plan,draft,ids[0]),
+      claimSyntheticAttempt(root,plan,draft,ids[0])
+    ]);
+    expect(all.filter(x=>x.status==="fulfilled")).toHaveLength(1);
+    expect(all.filter(x=>x.status==="rejected")).toHaveLength(2);
+    expect(all.filter(x=>x.status==="rejected").map(x=>x.reason.code))
+      .toEqual(["SYNTHETIC_ATTEMPT_ALREADY_CLAIMED","SYNTHETIC_ATTEMPT_ALREADY_CLAIMED"]);
+    const state=await inspectSyntheticAttempt(root,plan,draft,ids[0]);
+    expect(state).toMatchObject({status:"SIMULATED_UNCERTAIN_OUTCOME_NO_NETWORK",
+      networkAllowed:false,mayAutoReplay:false});
+    expect((await inspectSyntheticAttempt(root,plan,draft,ids[1])).status).toBe("NOT_CLAIMED");
+    expect((await claimSyntheticAttempt(root,plan,draft,ids[1])).providerRequestsIssued).toBe(0);
+  }));
+  it("requires isolated marker and blocks any prior billable receipt",()=>onTemp(async root=>{
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    await mustReject(()=>claimSyntheticAttempt(root,plan,draft,ids[0]),
+      "SYNTHETIC_ATTEMPT_MARKER_INVALID");
+    await testRoot(root);
+    const marker=join(root,".glm-cloud-v1-RB-PDF-12-page-001-region-01.cloud-attempted");
+    await writeFile(marker,"POSSIBLY_BILLED");
+    await mustReject(()=>claimSyntheticAttempt(root,plan,draft,ids[0]),
+      "SYNTHETIC_ATTEMPT_PRIOR_PROVIDER_EVIDENCE");
+    await rm(marker);
+    await claimSyntheticAttempt(root,plan,draft,ids[0]);
+    await mustReject(()=>claimSyntheticAttempt(root,plan,draft,ids[0]),
+      "SYNTHETIC_ATTEMPT_ALREADY_CLAIMED");
+  }));
+  it("rejects cross-authorization reuse and truncated claims after crash",()=>onTemp(async root=>{
+    await testRoot(root);
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    await claimSyntheticAttempt(root,plan,draft,ids[0]);
+    const different=draftBatchAuthorization(plan,{...opts,maxSpendMinorUnits:3300});
+    await mustReject(()=>inspectSyntheticAttempt(root,plan,different,ids[0]),
+      "SYNTHETIC_ATTEMPT_TAMPERED");
+    const path=join(root,"private-synthetic-attempts-04b02b",
+      "simulation-"+ids[0].replace(":","-")+".json");
+    await writeFile(path,"x");
+    await mustReject(()=>inspectSyntheticAttempt(root,plan,draft,ids[0]),
+      "SYNTHETIC_ATTEMPT_FILE_UNSAFE");
+    await mustReject(()=>claimSyntheticAttempt(root,plan,draft,ids[0]),
+      "SYNTHETIC_ATTEMPT_ALREADY_CLAIMED");
+  }));
+  it("does not accept marker symlink or non-selected region",()=>onTemp(async root=>{
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    await writeFile(join(root,"original.txt"),"ACS_SYNTHETIC_CLOUD_ROOT_V1\n");
+    await symlink(join(root,"original.txt"),join(root,"ACS_SYNTHETIC_ONLY.marker"));
+    await mustReject(()=>claimSyntheticAttempt(root,plan,draft,ids[0]),
+      "SYNTHETIC_ATTEMPT_MARKER_INVALID");
+    await mustReject(()=>claimSyntheticAttempt(root,plan,draft,
+      "RB-PDF-12:page-003-region-99"),"SYNTHETIC_ATTEMPT_NOT_SELECTED");
   }));
 });
