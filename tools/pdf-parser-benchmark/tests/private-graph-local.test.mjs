@@ -8,7 +8,8 @@ import { startAnnotationServer } from "../annotation/server.mjs";
 import { createGraphReviewDraft } from "../annotation/graph-review.mjs";
 import { verifyAutoGraphBundle } from "../annotation/graph-review-auto.mjs";
 import {
- PRIVATE_FILENAMES,readPrivateP127Bundle,readPrivateP127Draft,writePrivateP127Draft,PrivateGraphError,
+ PRIVATE_FILENAMES,readPrivateP127Bundle,readPrivateP127Draft,writePrivateP127Draft,
+ listPrivateGraphReviewQueue,PrivateGraphError,
 } from "../annotation/private-graph-local.mjs";
 
 const hash = content => createHash("sha256").update(content).digest("hex");
@@ -35,7 +36,7 @@ async function fixture(){
   const regions={schemaVersion:"acs-pdf-private-region-evidence-v1",
     sourceRun:"real-mineru-39440805765-1",fixtureId:"RB-PDF-13",
     allRegionsAreUnverified:true,noSemanticGraphClaims:true,
-    pages:[{sourcePhysicalPage1Based:127,regions:[{regionId:"page-002-region-01",
+    pages:[{subsetPageIndex:1,sourcePhysicalPage1Based:127,regions:[{regionId:"page-002-region-01",
       proposalStatus:"UNVERIFIED_REGION_SUGGESTION",nodes:null,directedEdges:null,timingRelations:null,
       cropSha256:cropSha,bboxPixels:[100,200,200,100]}]}]};
   const manifest=Buffer.from(JSON.stringify(regions));
@@ -237,6 +238,75 @@ describe("03D P127 local auto import — strictly synthetic, no D: data",()=>{
       const forged=await send(app,"/api/private-graph/p127/draft",{method:"PUT",body:draft});
       expect(forged.status).toBe(422);
       expect(forged.value.code).toBe("PRIVATE_DRAFT_STALE_OR_INVALID");
+    }finally{await app.close();}
+  }));
+});
+
+describe("03E-01 multiple fixture evidence queue — safe bounded inventory only",()=>{
+  it("discovers verified P127 r02 and never promotes crop-only pages to human review",()=>withFixture(async x=>{
+    const p12Crop=png(),digest=hash(p12Crop);
+    const doc={schemaVersion:"acs-pdf-private-region-evidence-v1",
+      fixtureId:"RB-PDF-12",sourceRun:"real-mineru-39440805765-1",
+      allRegionsAreUnverified:true,noSemanticGraphClaims:true,
+      pages:[{subsetPageIndex:0,sourcePhysicalPage1Based:51,regions:[{
+        regionId:"page-001-region-01",proposalStatus:"UNVERIFIED_REGION_SUGGESTION",
+        nodes:null,directedEdges:null,timingRelations:null,
+        bboxPixels:[10,20,200,100],cropSha256:digest
+      }]}]};
+    const manifest=join(x.root,"region-proposals-v1-RB-PDF-12","region-proposals.json");
+    const crop=join(x.root,"region-proposals-v1-RB-PDF-12","crops","page-001-region-01.png");
+    await mkdir(dirname(crop),{recursive:true});
+    await writeFile(manifest,JSON.stringify(doc));await writeFile(crop,p12Crop);
+    const queue=await listPrivateGraphReviewQueue(x.root);
+    expect(queue).toMatchObject({schemaVersion:"acs-private-graph-review-queue-v1",
+      authority:"DISCOVERY_ONLY_NOT_GROUND_TRUTH",
+      counts:{total:2,ready:1,cropOnly:1,blocked:0}});
+    expect(queue.items.map(x=>x.id)).toEqual([
+      "RB-PDF-12:page-001-region-01","RB-PDF-13:page-002-region-01"
+    ]);
+    expect(queue.items[0]).toMatchObject({sourcePhysicalPage1Based:51,
+      evidenceStatus:"CROP_READY_NO_GRAPH",reviewable:false,graphVerified:false});
+    expect(queue.items[1]).toMatchObject({sourcePhysicalPage1Based:127,
+      evidenceStatus:"GRAPH_READY_FOR_HUMAN_REVIEW",reviewable:true,
+      nodeCount:2,edgeCount:1,reviewedCount:0,graphVerified:false});
+    expect(JSON.stringify(queue)).not.toContain("合成客户端");
+    expect(JSON.stringify(queue)).not.toContain("cropSha256");
+    expect(JSON.stringify(queue)).not.toContain("fake-private-reports");
+  }));
+  it("reports a missing or forged crop as blocked without promoting or hiding other crops",()=>withFixture(async x=>{
+    const crop=join(x.root,...PRIVATE_FILENAMES.crop.split("/"));
+    await writeFile(crop,Buffer.from("corrupt-but-not-too-short"));
+    const queue=await listPrivateGraphReviewQueue(x.root);
+    expect(queue.counts).toEqual({total:1,ready:0,cropOnly:0,blocked:1});
+    expect(queue.items[0]).toMatchObject({reviewable:false,evidenceStatus:"CROP_MISSING_OR_BLOCKED"});
+  }));
+  it("fails closed for forged page sequence and graph manifest duplicate IDs",()=>withFixture(async x=>{
+    const path=join(x.root,...PRIVATE_FILENAMES.manifest.split("/"));
+    const manifest=JSON.parse((await readFile(path)).toString("utf8"));
+    manifest.pages[0].subsetPageIndex=0;
+    await writeFile(path,JSON.stringify(manifest));
+    await expectCode(listPrivateGraphReviewQueue(x.root),"PRIVATE_QUEUE_REGION_INVALID");
+  }));
+  it("rejects forged source manifest and prevents arbitrary-file inventory",()=>withFixture(async x=>{
+    const path=join(x.root,...PRIVATE_FILENAMES.manifest.split("/"));
+    const manifest=JSON.parse((await readFile(path)).toString("utf8"));
+    manifest.pages[0].regions[0].directedEdges=[{from:"evil"}];
+    await writeFile(path,JSON.stringify(manifest));
+    await expectCode(listPrivateGraphReviewQueue(x.root),"PRIVATE_QUEUE_REGION_INVALID");
+  }));
+  it("queue endpoint uses local capability, forbids writes, and is disabled by default",()=>withFixture(async x=>{
+    const off=await startAnnotationServer();
+    try{expect((await send(off,"/api/private-graph/queue")).status).toBe(404);}
+    finally{await off.close();}
+    const app=await startAnnotationServer({privateGraphRoot:x.root,graphAccessToken:token});
+    try{
+      expect((await send(app,"/api/private-graph/queue",{auth:false})).status).toBe(403);
+      expect((await send(app,"/api/private-graph/queue",{origin:"https://attacker.invalid"})).status).toBe(403);
+      expect((await send(app,"/api/private-graph/queue",{method:"POST"})).status).toBe(405);
+      const queue=await send(app,"/api/private-graph/queue");
+      expect(queue.status).toBe(200);
+      expect(queue.value.counts).toMatchObject({total:1,ready:1});
+      expect(queue.bytes.toString("utf8")).not.toContain("合成客户端");
     }finally{await app.close();}
   }));
 });
