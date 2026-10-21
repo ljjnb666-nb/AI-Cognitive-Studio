@@ -1,0 +1,11 @@
+OWNER APPROVED ONE PAID P127 GLM RETRY
+Approval date: 2026-10-21
+Fixture: RB-PDF-13
+Source physical page: P127
+Region: page-002-region-01
+Selected crops: 1
+Model: glm-5.3-flash
+Pinned code SHA: d8e08c4c1b2ec7e15fec1d8ffa4af58205fc5e42
+New attempt namespace: retry-p127-r02-20261021
+Old cloud-attempted receipt: retain unchanged
+No automatic retries or other pages are approved.
