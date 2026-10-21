@@ -208,7 +208,7 @@ def infer_cloud_one(item: dict, model: str, key: str, *, observer=None) -> dict:
 def parse_complete_graph_json(content: str) -> dict:
     """One whole JSON object, optionally inside one complete json code fence."""
     stripped = content.strip()
-    if stripped.startswith("""" + chr(96) * 3 + """"):
+    if stripped.startswith(chr(96) * 3):
         lines = stripped.splitlines()
         fence = chr(96) * 3
         if (len(lines) < 3 or lines[0] not in (fence + "json", fence + "JSON")
