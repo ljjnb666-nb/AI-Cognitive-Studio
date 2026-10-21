@@ -122,12 +122,26 @@ async function waitForBlockedPodcastUpdates(blockerPid: number, expectedCount: n
   throw new Error(`A2_PODCAST_EXPECTED_${expectedCount}_BLOCKED_RUN_UPDATES`);
 }
 
-async function waitForSignal(signal: () => boolean, message: string) {
-  for (let attempt = 0; attempt < 10_000; attempt++) {
-    if (signal()) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
+/**
+ * A2 provider arrival is an event, not an arbitrary count of event-loop
+ * ticks. Fail immediately if the worker terminates before that boundary,
+ * preserving a distinct genuine lost-claim result; bound a stuck worker by
+ * wall-clock time without touching lease, rearm or ownership assertions.
+ */
+async function awaitA2ProviderArrival(entered: Promise<void>, worker: Promise<unknown>, message: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message + "_WALL_TIMEOUT")), 10_000);
+  });
+  const workerExited = worker.then(
+    () => { throw new Error(message + "_WORKER_RETURNED_BEFORE_RESOLVER"); },
+    () => { throw new Error(message + "_WORKER_REJECTED_BEFORE_RESOLVER"); }
+  );
+  try {
+    await Promise.race([entered, workerExited, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
-  throw new Error(message);
 }
 
 async function cleanupWorkspace(workspaceId: string) {
@@ -244,11 +258,13 @@ describe("durable Phase 3 generation", () => {
       let releaseProvider!: () => void;
       const providerGate = new Promise<void>(resolve => releaseProvider = resolve);
       let providerDidEnter = false;
+      let signalProviderEntry!: () => void;
+      const providerEntry = new Promise<void>(resolve => { signalProviderEntry = resolve; });
       let rearm: ReturnType<typeof rearmPodcastGenerationRunById> | undefined;
       let worker: ReturnType<typeof processPodcastGenerationRun> | undefined;
       try {
         worker = processPodcastGenerationRun(runId, {
-          providerForRun: async () => { providerDidEnter = true; await providerGate; throw new Error("A2_STOP_AFTER_PODCAST_CLAIM"); },
+          providerForRun: async () => { providerDidEnter = true; signalProviderEntry(); await providerGate; throw new Error("A2_STOP_AFTER_PODCAST_CLAIM"); },
           embeddingProviderForRun: async () => data.embeddings,
         }, 0);
         await waitForBlockedPodcastUpdates(blocker.pid, 1);
@@ -256,7 +272,8 @@ describe("durable Phase 3 generation", () => {
         await waitForBlockedPodcastUpdates(blocker.pid, 2);
         blocker.release();
         await blocker.done;
-        await waitForSignal(() => providerDidEnter, "A2_PODCAST_CLAIM_DID_NOT_REACH_PROVIDER_RESOLVER");
+        await awaitA2ProviderArrival(providerEntry, worker!, "A2_PODCAST_CLAIM_DID_NOT_REACH_PROVIDER_RESOLVER");
+        expect(providerDidEnter).toBe(true);
         const beforeRearm = await Promise.all([
           prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId } }),
           prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }),
