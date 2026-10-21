@@ -200,6 +200,7 @@ async function load(){
       if(epoch!==loadEpoch)return;
       activeReviewKind="LEGACY_P127";activeItemId=null;
       view=validated;draft=createGraphReviewDraft(view);bitmap=image;selected=null;
+      $("review-scope").textContent="当前审核：RB-PDF-13 · 物理 P127 · 既有专用草稿";
       $("work").hidden=false;$("export-panel").hidden=false;
       draw();render();message("SHA / 物理 P127 / 节点关系坐标校验通过。所有候选仍未审阅。",true);
     }finally{if(bitmap!==image)image.close();}
@@ -260,6 +261,7 @@ async function loadAutomatically(){
       if(epoch!==loadEpoch)return;
       activeReviewKind="LEGACY_P127";activeItemId=null;
       view=validated;draft=createGraphReviewDraft(view);bitmap=image;selected=null;
+      $("review-scope").textContent="当前审核：RB-PDF-13 · 物理 P127 · 既有专用草稿";
       const prior=await autoRequest("/api/private-graph/p127/draft");
       if(epoch!==loadEpoch)return;
       if(prior.draft!==null)draft=parseGraphReviewDraft(prior.draft,view);
@@ -276,6 +278,71 @@ async function loadAutomatically(){
     const code=error instanceof GraphReviewError?error.code:"GRAPH_AUTO_IMPORT_FAILED";
     message("自动导入已安全停止（"+code+"）。没有调用 GLM，也没有自动提交任何人工结论。");
     saveStatus("未连接／未保存");
+  }
+}
+
+async function loadRegisteredRegion(item){
+  if(!hasLocalToken||item.reviewKind!=="REGISTERED_REGION"||
+     item.id==="RB-PDF-13:page-002-region-01")return;
+  const epoch=++loadEpoch;
+  cancelAutoSave();
+  if(bitmap){bitmap.close();bitmap=null;}
+  view=null;draft=null;selected=null;
+  $("work").hidden=true;$("export-panel").hidden=true;
+  try{
+    message("正在校验已授权区域 "+item.fixtureId+" · P"+item.sourcePhysicalPage1Based+" 的机器候选…");
+    const bundle=await autoRequest("/api/private-graph/registered/bundle?item="+encodeURIComponent(item.id));
+    if(epoch!==loadEpoch)return;
+    if(bundle.reviewKind!=="REGISTERED_REGION"||
+       bundle.registration?.id!==item.id||
+       bundle.registration?.fixtureId!==item.fixtureId||
+       bundle.registration?.regionId!==item.regionId||
+       bundle.registration?.physicalPage!==item.sourcePhysicalPage1Based||
+       bundle.registration?.kind!=="REGISTERED_REGION")
+      throw new GraphReviewError("GRAPH_REGISTERED_IDENTITY_INVALID");
+    const {result,manifest,crop,identity}=await verifyAutoGraphBundle(bundle);
+    const image=await createImageBitmap(new Blob([crop],{type:"image/png"}));
+    try{
+      if(epoch!==loadEpoch)return;
+      const verified=validateRegionGraphCandidate(result,manifest,{
+        ...identity,cropWidth:image.width,cropHeight:image.height
+      },{
+        fixtureId:bundle.registration.fixtureId,regionId:bundle.registration.regionId,
+        sourcePhysicalPage1Based:bundle.registration.physicalPage,
+        sourceRun:bundle.registration.sourceRun,provider:bundle.registration.provider,
+        model:bundle.registration.model,attemptClass:bundle.registration.attemptClass,
+        expectedCropSha256:bundle.registration.cropSha256,
+        expectedResultSha256:bundle.registration.resultSha256
+      });
+      if(epoch!==loadEpoch)return;
+      if(verified.nodes.length!==item.nodeCount||verified.edges.length!==item.edgeCount)
+        throw new GraphReviewError("GRAPH_REGISTERED_COUNTS_INVALID");
+      const saved=bundle.saved;
+      if(!saved||typeof saved!=="object"||!Object.hasOwn(saved,"draft")||
+         !(saved.revision===null||
+           (typeof saved.revision==="string"&&/^[0-9a-f]{64}$/u.test(saved.revision)))||
+         (saved.draft===null)!==(saved.revision===null))
+        throw new GraphReviewError("GRAPH_REGISTERED_DRAFT_RECEIPT_INVALID");
+      const restored=saved.draft===null?createRegionReviewDraft(verified):
+        parseRegionReviewDraft(saved.draft,verified);
+      if(epoch!==loadEpoch)return;
+      activeReviewKind="REGISTERED_REGION";activeItemId=item.id;
+      view=verified;draft=restored;bitmap=image;selected=null;
+      saveRevision=saved.revision;autoActive=true;
+      $("review-scope").textContent="当前审核："+item.fixtureId+
+        " · 物理 P"+verified.physicalPage+" · "+item.regionId+
+        " · 结果 SHA 绑定的私有未认证草稿";
+      $("work").hidden=false;$("export-panel").hidden=false;
+      draw();render();
+      saveStatus("已连接本机私有区域草稿"+(saved.draft?"（已恢复）":"（等待首次修改）"));
+      message("已核验本区域来源、节点与箭头映射；请逐条与原图核对。没有任何自动认证。",true);
+    }finally{if(bitmap!==image)image.close();}
+  }catch(e){
+    autoActive=false;
+    message("区域审核已阻止（"+
+      (typeof e?.code==="string"&&/^[A-Z_]{5,80}$/u.test(e.code)?
+       e.code:"GRAPH_REGISTERED_IMPORT_BLOCKED")+"）。未调用模型或修改原草稿。");
+    saveStatus("区域审核未连接");
   }
 }
 
@@ -340,6 +407,20 @@ async function loadQueue(){
       throw new GraphReviewError("GRAPH_QUEUE_RESPONSE_INVALID");
     const shown=new Set();
     const fragment=document.createDocumentFragment();
+    const registered=await autoRequest("/api/private-graph/registry");
+    if(epoch!==queueEpoch)return;
+    if(registered?.schemaVersion!=="acs-trusted-graph-registration-v1"||
+       registered.authority!=="REGISTERED_SOURCE_ONLY_NOT_GROUND_TRUTH"||
+       !Array.isArray(registered.entries)||registered.entries.length>32)
+      throw new GraphReviewError("GRAPH_REGISTRY_RESPONSE_INVALID");
+    const known=new Map();
+    for(const reg of registered.entries){
+      if(!reg||typeof reg.id!=="string"||known.has(reg.id)||
+         !["LEGACY_P127","REGISTERED_REGION"].includes(reg.reviewKind)||
+         reg.graphVerified!==false||reg.humanVerified!==false)
+        throw new GraphReviewError("GRAPH_REGISTRY_RESPONSE_INVALID");
+      known.set(reg.id,reg);
+    }
     for(const item of queue.items){
       if(!item||typeof item.id!=="string"||item.id.length>70||
          typeof item.fixtureId!=="string"||!["RB-PDF-12","RB-PDF-13"].includes(item.fixtureId)||
@@ -351,7 +432,14 @@ async function loadQueue(){
         throw new GraphReviewError("GRAPH_QUEUE_ITEM_INVALID");
       shown.add(item.id);
       if(item.reviewable!==(item.evidenceStatus==="GRAPH_READY_FOR_HUMAN_REVIEW")||
-         (item.reviewable&&item.id!=="RB-PDF-13:page-002-region-01"))
+         (item.reviewable && (
+           !known.has(item.id) || known.get(item.id).reviewKind!==item.reviewKind ||
+           known.get(item.id).fixtureId!==item.fixtureId ||
+           known.get(item.id).regionId!==item.regionId ||
+           known.get(item.id).sourcePhysicalPage1Based!==item.sourcePhysicalPage1Based ||
+           (item.reviewKind==="LEGACY_P127"&&item.id!=="RB-PDF-13:page-002-region-01")||
+           (item.reviewKind==="REGISTERED_REGION"&&item.id==="RB-PDF-13:page-002-region-01")
+         )))
         throw new GraphReviewError("GRAPH_QUEUE_AUTHORITY_INVALID");
       const card=el("div","queue-item"),label=el("div","queue-label");
       label.append(el("b","",item.fixtureId+" · 物理 P"+item.sourcePhysicalPage1Based),
@@ -370,9 +458,11 @@ async function loadQueue(){
           throw new GraphReviewError("GRAPH_QUEUE_COUNTS_INVALID");
         card.append(el("span","queue-status",item.nodeCount+" 节点 / "+item.edgeCount+
           " 关系 · 已审 "+item.reviewedCount+"/"+(item.nodeCount+item.edgeCount)));
-        const button=el("button","primary","进入 P127 人工审核");
+        const button=el("button","primary",item.reviewKind==="LEGACY_P127"?
+          "进入 P127 人工审核":"进入本区域图关系审核");
         button.type="button";
-        button.addEventListener("click",()=>void loadAutomatically());
+        button.addEventListener("click",()=>item.reviewKind==="LEGACY_P127"?
+          void loadAutomatically():void loadRegisteredRegion(item));
         card.append(button);
       }
       fragment.append(card);

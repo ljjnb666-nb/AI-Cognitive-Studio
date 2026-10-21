@@ -3,10 +3,10 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src blob: data:; font-src blob: data:; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'self'; form-action 'none'; base-uri 'none'">
 <meta name="referrer" content="no-referrer">
-<title>PDF P127 图表证据逐条审阅（仅本机）</title>
+<title>PDF 多区域图表证据集中审阅（仅本机）</title>
 <link rel="stylesheet" href="./graph-review.css"><script type="module" src="./graph-review-app.mjs"></script>
 </head><body>
-<header><div><strong>AI Cognitive Studio · P127 图表审阅</strong><span>原书物理第 127 页 · TCP 客户端/服务器图</span></div><strong class="privacy">仅本机 · 不上传</strong></header>
+<header><div><strong>AI Cognitive Studio · 多区域图表审核</strong><span>现有 P127 及以后明确登记的图关系候选 · 严格未认证</span></div><strong class="privacy">仅本机 · 不上传</strong></header>
 <main>
 <section class="intro">
 <h1>对照原图，逐一复核模型候选</h1>
@@ -46,6 +46,7 @@
 <div class="panel imagepanel"><h2>2. 图像证据（叠加坐标仅为机器提议）</h2>
 <div class="image-scroller"><canvas id="diagram" aria-label="经过 SHA 验证的 P127 局部图像及几何候选"></canvas></div>
 <p class="pathhelp">绿色方框表示候选节点；橙色线段和圆点表示候选箭头线与尖端，均未确认存在。选择右侧条目可强调其几何位置。</p>
+<p id="review-scope" class="pathhelp">当前审核对象：未选择</p>
 <p id="counts" class="notice"></p>
 </div>
 <div class="panel reviews"><h2>3. 逐条肉眼判断</h2>
