@@ -144,8 +144,8 @@ async function priorAttemptPresent(root,fixture,regionId){
   }
   return false;
 }
-export async function buildPrivateGraphBatchPlan(root,limits){
-  const queue=await listPrivateGraphReviewQueue(root);
+export async function buildPrivateGraphBatchPlan(root,limits,registrations){
+  const queue=await listPrivateGraphReviewQueue(root,registrations);
   const proofs=[];
   // No bulk image payload in the response. Read one trusted crop and discard it.
   for(const item of queue.items){

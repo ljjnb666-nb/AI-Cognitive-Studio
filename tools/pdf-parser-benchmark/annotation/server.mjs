@@ -121,7 +121,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
             reply(400,{code:"BATCH_PLAN_QUERY_REJECTED"});return;
           }
           // Read-only plan; never use this local endpoint to authorize spend.
-          reply(200,publicGraphBatchSummary(await buildPrivateGraphBatchPlan(privateGraphRoot)));
+          reply(200,publicGraphBatchSummary(await buildPrivateGraphBatchPlan(privateGraphRoot,undefined,registry)));
           return;
         }
         if (pathname === PRIVATE_REGISTRY) {
