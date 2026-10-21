@@ -46,13 +46,14 @@ function securityHeaders(graphPage = false) {
 const PRIVATE_BUNDLE = "/api/private-graph/p127/bundle";
 const PRIVATE_DRAFT = "/api/private-graph/p127/draft";
 const TOKEN = /^[0-9a-f]{64}$/u;
-export async function startAnnotationServer({ privateGraphRoot = null, graphAccessToken = null } = {}) {
+export async function startAnnotationServer({ privateGraphRoot = null, graphAccessToken = null, privateGraphReadOnly = false } = {}) {
   const enabled = privateGraphRoot !== null;
   if (enabled && (typeof privateGraphRoot !== "string" || !privateGraphRoot ||
       typeof graphAccessToken !== "string" || !TOKEN.test(graphAccessToken))) {
     throw new Error("PRIVATE_GRAPH_BRIDGE_CONFIG_INVALID");
   }
   if (!enabled && graphAccessToken !== null) throw new Error("PRIVATE_GRAPH_BRIDGE_CONFIG_INVALID");
+  if (typeof privateGraphReadOnly !== "boolean") throw new Error("PRIVATE_GRAPH_BRIDGE_CONFIG_INVALID");
   // Serializes private draft writes and prevents stale revision check races.
   let writer = Promise.resolve();
   const server = createServer(async (request, response) => {
@@ -83,6 +84,9 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
           (origin && origin!=="http://127.0.0.1:"+port) ||
           (fetchSite && !["same-origin","none"].includes(fetchSite))) {
         reply(403,{code:"PRIVATE_IMPORT_ACCESS_DENIED"}); return;
+      }
+      if (privateGraphReadOnly && pathname === PRIVATE_DRAFT && request.method === "PUT") {
+        reply(405,{code:"PRIVATE_DRAFT_WRITE_DISABLED"}); return;
       }
       if ((pathname === PRIVATE_BUNDLE && request.method !== "GET") ||
           (pathname === PRIVATE_DRAFT && !["GET","PUT"].includes(request.method)) ||
