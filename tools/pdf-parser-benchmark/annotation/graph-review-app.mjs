@@ -260,6 +260,74 @@ async function loadAutomatically(){
     saveStatus("未连接／未保存");
   }
 }
+
+let queueEpoch=0;
+const evidenceLabels={
+  GRAPH_READY_FOR_HUMAN_REVIEW:"图关系已存在 · 待人工复核",
+  CROP_READY_NO_GRAPH:"局部图像已校验 · 尚无图关系候选",
+  CROP_MISSING_OR_BLOCKED:"裁剪图缺失／SHA 或尺寸不匹配",
+  GRAPH_EVIDENCE_BLOCKED:"模型结果或审阅草稿不一致 · 阻止导入",
+};
+async function loadQueue(){
+  const epoch=++queueEpoch;
+  const summary=$("queue-summary"),list=$("queue-items");
+  list.replaceChildren();
+  if(!hasLocalToken){summary.textContent="未启用自动导入权限；可使用下方手动选择。";return;}
+  summary.textContent="正在核对私有证据目录（只读）…";
+  try{
+    const queue=await autoRequest("/api/private-graph/queue");
+    if(epoch!==queueEpoch)return;
+    if(queue?.schemaVersion!=="acs-private-graph-review-queue-v1"||
+       queue.authority!=="DISCOVERY_ONLY_NOT_GROUND_TRUTH"||
+       !Array.isArray(queue.items)||queue.items.length>32||
+       !queue.counts||queue.counts.total!==queue.items.length)
+      throw new GraphReviewError("GRAPH_QUEUE_RESPONSE_INVALID");
+    const shown=new Set();
+    const fragment=document.createDocumentFragment();
+    for(const item of queue.items){
+      if(!item||typeof item.id!=="string"||item.id.length>70||
+         typeof item.fixtureId!=="string"||!["RB-PDF-12","RB-PDF-13"].includes(item.fixtureId)||
+         !Number.isSafeInteger(item.sourcePhysicalPage1Based)||item.sourcePhysicalPage1Based<1||
+         typeof item.regionId!=="string"||!/^(?:page-[0-9]{3}-region-[0-9]{2})$/u.test(item.regionId)||
+         item.id!==item.fixtureId+":"+item.regionId||shown.has(item.id)||
+         !Object.hasOwn(evidenceLabels,item.evidenceStatus)||
+         typeof item.reviewable!=="boolean"||item.graphVerified!==false||item.humanVerified!==false)
+        throw new GraphReviewError("GRAPH_QUEUE_ITEM_INVALID");
+      shown.add(item.id);
+      if(item.reviewable!==(item.evidenceStatus==="GRAPH_READY_FOR_HUMAN_REVIEW")||
+         (item.reviewable&&item.id!=="RB-PDF-13:page-002-region-01"))
+        throw new GraphReviewError("GRAPH_QUEUE_AUTHORITY_INVALID");
+      const card=el("div","queue-item"),label=el("div","queue-label");
+      label.append(el("b","",item.fixtureId+" · 物理 P"+item.sourcePhysicalPage1Based),
+        el("small","",item.regionId));
+      card.append(label,el("span","queue-status",evidenceLabels[item.evidenceStatus]));
+      if(item.reviewable){
+        if(!Number.isSafeInteger(item.nodeCount)||!Number.isSafeInteger(item.edgeCount)||
+           !Number.isSafeInteger(item.reviewedCount)||item.reviewedCount<0||
+           item.reviewedCount>item.nodeCount+item.edgeCount)
+          throw new GraphReviewError("GRAPH_QUEUE_COUNTS_INVALID");
+        card.append(el("span","queue-status",item.nodeCount+" 节点 / "+item.edgeCount+
+          " 关系 · 已审 "+item.reviewedCount+"/"+(item.nodeCount+item.edgeCount)));
+        const button=el("button","primary","进入 P127 人工审核");
+        button.type="button";
+        button.addEventListener("click",()=>void loadAutomatically());
+        card.append(button);
+      }
+      fragment.append(card);
+    }
+    if(!queue.items.length)fragment.append(el("p","pathhelp","当前范围内没有已发现的区域证据，未发起任何新解析。"));
+    list.replaceChildren(fragment);
+    summary.textContent="已发现 "+queue.items.length+" 个区域 · 可审核 "+
+      queue.counts.ready+" · 只有裁剪 "+queue.counts.cropOnly+
+      " · 证据异常 "+queue.counts.blocked;
+  }catch(e){
+    if(epoch!==queueEpoch)return;
+    list.replaceChildren();
+    summary.textContent="队列加载被安全阻止："+(e instanceof GraphReviewError?e.code:"GRAPH_QUEUE_UNAVAILABLE");
+  }
+}
+
+$("refresh-queue").addEventListener("click",()=>{void loadQueue();});
 $("auto-load").addEventListener("click",()=>{void loadAutomatically();});
 $("load").addEventListener("click",()=>{void load();});
 $("clear").addEventListener("click",()=>reset(true));
@@ -269,4 +337,4 @@ for(const id of ["result-file","manifest-file","crop-file"]){
 $("restore").addEventListener("change",()=>{void restoreDraft();});
 $("export").addEventListener("click",exportDraft);
 
-if(hasLocalToken)void loadAutomatically();
+if(hasLocalToken){void loadQueue();void loadAutomatically();}

@@ -13,6 +13,12 @@
 <p>此页面只显示机器提出的节点、线段和箭头尖端，允许人工记录“肉眼一致 / 不一致 / 无法判断”。本工具不会确认知识图谱，不会写入 Ground Truth，也不会触发 GLM、OCR 或播客生成。</p>
 <p><b>注意：</b>裁剪图可能不包含整页上下文。可另外在原书阅读器打开物理 P127 辅助判断。只在图像中确实看清时选择“肉眼一致”；看不清方向应选“无法判断”。</p>
 </section>
+<section class="panel" id="queue-panel">
+<h2>0. 已有证据自动发现队列（只读）</h2>
+<p>自动识别允许范围内 RB-PDF-12/13 的已有局部裁剪。<b>仅已验证来源和已存在图关系结果的项目才能进入最终人工审核</b>；单有 PNG 的其他区域不会假装已经完成 GLM 识别，也不会自动发起付费请求。</p>
+<div class="actions"><button id="refresh-queue" type="button">重新扫描已有证据</button><span id="queue-summary" role="status" aria-live="polite">队列尚未读取</span></div>
+<div id="queue-items" class="queue-items"></div>
+</section>
 <section class="panel">
 <h2>1. 自动导入本机已生成的 P127 证据</h2>
 <p>使用 <code>node scripts/serve_gt_annotation.mjs --auto-import-p127</code> 启动服务后，打开终端输出的带有本机访问凭据的审阅地址。页面会自动导入已有的结果、Manifest、裁剪 PNG，并尝试恢复上次未认证草稿。无需再手动选文件。</p>
