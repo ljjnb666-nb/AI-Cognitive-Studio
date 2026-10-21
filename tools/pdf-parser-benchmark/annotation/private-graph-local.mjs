@@ -8,6 +8,9 @@ import { lstat, realpath, open, mkdir, rename, rm } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { resolve, join, sep } from "node:path";
 import { TextDecoder } from "node:util";
+import {lookupTrustedGraphResult,TRUSTED_GRAPH_RESULTS,RegistryError} from "./graph-result-registry.mjs";
+import {validateRegionGraphCandidate,RegionReviewError} from "./region-graph-review.mjs";
+import {readRegionReviewDraft,saveRegionReviewDraft,RegionStoreError} from "./region-review-store.mjs";
 import {
   validateGraphReviewSource, parseGraphReviewDraft,
   MAX_CROP_BYTES, MAX_MANIFEST_BYTES, MAX_RESULT_BYTES, MAX_REVIEW_BYTES,
@@ -238,18 +241,28 @@ export async function listPrivateGraphReviewQueue(root){
   }
   // The single known model result is checked by the same contract as manual
   // import; a corrupt/missing graph cannot turn into a 'ready to review' item.
-  const pinned=discovered.find(x=>x.id==="RB-PDF-13:page-002-region-01");
-  if(pinned&&pinned.evidenceStatus==="CROP_READY_NO_GRAPH"){
+  for(const entry of discovered){
+    // Crop-only evidence is never upgraded by a filename or model claim.
+    // A source can become reviewable only through a reviewed code registry.
+    let reg;
+    try{reg=lookupTrustedGraphResult(entry.id);}
+    catch{fail("PRIVATE_REGISTERED_ID_INVALID");}
+    if(!reg || entry.evidenceStatus!=="CROP_READY_NO_GRAPH")continue;
     try{
-      const bundle=await readPrivateP127Bundle(root);
-      const review=await readPrivateP127Draft(root,bundle.view);
-      pinned.evidenceStatus="GRAPH_READY_FOR_HUMAN_REVIEW";
-      pinned.reviewable=true;
-      pinned.nodeCount=bundle.view.nodes.length;
-      pinned.edgeCount=bundle.view.edges.length;
-      pinned.reviewedCount=review.draft?.decisions.filter(x=>x.decision!=="UNREVIEWED").length??0;
+      const bundle=await readRegisteredGraphBundle(root,entry.id);
+      if(bundle.identity.cropSha256!==(
+        // The queue already verified this exact crop's SHA.
+        (await readPrivateGraphCropPreview(root,entry.id)).cropSha256
+      ))fail("PRIVATE_REGISTERED_QUEUE_CROP_CHANGED");
+      entry.evidenceStatus="GRAPH_READY_FOR_HUMAN_REVIEW";
+      entry.reviewable=true;
+      entry.reviewKind=bundle.reviewKind;
+      entry.nodeCount=bundle.view.nodes.length;
+      entry.edgeCount=bundle.view.edges.length;
+      entry.reviewedCount=bundle.saved.draft?.decisions
+        .filter(x=>x.decision!=="UNREVIEWED").length??0;
     }catch{
-      pinned.evidenceStatus="GRAPH_EVIDENCE_BLOCKED";
+      entry.evidenceStatus="GRAPH_EVIDENCE_BLOCKED";
     }
   }
   discovered.sort((a,b)=>
@@ -297,4 +310,63 @@ export async function readPrivateGraphCropPreview(root, itemId){
     graphVerified:false,humanVerified:false,
     pngBase64:bytes.toString("base64")
   };
+}
+
+/** Trusted registry is code-owned; callers cannot supply a filesystem path. */
+export async function readRegisteredGraphBundle(root,itemId,registrations=TRUSTED_GRAPH_RESULTS){
+  let reg;
+  try{reg=lookupTrustedGraphResult(itemId,registrations);}
+  catch(e){if(e instanceof RegistryError)fail("PRIVATE_REGISTERED_ID_INVALID");throw e;}
+  if(!reg)fail("PRIVATE_REGISTERED_RESULT_NOT_FOUND");
+  if(reg.kind==="LEGACY_P127"){
+    const bundle=await readPrivateP127Bundle(root);
+    const saved=await readPrivateP127Draft(root,bundle.view);
+    return {...bundle,reviewKind:"LEGACY_P127",saved};
+  }
+  const [resultBytes,manifestBytes,cropBytes]=await Promise.all([
+    readBounded(root,reg.resultPath,MAX_RESULT_BYTES),
+    readBounded(root,reg.manifestPath,MAX_MANIFEST_BYTES),
+    readBounded(root,reg.cropPath,MAX_CROP_BYTES)
+  ]);
+  const identity={resultSha256:sha(resultBytes),manifestSha256:sha(manifestBytes),
+    cropSha256:sha(cropBytes),...dimensions(cropBytes)};
+  if(identity.resultSha256!==reg.resultSha256 ||
+      identity.manifestSha256!==reg.manifestSha256 ||
+      identity.cropSha256!==reg.cropSha256)
+    fail("PRIVATE_REGISTERED_SOURCE_SHA_INVALID");
+  let view;
+  try{
+    view=validateRegionGraphCandidate(json(resultBytes),json(manifestBytes),identity,{
+      fixtureId:reg.fixtureId,regionId:reg.regionId,
+      sourcePhysicalPage1Based:reg.physicalPage,
+      sourceRun:reg.sourceRun,provider:reg.provider,model:reg.model,
+      attemptClass:reg.attemptClass,
+      expectedCropSha256:reg.cropSha256,
+      expectedResultSha256:reg.resultSha256,
+    });
+  }catch(e){
+    if(e instanceof RegionReviewError)fail("PRIVATE_REGISTERED_GRAPH_INVALID");
+    throw e;
+  }
+  let saved;
+  try{saved=await readRegionReviewDraft(root,view);}
+  catch(e){if(e instanceof RegionStoreError)fail(e.code.replace(/^REGION_/u,"PRIVATE_REGION_"));throw e;}
+  return {source:SOURCE,identity,view,reviewKind:"REGISTERED_REGION",saved,
+    authority:"PROPOSED_UNVERIFIED",humanVerified:false,
+    data:{resultBase64:resultBytes.toString("base64"),
+      manifestBase64:manifestBytes.toString("base64"),
+      cropBase64:cropBytes.toString("base64")}
+  };
+}
+export async function saveRegisteredGraphReviewDraft(root,itemId,raw,revision,registrations=TRUSTED_GRAPH_RESULTS){
+  const bundle=await readRegisteredGraphBundle(root,itemId,registrations);
+  if(bundle.reviewKind!=="REGISTERED_REGION")
+    fail("PRIVATE_REGISTERED_LEGACY_DRAFT_SEPARATE");
+  try{
+    return await saveRegionReviewDraft(root,bundle.view,raw,revision);
+  }catch(e){
+    if(e instanceof RegionStoreError)
+      fail(e.code.replace(/^REGION_/u,"PRIVATE_REGION_"));
+    throw e;
+  }
 }
