@@ -3,7 +3,7 @@
 name: ACS 02F real-private Edge read-only acceptance
 on:
   pull_request:
-    branches: [feat/pdf-figure-03e04b02f-staged-review]
+    branches: [feat/pdf-figure-03e04b02f-review-workflow]
     paths:
       - ".github/workflows/acs-pdf-02f-real-readonly.yml"
 
