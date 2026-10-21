@@ -489,6 +489,10 @@ describe("03E-03B code-pinned result registration and per-region HTTP fences",()
       trustedGraphRegistrations:registry});
     const item="RB-PDF-12%3Apage-001-region-01";
     try{
+      const batch=await send(app,"/api/private-graph/batch/plan");
+      expect(batch.status).toBe(200);
+      expect(batch.value.counts).toMatchObject({discovered:2,eligible:0,alreadyHasGraph:2});
+      expect(batch.value).toMatchObject({providerRequestsIssued:0,dispatchEnabled:false});
       const meta=await send(app,"/api/private-graph/registry");
       expect(meta.status).toBe(200);
       expect(meta.value.entries).toHaveLength(2);
