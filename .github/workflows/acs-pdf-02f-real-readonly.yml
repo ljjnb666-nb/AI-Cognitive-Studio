@@ -1,0 +1,64 @@
+# Real D: private corpus is read only by local Edge; never committed, logged or uploaded.
+# One explicitly pinned PR commit, isolated ops branch; no GLM/paid calls.
+name: ACS 02F real-private Edge read-only acceptance
+on:
+  pull_request:
+    branches: [feat/pdf-figure-03e04b02f-review-workflow]
+    paths:
+      - ".github/workflows/acs-pdf-02f-real-readonly.yml"
+
+permissions:
+  contents: read
+
+# Repository access goes through the locally configured SOCKS proxy;
+# loopback Edge and the private D: source never leave this runner.
+env:
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "http.proxy"
+  GIT_CONFIG_VALUE_0: "socks5h://127.0.0.1:10808"
+  NO_PROXY: "127.0.0.1,localhost"
+concurrency:
+  group: acs-windows-pdf-local-ownership
+  cancel-in-progress: false
+
+jobs:
+  real-readonly:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'ops/pdf-02f-real-readonly-20261021' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout pinned 02F PR head without persistent credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: d7f037f94dbd783fdd974e6e76ebd6472db6aaca
+      - name: Verify exact SHA, Node 24, Edge, and safe RAM
+        shell: powershell
+        env:
+          EXPECTED_SHA: d7f037f94dbd783fdd974e6e76ebd6472db6aaca
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) {throw 'PRIVATE_EDGE_EXACT_SHA_INVALID'}
+          $node=(Get-Command node -ErrorAction Stop).Source
+          if ((& $node -p "Number(process.versions.node.split('.')[0]) >= 24").Trim() -ne 'true') {throw 'PRIVATE_EDGE_NODE_VERSION_BLOCKED'}
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ([double]$os.FreePhysicalMemory -lt 1572864) {throw 'PRIVATE_EDGE_MEMORY_GUARD_BLOCKED'}
+          $root='D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1'
+          if (-not (Test-Path -LiteralPath $root -PathType Container)) {throw 'PRIVATE_EDGE_SOURCE_NOT_READY'}
+          Write-Output 'ACS_02F_REAL_EDGE_EXACT_SHA_AND_RESOURCES_VERIFIED=true'
+      - name: Run actual local Windows Edge with hard-disabled draft PUT and no private logs
+        shell: powershell
+        env:
+          NODE_OPTIONS: '--no-warnings'
+        run: |
+          $ErrorActionPreference='Stop'
+          $paths=@("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
+            "${env:LOCALAPPDATA}\Microsoft\Edge\Application\msedge.exe")
+          $edge=@($paths | Where-Object {Test-Path -LiteralPath $_ -PathType Leaf} | Select-Object -First 1)
+          if ($edge.Count -ne 1) {throw 'PRIVATE_EDGE_BINARY_NOT_AVAILABLE'}
+          node --check tools/pdf-parser-benchmark/scripts/edge_graph_review_progress_real_readonly.mjs
+          if ($LASTEXITCODE -ne 0) {throw 'PRIVATE_EDGE_SCRIPT_INVALID'}
+          node tools/pdf-parser-benchmark/scripts/edge_graph_review_progress_real_readonly.mjs ('--edge='+$edge[0]) ('--root=D:\ai-cognitive-pdf-benchmark-data\reports\real-mineru-39440805765-1')
+          if ($LASTEXITCODE -ne 0) {throw 'PRIVATE_EDGE_READONLY_ACCEPTANCE_FAILED'}
+          Write-Output 'ACS_02F_EDGE_15_REAL_PRIVATE_CROPS_READONLY_ACCEPTED=true'
