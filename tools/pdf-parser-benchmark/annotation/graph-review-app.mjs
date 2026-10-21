@@ -5,6 +5,8 @@ import {
 } from "./graph-review.mjs";
 import { verifyAutoGraphBundle } from "./graph-review-auto.mjs";
 import { verifyGraphCropPreview } from "./graph-crop-preview.mjs";
+import {validateRegionGraphCandidate,createRegionReviewDraft,parseRegionReviewDraft,
+  updateRegionReviewDraft,regionReviewProgress,regionReviewDraftFilename} from "./region-graph-review.mjs";
 
 const $=id=>document.getElementById(id);
 const el=(tag,klass,text)=>{
@@ -15,6 +17,16 @@ let view=null,draft=null,bitmap=null,selected=null,loadEpoch=0;
 const token=new URLSearchParams(location.hash.slice(1)).get("review-token");
 const hasLocalToken=typeof token==="string"&&/^[0-9a-f]{64}$/u.test(token);
 let autoActive=false,saveRevision=null,saveTimer=null,saveQueue=Promise.resolve(),saveEpoch=0;
+let activeReviewKind="LEGACY_P127",activeItemId=null;
+const useGeneric=()=>activeReviewKind==="REGISTERED_REGION";
+const currentParse=(raw,v)=>useGeneric()?parseRegionReviewDraft(raw,v):parseGraphReviewDraft(raw,v);
+const currentUpdate=(raw,v,kind,id,decision,note)=>useGeneric()?
+  updateRegionReviewDraft(raw,v,kind,id,decision,note):
+  updateGraphDecision(raw,v,kind,id,decision,note);
+const currentProgress=(raw,v)=>useGeneric()?regionReviewProgress(raw,v):graphReviewProgress(raw,v);
+const draftEndpoint=()=>useGeneric()?
+  "/api/private-graph/registered/draft?item="+encodeURIComponent(activeItemId):
+  "/api/private-graph/p127/draft";
 function saveStatus(value){$("autosave-state").textContent="自动保存："+value;}
 function autoHeaders(extra={}){return {...extra,"x-acs-review-token":hasLocalToken?token:""};}
 async function autoRequest(url,config={}){
@@ -42,16 +54,19 @@ function scheduleAutoSave(){
     saveTimer=null;
     const stored=structuredClone(draft);
     const lineage=view.resultSha256;
+    const sourceItem=activeItemId,reviewMode=activeReviewKind;
     const next=saveQueue.then(async()=>{
-      if(!autoActive||saveEpoch!==epoch||!view||view.resultSha256!==lineage)return;
+      if(!autoActive||saveEpoch!==epoch||!view||view.resultSha256!==lineage||
+         activeItemId!==sourceItem||activeReviewKind!==reviewMode)return;
       saveStatus("保存中…");
       try{
-        const result=await autoRequest("/api/private-graph/p127/draft",{
+        const result=await autoRequest(draftEndpoint(),{
           method:"PUT",
           headers:{"Content-Type":"application/json","x-acs-draft-revision":saveRevision??"none"},
           body:JSON.stringify(stored),
         });
-        if(saveEpoch!==epoch||!autoActive||!view||view.resultSha256!==lineage)return;
+        if(saveEpoch!==epoch||!autoActive||!view||view.resultSha256!==lineage||
+           activeItemId!==sourceItem||activeReviewKind!==reviewMode)return;
         if(!/^[0-9a-f]{64}$/u.test(result.revision)||result.status!=="REVIEW_DRAFT_UNATTESTED")
           throw new GraphReviewError("PRIVATE_DRAFT_RECEIPT_INVALID");
         saveRevision=result.revision;
@@ -72,7 +87,7 @@ const options=[
 ];
 function message(text,good=false){$("notice").textContent=text;$("notice").classList.toggle("ok",good);}
 function reset(clearFiles=false){
-  ++loadEpoch;cancelAutoSave();
+  ++loadEpoch;cancelAutoSave();activeReviewKind="LEGACY_P127";activeItemId=null;
   if(bitmap){bitmap.close();bitmap=null;}
   if(clearFiles)for(const id of ["result-file","manifest-file","crop-file","restore"])$(id).value="";
   view=null;draft=null;selected=null;$("work").hidden=true;$("export-panel").hidden=true;
@@ -120,7 +135,7 @@ function draw(){
 }
 function render(){
   if(!view||!draft)return;
-  const progress=graphReviewProgress(draft,view);
+  const progress=currentProgress(draft,view);
   $("counts").textContent="候选节点 "+view.nodes.length+" 个，候选关系 "+view.edges.length+
     " 条；人工草稿已处理 "+progress.reviewed+"/"+progress.total+
     " 项（其中无法判断 "+progress.uncertain+" 项）。无认证结论。";
@@ -144,7 +159,7 @@ function render(){
     }
     select.addEventListener("change",()=>{
       try{
-        draft=updateGraphDecision(draft,view,r.kind,r.id,select.value,select.value==="UNREVIEWED"?"":v.note);
+        draft=currentUpdate(draft,view,r.kind,r.id,select.value,select.value==="UNREVIEWED"?"":v.note);
         render();scheduleAutoSave();
         message("已更新本机草稿；"+(autoActive?"等待本机自动保存。":"请手动导出草稿。"),true);
       }catch{message("审阅状态不合法，未修改草稿。");render();}
@@ -154,7 +169,7 @@ function render(){
     const field=el("input");field.type="text";field.maxLength=280;field.value=v.note;field.placeholder="例如：箭头尖端模糊，不可确定方向";
     field.disabled=v.decision==="UNREVIEWED";
     field.addEventListener("change",()=>{
-      try{draft=updateGraphDecision(draft,view,r.kind,r.id,v.decision,field.value);render();scheduleAutoSave();message("已更新本机备注；"+(autoActive?"等待本机自动保存。":"请导出草稿。"),true);}
+      try{draft=currentUpdate(draft,view,r.kind,r.id,v.decision,field.value);render();scheduleAutoSave();message("已更新本机备注；"+(autoActive?"等待本机自动保存。":"请导出草稿。"),true);}
       catch{message("备注格式不合法，未保存。");render();}
     });
     nlabel.append(field);item.append(nlabel);fragment.append(item);
@@ -183,6 +198,7 @@ async function load(){
       const validated=validateGraphReviewSource(parseJSON(rb),parseJSON(mb),
         {resultSha256,manifestSha256,cropSha256,cropWidth:image.width,cropHeight:image.height});
       if(epoch!==loadEpoch)return;
+      activeReviewKind="LEGACY_P127";activeItemId=null;
       view=validated;draft=createGraphReviewDraft(view);bitmap=image;selected=null;
       $("work").hidden=false;$("export-panel").hidden=false;
       draw();render();message("SHA / 物理 P127 / 节点关系坐标校验通过。所有候选仍未审阅。",true);
@@ -202,7 +218,7 @@ async function restoreDraft(){
     const raw=parseJSON(await f.arrayBuffer());
     if(loadEpoch!==expectedEpoch||!view||view.resultSha256!==expectedSha)
       throw new GraphReviewError("GRAPH_RESTORE_STALE_SELECTION");
-    draft=parseGraphReviewDraft(raw,view);
+    draft=currentParse(raw,view);
     selected=null;render();draw();scheduleAutoSave();
     message("仅恢复了同一 SHA 来源下的未认证草稿；请继续独立核对。",true);
   }catch(error){message("草稿来源或结构不符，已拒绝（"+(error instanceof GraphReviewError?error.code:"GRAPH_RESTORE_FAILED")+"）。");}
@@ -210,11 +226,11 @@ async function restoreDraft(){
 function exportDraft(){
   if(!view||!draft)return;
   try{
-    const checked=parseGraphReviewDraft(draft,view);
+    const checked=currentParse(draft,view);
     const data=JSON.stringify(checked,null,2);
     if(new TextEncoder().encode(data).byteLength>MAX_REVIEW_BYTES)throw new GraphReviewError("GRAPH_REVIEW_TOO_LARGE");
     const url=URL.createObjectURL(new Blob([data],{type:"application/json"}));
-    const link=el("a");link.href=url;link.download="P127-graph-review-DRAFT-UNATTESTED.json";
+    const link=el("a");link.href=url;link.download=useGeneric()?regionReviewDraftFilename(view):"P127-graph-review-DRAFT-UNATTESTED.json";
     document.body.append(link);link.click();link.remove();
     setTimeout(()=>URL.revokeObjectURL(url),3000);
     message("已向浏览器发出私有草稿下载请求。请核实文件实际保存位置；不代表人工验收通过。",true);
@@ -242,6 +258,7 @@ async function loadAutomatically(){
       const validated=validateGraphReviewSource(result,manifest,
         {...identity,cropWidth:image.width,cropHeight:image.height});
       if(epoch!==loadEpoch)return;
+      activeReviewKind="LEGACY_P127";activeItemId=null;
       view=validated;draft=createGraphReviewDraft(view);bitmap=image;selected=null;
       const prior=await autoRequest("/api/private-graph/p127/draft");
       if(epoch!==loadEpoch)return;
