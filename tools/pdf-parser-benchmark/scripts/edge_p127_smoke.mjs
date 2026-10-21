@@ -112,6 +112,10 @@ async function main(){
     await until(cdp,'document.querySelectorAll("#queue-items .queue-item").length===1',"EDGE_SYNTHETIC_QUEUE_TIMEOUT");
     const queued=await cdp.value('({total:document.querySelector("#queue-summary")?.textContent.includes("已发现 1 个区域"),ready:document.querySelector("#queue-summary")?.textContent.includes("可审核 1"),entry:document.querySelectorAll("#queue-items button.primary").length===1})');
     if(!queued||!Object.values(queued).every(Boolean))stop("EDGE_SYNTHETIC_QUEUE_REJECTED");
+
+    await cdp.value('(()=>{const button=document.querySelector("#queue-items .crop-preview-button");if(!button)return false;button.click();return true;})()');
+    await until(cdp,'document.querySelector("#crop-preview")?.hidden === false && document.querySelector("#crop-preview-canvas")?.width > 0 && document.querySelector("#crop-preview-status")?.textContent.includes("校验通过")',"EDGE_SYNTHETIC_PREVIEW_TIMEOUT");
+    console.log("ACS_P127_EDGE_SYNTHETIC_SHA_PREVIEW_PASS");
     console.log("ACS_P127_EDGE_SYNTHETIC_QUEUE_PASS");
     console.log("ACS_P127_EDGE_SYNTHETIC_IMPORT_AND_OVERLAY_PASS");
     await cdp.value('(()=>{const s=document.querySelector("#entries select");s.value="UNCERTAIN";s.dispatchEvent(new Event("change",{bubbles:true}));return true;})()');
