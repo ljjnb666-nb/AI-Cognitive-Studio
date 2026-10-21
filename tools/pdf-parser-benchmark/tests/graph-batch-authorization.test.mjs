@@ -169,6 +169,15 @@ describe("03E-04B-02A exact list-rate estimation and uncertain-result fail-close
     rejectCode(()=>guardBatchDispatch(plan,draft),BatchAuthorizationError,
       "BATCH_DISPATCH_REQUIRES_VERIFIED_PRICE_AND_EXPLICIT_APPROVAL");
   });
+  it("rounds each call independently in the non-binding price illustration",()=>{
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    const quote=quoteOfflineReferenceUsage(plan,draft,ids.map(id=>({
+      id,inputTokens:1,cachedInputTokens:0,outputTokens:1
+    })));
+    expect(quote.listRateComponentsFen).toEqual({input:2,cachedInput:0,output:2});
+    expect(quote.referenceTotalFen).toBe(4);
+    expect(quote.providerSpendUpperBoundVerified).toBe(false);
+  });
   it("rejects made-up input token bounds, incomplete usage or out-of-scope rows",()=>{
     const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
     for(const rows of [
