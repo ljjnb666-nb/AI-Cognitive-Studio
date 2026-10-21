@@ -785,6 +785,13 @@ describe("03E-04B-02C canonical Python producer result -> unapproved registry pr
     const {src,receipt}=await canonical(x);
     const output=join(x.root,...src.registration.resultPath.split("/"));
     await rm(output);
+    const leftover=await readOnlyCanonicalIntakeOverview(x.root);
+    expect(leftover.counts).toMatchObject({total:2,reviewable:1,blocked:1});
+    expect(leftover.items.find(i=>i.id===src.registration.id).state)
+      .toBe("MODEL_RESULT_BLOCKED_MANUAL_INVESTIGATION");
+    // A request marker with no output directory is a different kind of
+    // uncertainty. Both states must block every automatic replay.
+    await rm(dirname(output),{recursive:true});
     const overview=await readOnlyCanonicalIntakeOverview(x.root);
     expect(overview.counts).toMatchObject({total:2,reviewable:1,blocked:1});
     expect(overview.items.find(i=>i.id===src.registration.id)).toMatchObject({
