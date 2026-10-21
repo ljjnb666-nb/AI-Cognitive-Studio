@@ -91,8 +91,9 @@ def record_attempt(receipt: Path, event: str, **fields) -> None:
         elif name in ("finishStatus", "contentKind"):
             if value not in (("STOP", "LENGTH", "MISSING", "OTHER") if name == "finishStatus" else ("TEXT", "MISSING", "OTHER")):
                 raise CloudBlocked("CLOUD_RECEIPT_FIELD_INVALID")
-        elif type(value) is bool:
-            pass
+        elif name in ("modelMatchesRequested", "modelFieldPresent", "reasoningPresent"):
+            if type(value) is not bool:
+                raise CloudBlocked("CLOUD_RECEIPT_FIELD_INVALID")
         elif type(value) is not int or not -1 <= value <= 2000000:
             raise CloudBlocked("CLOUD_RECEIPT_FIELD_INVALID")
     with receipt.open("a", encoding="utf-8") as out:
@@ -191,7 +192,8 @@ def infer_cloud_one(item: dict, model: str, key: str, *, observer=None) -> dict:
         finish = choice.get("finish_reason")
         if finish == "length":
             raise CloudBlocked("CLOUD_GENERATION_TRUNCATED")
-        if finish not in ("stop", None):
+        if finish != "stop":
+            # Unknown/missing termination cannot certify a complete graph.
             raise CloudBlocked("CLOUD_FINISH_STATUS_REJECTED")
         content = choice["message"]["content"]
         if not isinstance(content, str) or not content.strip():
@@ -313,7 +315,12 @@ def execute_cloud(root: Path, fixture: str, model: str, *,
             handle.flush()
             os.fsync(handle.fileno())
         os.rename(stage, output)
-        observe("OUTPUT_SAVED")
+        # The result is already committed. Diagnostic I/O must not retroactively
+        # report a successful durable result as failed or delete the output.
+        try:
+            observe("OUTPUT_SAVED")
+        except (OSError, CloudBlocked):
+            pass
     except BaseException as exc:
         # Retain first-failure diagnostics while preserving the original error.
         code = str(exc) if isinstance(exc, CloudBlocked) else "CLOUD_RUNTIME_BLOCKED"

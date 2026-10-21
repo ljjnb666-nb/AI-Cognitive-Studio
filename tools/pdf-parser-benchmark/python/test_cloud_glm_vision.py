@@ -182,6 +182,51 @@ class GLMTests(unittest.TestCase):
                             region_id=None,max_regions=1,cloud_consent=True,key="demo")
                     call.assert_not_called()
 
+    def test_receipt_field_type_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            receipt=Path(d)/".cloud-attempted"
+            receipt.write_text("reserved\\n",encoding="utf-8")
+            valid=glm.response_metadata({},glm.DEFAULT_MODEL)
+            invalid=dict(valid,contentChars=True)
+            with self.assertRaisesRegex(glm.CloudBlocked,"CLOUD_RECEIPT_FIELD_INVALID"):
+                glm.record_attempt(receipt,"RESPONSE_META",**invalid)
+            invalid=dict(valid,reasoningPresent=1)
+            with self.assertRaisesRegex(glm.CloudBlocked,"CLOUD_RECEIPT_FIELD_INVALID"):
+                glm.record_attempt(receipt,"RESPONSE_META",**invalid)
+            self.assertEqual(receipt.read_text(encoding="utf-8"),"reserved\\n")
+
+    def test_output_commit_not_reversed_by_receipt_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            folder=root/"reports"/glm.SOURCE_RUN/"region-proposals-v1-RB-PDF-13"
+            folder.mkdir(parents=True)
+            (folder/"region-proposals.json").write_text(json.dumps(provenance()),encoding="utf-8")
+            row=item(root/"fake.png")
+            original=glm.record_attempt
+            def record(receipt,event,**fields):
+                if event=="OUTPUT_SAVED":
+                    raise OSError("simulated private disk diagnostic failure")
+                return original(receipt,event,**fields)
+            with patch.object(glm,"verify_regions",return_value=(provenance(),[row])):
+                with patch.object(glm,"infer_cloud_one",return_value=graph()):
+                    with patch.object(glm,"record_attempt",side_effect=record):
+                        result=glm.execute_cloud(root,"RB-PDF-13",glm.DEFAULT_MODEL,
+                            region_id=None,max_regions=1,cloud_consent=True,key="demo")
+            self.assertEqual(result["status"],"GLM_CLOUD_PROPOSALS_SAVED_UNREVIEWED")
+            output=root/"reports"/glm.SOURCE_RUN/"glm-cloud-v1-RB-PDF-13-page-002-region-01"/"cloud-vision-proposals.json"
+            self.assertTrue(output.is_file())
+
+    def test_missing_finish_status_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/"crop.png"
+            p.write_bytes(b"SYNTHETIC")
+            row=item(p)
+            row["sha"]=hashlib.sha256(p.read_bytes()).hexdigest()
+            response={"choices":[{"message":{"content":json.dumps(graph())}}]}
+            with patch.object(glm,"request_glm",return_value=response):
+                with self.assertRaisesRegex(glm.CloudBlocked,"FINISH_STATUS_REJECTED"):
+                    glm.infer_cloud_one(row,glm.DEFAULT_MODEL,"demo")
+
     def test_mock_cloud_result_unreviewed_and_no_replay(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
