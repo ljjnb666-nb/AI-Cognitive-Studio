@@ -193,6 +193,15 @@ async function main(){
       'switchBlocked:document.querySelector("#notice")?.textContent.includes("已阻止切换")};})()');
     if(!unblurredNote||!Object.values(unblurredNote).every(Boolean))
       stop("EDGE_02G_UNBLURRED_NOTE_NOT_FENCED");
+    // Changing the decision immediately after typing must not use the
+    // stale note captured by an older render() event handler.
+    const noteKept=await cdp.value('(()=>{'+
+      'const s=document.querySelector("#entries select");s.value="VISIBLE_MISMATCH";'+
+      's.dispatchEvent(new Event("change",{bubbles:true}));'+
+      'const retained=document.querySelector("#entries .reviewitem input")?.value==="synthetic-unblurred-note";'+
+      'const refreshed=document.querySelector("#entries select");refreshed.value="UNCERTAIN";'+
+      'refreshed.dispatchEvent(new Event("change",{bubbles:true}));return retained;})()');
+    if(!noteKept)stop("EDGE_02G_DECISION_OVERWROTE_UNBLURRED_NOTE");
     await until(cdp,'document.querySelector("#autosave-state")?.textContent.includes("已保存到本机 D 盘")',
       "EDGE_02G_NOTE_AUTOSAVE_TIMEOUT");
     const afterNote=await readPrivateP127Draft(root,(await readPrivateP127Bundle(root)).view);
