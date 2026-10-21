@@ -31,6 +31,8 @@ jobs:
           GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
         with:
           persist-credentials: false
+          clean: false
+          path: acs-02e-stage
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Verify exact SHA and machine resource guard
         shell: powershell
@@ -38,7 +40,7 @@ jobs:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           $ErrorActionPreference='Stop'
-          if ((git rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'EDGE_EXACT_SHA_CHECK_FAILED' }
+          if ((git -C acs-02e-stage rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'EDGE_EXACT_SHA_CHECK_FAILED' }
           $node=(Get-Command node -ErrorAction Stop).Source
           if ((& $node -p "Number(process.versions.node.split('.')[0]) >= 24").Trim() -ne 'true') { throw 'EDGE_NODE24_REQUIRED' }
           $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
@@ -57,8 +59,8 @@ jobs:
           )
           $edge=@($paths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
           if ($edge.Count -ne 1) { throw 'EDGE_BINARY_NOT_AVAILABLE' }
-          node --check tools/pdf-parser-benchmark/scripts/edge_graph_staged_smoke.mjs
+          node --check acs-02e-stage/tools/pdf-parser-benchmark/scripts/edge_graph_staged_smoke.mjs
           if ($LASTEXITCODE -ne 0) { throw 'EDGE_SCRIPT_SYNTAX_INVALID' }
-          node tools/pdf-parser-benchmark/scripts/edge_graph_staged_smoke.mjs ('--edge='+$edge[0])
+          node acs-02e-stage/tools/pdf-parser-benchmark/scripts/edge_graph_staged_smoke.mjs ('--edge='+$edge[0])
           if ($LASTEXITCODE -ne 0) { throw 'EDGE_STAGED_SYNTHETIC_ACCEPTANCE_FAILED' }
           Write-Output 'ACS_03E04B02E_EDGE_STAGED_SYNTHETIC_ACCEPTED=true'
