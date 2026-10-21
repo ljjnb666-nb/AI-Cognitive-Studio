@@ -2,20 +2,28 @@
 # One explicitly pinned PR commit, isolated ops branch; no GLM/paid calls.
 name: ACS 02E real-private Edge read-only acceptance
 on:
-  push:
-    branches: [ops/pdf-02e-real-readonly-20261021]
+  pull_request:
+    branches: [feat/pdf-figure-03e04b02e-staged-review]
     paths:
       - ".github/workflows/acs-pdf-02e-real-readonly.yml"
 
 permissions:
   contents: read
+
+# Repository access goes through the locally configured SOCKS proxy;
+# loopback Edge and the private D: source never leave this runner.
+env:
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "http.proxy"
+  GIT_CONFIG_VALUE_0: "socks5h://127.0.0.1:10808"
+  NO_PROXY: "127.0.0.1,localhost"
 concurrency:
   group: acs-windows-pdf-local-ownership
   cancel-in-progress: false
 
 jobs:
   real-readonly:
-    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.ref == 'refs/heads/ops/pdf-02e-real-readonly-20261021' }}
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'ops/pdf-02e-real-readonly-20261021' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 10
     steps:
