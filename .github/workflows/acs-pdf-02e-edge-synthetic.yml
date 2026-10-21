@@ -2,6 +2,11 @@
 # Only the owner's exact same-repository feature branch may use the local runner.
 name: ACS PDF staged graph Edge synthetic acceptance
 on:
+  push:
+    branches: [feat/pdf-figure-03e04b02e-staged-review]
+    paths:
+      - "tools/pdf-parser-benchmark/**"
+      - ".github/workflows/acs-pdf-02e-edge-synthetic.yml"
   pull_request:
     branches: [feat/pdf-local-vision-proposals-03b]
     paths:
@@ -17,7 +22,7 @@ concurrency:
 
 jobs:
   staged-edge:
-    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-figure-03e04b02e-staged-review' && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && ((github.event_name == 'push' && github.ref == 'refs/heads/feat/pdf-figure-03e04b02e-staged-review') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-figure-03e04b02e-staged-review' && github.event.pull_request.user.login == 'ljjnb666-nb')) }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 10
     steps:
@@ -33,11 +38,11 @@ jobs:
           persist-credentials: false
           clean: false
           path: acs-02e-stage
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Verify exact SHA and machine resource guard
         shell: powershell
         env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           $ErrorActionPreference='Stop'
           if ((git -C acs-02e-stage rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'EDGE_EXACT_SHA_CHECK_FAILED' }
