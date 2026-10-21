@@ -118,6 +118,15 @@ async function main(){
     }
     console.log("ACS_P127_EDGE_REAL_CROP_PREVIEWS_VERIFIED=15");
     console.log("ACS_P127_EDGE_REAL_CROP_ONLY_SHA_PREVIEW_PASS=true");
+    let planReady=false;
+    for(let n=0;n<110;n++){
+      const ready=await cdp.evaluate('document.querySelector("#batch-plan-state")?.textContent.includes("已发现 15 个区域") && document.querySelector("#batch-plan-state")?.textContent.includes("需推理 14") && document.querySelector("#batch-plan-details")?.textContent.includes("实际付费调用 0 次")');
+      if(ready){planReady=true;break;}
+      await delay(160);
+    }
+    if(!planReady)fail("EDGE_REAL_BATCH_PLAN_NOT_VERIFIED");
+    console.log("ACS_03E04_EDGE_REAL_BATCH_ELIGIBLE=14");
+    console.log("ACS_03E04_EDGE_REAL_BATCH_PROVIDER_CALLS=0");
     console.log("ACS_P127_EDGE_REAL_QUEUE_TOTAL=15");
     console.log("ACS_P127_EDGE_REAL_QUEUE_REVIEWABLE=1");
     console.log("ACS_P127_EDGE_REAL_QUEUE_CROP_ONLY=14");
