@@ -127,6 +127,61 @@ class GLMTests(unittest.TestCase):
                 with self.assertRaisesRegex(glm.CloudBlocked,"GENERATION_TRUNCATED"):
                     glm.infer_cloud_one(row,glm.DEFAULT_MODEL,"demo")
 
+    def test_strict_full_json_fence_and_redacted_response_metadata(self):
+        body=json.dumps(graph())
+        fence=chr(96)*3
+        self.assertEqual(glm.parse_complete_graph_json(body),graph())
+        self.assertEqual(glm.parse_complete_graph_json(" "+fence+"json\n"+body+"\n"+fence+" "),graph())
+        for candidate in ("prefix "+body, body+" suffix", fence+"json\n"+body+"\n"+fence+" more",
+                          fence+"python\n"+body+"\n"+fence,
+                          fence+"json\n"+body+"\n"+fence+"\n"+fence+"json\n"+body+"\n"+fence):
+            with self.subTest(candidate=candidate[:10]):
+                with self.assertRaisesRegex(glm.CloudBlocked,"CONTENT_NOT_PURE_JSON"):
+                    glm.parse_complete_graph_json(candidate)
+        with self.assertRaisesRegex(glm.CloudBlocked,"GRAPH_FIELDS_INVALID"):
+            glm.parse_complete_graph_json(json.dumps({"nodes":[],"edges":[],"verified":True}))
+        sample={"model":glm.DEFAULT_MODEL,"usage":{"prompt_tokens":124,"completion_tokens":38},
+                "choices":[{"finish_reason":"length",
+                            "message":{"content":"PRIVATE BOOK BODY",
+                                       "reasoning_content":"PRIVATE CHAIN"}}]}
+        metadata=glm.response_metadata(sample,glm.DEFAULT_MODEL)
+        self.assertEqual(metadata["finishStatus"],"LENGTH")
+        self.assertEqual(metadata["contentChars"],17)
+        self.assertTrue(metadata["modelMatchesRequested"])
+        self.assertTrue(metadata["reasoningPresent"])
+        self.assertNotIn("PRIVATE",json.dumps(metadata))
+
+    def test_post_http_receipt_is_private_bounded_and_blocks_replay(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            folder=root/"reports"/glm.SOURCE_RUN/"region-proposals-v1-RB-PDF-13"
+            folder.mkdir(parents=True)
+            (folder/"region-proposals.json").write_text(json.dumps(provenance()),encoding="utf-8")
+            def synthetic_rejected(row, model, key, *, observer=None):
+                observer("REQUEST_DISPATCHED")
+                observer("HTTP_200",responseBytes=141)
+                observer("RESPONSE_META",**glm.response_metadata({
+                    "model":model,"choices":[{"finish_reason":"stop",
+                                             "message":{"content":"PRIVATE BOOK BODY"}}]},model))
+                raise glm.CloudBlocked("CLOUD_CONTENT_NOT_PURE_JSON")
+            with patch.object(glm,"verify_regions",return_value=(provenance(),[item(root/"fake")])):
+                with patch.object(glm,"infer_cloud_one",side_effect=synthetic_rejected):
+                    with self.assertRaisesRegex(glm.CloudBlocked,"CONTENT_NOT_PURE_JSON"):
+                        glm.execute_cloud(root,"RB-PDF-13",glm.DEFAULT_MODEL,
+                            region_id=None,max_regions=1,cloud_consent=True,key="demo")
+            receipt=root/"reports"/glm.SOURCE_RUN/".glm-cloud-v1-RB-PDF-13-page-002-region-01.cloud-attempted"
+            raw=receipt.read_text(encoding="utf-8")
+            self.assertNotIn("PRIVATE",raw)
+            self.assertNotIn("demo",raw)
+            events=[json.loads(line)["event"] for line in raw.splitlines()[1:]]
+            self.assertEqual(events,["REQUEST_DISPATCHED","HTTP_200","RESPONSE_META","FAILED"])
+            with patch.object(glm,"verify_regions",return_value=(provenance(),[item(root/"fake")])):
+                with patch.object(glm,"infer_cloud_one") as call:
+                    with self.assertRaisesRegex(glm.CloudBlocked,"ALREADY_EXISTS"):
+                        glm.execute_cloud(root,"RB-PDF-13",glm.DEFAULT_MODEL,
+                            region_id=None,max_regions=1,cloud_consent=True,key="demo")
+                    call.assert_not_called()
+
     def test_mock_cloud_result_unreviewed_and_no_replay(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
