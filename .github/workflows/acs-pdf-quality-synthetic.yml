@@ -68,6 +68,8 @@ jobs:
           node --check annotation/graph-batch-offline-ledger.mjs
           node --check annotation/graph-batch-pricing.mjs
           node --check annotation/graph-batch-reconcile.mjs
+          node --check annotation/graph-batch-consent-proof.mjs
+          node --check annotation/graph-batch-simulated-attempt.mjs
           node --check annotation/region-review-store.mjs
           node --check annotation/graph-review-app.mjs
           node --check annotation/graph-review-auto.mjs
