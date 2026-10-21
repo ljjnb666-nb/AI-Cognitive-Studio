@@ -5,6 +5,10 @@ import {tmpdir} from "node:os";
 import {compileGraphBatchPlan} from "../annotation/graph-batch-plan.mjs";
 import {draftBatchAuthorization,verifyBatchAuthorizationDraft,
   guardBatchDispatch,BatchAuthorizationError} from "../annotation/graph-batch-authorization.mjs";
+import {OFFICIAL_REFERENCE_RATES,quoteOfflineReferenceUsage,requireActualSpendBound,PricingGateError}
+  from "../annotation/graph-batch-pricing.mjs";
+import {reconcileCloudEvidence,reconcileBatchCandidates,ReconcileError}
+  from "../annotation/graph-batch-reconcile.mjs";
 import {reserveOfflineReviewItem,inspectOfflineReviewItem,BatchLedgerError}
   from "../annotation/graph-batch-offline-ledger.mjs";
 const ids=["RB-PDF-12:page-001-region-01","RB-PDF-13:page-001-region-01"];
@@ -129,5 +133,100 @@ describe("03E-04B-01 nonbillable authorization request and durable OFFLINE only 
     expect(receipt.dispatchEnabled).toBe(false);
     await rejectAsync(()=>reserveOfflineReviewItem(root,plan,draft,ids[0],
       {now:"2026-10-21T00:00:00.000Z"}),"BATCH_LEDGER_ITEM_ALREADY_RESERVED");
+  }));
+});
+
+
+describe("03E-04B-02A exact list-rate estimation and uncertain-result fail-closed",()=>{
+  it("publishes official CNY per-million reference but cannot certify account rate or image tokens",()=>{
+    expect(OFFICIAL_REFERENCE_RATES).toMatchObject({
+      model:"glm-5.3-flash",currency:"CNY",
+      inputFenPerMillionTokens:80,outputFenPerMillionTokens:280,
+      cachedInputFenPerMillionTokens:23,accountTariffVerified:false,
+      imageTokenUpperBoundVerified:false,eligibleForPaidDispatch:false
+    });
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    const quote=quoteOfflineReferenceUsage(plan,draft,[
+      {id:ids[0],inputTokens:1_000_000,cachedInputTokens:0,outputTokens:6000},
+      {id:ids[1],inputTokens:0,cachedInputTokens:0,outputTokens:0}
+    ]);
+    expect(quote.listRateComponentsFen).toEqual({input:80,cachedInput:0,output:2});
+    expect(quote.referenceTotalFen).toBe(82);
+    expect(quote).toMatchObject({withinRequestedDraftCapForIllustration:true,
+      providerSpendUpperBoundVerified:false,approved:false,dispatchEnabled:false,
+      imageTokenUpperBoundVerified:false,accountTariffVerified:false});
+    rejectCode(()=>requireActualSpendBound(quote),PricingGateError,
+      "PRICING_ACTUAL_MAXIMUM_NOT_VERIFIED");
+  });
+  it("uses separate cache rates and round-up without hiding fractional fen",()=>{
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    const q=quoteOfflineReferenceUsage(plan,draft,[
+      {id:ids[0],inputTokens:1,cachedInputTokens:0,outputTokens:1},
+      {id:ids[1],inputTokens:1_000_000,cachedInputTokens:1_000_000,outputTokens:0}
+    ]);
+    expect(q.listRateComponentsFen).toEqual({input:1,cachedInput:23,output:1});
+    expect(q.referenceTotalFen).toBe(25);
+    rejectCode(()=>guardBatchDispatch(plan,draft),BatchAuthorizationError,
+      "BATCH_DISPATCH_REQUIRES_VERIFIED_PRICE_AND_EXPLICIT_APPROVAL");
+  });
+  it("rejects made-up input token bounds, incomplete usage or out-of-scope rows",()=>{
+    const plan=makePlan(),draft=draftBatchAuthorization(plan,opts);
+    for(const rows of [
+      [{id:ids[0],inputTokens:0,cachedInputTokens:0,outputTokens:0}],
+      [{id:ids[0],inputTokens:1_048_577,cachedInputTokens:0,outputTokens:0},
+       {id:ids[1],inputTokens:0,cachedInputTokens:0,outputTokens:0}],
+      [{id:ids[0],inputTokens:20,cachedInputTokens:21,outputTokens:0},
+       {id:ids[1],inputTokens:0,cachedInputTokens:0,outputTokens:0}],
+      [{id:ids[0],inputTokens:10,cachedInputTokens:0,outputTokens:6001},
+       {id:ids[1],inputTokens:0,cachedInputTokens:0,outputTokens:0}],
+      [{id:ids[0],inputTokens:10,cachedInputTokens:0,outputTokens:0},
+       {id:ids[0],inputTokens:10,cachedInputTokens:0,outputTokens:0}]
+    ])expect(()=>quoteOfflineReferenceUsage(plan,draft,rows)).toThrow(PricingGateError);
+    expect(()=>quoteOfflineReferenceUsage(plan,draft,{
+      model:"fake",approved:true})).toThrow(PricingGateError);
+  });
+  it("refuses to classify a reserved receipt or half-written stage as retryable",()=>onTemp(async root=>{
+    const id=ids[0];
+    expect(await reconcileCloudEvidence(root,id)).toMatchObject({
+      state:"NO_PRIOR_PROVIDER_EVIDENCE_NOT_AUTHORIZED",
+      canAutoRetry:false,dispatchAuthorized:false,providerRequestsIssuedThisRun:0});
+    const prefix="glm-cloud-v1-RB-PDF-12-page-001-region-01";
+    await writeFile(join(root,"."+prefix+".cloud-attempted"),"REQUEST_MAY_HAVE_COST");
+    expect(await reconcileCloudEvidence(root,id)).toMatchObject({
+      state:"PRIOR_ATTEMPT_OUTCOME_UNCERTAIN",attemptMarkerObserved:true,canAutoRetry:false});
+    await rm(join(root,"."+prefix+".cloud-attempted"));
+    await mkdir(join(root,"."+prefix+"-stage"));
+    expect((await reconcileCloudEvidence(root,id)).state).toBe("PRIOR_ATTEMPT_OUTCOME_UNCERTAIN");
+    await rm(join(root,"."+prefix+"-stage"),{recursive:true});
+    await mkdir(join(root,prefix));
+    expect(await reconcileCloudEvidence(root,id)).toMatchObject({
+      state:"OUTPUT_PRESENT_REQUIRES_PRIVATE_VALIDATION",resultObserved:true,
+      dispatchAuthorized:false,canAutoRetry:false});
+    const report=await reconcileBatchCandidates(root,makePlan());
+    expect(report).toMatchObject({inspected:2,unsafeToReplay:1,noPreviousEvidence:1,
+      dispatchEnabled:false,providerRequestsIssued:0});
+    expect(JSON.stringify(report)).not.toContain("REQUEST_MAY_HAVE_COST");
+  }));
+  it("recognizes legacy P127 retry and same-book batch markers without reading their contents",()=>onTemp(async root=>{
+    const id="RB-PDF-13:page-002-region-01";
+    const prefix="glm-cloud-v1-RB-PDF-13-page-002-region-01";
+    await writeFile(join(root,"."+prefix+"-retry-p127-r02-20261021.cloud-attempted"),"PRIVATE");
+    expect(await reconcileCloudEvidence(root,id)).toMatchObject({
+      state:"PRIOR_ATTEMPT_OUTCOME_UNCERTAIN",canAutoRetry:false});
+    await rm(join(root,"."+prefix+"-retry-p127-r02-20261021.cloud-attempted"));
+    await mkdir(join(root,"glm-cloud-v1-RB-PDF-13-batch"));
+    expect((await reconcileCloudEvidence(root,id)).state).toBe("OUTPUT_PRESENT_REQUIRES_PRIVATE_VALIDATION");
+  }));
+  it("fails closed on symlink and unknown item, never suggests auto-replay",()=>onTemp(async root=>{
+    const marker=join(root,".glm-cloud-v1-RB-PDF-12-page-001-region-01.cloud-attempted");
+    const outside=join(root,"other.txt");
+    await writeFile(outside,"DO_NOT_READ");
+    await symlink(outside,marker);
+    await rejectAsync(async()=>{
+      try{await reconcileCloudEvidence(root,ids[0]);}
+      catch(e){if(e instanceof ReconcileError)throw new BatchLedgerError(e.code);throw e;}
+    },"RECONCILE_SYMLINK_UNSAFE");
+    await expect(reconcileCloudEvidence(root,"../secrets")).rejects
+      .toMatchObject({code:"RECONCILE_ITEM_INVALID"});
   }));
 });
