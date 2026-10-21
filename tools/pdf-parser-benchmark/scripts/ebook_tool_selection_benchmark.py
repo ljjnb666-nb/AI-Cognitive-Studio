@@ -153,16 +153,15 @@ def main():
     manifest = json.loads(Path(args.manifest).read_text("utf-8"))
     if manifest.get("schema_version") != 1:
         raise ValueError("unsupported manifest")
-    index = {}
-    for raw in corpus_members(args.archive, args.directory):
-        digest = hashlib.sha256(raw).hexdigest()
-        index[digest] = raw
+    required = {book["sha256"]: book for book in manifest["sources"]}
     results = []
     matched = []
-    for book in manifest["sources"]:
-        raw = index.get(book["sha256"])
-        if raw is None:
-            raise FileNotFoundError(f'fixture {book["id"]}: expected SHA-256 missing')
+    for raw in corpus_members(args.archive, args.directory):
+        book = required.get(hashlib.sha256(raw).hexdigest())
+        if book is None:
+            continue
+        if book["id"] in matched:
+            raise ValueError(f'duplicate matched fixture: {book["id"]}')
         if len(raw) != book["size"]:
             raise ValueError(f'fixture {book["id"]}: size mismatch')
         matched.append(book["id"])
@@ -172,6 +171,11 @@ def main():
             results.extend(epub_benchmark(book, raw))
         else:
             raise ValueError("format is not within the PDF/EPUB evaluation scope")
+    missing = sorted(book["id"] for book in required.values() if book["id"] not in matched)
+    if missing:
+        raise FileNotFoundError("Missing SHA-pinned fixtures: " + ", ".join(missing))
+    matched.sort()
+    results.sort(key=lambda r: (r["book_id"], r["physical_page"] or 0, r["engine"]))
     record = {"schema_version": 1, "corpus_id": manifest["corpus_id"],
               "status": "EXECUTED_BASELINE_NOT_ACCURACY_EVALUATION",
               "matched_book_ids": matched, "records": results}
