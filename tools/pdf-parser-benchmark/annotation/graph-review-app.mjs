@@ -18,7 +18,16 @@ const token=new URLSearchParams(location.hash.slice(1)).get("review-token");
 const hasLocalToken=typeof token==="string"&&/^[0-9a-f]{64}$/u.test(token);
 let autoActive=false,saveRevision=null,saveTimer=null,saveQueue=Promise.resolve(),saveEpoch=0;
 let activeReviewKind="LEGACY_P127",activeItemId=null;
-let localEditSerial=0,persistedEditSerial=0,restoreEpoch=0;
+let localEditSerial=0,persistedEditSerial=0,restoreEpoch=0,saveActiveWrites=0;
+let discardStamp=null;
+function currentDraftStamp(){
+  return JSON.stringify([loadEpoch,saveEpoch,localEditSerial,saveRevision,
+    activeReviewKind,activeItemId,view?.resultSha256??null]);
+}
+function clearDiscardConfirmation(){
+  discardStamp=null;
+  $("discard-local").textContent="放弃未保存草稿（双重确认）";
+}
 function hasUnpersistedEdits(){return localEditSerial!==persistedEditSerial||saveTimer!==null;}
 function allowReviewSwitch(){
   if(!hasUnpersistedEdits())return true;
@@ -56,7 +65,7 @@ function cancelAutoSave(){
 }
 function scheduleAutoSave(){
   if(!view||!draft)return;
-  ++localEditSerial;
+  ++localEditSerial;clearDiscardConfirmation();
   if(!autoActive){saveStatus("本地草稿未自动保存 · 请导出 JSON");return;}
   if(saveTimer!==null)clearTimeout(saveTimer);
   const epoch=saveEpoch;
@@ -72,6 +81,7 @@ function scheduleAutoSave(){
          activeItemId!==sourceItem||activeReviewKind!==reviewMode)return;
       saveStatus("保存中…");
       try{
+        ++saveActiveWrites;
         const result=await autoRequest(draftEndpoint(),{
           method:"PUT",
           headers:{"Content-Type":"application/json","x-acs-draft-revision":saveRevision??"none"},
@@ -90,7 +100,7 @@ function scheduleAutoSave(){
         autoActive=false;
         saveStatus("保存失败／版本冲突：已停止自动保存");
         message("自动保存失败（"+(error instanceof GraphReviewError?error.code:"PRIVATE_DRAFT_SAVE_FAILED")+"）。本页人工草稿仍保留，可立即手动导出 JSON。");
-      }
+      }finally{saveActiveWrites--;}
     });
     saveQueue=next.catch(()=>{});
   },450);
@@ -100,14 +110,37 @@ const options=[
   ["VISIBLE_MISMATCH","与可见图像不一致"],["UNCERTAIN","无法判断／局部图像不清晰"],
 ];
 function message(text,good=false){$("notice").textContent=text;$("notice").classList.toggle("ok",good);}
-function reset(clearFiles=false){
-  if(!allowReviewSwitch())return;
+function reset(clearFiles=false,explicitDiscard=false){
+  if(explicitDiscard){
+    if(!hasUnpersistedEdits()||autoActive||saveTimer!==null||saveActiveWrites!==0)
+      return;
+  }else if(!allowReviewSwitch())return;
+  clearDiscardConfirmation();
   ++loadEpoch;cancelAutoSave();resetEditTracking();activeReviewKind="LEGACY_P127";activeItemId=null;
   if(bitmap){bitmap.close();bitmap=null;}
   if(clearFiles)for(const id of ["result-file","manifest-file","crop-file","restore"])$(id).value="";
   view=null;draft=null;selected=null;$("work").hidden=true;$("export-panel").hidden=true;
   $("entries").replaceChildren();const c=$("diagram");c.width=0;c.height=0;
   message("未加载私人证据。所有本地审阅草稿已从页面内存清空。");
+}
+function discardUnpersistedDraft(){
+  if(!hasUnpersistedEdits()){reset(true);return;}
+  // No discard while a network write is pending, still active, or queued.
+  // A failed autosave or offline manual draft can be explicitly abandoned,
+  // but never silently lost by ordinary navigation/clear/reset.
+  if(autoActive||saveTimer!==null||saveActiveWrites!==0){
+    message("草稿保存仍在进行或可继续自动保存，不允许放弃；请等待结果或手动导出。");
+    return;
+  }
+  const stamp=currentDraftStamp();
+  if(discardStamp!==stamp){
+    discardStamp=stamp;
+    $("discard-local").textContent="再次点击确认放弃（不可恢复）";
+    message("请先导出草稿 JSON 并核对本机文件；再次点击才会放弃当前未保存的浏览器内存修改，不会更改已持久化的私有草稿。");
+    return;
+  }
+  reset(true,true);
+  message("已通过双次确认放弃本页未保存修改；本机已有私有草稿没有被删除。");
 }
 function fileCheck(id,name,max){
   const f=$(id).files?.[0];
@@ -709,6 +742,7 @@ $("refresh-queue").addEventListener("click",()=>{void loadQueue();});
 $("auto-load").addEventListener("click",()=>{void loadAutomatically();});
 $("load").addEventListener("click",()=>{void load();});
 $("clear").addEventListener("click",()=>reset(true));
+$("discard-local").addEventListener("click",discardUnpersistedDraft);
 for(const id of ["result-file","manifest-file","crop-file"]){
   $(id).addEventListener("change",()=>reset(false));
 }
