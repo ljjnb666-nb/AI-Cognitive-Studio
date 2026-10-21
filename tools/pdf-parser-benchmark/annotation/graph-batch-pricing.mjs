@@ -42,6 +42,7 @@ export function quoteOfflineReferenceUsage(plan,draft,usage){
   const selected=new Map(draft.items.map(x=>[x.id,x]));
   const seen=new Set();
   let input=0,output=0,cached=0;
+  let inputFen=0,outputFen=0,cacheFen=0;
   for(const row of usage){
     if(!row||typeof row!=="object"||Array.isArray(row)||
        typeof row.id!=="string"||!selected.has(row.id)||seen.has(row.id)||
@@ -54,8 +55,13 @@ export function quoteOfflineReferenceUsage(plan,draft,usage){
     input+=row.inputTokens-row.cachedInputTokens;
     output+=row.outputTokens;
     cached+=row.cachedInputTokens;
+    // Round each hypothetical request's charge upward to a whole fen.
+    // Rounding only once across a batch can understate individually rounded
+    // provider bills. This is still NOT a verified spend upper bound.
+    inputFen+=fen(row.inputTokens-row.cachedInputTokens,80);
+    outputFen+=fen(row.outputTokens,280);
+    cacheFen+=fen(row.cachedInputTokens,23);
   }
-  const inputFen=fen(input,80),outputFen=fen(output,280),cacheFen=fen(cached,23);
   const referenceTotalFen=inputFen+outputFen+cacheFen;
   return Object.freeze({
     schemaVersion:"acs-glm-batch-reference-quote-v1",
