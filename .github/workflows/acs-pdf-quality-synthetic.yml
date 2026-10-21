@@ -64,6 +64,8 @@ jobs:
           node --check annotation/region-graph-review.mjs
           node --check annotation/graph-result-registry.mjs
           node --check annotation/graph-batch-plan.mjs
+          node --check annotation/graph-batch-authorization.mjs
+          node --check annotation/graph-batch-offline-ledger.mjs
           node --check annotation/region-review-store.mjs
           node --check annotation/graph-review-app.mjs
           node --check annotation/graph-review-auto.mjs
@@ -75,7 +77,7 @@ jobs:
           node --check scripts/edge_p127_real_readonly.mjs
       - name: Synthetic annotation schema and loopback guard tests
         working-directory: tools/pdf-parser-benchmark
-        run: ./node_modules/.bin/vitest run tests/gt-annotation.test.mjs tests/gt-annotation-review.test.mjs tests/graph-review.test.mjs tests/private-graph-local.test.mjs tests/region-graph-review.test.mjs tests/region-review-store.test.mjs
+        run: ./node_modules/.bin/vitest run tests/gt-annotation.test.mjs tests/gt-annotation-review.test.mjs tests/graph-review.test.mjs tests/private-graph-local.test.mjs tests/region-graph-review.test.mjs tests/region-review-store.test.mjs tests/graph-batch-authorization.test.mjs
       - name: CLI fails closed without local human GT (cloud has no private books)
         shell: bash
         working-directory: tools/pdf-parser-benchmark
