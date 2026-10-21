@@ -114,7 +114,7 @@ describe("03D P127 local auto import — strictly synthetic, no D: data",()=>{
     const verified=await verifyAutoGraphBundle(data);
     expect(verified.identity).toEqual(bundle.identity);
     expect(verified.result.schemaVersion).toBe("acs-glm-cloud-vision-proposal-v1");
-    expect(verified.crop).toEqual(x.files.crop);
+    expect(Buffer.from(verified.crop)).toEqual(x.files.crop);
     const changedCrop={...data,cropBase64:Buffer.from("synthetic_wrong_png").toString("base64")};
     await expect(verifyAutoGraphBundle(changedCrop)).rejects.toMatchObject({code:"GRAPH_AUTO_SOURCE_SHA_INVALID"});
     const modifiedManifest={...data,manifestBase64:Buffer.concat([x.files.manifest,Buffer.from(" ")]).toString("base64")};
