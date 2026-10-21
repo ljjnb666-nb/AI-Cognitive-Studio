@@ -36,6 +36,9 @@ MAX_IMAGE_BYTES = 8_000_000
 MAX_REQUEST_BYTES = 12_000_000
 MAX_RESPONSE_BYTES = 128_000
 MAX_REGIONS_IN_ONE_RUN = 3
+# A single explicitly selected second P127 attempt; no generic retry IDs.
+P127_RETRY_SUFFIX = "-retry-p127-r02-20261021"
+P127_RETRY_REGION = "page-002-region-01"
 REGION_RE = re.compile(r"page-[0-9]{3}-region-[0-9]{2}\Z")
 
 
@@ -241,18 +244,37 @@ def plan_regions(items: list[dict], region_id: str | None,
 
 def execute_cloud(root: Path, fixture: str, model: str, *,
                   region_id: str | None, max_regions: int,
-                  cloud_consent: bool, key: str | None = None) -> dict:
+                  cloud_consent: bool, key: str | None = None,
+                  retry_p127_once: bool = False) -> dict:
     if cloud_consent is not True:
         raise CloudBlocked("EXPLICIT_CLOUD_CONSENT_REQUIRED")
     if model not in MODELS:
         raise CloudBlocked("VISION_MODEL_NOT_ALLOWLISTED")
+    if type(retry_p127_once) is not bool:
+        raise CloudBlocked("RETRY_FLAG_INVALID")
+    if retry_p127_once and (
+        fixture != "RB-PDF-13" or model != DEFAULT_MODEL
+        or region_id != P127_RETRY_REGION or max_regions != 1
+    ):
+        raise CloudBlocked("P127_RETRY_SCOPE_INVALID")
     # Fail BEFORE crop access if the key hasn't been provided.
     secret = key if key is not None else secret_from_environment()
     provenance, all_items = verify_regions(root, fixture)
     selected = plan_regions(all_items, region_id, max_regions)
     report = root / "reports" / SOURCE_RUN
     target_id = selected[0]["regionId"] if len(selected) == 1 else "batch"
-    output = report / ("glm-cloud-v1-" + fixture + "-" + target_id)
+    initial_output = report / ("glm-cloud-v1-" + fixture + "-" + target_id)
+    if retry_p127_once:
+        prior_receipt = report / ("." + initial_output.name + ".cloud-attempted")
+        prior_stage = report / ("." + initial_output.name + "-stage")
+        if (prior_receipt.is_symlink()
+                or not prior_receipt.is_file()
+                or not 0 < prior_receipt.stat().st_size <= 16_384
+                or initial_output.exists() or initial_output.is_symlink()
+                or prior_stage.exists() or prior_stage.is_symlink()):
+            raise CloudBlocked("P127_PRIOR_FAILED_ATTEMPT_NOT_CONFIRMED")
+    output = (report / (initial_output.name + P127_RETRY_SUFFIX)
+              if retry_p127_once else initial_output)
     stage = report / ("." + output.name + "-stage")
     # Keep a durable spend/attempt marker even if a request fails after billing.
     # Never automatically retry such a failure; manual review is required.
@@ -301,6 +323,8 @@ def execute_cloud(root: Path, fixture: str, model: str, *,
             "fixtureId": fixture,
             "provider": "ZHIPU_GLMCLOUD_STANDARD_API",
             "model": model,
+            "attemptClass": ("EXPLICIT_P127_SECOND_ATTEMPT" if retry_p127_once
+                             else "INITIAL_ATTEMPT"),
             "sourceRegionManifestSha256": hashlib.sha256(
                 (report / ("region-proposals-v1-" + fixture) /
                  "region-proposals.json").read_bytes()).hexdigest(),
@@ -354,12 +378,14 @@ def main() -> None:
     parser.add_argument("--region-id", default=None)
     parser.add_argument("--max-regions", type=int, default=1)
     parser.add_argument("--allow-cloud-upload", action="store_true")
+    parser.add_argument("--retry-p127-once", action="store_true")
     args = parser.parse_args()
     try:
         result = execute_cloud(
             ROOT, args.fixture, args.model,
             region_id=args.region_id, max_regions=args.max_regions,
             cloud_consent=args.allow_cloud_upload,
+            retry_p127_once=args.retry_p127_once,
         )
     except (CloudBlocked, LocalVisionBlocked) as exc:
         code = str(exc)

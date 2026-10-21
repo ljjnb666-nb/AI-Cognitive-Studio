@@ -227,6 +227,58 @@ class GLMTests(unittest.TestCase):
                 with self.assertRaisesRegex(glm.CloudBlocked,"FINISH_STATUS_REJECTED"):
                     glm.infer_cloud_one(row,glm.DEFAULT_MODEL,"demo")
 
+    def test_explicit_p127_retry_is_new_namespace_only_and_no_replay(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            report=root/"reports"/glm.SOURCE_RUN
+            folder=report/"region-proposals-v1-RB-PDF-13"
+            folder.mkdir(parents=True)
+            (folder/"region-proposals.json").write_text(json.dumps(provenance()),encoding="utf-8")
+            row=item(root/"fake")
+            old=report/".glm-cloud-v1-RB-PDF-13-page-002-region-01.cloud-attempted"
+            with patch.object(glm,"verify_regions",return_value=(provenance(),[row])):
+                with patch.object(glm,"infer_cloud_one") as call:
+                    with self.assertRaisesRegex(glm.CloudBlocked,"PRIOR_FAILED_ATTEMPT_NOT_CONFIRMED"):
+                        glm.execute_cloud(root,"RB-PDF-13",glm.DEFAULT_MODEL,
+                            region_id="page-002-region-01",max_regions=1,cloud_consent=True,
+                            key="demo",retry_p127_once=True)
+                    call.assert_not_called()
+                old.write_text("Original failed paid attempt must remain intact",encoding="utf-8")
+                before=old.read_bytes()
+                with patch.object(glm,"infer_cloud_one",return_value=graph()) as call:
+                    result=glm.execute_cloud(root,"RB-PDF-13",glm.DEFAULT_MODEL,
+                        region_id="page-002-region-01",max_regions=1,cloud_consent=True,
+                        key="demo",retry_p127_once=True)
+                    call.assert_called_once()
+                self.assertFalse(result["graphRelationsHumanVerified"])
+                self.assertEqual(old.read_bytes(),before)
+                base="glm-cloud-v1-RB-PDF-13-page-002-region-01"+glm.P127_RETRY_SUFFIX
+                self.assertTrue((report/base/"cloud-vision-proposals.json").is_file())
+                self.assertTrue((report/("."+base+".cloud-attempted")).is_file())
+                with patch.object(glm,"infer_cloud_one") as call:
+                    with self.assertRaisesRegex(glm.CloudBlocked,"ALREADY_EXISTS"):
+                        glm.execute_cloud(root,"RB-PDF-13",glm.DEFAULT_MODEL,
+                            region_id="page-002-region-01",max_regions=1,cloud_consent=True,
+                            key="demo",retry_p127_once=True)
+                    call.assert_not_called()
+
+    def test_retry_scope_rejected_before_private_access(self):
+        variants=[
+            ("RB-PDF-12",glm.DEFAULT_MODEL,"page-002-region-01",1),
+            ("RB-PDF-13","glm-5.3-flashx","page-002-region-01",1),
+            ("RB-PDF-13",glm.DEFAULT_MODEL,None,1),
+            ("RB-PDF-13",glm.DEFAULT_MODEL,"page-003-region-01",1),
+            ("RB-PDF-13",glm.DEFAULT_MODEL,"page-002-region-01",2),
+        ]
+        with patch.object(glm,"verify_regions") as read:
+            for fixture,model,rid,limit in variants:
+                with self.subTest(fixture=fixture,model=model,rid=rid,limit=limit):
+                    with self.assertRaisesRegex(glm.CloudBlocked,"P127_RETRY_SCOPE_INVALID"):
+                        glm.execute_cloud(Path("unused"),fixture,model,
+                            region_id=rid,max_regions=limit,cloud_consent=True,
+                            key="demo",retry_p127_once=True)
+            read.assert_not_called()
+
     def test_mock_cloud_result_unreviewed_and_no_replay(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
