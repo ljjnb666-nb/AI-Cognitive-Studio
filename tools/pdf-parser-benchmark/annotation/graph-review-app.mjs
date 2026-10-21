@@ -18,7 +18,7 @@ const token=new URLSearchParams(location.hash.slice(1)).get("review-token");
 const hasLocalToken=typeof token==="string"&&/^[0-9a-f]{64}$/u.test(token);
 let autoActive=false,saveRevision=null,saveTimer=null,saveQueue=Promise.resolve(),saveEpoch=0;
 let activeReviewKind="LEGACY_P127",activeItemId=null;
-let localEditSerial=0,persistedEditSerial=0;
+let localEditSerial=0,persistedEditSerial=0,restoreEpoch=0;
 function hasUnpersistedEdits(){return localEditSerial!==persistedEditSerial||saveTimer!==null;}
 function allowReviewSwitch(){
   if(!hasUnpersistedEdits())return true;
@@ -229,12 +229,21 @@ async function restoreDraft(){
   if(!view||!allowReviewSwitch())return;
   const expectedEpoch=loadEpoch;
   const expectedSha=view.resultSha256;
+  const expectedSerial=localEditSerial,expectedRevision=saveRevision;
+  const expectedKind=activeReviewKind,expectedItem=activeItemId;
+  const requestEpoch=++restoreEpoch;
   const f=$("restore").files?.[0];
   if(!f||f.size<8||f.size>MAX_REVIEW_BYTES){message("已有草稿文件无效或过大。");return;}
   try{
     const raw=parseJSON(await f.arrayBuffer());
-    if(loadEpoch!==expectedEpoch||!view||view.resultSha256!==expectedSha)
-      throw new GraphReviewError("GRAPH_RESTORE_STALE_SELECTION");
+    // File.arrayBuffer() is asynchronous: a new edit, later restore or
+    // source/revision change must invalidate this pending file read. Otherwise
+    // a slow disk picker could overwrite a newer human decision in memory.
+    if(loadEpoch!==expectedEpoch||!view||view.resultSha256!==expectedSha||
+       localEditSerial!==expectedSerial||saveRevision!==expectedRevision||
+       activeReviewKind!==expectedKind||activeItemId!==expectedItem||
+       requestEpoch!==restoreEpoch||hasUnpersistedEdits())
+      throw new GraphReviewError("GRAPH_RESTORE_STALE_SELECTION_OR_EDIT");
     draft=currentParse(raw,view);
     selected=null;render();draw();scheduleAutoSave();
     message("仅恢复了同一 SHA 来源下的未认证草稿；请继续独立核对。",true);
