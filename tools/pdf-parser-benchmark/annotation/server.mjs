@@ -8,6 +8,7 @@ import { readFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
 import { readPrivateP127Bundle, readPrivateP127Draft, writePrivateP127Draft, listPrivateGraphReviewQueue, readPrivateGraphCropPreview, readRegisteredGraphBundle, saveRegisteredGraphReviewDraft, PrivateGraphError } from "./private-graph-local.mjs";
 import { publicRegisteredGraphMetadata, compileTrustedGraphRegistry, TRUSTED_GRAPH_RESULTS } from "./graph-result-registry.mjs";
+import {buildPrivateGraphBatchPlan,publicGraphBatchSummary,BatchPlanError} from "./graph-batch-plan.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -47,6 +48,7 @@ function securityHeaders(graphPage = false) {
   };
 }
 const PRIVATE_QUEUE = "/api/private-graph/queue";
+const PRIVATE_BATCH_PLAN = "/api/private-graph/batch/plan";
 const PRIVATE_PREVIEW = "/api/private-graph/crop";
 const PRIVATE_REGISTRY = "/api/private-graph/registry";
 const REGISTERED_BUNDLE = "/api/private-graph/registered/bundle";
@@ -78,7 +80,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
     const pathname = request.url?.split("?")[0];
     const cropRoute = pathname === PRIVATE_PREVIEW;
     const registeredRoute = pathname === REGISTERED_BUNDLE || pathname === REGISTERED_DRAFT;
-    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT || pathname === PRIVATE_QUEUE || cropRoute || registeredRoute || pathname === PRIVATE_REGISTRY) {
+    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT || pathname === PRIVATE_QUEUE || cropRoute || registeredRoute || pathname === PRIVATE_REGISTRY || pathname === PRIVATE_BATCH_PLAN) {
       const headers = securityHeaders(true);
       const reply = (status, value) => {
         const body = Buffer.from(JSON.stringify(value),"utf8");
@@ -99,7 +101,8 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
       if (privateGraphReadOnly && (pathname === PRIVATE_DRAFT || pathname === REGISTERED_DRAFT) && request.method === "PUT") {
         reply(405,{code:"PRIVATE_DRAFT_WRITE_DISABLED"}); return;
       }
-      if ((pathname === PRIVATE_REGISTRY && request.method !== "GET") ||
+      if ((pathname === PRIVATE_BATCH_PLAN && request.method !== "GET") ||
+          (pathname === PRIVATE_REGISTRY && request.method !== "GET") ||
           (pathname === REGISTERED_BUNDLE && request.method !== "GET") ||
           (pathname === REGISTERED_DRAFT && !["GET","PUT"].includes(request.method)) ||
           (cropRoute && request.method !== "GET") ||
@@ -113,6 +116,14 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
         reply(405,{code:"PRIVATE_IMPORT_METHOD_REJECTED"}); return;
       }
       try {
+        if (pathname === PRIVATE_BATCH_PLAN) {
+          if (request.url !== PRIVATE_BATCH_PLAN){
+            reply(400,{code:"BATCH_PLAN_QUERY_REJECTED"});return;
+          }
+          // Read-only plan; never use this local endpoint to authorize spend.
+          reply(200,publicGraphBatchSummary(await buildPrivateGraphBatchPlan(privateGraphRoot)));
+          return;
+        }
         if (pathname === PRIVATE_REGISTRY) {
           if (request.url !== PRIVATE_REGISTRY) {
             reply(400,{code:"PRIVATE_REGISTRY_QUERY_INVALID"});return;
@@ -217,7 +228,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
         writer=next.catch(()=>{});
         reply(200,await next);
       } catch(e) {
-        const code=e instanceof PrivateGraphError ? e.code : "PRIVATE_IMPORT_INTERNAL_ERROR";
+        const code=e instanceof PrivateGraphError || e instanceof BatchPlanError ? e.code : "PRIVATE_IMPORT_INTERNAL_ERROR";
         reply(["PRIVATE_DRAFT_CONFLICT","PRIVATE_REGION_STORE_REVISION_CONFLICT","PRIVATE_REGION_STORE_LOCKED"].includes(code)?409:
           code==="PRIVATE_DRAFT_BODY_TOO_LARGE"?413:
           code==="PRIVATE_EVIDENCE_NOT_READY"?404:422,{code});
