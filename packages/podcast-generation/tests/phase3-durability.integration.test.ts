@@ -123,11 +123,16 @@ async function waitForBlockedPodcastUpdates(blockerPid: number, expectedCount: n
 }
 
 async function waitForSignal(signal: () => boolean, message: string) {
-  for (let attempt = 0; attempt < 10_000; attempt++) {
-    if (signal()) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
+  // A bound on setImmediate turns is *not* a time bound. On fast CI hosts,
+  // 10,000 turns can finish before an async PostgreSQL claim reaches the
+  // injected provider resolver, even when claim/rearm is behaving correctly.
+  // Keep the original requirement to observe the signal, with a real,
+  // monotonic 10s deadline and bounded polling rather than busy spinning.
+  const deadline = performance.now() + 10_000;
+  while (!signal()) {
+    if (performance.now() >= deadline) throw new Error(message);
+    await sleep(10);
   }
-  throw new Error(message);
 }
 
 async function cleanupWorkspace(workspaceId: string) {
@@ -167,6 +172,22 @@ afterAll(() => Promise.all([prisma.$disconnect(), observerPrisma.$disconnect()])
 
 describe("durable Phase 3 generation", () => {
   describe("A2 claim/rearm authority races", () => {
+    it("waits for a legitimately delayed async signal rather than exhausting 10,000 event-loop turns", async () => {
+      let entered = false;
+      // This controlled counterexample is independent of DB, Redis and CPU
+      // wall-clock speed: the producer needs more asynchronous turns than the
+      // original fixed-iteration waiter permitted.
+      const signalProducer = (async () => {
+        for (let i = 0; i < 20_000; i++) {
+          await new Promise<void>(resolve => setImmediate(resolve));
+        }
+        entered = true;
+      })();
+      await waitForSignal(() => entered, "A2_SIGNAL_WAITER_STOPPED_BEFORE_VALID_PROVIDER_ENTRY");
+      await signalProducer;
+      expect(entered).toBe(true);
+    });
+
     it("lets rearm N→N+1 win before a stale Podcast claim and gives the stale processor zero authority", async () => {
       const data = await fixture();
       const runId = data.requested.run.id;
