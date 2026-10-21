@@ -34,9 +34,9 @@ def metrics(book_id, page, engine, start, content=None, extra=None, failure=None
     item = {"book_id": book_id, "physical_page": page, "engine": engine,
             "wall_ms": round((time.perf_counter() - start) * 1000, 2)}
     if content is not None:
-        compact = re.sub(r"\\s+", "", content)
+        compact = re.sub(r"\s+", "", content)
         item["character_count"] = len(compact)
-        item["cjk_count"] = len(re.findall(r"[\\u4e00-\\u9fff]", compact))
+        item["cjk_count"] = len(re.findall(r"[\u4e00-\u9fff]", compact))
         item["output_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
     if extra:
         item.update(extra)
@@ -123,7 +123,7 @@ def epub_benchmark(book, raw):
             if not href:
                 missing += 1
                 continue
-            path = os.path.normpath(os.path.join(os.path.dirname(opf), unquote(href).split("#")[0])).replace("\\\\", "/")
+            path = os.path.normpath(os.path.join(os.path.dirname(opf), unquote(href).split("#")[0])).replace("\\", "/")
             if path not in filenames:
                 missing += 1
                 continue
@@ -132,7 +132,7 @@ def epub_benchmark(book, raw):
             soup = BeautifulSoup(epub.read(path), "lxml")
             for tag in soup(["style", "script"]):
                 tag.decompose()
-            chars += len(re.sub(r"\\s+", "", soup.get_text(" ", strip=True)))
+            chars += len(re.sub(r"\s+", "", soup.get_text(" ", strip=True)))
             image_refs += len(soup.find_all(["img", "image"]))
             html_count += 1
     return [metrics(book["id"], None, "EPUB_OPF_spine+lxml", t,
@@ -177,7 +177,7 @@ def main():
               "matched_book_ids": matched, "records": results}
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+    output.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"Matched {len(matched)} documents, {len(results)} engine runs; metadata only.")
 
 
