@@ -232,29 +232,34 @@ async function loadAutomatically(){
     message("正在经授权的本机回环接口读取三份 P127 证据并核验 SHA…");
     const bundle=await autoRequest("/api/private-graph/p127/bundle");
     if(epoch!==loadEpoch)return;
-    if(bundle.authority!=="PROPOSED_UNVERIFIED"||
-      typeof bundle.cropBase64!=="string"||bundle.cropBase64.length>MAX_CROP_BYTES*1.4)
-      throw new GraphReviewError("GRAPH_AUTO_BUNDLE_INVALID");
-    let crop;
-    try{
-      const binary=atob(bundle.cropBase64);
-      crop=Uint8Array.from(binary, c=>c.charCodeAt(0));
-    }catch{throw new GraphReviewError("GRAPH_CROP_B64_INVALID");}
-    if(crop.length<8||crop.length>MAX_CROP_BYTES)throw new GraphReviewError("GRAPH_CROP_SIZE_INVALID");
-    const rb=new TextEncoder().encode(JSON.stringify(bundle.result));
-    const mb=new TextEncoder().encode(JSON.stringify(bundle.manifest));
-    // Re-serialization changes whitespace: server also provides RAW hashes.
-    // Compare the server-advertised hash against its own raw evidence; browser
-    // independently verifies crop SHA and the strict machine provenance.
-    if(!bundle.identity||!/^[0-9a-f]{64}$/u.test(bundle.identity.resultSha256)||
+    if(bundle.authority!=="PROPOSED_UNVERIFIED"||!bundle.identity||
+      !/^[0-9a-f]{64}$/u.test(bundle.identity.resultSha256)||
       !/^[0-9a-f]{64}$/u.test(bundle.identity.manifestSha256)||
-      (await digest(crop))!==bundle.identity.cropSha256)
+      !/^[0-9a-f]{64}$/u.test(bundle.identity.cropSha256))
+      throw new GraphReviewError("GRAPH_AUTO_BUNDLE_INVALID");
+    function decodeSource(value,max){
+      if(typeof value!=="string"||value.length>Math.ceil(max*4/3)+8)
+        throw new GraphReviewError("GRAPH_AUTO_BUNDLE_TOO_LARGE");
+      try{return Uint8Array.from(atob(value), c=>c.charCodeAt(0));}
+      catch{throw new GraphReviewError("GRAPH_AUTO_BUNDLE_DECODE_INVALID");}
+    }
+    const rb=decodeSource(bundle.resultBase64,MAX_RESULT_BYTES);
+    const mb=decodeSource(bundle.manifestBase64,MAX_MANIFEST_BYTES);
+    const crop=decodeSource(bundle.cropBase64,MAX_CROP_BYTES);
+    if([rb.length,mb.length,crop.length].some((n,i)=>n<8||
+      n>[MAX_RESULT_BYTES,MAX_MANIFEST_BYTES,MAX_CROP_BYTES][i]))
+      throw new GraphReviewError("GRAPH_AUTO_BUNDLE_TOO_LARGE");
+    const [resultSha,manifestSha,cropSha]=await Promise.all([digest(rb),digest(mb),digest(crop)]);
+    if(resultSha!==bundle.identity.resultSha256||
+      manifestSha!==bundle.identity.manifestSha256||
+      cropSha!==bundle.identity.cropSha256)
       throw new GraphReviewError("GRAPH_AUTO_SOURCE_SHA_INVALID");
+    const result=parseJSON(rb),manifest=parseJSON(mb);
     const blob=new Blob([crop],{type:"image/png"});
     const image=await createImageBitmap(blob);
     try{
       if(epoch!==loadEpoch)return;
-      const validated=validateGraphReviewSource(bundle.result,bundle.manifest,
+      const validated=validateGraphReviewSource(result,manifest,
         {...bundle.identity,cropWidth:image.width,cropHeight:image.height});
       if(epoch!==loadEpoch)return;
       view=validated;draft=createGraphReviewDraft(view);bitmap=image;selected=null;
@@ -267,7 +272,7 @@ async function loadAutomatically(){
       $("work").hidden=false;$("export-panel").hidden=false;
       draw();render();
       saveStatus("已连接本机私有草稿"+(prior.draft?"（已恢复）":"（等待首次修改）"));
-      message("已自动导入固定 P127 证据并通过 SHA/坐标检查；"+(prior.draft?"已恢复未认证草稿。":"19 项候选均待你人工审核。"),true);
+      message("已自动导入固定 P127 证据并通过 SHA/坐标检查；"+(prior.draft?"已恢复未认证草稿。":(validated.nodes.length+validated.edges.length)+" 项候选均待你人工审核。"),true);
     }finally{if(bitmap!==image)image.close();}
   }catch(error){
     autoActive=false;

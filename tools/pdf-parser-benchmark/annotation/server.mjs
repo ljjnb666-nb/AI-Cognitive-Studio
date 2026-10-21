@@ -94,7 +94,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
       try {
         if (pathname === PRIVATE_BUNDLE) {
           const bundle=await readPrivateP127Bundle(privateGraphRoot);
-          reply(200,{...bundle.data,authority:bundle.authority});
+          reply(200,{...bundle.data,identity:bundle.identity,authority:bundle.authority});
           return;
         }
         if (request.method === "GET") {

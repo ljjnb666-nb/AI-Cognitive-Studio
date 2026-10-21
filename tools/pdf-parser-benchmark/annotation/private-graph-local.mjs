@@ -110,7 +110,8 @@ export async function readPrivateP127Bundle(root){
   catch{fail("PRIVATE_GRAPH_PROVENANCE_INVALID");}
   // Encode only the exact three verified P127 files, not directory contents.
   return {source:SOURCE,identity,view,
-    data:{result:json(rb),manifest:json(mb),cropBase64:cb.toString("base64")},
+    data:{resultBase64:rb.toString("base64"),manifestBase64:mb.toString("base64"),
+      cropBase64:cb.toString("base64")},
     authority:"PROPOSED_UNVERIFIED",humanVerified:false};
 }
 export async function readPrivateP127Draft(root,view){
