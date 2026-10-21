@@ -6,7 +6,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
-import { readPrivateP127Bundle, readPrivateP127Draft, writePrivateP127Draft, PrivateGraphError } from "./private-graph-local.mjs";
+import { readPrivateP127Bundle, readPrivateP127Draft, writePrivateP127Draft, listPrivateGraphReviewQueue, PrivateGraphError } from "./private-graph-local.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -43,6 +43,7 @@ function securityHeaders(graphPage = false) {
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
   };
 }
+const PRIVATE_QUEUE = "/api/private-graph/queue";
 const PRIVATE_BUNDLE = "/api/private-graph/p127/bundle";
 const PRIVATE_DRAFT = "/api/private-graph/p127/draft";
 const TOKEN = /^[0-9a-f]{64}$/u;
@@ -67,7 +68,7 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
       response.writeHead(403, securityHeaders()); response.end(); return;
     }
     const pathname = request.url?.split("?")[0];
-    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT) {
+    if (pathname === PRIVATE_BUNDLE || pathname === PRIVATE_DRAFT || pathname === PRIVATE_QUEUE) {
       const headers = securityHeaders(true);
       const reply = (status, value) => {
         const body = Buffer.from(JSON.stringify(value),"utf8");
@@ -88,7 +89,8 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
       if (privateGraphReadOnly && pathname === PRIVATE_DRAFT && request.method === "PUT") {
         reply(405,{code:"PRIVATE_DRAFT_WRITE_DISABLED"}); return;
       }
-      if ((pathname === PRIVATE_BUNDLE && request.method !== "GET") ||
+      if ((pathname === PRIVATE_QUEUE && request.method !== "GET") ||
+          (pathname === PRIVATE_BUNDLE && request.method !== "GET") ||
           (pathname === PRIVATE_DRAFT && !["GET","PUT"].includes(request.method)) ||
           (pathname === PRIVATE_DRAFT && request.method === "PUT" &&
            (!/^application\/json(?:;|$)/iu.test(request.headers["content-type"]??"") ||
@@ -97,6 +99,10 @@ export async function startAnnotationServer({ privateGraphRoot = null, graphAcce
         reply(405,{code:"PRIVATE_IMPORT_METHOD_REJECTED"}); return;
       }
       try {
+        if (pathname === PRIVATE_QUEUE) {
+          reply(200,await listPrivateGraphReviewQueue(privateGraphRoot));
+          return;
+        }
         if (pathname === PRIVATE_BUNDLE) {
           const bundle=await readPrivateP127Bundle(privateGraphRoot);
           reply(200,{...bundle.data,identity:bundle.identity,authority:bundle.authority});
