@@ -15,8 +15,9 @@ const options=[
   ["VISIBLE_MISMATCH","与可见图像不一致"],["UNCERTAIN","无法判断／局部图像不清晰"],
 ];
 function message(text,good=false){$("notice").textContent=text;$("notice").classList.toggle("ok",good);}
-function reset(){
+function reset(clearFiles=false){
   ++loadEpoch;if(bitmap){bitmap.close();bitmap=null;}
+  if(clearFiles)for(const id of ["result-file","manifest-file","crop-file","restore"])$(id).value="";
   view=null;draft=null;selected=null;$("work").hidden=true;$("export-panel").hidden=true;
   $("entries").replaceChildren();const c=$("diagram");c.width=0;c.height=0;
   message("未加载私人证据。所有本地审阅草稿已从页面内存清空。");
@@ -134,10 +135,14 @@ async function load(){
 }
 async function restoreDraft(){
   if(!view)return;
+  const expectedEpoch=loadEpoch;
+  const expectedSha=view.resultSha256;
   const f=$("restore").files?.[0];
   if(!f||f.size<8||f.size>MAX_REVIEW_BYTES){message("已有草稿文件无效或过大。");return;}
   try{
     const raw=parseJSON(await f.arrayBuffer());
+    if(loadEpoch!==expectedEpoch||!view||view.resultSha256!==expectedSha)
+      throw new GraphReviewError("GRAPH_RESTORE_STALE_SELECTION");
     draft=parseGraphReviewDraft(raw,view);
     selected=null;render();draw();message("仅恢复了同一 SHA 来源下的未认证草稿；请继续独立核对。",true);
   }catch(error){message("草稿来源或结构不符，已拒绝（"+(error instanceof GraphReviewError?error.code:"GRAPH_RESTORE_FAILED")+"）。");}
@@ -156,6 +161,9 @@ function exportDraft(){
   }catch{message("草稿导出失败，未标记任何内容已验证。");}
 }
 $("load").addEventListener("click",()=>{void load();});
-$("clear").addEventListener("click",reset);
+$("clear").addEventListener("click",()=>reset(true));
+for(const id of ["result-file","manifest-file","crop-file"]){
+  $(id).addEventListener("change",()=>reset(false));
+}
 $("restore").addEventListener("change",()=>{void restoreDraft();});
 $("export").addEventListener("click",exportDraft);
