@@ -41,7 +41,7 @@ jobs:
           Write-Output ('ACS_BENCHMARK_FREE_MEMORY_KIB=' + $os.FreePhysicalMemory)
           $python = Get-Command python -ErrorAction SilentlyContinue
           if ($null -eq $python) { throw 'BENCHMARK_PYTHON_UNAVAILABLE' }
-          $inputRoot = 'D:\ai-cognitive-pdf-benchmark-data\books'
+          $inputRoot = 'D:\ai-cognitive-pdf-benchmark-data'
           if (-not (Test-Path -LiteralPath $inputRoot -PathType Container)) { throw 'BENCHMARK_PRIVATE_BOOKS_DIRECTORY_UNAVAILABLE' }
           $script = 'acs-ebook-private-readonly/tools/pdf-parser-benchmark/scripts/ebook_tool_selection_preflight.py'
           $manifest = 'acs-ebook-private-readonly/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
