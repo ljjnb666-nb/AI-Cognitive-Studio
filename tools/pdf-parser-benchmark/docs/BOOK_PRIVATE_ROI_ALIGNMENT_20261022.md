@@ -4,7 +4,7 @@
 
 输入：现有 B15/B31 私有参考 JSON 的 `regions`，以及同页 Docling 图片框。来源文件 SHA-256、匿名书籍 ID、物理页必须完全一致。
 规则：IoU >= 0.10 且参考 ROI 覆盖 >= 0.20 时可视为空间候选。采用最大基数的单独一对一匹配（增广路径、候选边按 IoU 降序与稳定编号排序），先保证可匹配数量不被贪心策略低估；算法**不保证同一最大匹配数下的 IoU 总和最优**。结果仅为 L2 暂定空间一致性，既不是人工真值召回率，也不是图表关系/箭头语义准确率。已加入歧义重叠造成旧算法漏匹配的纯合成回归。
-严格拒绝无效坐标、非有限数、未知 TOPLEFT/BOTTOMLEFT 原点、跨文档 SHA、不属于当前页的 Docling provenance，以及 humanVerified/graphVerified 越权字段。
+严格拒绝无效坐标、非有限数、未知 TOPLEFT/BOTTOMLEFT 原点、跨文档 SHA、不属于当前页的 Docling provenance，以及 humanVerified/graphVerified 越权字段。匹配器独立拒绝**同页完全重复的 L2 参考框或预测框**（即使绕开 Docling provenance 的本地去重也无法虚增一对一命中数）；不同物理页的参考框不会误判为本页重复。该检测只处理精确重复，未把“相近”框擅自当成相同目标。
 
 Docling Windows 实书报告新增长度受限的 `private_picture_boxes_normalized`，全部保留在 D 盘 `reports/*.private.json`，Actions 日志只读已批准的匿名版面数量，不输出具体 ROI/框、书本原文或图像。
 仅当 D 盘存在 `semantic_gate/B15_B31_roi_candidates.private.json` 私有参考时，Windows 工具才自动执行区域对齐；参考不存在时输出 PRIVATE_REFERENCE_UNAVAILABLE，不产生错误的零命中率或已验收结论。
