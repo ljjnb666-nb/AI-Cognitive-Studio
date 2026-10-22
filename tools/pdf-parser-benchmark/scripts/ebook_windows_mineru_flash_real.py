@@ -151,6 +151,26 @@ def classify_verify(result, stderr_log, stdout_log):
     return "MODEL_VERIFY_NONZERO_UNCLASSIFIED_PRIVATE_LOG"
 
 
+def summarize_model_show(result, stdout_path, stderr_path):
+    """Return coarse, non-sensitive signals only; keep full CLI output on D:."""
+    out = Path(stdout_path).read_text(encoding="utf-8", errors="replace") if Path(stdout_path).is_file() else ""
+    err = Path(stderr_path).read_text(encoding="utf-8", errors="replace") if Path(stderr_path).is_file() else ""
+    all_text = (out + "\n" + err).lower()
+    return {
+        "exit_code": result["exit_code"],
+        "timeout": result.get("status") == "TIMEOUT",
+        "stdout_bytes": len(out.encode("utf-8")),
+        "stderr_bytes": len(err.encode("utf-8")),
+        "mentions_onnx_bundle": "mineru-4_models_onnx" in all_text,
+        "mentions_model_base_dir": "base_dir" in all_text or "model base" in all_text,
+        "contains_not_ready_signal": bool(re.search(r"not[ _-]?ready|not[ _-]?found|incomplete|missing", all_text)),
+        "contains_ready_signal": bool(re.search(r"\\bready\\b", all_text)),
+        "contains_command_usage_signal": bool(re.search(r"no such option|unrecognized arguments|no such command|usage:", all_text)),
+        "stdout_sha256": hashlib.sha256(out.encode("utf-8")).hexdigest(),
+        "stderr_sha256": hashlib.sha256(err.encode("utf-8")).hexdigest(),
+    }
+
+
 def evaluate(book, payload, kit, temp_root, env):
     import fitz
     physical = PAGES[book["id"]]
@@ -266,6 +286,23 @@ def main():
     print("ACS_MINERU_ONNX_BUNDLE_AT_BENCHMARK_ROOT="
           + str(explicit_bundle.is_dir()).lower(), flush=True)
     print("ACS_MINERU_BASIC_ONNX_INHERITED_CLASS=" + inherited_class, flush=True)
+    show_cmd = [str(kit), "models", "show", "--small-backend", "onnx"]
+    for label, show_env in (("explicit", env), ("inherited", inherited_env)):
+        show_prefix = run_id + "-" + label + "-models-show"
+        show = run_private(show_cmd, show_env, private_logs, show_prefix, 45)
+        model_checks[label + "_model_show"] = summarize_model_show(
+            show, private_logs / (show_prefix + ".stdout.private.log"),
+            private_logs / (show_prefix + ".stderr.private.log"))
+        print("ACS_MINERU_MODEL_SHOW_" + label.upper() + "_EXIT="
+              + str(show["exit_code"]), flush=True)
+        print("ACS_MINERU_MODEL_SHOW_" + label.upper() + "_ONNX_BUNDLE_MENTIONED="
+              + str(model_checks[label + "_model_show"]["mentions_onnx_bundle"]).lower(),
+              flush=True)
+    default_onnx_bundle = Path.home() / ".mineru" / "models" / "MinerU-4_models_onnx"
+    model_checks["default_home_bundle_dir_present"] = default_onnx_bundle.is_dir()
+    model_checks["default_config_yaml_present"] = (Path.home() / ".mineru" / "config.yaml").is_file()
+    print("ACS_MINERU_DEFAULT_HOME_ONNX_BUNDLE_DIR_EXISTS="
+          + str(default_onnx_bundle.is_dir()).lower(), flush=True)
     for data in candidates(root):
         item = required.get(hashlib.sha256(data).hexdigest())
         if item is None or item["id"] in rows:
