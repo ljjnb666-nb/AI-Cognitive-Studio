@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+from ebook_private_roi_alignment import docling_picture_boxes, match as align_private_roi
 from ebook_layout_signals import docling_layout_signals
 import re
 import shutil
@@ -65,7 +66,7 @@ def compact(engine, output, elapsed):
             "content_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest()}
 
 
-def evaluate(fixture, source, converter):
+def evaluate(fixture, source, converter, private_reference=None):
     import fitz
     from docling.datamodel.base_models import ConversionStatus
     physical = PAGES[fixture["id"]]
@@ -107,6 +108,24 @@ def evaluate(fixture, source, converter):
         recognized = normalized(result.document.export_to_markdown())
         docling_metric = compact("Docling", recognized, duration)
         docling_metric["layout_evidence"] = docling_layout_signals(result.document)
+        # Actual bounding boxes stay in the private D: report, never Actions stdout.
+        picture_boxes = docling_picture_boxes(result.document)
+        docling_metric["layout_evidence"]["private_picture_boxes_normalized"] = [
+            list(box) for box in picture_boxes]
+        docling_metric["layout_evidence"]["picture_boxes_with_geometry"] = len(picture_boxes)
+        docling_metric["layout_evidence"]["spatial_alignment_status"] = "PRIVATE_REFERENCE_UNAVAILABLE"
+        if private_reference is not None and fixture["id"] in ("B15", "B31"):
+            candidate = {
+                "schema_version": 1,
+                "book_id": fixture["id"],
+                "physical_page": physical,
+                "source_document_sha256": fixture["sha256"],
+                "engine": "Docling",
+                "picture_boxes_normalized": [list(box) for box in picture_boxes],
+            }
+            alignment = align_private_roi(private_reference, candidate)
+            docling_metric["layout_evidence"]["spatial_alignment"] = alignment
+            docling_metric["layout_evidence"]["spatial_alignment_status"] = alignment["status"]
         if native_reference:
             docling_metric["native_reference_edit_distance"] = edit_distance(native_reference, recognized)
             docling_metric["native_reference_cer"] = round(
@@ -139,6 +158,13 @@ def main():
                         if shutil.which("tesseract") else RapidOcrOptions())
     pipeline = DocumentConverter(format_options={InputFormat.PDF:
                                  PdfFormatOption(pipeline_options=opts)})
+    # Optional L2 reference is local-only. Its absence never becomes a fabricated miss.
+    roi_path = Path(args.root) / "semantic_gate" / "B15_B31_roi_candidates.private.json"
+    private_reference = None
+    if roi_path.is_file():
+        if roi_path.is_symlink() or roi_path.stat().st_size > 262144:
+            raise ValueError("Private ROI reference unsafe or oversized")
+        private_reference = json.loads(roi_path.read_text(encoding="utf-8"))
     results = {}
     for raw in inputs(args.root):
         fixture = expected.get(hashlib.sha256(raw).hexdigest())
@@ -149,7 +175,7 @@ def main():
         try:
             results[fixture["id"]] = {
                 "status": "SUCCESS",
-                **evaluate(fixture, raw, pipeline),
+                **evaluate(fixture, raw, pipeline, private_reference),
             }
             print("ACS_DOCLING_REAL_BOOK_COMPLETE=" + fixture["id"], flush=True)
         except Exception as exc:

@@ -1,0 +1,106 @@
+"""Synthetic-only Docling normalized ROI geometry and privacy checks."""
+import copy
+from pathlib import Path
+from types import SimpleNamespace as Obj
+import json
+import sys
+import tempfile
+import unittest
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"scripts"))
+from ebook_private_roi_alignment import Rejected, docling_bbox_normalized, docling_picture_boxes, match, main
+
+SHA = "a"*64
+REF = {"authority":"L2_AI_VISUAL_PROVISIONAL_NOT_HUMAN_GROUND_TRUTH", "regions":[
+    {"book_id":"B15","physical_page":109,"source_document_sha256":SHA,"evidence":"L2_AI_VISUAL_PROVISIONAL","roi_xyxy_normalized":[.2,.2,.4,.4]},
+    {"book_id":"B15","physical_page":109,"source_document_sha256":SHA,"evidence":"L2_AI_VISUAL_PROVISIONAL","roi_xyxy_normalized":[.5,.5,.8,.8]}]}
+CAND = {"schema_version":1,"book_id":"B15","physical_page":109,"source_document_sha256":SHA,
+        "engine":"Docling","picture_boxes_normalized":[[.21,.22,.41,.41],[.51,.51,.79,.79]]}
+
+class Geometry(unittest.TestCase):
+    def test_top_left(self):
+        b = Obj(l=10,t=20,r=50,b=60,coord_origin="TOPLEFT")
+        self.assertEqual(docling_bbox_normalized(b,Obj(width=100,height=100)),(.1,.2,.5,.6))
+    def test_bottom_left(self):
+        b = Obj(l=10,t=80,r=50,b=40,coord_origin="BOTTOMLEFT")
+        self.assertEqual(docling_bbox_normalized(b,Obj(width=100,height=100)),(.1,.2,.5,.6))
+    def test_unknown_origin(self):
+        b=Obj(l=0,t=0,r=10,b=10,coord_origin="OTHER")
+        with self.assertRaisesRegex(Rejected,"UNKNOWN_COORDINATE_ORIGIN"):
+            docling_bbox_normalized(b,Obj(width=100,height=100))
+    def test_zero_page_size(self):
+        b=Obj(l=0,t=0,r=10,b=10,coord_origin="TOPLEFT")
+        with self.assertRaisesRegex(Rejected,"INVALID_PAGE_SIZE"):
+            docling_bbox_normalized(b,Obj(width=0,height=100))
+    def test_nan_box(self):
+        b=Obj(l=0,t=0,r=float("nan"),b=10,coord_origin="TOPLEFT")
+        with self.assertRaisesRegex(Rejected,"INVALID_COORDINATE"):
+            docling_bbox_normalized(b,Obj(width=100,height=100))
+    def test_outside_box(self):
+        b=Obj(l=0,t=0,r=101,b=10,coord_origin="TOPLEFT")
+        with self.assertRaisesRegex(Rejected,"BBOX_OUTSIDE_NORMALIZED_PAGE"):
+            docling_bbox_normalized(b,Obj(width=100,height=100))
+    def test_single_page_provenance(self):
+        pic=Obj(prov=[Obj(page_no=1,bbox=Obj(l=20,t=20,r=40,b=40,coord_origin="TOPLEFT"))])
+        doc=Obj(pages={1:Obj(size=Obj(width=100,height=100))},pictures=[pic])
+        self.assertEqual(docling_picture_boxes(doc),[(.2,.2,.4,.4)])
+    def test_wrong_local_page(self):
+        doc=Obj(pages={1:Obj(size=Obj(width=100,height=100))},
+                pictures=[Obj(prov=[Obj(page_no=126,bbox=None)])])
+        with self.assertRaisesRegex(Rejected,"DOCLING_WRONG_LOCAL_PAGE_NUMBER"):
+            docling_picture_boxes(doc)
+    def test_two_hits_not_certified(self):
+        result=match(REF,CAND)
+        self.assertEqual(result["one_to_one_region_matches"],2)
+        self.assertIsNone(result["certified_graph_f1"])
+        self.assertFalse(result["human_verified"])
+    def test_one_picture_cannot_hit_two(self):
+        candidate=copy.deepcopy(CAND)
+        candidate["picture_boxes_normalized"]=[[.2,.2,.8,.8]]
+        self.assertLessEqual(match(REF,candidate)["one_to_one_region_matches"],1)
+    def test_empty_boxes_is_not_accuracy_zero(self):
+        candidate=copy.deepcopy(CAND)
+        candidate["picture_boxes_normalized"]=[]
+        self.assertEqual(match(REF,candidate)["status"],"NO_SPATIAL_MATCH_UNVERIFIED")
+    def test_sha_mismatch(self):
+        candidate=copy.deepcopy(CAND)
+        candidate["source_document_sha256"]="b"*64
+        with self.assertRaisesRegex(Rejected,"SOURCE_DOCUMENT_SHA_MISMATCH"):
+            match(REF,candidate)
+    def test_unsupported_engine(self):
+        candidate=copy.deepcopy(CAND)
+        candidate["engine"]="unrelated"
+        with self.assertRaisesRegex(Rejected,"UNSUPPORTED_ENGINE_CANDIDATE"):
+            match(REF,candidate)
+    def test_wrong_reference_page(self):
+        candidate=copy.deepcopy(CAND)
+        candidate["book_id"]="B31"
+        with self.assertRaisesRegex(Rejected,"PRIVATE_REFERENCE_NOT_PRESENT_FOR_PAGE"):
+            match(REF,candidate)
+    def test_fake_verified_rejected(self):
+        candidate=copy.deepcopy(CAND)
+        candidate["humanVerified"]=True
+        with self.assertRaisesRegex(Rejected,"UNAUTHORIZED_VERIFICATION_CLAIM"):
+            match(REF,candidate)
+    def test_report_private_and_text_free(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            (root/"ref.json").write_text(json.dumps(REF),encoding="utf-8")
+            (root/"candidate.json").write_text(json.dumps(CAND),encoding="utf-8")
+            target=root/"result.json"
+            self.assertEqual(main(["--private-root",temp,"--reference",str(root/"ref.json"),
+                "--candidate",str(root/"candidate.json"),"--output",str(target)]),0)
+            saved=target.read_text()
+            self.assertNotIn(SHA,saved)
+            self.assertNotIn("0.21",saved)
+    def test_output_outside_private_root_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            (root/"ref.json").write_text(json.dumps(REF),encoding="utf-8")
+            (root/"candidate.json").write_text(json.dumps(CAND),encoding="utf-8")
+            with self.assertRaisesRegex(Rejected,"PRIVATE_REPORT_PATH_REQUIRED"):
+                main(["--private-root",temp,"--reference",str(root/"ref.json"),
+                    "--candidate",str(root/"candidate.json"),
+                    "--output",str(root.parent/"outside.json")])
+
+if __name__ == "__main__":
+    unittest.main()
