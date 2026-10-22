@@ -77,6 +77,9 @@ jobs:
           if (@($data.rows).Count -ne 3 -or @($data.failed).Count -gt 0 -or @($data.missing).Count -gt 0) { throw 'ACS_MINERU_FLASH_PRIVATE_REPORT_INVARIANT_FAILED' }
           Write-Output ('ACS_MINERU_FLASH_VERSION=' + $data.mineru_version)
           Write-Output ('ACS_MINERU_BASIC_ONNX_CLASS=' + $data.model_verification_class)
+          Write-Output ('ACS_MINERU_BASIC_ONNX_EXPLICIT_BUNDLE_PRESENT=' + $data.model_root_diagnostics.explicit_root_bundle_dir_present)
+          Write-Output ('ACS_MINERU_BASIC_ONNX_INHERITED_ROOT_CLASS=' + $data.model_root_diagnostics.inherited_root_verify_class)
+          Write-Output ('ACS_MINERU_BASIC_ONNX_INHERITED_ROOT_EXIT=' + $data.model_root_diagnostics.inherited_root_verify_exit_code)
           foreach($entry in $data.rows) {
             if ($entry.status -notin @('NATIVE_TEXT_EXTRACTED','FLASH_NO_NATIVE_TEXT_CONTROL')) { throw 'ACS_MINERU_FLASH_UNEXPECTED_PAGE_FAILURE' }
             Write-Output ('ACS_MINERU_FLASH_METRIC=' + $entry.book_id + '_P' + $entry.physical_page + '|STATE=' + $entry.status + '|TEXT_CHARS=' + $entry.characters + '|MS=' + $entry.wall_ms)
