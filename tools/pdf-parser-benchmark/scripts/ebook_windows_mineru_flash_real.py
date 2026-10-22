@@ -6,7 +6,6 @@ Windows D: drive. Public Actions output contains only sanitized IDs and counters
 """
 import argparse
 import hashlib
-import importlib.metadata
 import io
 import json
 import os
@@ -213,11 +212,24 @@ def main():
         del data
     missing = sorted(set(PAGES).difference(rows))
     failed = sorted(id for id, item in rows.items() if item["status"] != "SUCCESS")
+    kit_python = kit.parent / "python.exe"
+    if not kit_python.is_file():
+        raise FileNotFoundError("Companion MinerU interpreter missing")
+    version_check = subprocess.run(
+        [str(kit_python), "-c", "import importlib.metadata; print(importlib.metadata.version('mineru'))"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False,
+        env=env,
+    )
+    if version_check.returncode != 0:
+        raise RuntimeError("Unable to verify installed MinerU version")
+    mineru_version = version_check.stdout.decode("utf-8", errors="replace").strip()
+    if not mineru_version.startswith("4."):
+        raise ValueError("Expected verified MinerU 4 runtime")
     report = {
         "schema_version": 1,
         "corpus_id": manifest["corpus_id"],
         "evidence_level": "ACTUAL_WINDOWS_MINERU_FLASH_NATIVE_ONLY",
-        "mineru_version": importlib.metadata.version("mineru"),
+        "mineru_version": mineru_version,
         "model_verification_class": verified,
         "model_verification_exit_code": verification["exit_code"],
         "model_verification_ms": verification["wall_ms"],
