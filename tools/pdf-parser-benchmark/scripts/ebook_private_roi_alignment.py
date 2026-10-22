@@ -84,12 +84,19 @@ def docling_picture_boxes(document):
         raise Rejected("DOCLING_PICTURES_INVALID")
     result = []
     for pic in pictures:
-        for prov in (getattr(pic, "prov", None) or []):
-            if prov.page_no != 1:
-                raise Rejected("DOCLING_WRONG_LOCAL_PAGE_NUMBER")
-            box = docling_bbox_normalized(prov.bbox, pages[1].size)
-            if box not in result:
-                result.append(box)
+        provenance = getattr(pic, "prov", None)
+        # Each *picture object* must contribute exactly one independently
+        # attributable geometry. A two-box picture plus an unlocated picture
+        # must never pass merely because total box count matches item count.
+        if not isinstance(provenance, (list, tuple)) or len(provenance) != 1:
+            raise Rejected("DOCLING_PICTURE_PROVENANCE_NOT_SINGLE")
+        prov = provenance[0]
+        if prov.page_no != 1:
+            raise Rejected("DOCLING_WRONG_LOCAL_PAGE_NUMBER")
+        box = docling_bbox_normalized(prov.bbox, pages[1].size)
+        if box in result:
+            raise Rejected("DOCLING_DUPLICATE_PICTURE_GEOMETRY")
+        result.append(box)
     return result
 
 def _area(box):

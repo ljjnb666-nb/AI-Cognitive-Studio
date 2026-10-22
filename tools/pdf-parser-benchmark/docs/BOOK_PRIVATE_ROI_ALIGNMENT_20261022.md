@@ -6,6 +6,8 @@
 规则：IoU >= 0.10 且参考 ROI 覆盖 >= 0.20 时可视为空间候选。采用最大基数的单独一对一匹配（增广路径、候选边按 IoU 降序与稳定编号排序），先保证可匹配数量不被贪心策略低估；算法**不保证同一最大匹配数下的 IoU 总和最优**。结果仅为 L2 暂定空间一致性，既不是人工真值召回率，也不是图表关系/箭头语义准确率。已加入歧义重叠造成旧算法漏匹配的纯合成回归。
 严格拒绝无效坐标、非有限数、未知 TOPLEFT/BOTTOMLEFT 原点、跨文档 SHA、不属于当前页的 Docling provenance，以及 humanVerified/graphVerified 越权字段。匹配器独立拒绝**同页完全重复的 L2 参考框或预测框**（即使绕开 Docling provenance 的本地去重也无法虚增一对一命中数）；不同物理页的参考框不会误判为本页重复。该检测只处理精确重复，未把“相近”框擅自当成相同目标。
 
+**逐图片对象来源门禁**：不能只比较去重后的 box 总数与 picture_items。每个 Docling picture 对象必须恰有一个可验证的本页 provenance 框，不允许缺框、多框混抵或不同图片共用相同位置；出现这些情况统一 fail-closed、保留私有报告，不产生空间匹配成功声明。该策略对真实合法多 provenance 图像也暂时保守拒绝，后续若需支持，必须先设计不虚增命中数的多框语义及独立测试。
+
 Docling Windows 实书报告新增长度受限的 `private_picture_boxes_normalized`，全部保留在 D 盘 `reports/*.private.json`，Actions 日志只读已批准的匿名版面数量，不输出具体 ROI/框、书本原文或图像。
 仅当 D 盘存在 `semantic_gate/B15_B31_roi_candidates.private.json` 私有参考时，Windows 工具才自动执行区域对齐；参考不存在时输出 PRIVATE_REFERENCE_UNAVAILABLE，不产生错误的零命中率或已验收结论。
 本会话云沙盒中的私有 L2 文件不会被上传到公开仓库，也不能默认假设在 Windows 自托管 Runner 中存在。因此此轮实际任务重点是规范化的图片框采集及可选私有对齐门禁。

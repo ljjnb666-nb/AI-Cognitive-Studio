@@ -43,6 +43,38 @@ class Geometry(unittest.TestCase):
         pic=Obj(prov=[Obj(page_no=1,bbox=Obj(l=20,t=20,r=40,b=40,coord_origin="TOPLEFT"))])
         doc=Obj(pages={1:Obj(size=Obj(width=100,height=100))},pictures=[pic])
         self.assertEqual(docling_picture_boxes(doc),[(.2,.2,.4,.4)])
+    def test_two_pictures_each_have_unique_geometry(self):
+        bbox = lambda l: Obj(l=l,t=10,r=l+10,b=20,coord_origin="TOPLEFT")
+        doc = Obj(pages={1:Obj(size=Obj(width=100,height=100))},pictures=[
+            Obj(prov=[Obj(page_no=1,bbox=bbox(10))]),
+            Obj(prov=[Obj(page_no=1,bbox=bbox(30))])])
+        self.assertEqual(len(docling_picture_boxes(doc)),2)
+
+    def test_one_picture_missing_provenance_fails_closed(self):
+        doc = Obj(pages={1:Obj(size=Obj(width=100,height=100))},
+                  pictures=[Obj(prov=[])])
+        with self.assertRaisesRegex(Rejected,"DOCLING_PICTURE_PROVENANCE_NOT_SINGLE"):
+            docling_picture_boxes(doc)
+
+    def test_two_boxes_on_one_picture_cannot_hide_missing_picture(self):
+        def bbox(left):
+            return Obj(l=left,t=10,r=left+10,b=20,coord_origin="TOPLEFT")
+        doc = Obj(pages={1:Obj(size=Obj(width=100,height=100))},pictures=[
+            Obj(prov=[Obj(page_no=1,bbox=bbox(10)),
+                      Obj(page_no=1,bbox=bbox(30))]),
+            Obj(prov=[])])
+        with self.assertRaisesRegex(Rejected,"DOCLING_PICTURE_PROVENANCE_NOT_SINGLE"):
+            docling_picture_boxes(doc)
+
+    def test_duplicate_geometry_across_distinct_pictures_rejected(self):
+        def item():
+            return Obj(prov=[Obj(page_no=1,bbox=Obj(
+                l=10,t=10,r=40,b=40,coord_origin="TOPLEFT"))])
+        doc=Obj(pages={1:Obj(size=Obj(width=100,height=100))},
+                pictures=[item(),item()])
+        with self.assertRaisesRegex(Rejected,"DOCLING_DUPLICATE_PICTURE_GEOMETRY"):
+            docling_picture_boxes(doc)
+
     def test_wrong_local_page(self):
         doc=Obj(pages={1:Obj(size=Obj(width=100,height=100))},
                 pictures=[Obj(prov=[Obj(page_no=126,bbox=None)])])
