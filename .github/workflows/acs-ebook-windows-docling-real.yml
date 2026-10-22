@@ -61,8 +61,8 @@ jobs:
             & $python -m venv $tool
             if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_VENV_CREATE_FAILED' }
           }
-          $check=(& $venvPython -m pip show docling 2>$null | Select-String '^Version: ' | Select-Object -First 1)
-          $version=if ($null -eq $check) { '' } else { ($check.ToString() -split ':\s*')[1].Trim() }
+          $version=(& $venvPython -c "import importlib.util, importlib.metadata; print(importlib.metadata.version('docling') if importlib.util.find_spec('docling') else '')").Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_SAFE_VERSION_INSPECTION_FAILED' }
           if ($version -ne '2.141.0') {
             & $venvPython -m pip install --disable-pip-version-check --no-input --no-cache-dir --retries 2 --timeout 20 'docling==2.141.0' 'pymupdf>=1.24,<2'
             if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_ISOLATED_INSTALL_FAILED' }
