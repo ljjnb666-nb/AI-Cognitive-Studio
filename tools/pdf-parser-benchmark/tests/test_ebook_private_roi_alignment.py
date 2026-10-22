@@ -108,6 +108,26 @@ class Geometry(unittest.TestCase):
         self.assertFalse(result["graph_verified"])
         self.assertIsNone(result["certified_graph_f1"])
 
+    def test_duplicate_l2_reference_boxes_rejected(self):
+        reference=copy.deepcopy(REF)
+        reference["regions"].append(copy.deepcopy(reference["regions"][0]))
+        with self.assertRaisesRegex(Rejected,"DUPLICATE_REFERENCE_REGION"):
+            match(reference,CAND)
+
+    def test_duplicate_candidate_boxes_rejected(self):
+        candidate=copy.deepcopy(CAND)
+        candidate["picture_boxes_normalized"].append(
+            copy.deepcopy(candidate["picture_boxes_normalized"][0]))
+        with self.assertRaisesRegex(Rejected,"DUPLICATE_PICTURE_BOX"):
+            match(REF,candidate)
+
+    def test_other_page_reference_not_counted_as_duplicate(self):
+        reference=copy.deepcopy(REF)
+        other=copy.deepcopy(reference["regions"][0])
+        other["physical_page"]=110
+        reference["regions"].append(other)
+        self.assertEqual(match(reference,CAND)["one_to_one_region_matches"],2)
+
     def test_ambiguous_matching_is_deterministic(self):
         reference = copy.deepcopy(REF)
         candidate = copy.deepcopy(CAND)
