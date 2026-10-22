@@ -1,0 +1,40 @@
+name: ACS Ebook Evidence Ledger Gate
+on:
+  push:
+    branches: ['bench/ebook-evidence-ledger-20261023']
+    paths:
+      - 'tools/pdf-parser-benchmark/corpus/ebook-20261022.cross-engine-evidence.json'
+      - 'tools/pdf-parser-benchmark/scripts/ebook_evidence_gate.py'
+      - 'tools/pdf-parser-benchmark/tests/test_ebook_evidence_gate.py'
+      - '.github/workflows/acs-ebook-evidence-ledger.yml'
+  pull_request:
+    branches: [main, 'bench/ebook-tool-selection-20261022']
+    paths:
+      - 'tools/pdf-parser-benchmark/corpus/ebook-20261022.cross-engine-evidence.json'
+      - 'tools/pdf-parser-benchmark/scripts/ebook_evidence_gate.py'
+      - 'tools/pdf-parser-benchmark/tests/test_ebook_evidence_gate.py'
+      - '.github/workflows/acs-ebook-evidence-ledger.yml'
+permissions:
+  contents: read
+jobs:
+  gate:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Confirm exact checkout
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Validate anonymous observed evidence and tamper regressions
+        shell: bash
+        run: |
+          python3 tools/pdf-parser-benchmark/scripts/ebook_evidence_gate.py tools/pdf-parser-benchmark/corpus/ebook-20261022.cross-engine-evidence.json
+          python3 -m unittest discover -v -s tools/pdf-parser-benchmark/tests -p 'test_ebook_evidence_gate.py'
+          echo ACS_EBOOK_CROSS_ENGINE_LEDGER_TEST_PASS
+          echo ACS_EBOOK_ENGINE_SELECTION_NOT_FROZEN
