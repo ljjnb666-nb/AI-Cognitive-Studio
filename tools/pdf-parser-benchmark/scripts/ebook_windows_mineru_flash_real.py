@@ -25,8 +25,8 @@ def normalize(value):
     return "".join(ASCII_CJK.findall(value)).lower()
 
 
-_MD_IMAGE = re.compile(r"!\\[[^\\]\\r\\n]*\\]\\([^)]*\\)")
-_HTML_IMAGE = re.compile(r"<img\\b[^>]*>", re.IGNORECASE | re.DOTALL)
+_MD_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_HTML_IMAGE = re.compile(r"<img\b[^>]*>", re.IGNORECASE | re.DOTALL)
 _BASE64_URI = re.compile(r"data:(?:image|application)/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+", re.I)
 _LONG_ENCODED = re.compile(r"[A-Za-z0-9+/]{256,}={0,2}")
 
