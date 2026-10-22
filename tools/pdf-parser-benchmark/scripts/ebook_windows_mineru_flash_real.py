@@ -25,6 +25,44 @@ def normalize(value):
     return "".join(ASCII_CJK.findall(value)).lower()
 
 
+_MD_IMAGE = re.compile(r"!\\[[^\\]\\r\\n]*\\]\\([^)]*\\)")
+_HTML_IMAGE = re.compile(r"<img\\b[^>]*>", re.IGNORECASE | re.DOTALL)
+_BASE64_URI = re.compile(r"data:(?:image|application)/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+", re.I)
+_LONG_ENCODED = re.compile(r"[A-Za-z0-9+/]{256,}={0,2}")
+
+
+def flash_markdown_metrics(markdown):
+    """Exclude embedded data/image payloads before computing document-text length.
+
+    Return only aggregate diagnostics. The actual text never leaves this process.
+    Long encoded tokens are excluded, not considered recognized words.
+    """
+    raw_bytes = len(markdown.encode("utf-8"))
+    markdown_images = len(_MD_IMAGE.findall(markdown))
+    html_images = len(_HTML_IMAGE.findall(markdown))
+    data_uris = len(_BASE64_URI.findall(markdown))
+    without_images = _MD_IMAGE.sub("", markdown)
+    without_images = _HTML_IMAGE.sub("", without_images)
+    without_data = _BASE64_URI.sub("", without_images)
+    chunks = _LONG_ENCODED.findall(without_data)
+    cleaned = _LONG_ENCODED.sub("", without_data)
+    value = normalize(cleaned)
+    original_count = len(normalize(markdown))
+    # Ratios are diagnostic only; exact page-text quality needs a reference.
+    stats = {
+        "markdown_bytes": raw_bytes,
+        "raw_normalized_characters": original_count,
+        "markdown_image_count": markdown_images,
+        "html_image_count": html_images,
+        "embedded_data_uri_count": data_uris,
+        "long_encoded_chunk_count": len(chunks),
+        "encoded_chunk_characters": sum(map(len, chunks)),
+        "nontext_removed_characters": len(markdown) - len(cleaned),
+        "normalized_text_characters": len(value),
+    }
+    return value, stats
+
+
 def levenshtein(a, b):
     if len(a) < len(b):
         a, b = b, a
@@ -142,15 +180,22 @@ def evaluate(book, payload, kit, temp_root, env):
         if result.get("status") == "TIMEOUT":
             row["status"] = "TIMEOUT"
         elif result["exit_code"] == 0 and target.is_file():
-            extracted = normalize(target.read_text(encoding="utf-8", errors="replace"))
+            extracted, diagnostics = flash_markdown_metrics(
+                target.read_text(encoding="utf-8", errors="replace"))
             row.update({
-                "status": "SUCCESS", "characters": len(extracted),
+                "characters": len(extracted),
                 "text_sha256": hashlib.sha256(extracted.encode("utf-8")).hexdigest(),
+                "markdown_diagnostics": diagnostics,
             })
-            if reference:
-                row["reference_layer_cer"] = round(levenshtein(reference, extracted) / len(reference), 4)
+            if diagnostics["normalized_text_characters"] > 20000:
+                row["status"] = "INVALID_ONE_PAGE_TEXT_METRIC_OVER_20K"
+            elif reference:
+                row["status"] = "NATIVE_TEXT_EXTRACTED"
+                row["reference_layer_cer"] = round(
+                    levenshtein(reference, extracted) / len(reference), 4)
                 row["reference_quality"] = "NATIVE_PDF_TEXT_LAYER_PROXY_NOT_HUMAN_GROUND_TRUTH"
             else:
+                row["status"] = "FLASH_NO_NATIVE_TEXT_CONTROL"
                 row["reference_quality"] = "NO_TEXT_LAYER; FLASH_TXT_DOES_NOT_TEST_SCANNED_OCR"
         else:
             row["status"] = "CLI_FAILED_OR_NO_OUTPUT"
@@ -211,7 +256,8 @@ def main():
               flush=True)
         del data
     missing = sorted(set(PAGES).difference(rows))
-    failed = sorted(id for id, item in rows.items() if item["status"] != "SUCCESS")
+    passed_states = {"NATIVE_TEXT_EXTRACTED", "FLASH_NO_NATIVE_TEXT_CONTROL"}
+    failed = sorted(id for id, item in rows.items() if item["status"] not in passed_states)
     kit_python = kit.parent / "python.exe"
     if not kit_python.is_file():
         raise FileNotFoundError("Companion MinerU interpreter missing")
@@ -236,7 +282,8 @@ def main():
         "missing": missing, "failed": failed,
         "rows": [rows[key] for key in sorted(rows)],
         "limits": [
-            "Flash --ocr-mode txt does not test OCR on scanned pages",
+            "Flash --ocr-mode txt does not test OCR on scanned pages; scanned pages are negative controls",
+            "Embedded Markdown image/data URI payloads are removed before textual metrics",
             "Basic/ONNX verification is independent of Flash parsing and does not download weights",
             "Book sources and converted PDF/Markdown never leave the private D: drive; temporary parses are deleted",
             "Raw subprocess logs are preserved only in D: private reports; no raw stdout/stderr is printed to GitHub",
@@ -250,7 +297,7 @@ def main():
     if missing or failed:
         raise SystemExit("MINERU_FLASH_BENCHMARK_INCOMPLETE missing="
                          + ",".join(missing) + " failed=" + ",".join(failed))
-    print("ACS_MINERU_FLASH_REAL_PRIVATE_PASS=3", flush=True)
+    print("ACS_MINERU_FLASH_NATIVE_EXECUTION_PASS=3;SCANNED_OCR_NOT_TESTED", flush=True)
 
 
 if __name__ == "__main__":
