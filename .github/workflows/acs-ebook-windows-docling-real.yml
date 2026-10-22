@@ -93,6 +93,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_SOCKSIO_INSTALL_FAILED' }
           }
           Write-Output 'ACS_DOCLING_SOCKS_HTTPX_READY'
+          $onnx=(& $venvPython -c "import importlib.util; print('yes' if importlib.util.find_spec('onnxruntime') else 'no')").Trim()
+          if ($onnx -ne 'yes') {
+            & $venvPython -m pip install --disable-pip-version-check --no-input --no-cache-dir --retries 2 --timeout 20 --only-binary=:all: 'onnxruntime==1.31.0'
+            if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_ONNXRUNTIME_CPU_INSTALL_FAILED' }
+          }
+          Write-Output 'ACS_DOCLING_RAPIDOCR_ONNX_RUNTIME_READY'
           $script='acs-ebook-docling-private/tools/pdf-parser-benchmark/scripts/ebook_windows_docling_real.py'
           $manifest='acs-ebook-docling-private/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
           $output=Join-Path $private ('reports\ebook-docling-real-' + $env:EXPECTED_SHA.Substring(0,12) + '.private.json')
