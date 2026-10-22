@@ -89,5 +89,7 @@ jobs:
             if ($row.status -ne 'SUCCESS') { throw 'ACS_PADDLE_REAL_ROW_FAILED' }
             Write-Output ('ACS_PADDLE_REAL_METRIC=' + $row.book_id + '_P' + $row.physical_page + '|CHARS=' + $row.recognized_characters + '|MS=' + $row.wall_ms)
             if ($null -ne $row.reference_layer_cer) { Write-Output ('ACS_PADDLE_REAL_NATIVE_REFERENCE_CER=' + $row.book_id + '_P' + $row.physical_page + '|' + $row.reference_layer_cer) }
+            if ($null -eq $row.layout_evidence -or $row.layout_evidence.graph_semantics -ne 'UNVERIFIED') { throw 'ACS_PADDLE_LAYOUT_EVIDENCE_MISSING_OR_UNSAFE' }
+            Write-Output ('ACS_PADDLE_LAYOUT=' + $row.book_id + '_P' + $row.physical_page + '|TEXT_BOXES=' + $row.layout_evidence.recognized_text_boxes + '|DETECTED=' + $row.layout_evidence.detection_polygons + '|RECOGNIZED_POLYGONS=' + $row.layout_evidence.recognized_polygons + '|LOW_CONF=' + $row.layout_evidence.low_confidence_boxes + '|GEOMETRY=' + $row.layout_evidence.geometry_integrity + '|GRAPH=UNVERIFIED')
           }
           Write-Output 'ACS_PADDLE_REAL_PRIVATE_REPORT_ONLY_D_DRIVE'
