@@ -64,6 +64,26 @@ jobs:
           $version=(& $venvPython -c "import importlib.util, importlib.metadata; print(importlib.metadata.version('docling') if importlib.util.find_spec('docling') else '')").Trim()
           if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_SAFE_VERSION_INSPECTION_FAILED' }
           if ($version -ne '2.141.0') {
+            $sock=(& $venvPython -c "import importlib.util; print('yes' if importlib.util.find_spec('socks') else 'no')").Trim()
+            if ($sock -ne 'yes') {
+              $curl=(Get-Command curl.exe -ErrorAction Stop).Source
+              $json=Join-Path $temp 'pysocks-1.7.1-metadata.json'
+              & $curl --fail --silent --show-error --location --max-time 45 --proxy 'socks5h://127.0.0.1:10808' 'https://pypi.org/pypi/PySocks/1.7.1/json' --output $json
+              if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_PYSOCKS_METADATA_FETCH_FAILED' }
+              $metadata=Get-Content -LiteralPath $json -Raw | ConvertFrom-Json
+              $wheels=@($metadata.urls | Where-Object { $_.filename -eq 'PySocks-1.7.1-py3-none-any.whl' })
+              if ($wheels.Count -ne 1) { throw 'ACS_DOCLING_PYSOCKS_WHEEL_MISSING' }
+              $wheel=$wheels[0]
+              if ($wheel.url -notmatch '^https://files[.]pythonhosted[.]org/') { throw 'ACS_DOCLING_PYSOCKS_HOST_REJECTED' }
+              $wheelfile=Join-Path $temp 'PySocks-1.7.1-py3-none-any.whl'
+              & $curl --fail --silent --show-error --location --max-time 45 --proxy 'socks5h://127.0.0.1:10808' $wheel.url --output $wheelfile
+              if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_PYSOCKS_WHEEL_FETCH_FAILED' }
+              $sha=(Get-FileHash -LiteralPath $wheelfile -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($sha -ne '2725bd0a9925919b9b51739eea5f9e2bae91e83288108a9ad338b2e3a4435ee5') { throw 'ACS_DOCLING_PYSOCKS_SHA256_INVALID' }
+              & $venvPython -m pip install --disable-pip-version-check --no-index --no-deps --no-input $wheelfile
+              if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_PYSOCKS_OFFLINE_INSTALL_FAILED' }
+              Write-Output 'ACS_DOCLING_PYSOCKS_SHA_VERIFIED_AND_BOOTSTRAPPED'
+            }
             & $venvPython -m pip install --disable-pip-version-check --no-input --no-cache-dir --retries 2 --timeout 20 'docling==2.141.0' 'pymupdf>=1.24,<2'
             if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_ISOLATED_INSTALL_FAILED' }
           }
