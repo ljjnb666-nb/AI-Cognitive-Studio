@@ -135,7 +135,15 @@ def match(reference, candidate):
         expected.append(normalized_box(region.get("roi_xyxy_normalized")))
     if not expected:
         raise Rejected("PRIVATE_REFERENCE_NOT_PRESENT_FOR_PAGE")
+    # Identical L2 annotations are not independent reference regions. Treating
+    # them as separate objects can artificially inflate a one-to-one hit count.
+    if len(set(expected)) != len(expected):
+        raise Rejected("DUPLICATE_REFERENCE_REGION")
     boxes = [normalized_box(value) for value in candidates]
+    # This guard is also needed for the standalone matcher: the Docling adapter
+    # deduplicates provenance boxes, but arbitrary private candidate JSON does not.
+    if len(set(boxes)) != len(boxes):
+        raise Rejected("DUPLICATE_PICTURE_BOX")
     # Maximize the number of distinct reference/picture matches, rather than
     # taking the highest IoU edge first: greedy can suppress a valid second hit.
     edges = [[] for _ in expected]
