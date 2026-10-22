@@ -66,6 +66,22 @@ jobs:
           if ($valid4 -eq 0) {
             Write-Output 'ACS_MINERU_STATUS=NOT_READY_NO_VERIFIED_4X_RUNTIME'
           } else {
-            Write-Output 'ACS_MINERU_STATUS=4X_RUNTIME_FOUND_MODEL_READINESS_UNVERIFIED'
+            Write-Output 'ACS_MINERU_STATUS=4X_RUNTIME_FOUND'
+            $cliCandidates=@($paths | ForEach-Object { Join-Path (Split-Path $_ -Parent) 'mineru-kit.exe' })
+            $kit=@($cliCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+            if ($kit.Count -ne 1) {
+              Write-Output 'ACS_MINERU_BASIC_ONNX_VERIFY=NO_KIT_ENTRYPOINT'
+            } else {
+              $reports=Join-Path $root 'reports'
+              if (-not (Test-Path -LiteralPath $reports -PathType Container)) { throw 'ACS_MINERU_PRIVATE_REPORTS_MISSING' }
+              $log=Join-Path $reports ('mineru-basic-onnx-verify-' + $env:EXPECTED_SHA.Substring(0,12) + '.private.log')
+              $err=Join-Path $reports ('mineru-basic-onnx-verify-' + $env:EXPECTED_SHA.Substring(0,12) + '.private.err')
+              $proc=Start-Process -FilePath $kit[0] -ArgumentList @('models','verify','--tier','basic','--small-backend','onnx') -PassThru -Wait -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError $err
+              if ($proc.ExitCode -eq 0) {
+                Write-Output 'ACS_MINERU_BASIC_ONNX_VERIFY=PASS_FILES_ONLY_NOT_INFERENCE'
+              } else {
+                Write-Output 'ACS_MINERU_BASIC_ONNX_VERIFY=NOT_READY_OR_UNSUPPORTED_SEE_PRIVATE_LOG'
+              }
+            }
           }
           Write-Output 'ACS_MINERU_PREFLIGHT_READONLY_NO_DOWNLOAD_NO_INFERENCE'
