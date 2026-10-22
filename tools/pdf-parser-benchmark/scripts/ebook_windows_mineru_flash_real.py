@@ -161,19 +161,19 @@ def summarize_model_verify(result, stdout_path, stderr_path):
             total += len(binary)
             data.append(binary.decode("utf-8", errors="replace"))
     message = "\n".join(data).lower()
-    message = re.sub(r"\\x1b\\[[0-9;]*m", "", message)
+    message = re.sub(r"\x1b\[[0-9;]*m", "", message)
     # All values below are aggregate classifications, never excerpts from logs.
     patterns = {
-        "missing": r"\\bmissing\\b|not found|not present|does not exist|❌|✗",
-        "incomplete": r"\\bincomplete\\b|not ready|not_ready|ready\\s*[:=]\\s*(?:no|false|0)",
+        "missing": r"\bmissing\b|not found|not present|does not exist|❌|✗",
+        "incomplete": r"\bincomplete\b|not ready|not_ready|ready\s*[:=]\s*(?:no|false|0)",
         "permission": r"permission denied|access is denied",
         "dependency": r"modulenotfounderror|importerror|no module named",
         "invalid_cli": r"no such option|unrecognized arguments|no such command|unexpected argument",
-        "traceback": r"traceback \\(most recent call last\\)",
+        "traceback": r"traceback \(most recent call last\)",
         "onnx_bundle": r"mineru-4_models_onnx",
         "torch_bundle": r"mineru-4_models_torch",
-        "ready_true": r"ready\\s*[:=]\\s*(?:yes|true|1)",
-        "error": r"\\berror\\b|\\bfailed\\b",
+        "ready_true": r"ready\s*[:=]\s*(?:yes|true|1)",
+        "error": r"\berror\b|\bfailed\b",
     }
     flags = {key: bool(re.search(regex, message)) for key, regex in patterns.items()}
     if result.get("status") == "TIMEOUT":
