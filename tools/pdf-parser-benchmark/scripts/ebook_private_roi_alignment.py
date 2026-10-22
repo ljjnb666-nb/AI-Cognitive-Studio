@@ -136,20 +136,37 @@ def match(reference, candidate):
     if not expected:
         raise Rejected("PRIVATE_REFERENCE_NOT_PRESENT_FOR_PAGE")
     boxes = [normalized_box(value) for value in candidates]
-    pairs = []
+    # Maximize the number of distinct reference/picture matches, rather than
+    # taking the highest IoU edge first: greedy can suppress a valid second hit.
+    edges = [[] for _ in expected]
     for i, roi in enumerate(expected):
         for j, box in enumerate(boxes):
             iou, coverage = overlap(roi, box)
             if iou >= 0.10 and coverage >= 0.20:
-                pairs.append((iou, i, j))
-    used_roi, used_box = set(), set()
-    scores = []
-    for iou, i, j in sorted(pairs, reverse=True):
-        if i in used_roi or j in used_box:
-            continue
-        used_roi.add(i)
-        used_box.add(j)
-        scores.append(iou)
+                edges[i].append((j, iou))
+        edges[i].sort(key=lambda item: (-item[1], item[0]))
+
+    assigned_to_reference = [None] * len(boxes)
+
+    def augment(reference_id, seen_boxes):
+        for box_id, _ in edges[reference_id]:
+            if box_id in seen_boxes:
+                continue
+            seen_boxes.add(box_id)
+            previous_reference = assigned_to_reference[box_id]
+            if previous_reference is None or augment(previous_reference, seen_boxes):
+                assigned_to_reference[box_id] = reference_id
+                return True
+        return False
+
+    # A bounded augmenting-path matching (128 regions/boxes max). Each box
+    # and each reference may contribute at most once; tie-breaking is stable.
+    for reference_id in sorted(range(len(expected)),
+                               key=lambda i: (len(edges[i]), i)):
+        augment(reference_id, set())
+    scores = [overlap(expected[reference_id], boxes[box_id])[0]
+              for box_id, reference_id in enumerate(assigned_to_reference)
+              if reference_id is not None]
     return {
         "schema_version": 1,
         "status": "PROVISIONAL_SPATIAL_OVERLAP_ONLY" if scores else "NO_SPATIAL_MATCH_UNVERIFIED",
