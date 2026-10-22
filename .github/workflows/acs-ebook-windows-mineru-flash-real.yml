@@ -75,8 +75,10 @@ jobs:
           Write-Output ('ACS_MINERU_FLASH_VERSION=' + $data.mineru_version)
           Write-Output ('ACS_MINERU_BASIC_ONNX_CLASS=' + $data.model_verification_class)
           foreach($entry in $data.rows) {
-            if ($entry.status -ne 'SUCCESS') { throw 'ACS_MINERU_FLASH_UNEXPECTED_PAGE_FAILURE' }
-            Write-Output ('ACS_MINERU_FLASH_METRIC=' + $entry.book_id + '_P' + $entry.physical_page + '|CHARS=' + $entry.characters + '|MS=' + $entry.wall_ms)
+            if ($entry.status -notin @('NATIVE_TEXT_EXTRACTED','FLASH_NO_NATIVE_TEXT_CONTROL')) { throw 'ACS_MINERU_FLASH_UNEXPECTED_PAGE_FAILURE' }
+            Write-Output ('ACS_MINERU_FLASH_METRIC=' + $entry.book_id + '_P' + $entry.physical_page + '|STATE=' + $entry.status + '|TEXT_CHARS=' + $entry.characters + '|MS=' + $entry.wall_ms)
+            $diag=$entry.markdown_diagnostics
+            Write-Output ('ACS_MINERU_FLASH_DIAGNOSTIC=' + $entry.book_id + '_P' + $entry.physical_page + '|RAW_CHARACTERS=' + $diag.raw_normalized_characters + '|CLEAN_TEXT=' + $diag.normalized_text_characters + '|MD_IMAGES=' + $diag.markdown_image_count + '|HTML_IMAGES=' + $diag.html_image_count + '|DATA_URI=' + $diag.embedded_data_uri_count + '|LONG_ENCODED=' + $diag.long_encoded_chunk_count + '|REMOVED=' + $diag.nontext_removed_characters)
             if ($null -ne $entry.reference_layer_cer) { Write-Output ('ACS_MINERU_FLASH_NATIVE_REFERENCE_CER=' + $entry.book_id + '_P' + $entry.physical_page + '|' + $entry.reference_layer_cer) }
           }
           Write-Output 'ACS_MINERU_FLASH_OUTPUTS_PRIVATE_D_DRIVE_ONLY'
