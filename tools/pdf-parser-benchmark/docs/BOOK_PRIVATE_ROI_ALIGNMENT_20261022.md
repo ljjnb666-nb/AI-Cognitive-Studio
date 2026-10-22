@@ -3,7 +3,7 @@
 该工具把 Docling 输出的 picture provenance bbox 规范化到左上原点、[0,1] 页面坐标，允许与 D 盘私有 L2 参考 ROI 比较。不可将区域重叠视为图表语义正确率。
 
 输入：现有 B15/B31 私有参考 JSON 的 `regions`，以及同页 Docling 图片框。来源文件 SHA-256、匿名书籍 ID、物理页必须完全一致。
-规则：IoU >= 0.10 且参考 ROI 覆盖 >= 0.20 时可视为空间候选，图片与参考一对一贪心匹配；匹配率仅为 L2 暂定一致性，不是经过人工确认的召回率。
+规则：IoU >= 0.10 且参考 ROI 覆盖 >= 0.20 时可视为空间候选。采用最大基数的单独一对一匹配（增广路径、候选边按 IoU 降序与稳定编号排序），先保证可匹配数量不被贪心策略低估；算法**不保证同一最大匹配数下的 IoU 总和最优**。结果仅为 L2 暂定空间一致性，既不是人工真值召回率，也不是图表关系/箭头语义准确率。已加入歧义重叠造成旧算法漏匹配的纯合成回归。
 严格拒绝无效坐标、非有限数、未知 TOPLEFT/BOTTOMLEFT 原点、跨文档 SHA、不属于当前页的 Docling provenance，以及 humanVerified/graphVerified 越权字段。
 
 Docling Windows 实书报告新增长度受限的 `private_picture_boxes_normalized`，全部保留在 D 盘 `reports/*.private.json`，Actions 日志只读已批准的匿名版面数量，不输出具体 ROI/框、书本原文或图像。
