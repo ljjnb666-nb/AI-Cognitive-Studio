@@ -32,8 +32,9 @@ def read_documents(archive, root, expected):
                 if fixture:
                     yield fixture, data
     else:
-        for path in Path(root).rglob('*.pdf'):
-            if path.is_symlink() or path.stat().st_size > MAX_SOURCE_BYTES:
+        for path in Path(root).rglob('*'):
+            if (not path.is_file() or path.suffix.lower() != '.pdf'
+                    or path.is_symlink() or path.stat().st_size > MAX_SOURCE_BYTES):
                 continue
             data = path.read_bytes()
             fixture = expected.get(hashlib.sha256(data).hexdigest())
@@ -132,11 +133,14 @@ def main():
               'tesseract_modes': list(MODES), 'image_scale': 1.6,
               'book_count': len(matched), 'page_count': len(rows),
               'ocr_executions': sum(len(row['modes']) for row in rows),
+              'ocr_errors': sum(m['status'] != 'ok' for row in rows for m in row['modes']),
               'rows': rows}
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', 'utf-8')
     print(f'Processed {len(matched)} books, {len(rows)} pages; private metadata only')
+    if report['ocr_errors']:
+        raise SystemExit(2)
 
 
 if __name__ == '__main__':
