@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"scripts"))
-from ebook_private_roi_alignment import Rejected, docling_bbox_normalized, docling_picture_boxes, match, main
+from ebook_private_roi_alignment import Rejected, docling_bbox_normalized, docling_picture_boxes, geometry_gate, match, main
 
 SHA = "a"*64
 REF = {"authority":"L2_AI_VISUAL_PROVISIONAL_NOT_HUMAN_GROUND_TRUTH", "regions":[
@@ -48,6 +48,33 @@ class Geometry(unittest.TestCase):
                 pictures=[Obj(prov=[Obj(page_no=126,bbox=None)])])
         with self.assertRaisesRegex(Rejected,"DOCLING_WRONG_LOCAL_PAGE_NUMBER"):
             docling_picture_boxes(doc)
+    def test_b15_valid_boxes_no_reference(self):
+        self.assertEqual(geometry_gate("B15",2,[(.1,.1,.3,.3),(.4,.4,.8,.8)],270,False),"PRIVATE_REFERENCE_UNAVAILABLE")
+    def test_b15_rotation_blocks_spatial_claim(self):
+        self.assertEqual(geometry_gate("B15",2,[(.1,.1,.3,.3),(.4,.4,.8,.8)],270,True),"ROTATED_DISPLAY_TRANSFORM_UNVERIFIED")
+    def test_b31_zero_boxes_fail_closed(self):
+        with self.assertRaisesRegex(Rejected,"SCANNED_PICTURE_GEOMETRY_INCOMPLETE"):
+            geometry_gate("B31",3,[],0,False)
+    def test_b31_partial_boxes_fail_closed(self):
+        with self.assertRaisesRegex(Rejected,"SCANNED_PICTURE_GEOMETRY_INCOMPLETE"):
+            geometry_gate("B31",3,[(.1,.1,.3,.3)],0,False)
+    def test_b31_good_boxes_may_align(self):
+        self.assertEqual(geometry_gate("B31",1,[(.1,.1,.3,.3)],0,True),"PRIVATE_REFERENCE_READY_TO_MATCH")
+    def test_invalid_rotation_rejected(self):
+        with self.assertRaisesRegex(Rejected,"INVALID_PDF_PAGE_ROTATION"):
+            geometry_gate("B31",1,[(.1,.1,.3,.3)],45,True)
+    def test_invalid_bbox_rejected(self):
+        with self.assertRaisesRegex(Rejected,"BBOX_OUTSIDE_NORMALIZED_PAGE"):
+            geometry_gate("B31",1,[(.1,.1,1.2,.5)],0,True)
+    def test_b16_no_picture_allowed(self):
+        self.assertEqual(geometry_gate("B16",0,[],0,False),"PRIVATE_REFERENCE_UNAVAILABLE")
+    def test_scanned_zero_picture_item_rejected(self):
+        with self.assertRaisesRegex(Rejected,"SCANNED_PICTURE_GEOMETRY_INCOMPLETE"):
+            geometry_gate("B15",0,[],270,False)
+    def test_duplicate_boxes_cannot_meet_count(self):
+        with self.assertRaisesRegex(Rejected,"SCANNED_PICTURE_GEOMETRY_INCOMPLETE"):
+            geometry_gate("B31",2,[(.1,.1,.3,.3)],0,False)
+
     def test_two_hits_not_certified(self):
         result=match(REF,CAND)
         self.assertEqual(result["one_to_one_region_matches"],2)

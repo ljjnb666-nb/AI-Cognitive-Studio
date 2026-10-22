@@ -53,6 +53,28 @@ def docling_bbox_normalized(bbox, page_size):
     return normalized_box([_finite(left)/width, _finite(top)/height,
                            _finite(right)/width, _finite(bottom)/height])
 
+def geometry_gate(book_id, picture_count, boxes, rotation, has_reference):
+    """Require real geometry; rotated PDFs cannot assume display coordinates."""
+    if type(rotation) is not int or rotation not in (0, 90, 180, 270):
+        raise Rejected("INVALID_PDF_PAGE_ROTATION")
+    if type(picture_count) is not int or not 0 <= picture_count <= 128:
+        raise Rejected("INVALID_PICTURE_COUNT")
+    if not isinstance(boxes, (list, tuple)) or len(boxes) > 128:
+        raise Rejected("INVALID_PICTURE_BOXES")
+    for box in boxes:
+        normalized_box(box)
+    if book_id in ("B15", "B31"):
+        if picture_count == 0 or len(boxes) != picture_count:
+            raise Rejected("SCANNED_PICTURE_GEOMETRY_INCOMPLETE")
+    elif len(boxes) > picture_count:
+        raise Rejected("PICTURE_GEOMETRY_OVERCOUNT")
+    if not has_reference:
+        return "PRIVATE_REFERENCE_UNAVAILABLE"
+    if rotation:
+        return "ROTATED_DISPLAY_TRANSFORM_UNVERIFIED"
+    return "PRIVATE_REFERENCE_READY_TO_MATCH"
+
+
 def docling_picture_boxes(document):
     pages = getattr(document, "pages", None)
     if not isinstance(pages, dict) or 1 not in pages:

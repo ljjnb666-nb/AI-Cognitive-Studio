@@ -7,7 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
-from ebook_private_roi_alignment import docling_picture_boxes, match as align_private_roi
+from ebook_private_roi_alignment import docling_picture_boxes, geometry_gate, match as align_private_roi
 from ebook_layout_signals import docling_layout_signals
 import re
 import shutil
@@ -74,6 +74,7 @@ def evaluate(fixture, source, converter, private_reference=None):
         if len(doc) != fixture["total_physical_pages"]:
             raise ValueError("physical page count mismatch")
         page = doc[physical - 1]
+        pdf_page_rotation = int(page.rotation)
         started = time.perf_counter()
         native_text = page.get_text("text", sort=True)
         native_reference = normalized(native_text)
@@ -113,8 +114,10 @@ def evaluate(fixture, source, converter, private_reference=None):
         docling_metric["layout_evidence"]["private_picture_boxes_normalized"] = [
             list(box) for box in picture_boxes]
         docling_metric["layout_evidence"]["picture_boxes_with_geometry"] = len(picture_boxes)
-        docling_metric["layout_evidence"]["spatial_alignment_status"] = "PRIVATE_REFERENCE_UNAVAILABLE"
-        if private_reference is not None and fixture["id"] in ("B15", "B31"):
+        docling_metric["layout_evidence"]["source_pdf_rotation_degrees"] = pdf_page_rotation
+        status = geometry_gate(fixture["id"], docling_metric["layout_evidence"]["picture_items"], picture_boxes, pdf_page_rotation, private_reference is not None)
+        docling_metric["layout_evidence"]["spatial_alignment_status"] = status
+        if status == "PRIVATE_REFERENCE_READY_TO_MATCH" and fixture["id"] in ("B15", "B31"):
             candidate = {
                 "schema_version": 1,
                 "book_id": fixture["id"],

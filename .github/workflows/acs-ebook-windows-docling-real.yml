@@ -120,7 +120,13 @@ jobs:
                 if ($null -ne $metric.native_reference_cer) { Write-Output ('ACS_DOCLING_REAL_NATIVE_REFERENCE_CER=' + $label + '|' + $metric.native_reference_cer) }
                 if ($metric.engine -eq 'Docling') {
                   if ($null -eq $metric.layout_evidence -or $metric.layout_evidence.graph_semantics -ne 'UNVERIFIED') { throw 'ACS_DOCLING_LAYOUT_EVIDENCE_MISSING_OR_UNSAFE' }
-                  Write-Output ('ACS_DOCLING_LAYOUT=' + $label + '|TEXT=' + $metric.layout_evidence.text_items + '|PICTURES=' + $metric.layout_evidence.picture_items + '|TABLES=' + $metric.layout_evidence.table_items + '|PROVENANCE=' + $metric.layout_evidence.items_with_provenance + '|GRAPH=UNVERIFIED')
+                  $layout=$metric.layout_evidence
+                  if ($entry.book_id -in @('B15','B31')) {
+                    if ($layout.picture_items -le 0 -or $layout.picture_boxes_with_geometry -ne $layout.picture_items) { throw 'ACS_SCANNED_PICTURE_GEOMETRY_MISSING' }
+                  }
+                  if ($entry.book_id -eq 'B15' -and $layout.source_pdf_rotation_degrees -ne 270) { throw 'ACS_B15_ROTATION_CHANGED' }
+                  if ($entry.book_id -eq 'B31' -and $layout.source_pdf_rotation_degrees -ne 0) { throw 'ACS_B31_ROTATION_CHANGED' }
+                  Write-Output ('ACS_DOCLING_LAYOUT=' + $label + '|TEXT=' + $layout.text_items + '|PICTURES=' + $layout.picture_items + '|BOXES=' + $layout.picture_boxes_with_geometry + '|ROTATION=' + $layout.source_pdf_rotation_degrees + '|ALIGNMENT=' + $layout.spatial_alignment_status + '|GRAPH=UNVERIFIED')
                 }
               }
             }
