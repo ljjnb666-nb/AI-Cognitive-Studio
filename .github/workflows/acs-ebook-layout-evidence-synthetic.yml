@@ -1,0 +1,29 @@
+name: ACS Ebook Layout Evidence Synthetic
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/pdf-parser-benchmark/scripts/ebook_layout_signals.py'
+      - 'tools/pdf-parser-benchmark/tests/test_ebook_layout_signals.py'
+      - '.github/workflows/acs-ebook-layout-evidence-synthetic.yml'
+permissions:
+  contents: read
+jobs:
+  layout-evidence:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Exact-head no-book layout evidence regressions
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 -m unittest discover -v -s tools/pdf-parser-benchmark/tests -p 'test_ebook_layout_signals.py'
+          echo ACS_LAYOUT_EVIDENCE_SYNTHETIC_PASS
+          echo ACS_CHART_GRAPH_SEMANTICS=UNVERIFIED

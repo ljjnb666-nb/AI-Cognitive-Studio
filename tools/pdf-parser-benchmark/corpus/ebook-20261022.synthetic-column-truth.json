@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "corpus_id": "ACS-EBOOK-20261022-A",
+  "evaluation": "EXECUTED_L3_SYNTHETIC_AUTHOR_CONTROLLED_TRUTH_NOT_REAL_BOOK_ACCURACY",
+  "environment": "Linux CPU sandbox, Tesseract 5 chi_sim+eng, Noto Sans CJK",
+  "ref_normalization": "Chinese and ASCII alphanumeric; whitespace and punctuation excluded",
+  "clean_text": [
+    {
+      "psm": 3,
+      "reference_chars": 162,
+      "edit_distance": 1,
+      "cer": 0.0062
+    },
+    {
+      "psm": 6,
+      "reference_chars": 162,
+      "edit_distance": 0,
+      "cer": 0
+    },
+    {
+      "psm": 11,
+      "reference_chars": 162,
+      "edit_distance": 10,
+      "cer": 0.0617
+    }
+  ],
+  "two_columns": [
+    {
+      "psm": 3,
+      "reference_chars": 88,
+      "edit_distance": 46,
+      "cer": 0.5227
+    },
+    {
+      "psm": 6,
+      "reference_chars": 88,
+      "edit_distance": 46,
+      "cer": 0.5227
+    },
+    {
+      "psm": 11,
+      "reference_chars": 88,
+      "edit_distance": 49,
+      "cer": 0.5568
+    }
+  ],
+  "layout_first": {
+    "strategy": "synthetic page split at image center, left crop followed by right crop, Tesseract PSM 6",
+    "reference_chars": 88,
+    "recognized_chars": 88,
+    "edit_distance": 1,
+    "cer": 0.0114,
+    "full_page_psm6_cer": 0.5227,
+    "full_page_multiset_character_error_ratio": 0.0227
+  },
+  "execution_count": 8,
+  "errors": 0,
+  "source_script": "tools/pdf-parser-benchmark/scripts/ebook_synthetic_column_truth.py",
+  "limits": [
+    "Two authored pages, not representative of real book distribution",
+    "Large measured CER includes reading order, not only character recognition",
+    "Vertical/complex multi-column layouts may not split at exact center",
+    "Independent hosted CI gate only verifies synthetic scenario"
+  ]
+}
