@@ -117,6 +117,7 @@ jobs:
                 Write-Output ('ACS_DOCLING_REAL_METRIC=' + $label + '|NOT_INSTALLED')
               } else {
                 Write-Output ('ACS_DOCLING_REAL_METRIC=' + $label + '|CHARS=' + $metric.characters + '|MS=' + $metric.wall_ms)
+                if ($null -ne $metric.native_reference_cer) { Write-Output ('ACS_DOCLING_REAL_NATIVE_REFERENCE_CER=' + $label + '|' + $metric.native_reference_cer) }
               }
             }
           }
