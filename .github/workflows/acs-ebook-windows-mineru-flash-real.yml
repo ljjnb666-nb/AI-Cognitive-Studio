@@ -1,0 +1,82 @@
+name: ACS Ebook Windows MinerU4 Flash Real Private Pages
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/pdf-parser-benchmark/scripts/ebook_windows_mineru_flash_real.py'
+      - 'tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+      - '.github/workflows/acs-ebook-windows-mineru-flash-real.yml'
+permissions:
+  contents: read
+concurrency:
+  group: acs-ebook-windows-mineru-flash-real
+  cancel-in-progress: false
+jobs:
+  mineru-flash:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-tool-selection-20261022' && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 22
+    steps:
+      - name: Checkout owner PR exact SHA
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'http.proxy'
+          GIT_CONFIG_VALUE_0: 'socks5h://127.0.0.1:10808'
+        with:
+          persist-credentials: false
+          clean: false
+          path: acs-ebook-mineru-flash
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Three private-book MinerU Flash offline native-only trial
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          MINERU_MODEL_SOURCE: local
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          MODELSCOPE_OFFLINE: '1'
+          HF_DATASETS_OFFLINE: '1'
+          OMP_NUM_THREADS: '2'
+          MKL_NUM_THREADS: '2'
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git -C acs-ebook-mineru-flash rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'ACS_MINERU_FLASH_HEAD_SHA_MISMATCH' }
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ([double]$os.FreePhysicalMemory -lt 4194304) { throw 'ACS_MINERU_FLASH_FREE_MEMORY_UNDER_4GIB' }
+          $drive=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='D:'" -ErrorAction Stop
+          if ([double]$drive.FreeSpace -lt 17179869184) { throw 'ACS_MINERU_FLASH_D_FREE_UNDER_16GIB' }
+          $private='D:\ai-cognitive-pdf-benchmark-data'
+          $reportRoot=Join-Path $private 'reports'
+          $temp=Join-Path $private 'temp'
+          foreach ($dir in @($private,$reportRoot,$temp)) {
+            if (-not (Test-Path -LiteralPath $dir -PathType Container)) { throw 'ACS_MINERU_FLASH_PRIVATE_ROOT_MISSING' }
+            $entry=Get-Item -LiteralPath $dir -Force -ErrorAction Stop
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'ACS_MINERU_FLASH_UNSAFE_REPARSE_ROOT' }
+          }
+          $candidates=@(
+            (Join-Path $private 'python\mineru\Scripts\mineru-kit.exe'),
+            (Join-Path $private 'tool-env\mineru-4.0.3\Scripts\mineru-kit.exe'),
+            (Join-Path $private 'tool-env\mineru-4\Scripts\mineru-kit.exe')
+          )
+          $kit=@($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+          if ($kit.Count -ne 1) { throw 'ACS_MINERU_FLASH_VERIFIED_KIT_NOT_FOUND' }
+          $py=(Get-Command python -ErrorAction Stop).Source
+          $runner='acs-ebook-mineru-flash/tools/pdf-parser-benchmark/scripts/ebook_windows_mineru_flash_real.py'
+          $manifest='acs-ebook-mineru-flash/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $unique=[guid]::NewGuid().ToString('N')
+          $report=Join-Path $reportRoot ('ebook-mineru-flash-' + $env:EXPECTED_SHA.Substring(0,12) + '-' + $unique + '.private.json')
+          $env:TEMP=$temp
+          $env:TMP=$temp
+          & $py $runner --root $private --manifest $manifest --kit $kit[0] --output $report
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_MINERU_FLASH_REAL_PRIVATE_BENCHMARK_FAILED' }
+          $data=Get-Content -LiteralPath $report -Raw -Encoding UTF8 | ConvertFrom-Json
+          if (@($data.rows).Count -ne 3 -or @($data.failed).Count -gt 0 -or @($data.missing).Count -gt 0) { throw 'ACS_MINERU_FLASH_PRIVATE_REPORT_INVARIANT_FAILED' }
+          Write-Output ('ACS_MINERU_FLASH_VERSION=' + $data.mineru_version)
+          Write-Output ('ACS_MINERU_BASIC_ONNX_CLASS=' + $data.model_verification_class)
+          foreach($entry in $data.rows) {
+            if ($entry.status -ne 'SUCCESS') { throw 'ACS_MINERU_FLASH_UNEXPECTED_PAGE_FAILURE' }
+            Write-Output ('ACS_MINERU_FLASH_METRIC=' + $entry.book_id + '_P' + $entry.physical_page + '|CHARS=' + $entry.characters + '|MS=' + $entry.wall_ms)
+            if ($null -ne $entry.reference_layer_cer) { Write-Output ('ACS_MINERU_FLASH_NATIVE_REFERENCE_CER=' + $entry.book_id + '_P' + $entry.physical_page + '|' + $entry.reference_layer_cer) }
+          }
+          Write-Output 'ACS_MINERU_FLASH_OUTPUTS_PRIVATE_D_DRIVE_ONLY'
