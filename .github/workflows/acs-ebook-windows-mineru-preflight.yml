@@ -1,0 +1,71 @@
+name: ACS Ebook Windows MinerU Existing Runtime Preflight
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/acs-ebook-windows-mineru-preflight.yml'
+      - 'tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+permissions:
+  contents: read
+concurrency:
+  group: acs-ebook-windows-mineru-preflight
+  cancel-in-progress: false
+jobs:
+  inspect:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-tool-selection-20261022' && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact PR SHA
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'http.proxy'
+          GIT_CONFIG_VALUE_0: 'socks5h://127.0.0.1:10808'
+        with:
+          persist-credentials: false
+          clean: false
+          path: acs-ebook-mineru-inspect
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Read-only existing MinerU 4 environment inventory; no model installation
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          HF_DATASETS_OFFLINE: '1'
+          MODELSCOPE_OFFLINE: '1'
+          MINERU_MODEL_SOURCE: 'local'
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git -C acs-ebook-mineru-inspect rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'ACS_MINERU_PREFLIGHT_HEAD_MISMATCH' }
+          $root='D:\ai-cognitive-pdf-benchmark-data'
+          if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'ACS_MINERU_PRIVATE_ROOT_NOT_FOUND' }
+          $paths=@(
+            (Join-Path $root 'python\mineru\Scripts\python.exe'),
+            (Join-Path $root 'tool-env\mineru-4.0.3\Scripts\python.exe'),
+            (Join-Path $root 'tool-env\mineru-4\Scripts\python.exe')
+          )
+          $found=0
+          $valid4=0
+          foreach($py in $paths) {
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { continue }
+            $found++
+            $version=(& $py -c "import importlib.util, importlib.metadata; print(importlib.metadata.version('mineru') if importlib.util.find_spec('mineru') else '')" 2>$null)
+            if ($LASTEXITCODE -ne 0) { continue }
+            $version=($version | Select-Object -Last 1).Trim()
+            if ($version -match '^4[.]\d+[.]\d+([a-zA-Z0-9.+-]*)?$') {
+              $valid4++
+              Write-Output ('ACS_MINERU_INSTALLED_VERSION=' + $version)
+            }
+          }
+          $models=Test-Path -LiteralPath (Join-Path $root 'models') -PathType Container
+          Write-Output ('ACS_MINERU_EXISTING_ENV_CANDIDATES=' + $found)
+          Write-Output ('ACS_MINERU_VERIFIED_4X_INSTALLS=' + $valid4)
+          Write-Output ('ACS_MINERU_LEGACY_MODELS_DIR_PRESENT=' + $models.ToString().ToLowerInvariant())
+          if ($valid4 -eq 0) {
+            Write-Output 'ACS_MINERU_STATUS=NOT_READY_NO_VERIFIED_4X_RUNTIME'
+          } else {
+            Write-Output 'ACS_MINERU_STATUS=4X_RUNTIME_FOUND_MODEL_READINESS_UNVERIFIED'
+          }
+          Write-Output 'ACS_MINERU_PREFLIGHT_READONLY_NO_DOWNLOAD_NO_INFERENCE'
