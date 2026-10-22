@@ -164,7 +164,7 @@ def summarize_model_show(result, stdout_path, stderr_path):
         "mentions_onnx_bundle": "mineru-4_models_onnx" in all_text,
         "mentions_model_base_dir": "base_dir" in all_text or "model base" in all_text,
         "contains_not_ready_signal": bool(re.search(r"not[ _-]?ready|not[ _-]?found|incomplete|missing", all_text)),
-        "contains_ready_signal": bool(re.search(r"\\bready\\b", all_text)),
+        "contains_ready_signal": bool(re.search(r"\bready\b", all_text)),
         "contains_command_usage_signal": bool(re.search(r"no such option|unrecognized arguments|no such command|usage:", all_text)),
         "stdout_sha256": hashlib.sha256(out.encode("utf-8")).hexdigest(),
         "stderr_sha256": hashlib.sha256(err.encode("utf-8")).hexdigest(),
