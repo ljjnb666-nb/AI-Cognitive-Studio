@@ -80,6 +80,13 @@ jobs:
           Write-Output ('ACS_MINERU_BASIC_ONNX_EXPLICIT_BUNDLE_PRESENT=' + $data.model_root_diagnostics.explicit_root_bundle_dir_present)
           Write-Output ('ACS_MINERU_BASIC_ONNX_INHERITED_ROOT_CLASS=' + $data.model_root_diagnostics.inherited_root_verify_class)
           Write-Output ('ACS_MINERU_BASIC_ONNX_INHERITED_ROOT_EXIT=' + $data.model_root_diagnostics.inherited_root_verify_exit_code)
+          foreach($mode in @('explicit','inherited')) {
+            $diag=if ($mode -eq 'explicit') { $data.model_root_diagnostics.explicit_model_show } else { $data.model_root_diagnostics.inherited_model_show }
+            if ($null -eq $diag) { throw 'ACS_MINERU_MODEL_SHOW_DIAGNOSTICS_MISSING' }
+            Write-Output ('ACS_MINERU_SHOW=' + $mode + '|EXIT=' + $diag.exit_code + '|OUT_BYTES=' + $diag.stdout_bytes + '|ERR_BYTES=' + $diag.stderr_bytes + '|ONNX_MENTION=' + $diag.mentions_onnx_bundle + '|BASE_DIR_MENTION=' + $diag.mentions_model_base_dir + '|MISSING_SIGNAL=' + $diag.contains_not_ready_signal + '|USAGE_SIGNAL=' + $diag.contains_command_usage_signal)
+          }
+          Write-Output ('ACS_MINERU_DEFAULT_HOME_ONNX_EXISTS=' + $data.model_root_diagnostics.default_home_bundle_dir_present)
+          Write-Output ('ACS_MINERU_DEFAULT_CONFIG_EXISTS=' + $data.model_root_diagnostics.default_config_yaml_present)
           foreach($entry in $data.rows) {
             if ($entry.status -notin @('NATIVE_TEXT_EXTRACTED','FLASH_NO_NATIVE_TEXT_CONTROL')) { throw 'ACS_MINERU_FLASH_UNEXPECTED_PAGE_FAILURE' }
             Write-Output ('ACS_MINERU_FLASH_METRIC=' + $entry.book_id + '_P' + $entry.physical_page + '|STATE=' + $entry.status + '|TEXT_CHARS=' + $entry.characters + '|MS=' + $entry.wall_ms)
