@@ -130,10 +130,11 @@ def evaluate(book, payload, kit, temp_root, env):
         source = Path(tmp) / (book["id"] + "_physical_" + str(physical) + ".pdf")
         target = Path(tmp) / "output.md"
         source.write_bytes(data)
+        private_logs = Path(env["ACS_MINERU_PRIVATE_LOG_DIR"])
         result = run_private(
             [str(kit), "parse", str(source), "-o", str(target),
              "--tier", "flash", "--ocr-mode", "txt"],
-            env, tmp, "mineru-flash-" + book["id"], 120,
+            env, private_logs, env["ACS_MINERU_RUN_ID"] + "-flash-" + book["id"], 120,
         )
         row = {"book_id": book["id"], "physical_page": physical,
                "engine": "MinerU4_Flash_native_txt",
@@ -181,14 +182,20 @@ def main():
     private_temp = root / "temp"
     private_temp.mkdir(parents=True, exist_ok=True)
     env = offline_environment(root)
+    private_logs = root / "reports" / "mineru-flash-private-logs"
+    private_logs.mkdir(parents=True, exist_ok=True)
+    from uuid import uuid4
+    run_id = uuid4().hex
+    env["ACS_MINERU_PRIVATE_LOG_DIR"] = str(private_logs)
+    env["ACS_MINERU_RUN_ID"] = run_id
     rows = {}
-    with tempfile.TemporaryDirectory(prefix="acs-mineru-model-check-", dir=private_temp) as model_temp:
-        cmd = [str(kit), "models", "verify", "--tier", "basic", "--small-backend", "onnx"]
-        verification = run_private(cmd, env, model_temp, "basic-onnx-verify", 90)
-        verified = classify_verify(
-            verification, Path(model_temp) / "basic-onnx-verify.stderr.private.log",
-            Path(model_temp) / "basic-onnx-verify.stdout.private.log",
-        )
+    prefix = run_id + "-basic-onnx-verify"
+    cmd = [str(kit), "models", "verify", "--tier", "basic", "--small-backend", "onnx"]
+    verification = run_private(cmd, env, private_logs, prefix, 90)
+    verified = classify_verify(
+        verification, private_logs / (prefix + ".stderr.private.log"),
+        private_logs / (prefix + ".stdout.private.log"),
+    )
     print("ACS_MINERU_BASIC_ONNX_CLASS=" + verified, flush=True)
     for data in candidates(root):
         item = required.get(hashlib.sha256(data).hexdigest())
@@ -219,7 +226,8 @@ def main():
         "limits": [
             "Flash --ocr-mode txt does not test OCR on scanned pages",
             "Basic/ONNX verification is independent of Flash parsing and does not download weights",
-            "All original source, converted PDFs, Markdown and raw stderr/stdout retained in local private temporary storage only",
+            "Book sources and converted PDF/Markdown never leave the private D: drive; temporary parses are deleted",
+            "Raw subprocess logs are preserved only in D: private reports; no raw stdout/stderr is printed to GitHub",
             "Text-layer CER is a proxy, not independently adjudicated truth",
         ],
     }
