@@ -122,15 +122,29 @@ def main():
             continue
         if len(raw) != fixture["size"]:
             raise ValueError("SHA-selected length mismatch")
-        results[fixture["id"]] = evaluate(fixture, raw, pipeline)
-        print("ACS_DOCLING_REAL_BOOK_COMPLETE=" + fixture["id"], flush=True)
+        try:
+            results[fixture["id"]] = {
+                "status": "SUCCESS",
+                **evaluate(fixture, raw, pipeline),
+            }
+            print("ACS_DOCLING_REAL_BOOK_COMPLETE=" + fixture["id"], flush=True)
+        except Exception as exc:
+            results[fixture["id"]] = {
+                "status": "FAILURE",
+                "book_id": fixture["id"],
+                "physical_page": PAGES[fixture["id"]],
+                "error_type": type(exc).__name__,
+            }
+            print("ACS_DOCLING_REAL_BOOK_FAILED=" + fixture["id"]
+                  + ":" + type(exc).__name__, flush=True)
         del raw
     missing = sorted(set(PAGES).difference(results))
+    failed = sorted(k for k, val in results.items() if val["status"] != "SUCCESS")
     report = {"schema_version": 1, "corpus_id": corpus["corpus_id"],
               "evidence_level": "L0_L1_REAL_PRIVATE_PAGES_NOT_ACCURACY",
               "docling_version": importlib.metadata.version("docling"),
               "docling_ocr_backend": ocr_kind, "books": sorted(results),
-              "missing": missing, "rows": [results[k] for k in sorted(results)],
+              "missing": missing, "failed": failed, "rows": [results[k] for k in sorted(results)],
               "limits": ["No CER without independent real-page ground truth",
                          "Docling text alone does not verify chart/graph semantics",
                          "No book text or images exported"]}
@@ -139,8 +153,9 @@ def main():
     staging = output.with_suffix(".tmp")
     staging.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", "utf-8")
     staging.replace(output)
-    if missing:
-        raise SystemExit("SHA-MATCHED-BOOKS-MISSING: " + ",".join(missing))
+    if missing or failed:
+        raise SystemExit("REAL_BENCHMARK_INCOMPLETE missing="
+                         + ",".join(missing) + " failed=" + ",".join(failed))
     print("ACS_DOCLING_REAL_PRIVATE_PASS=" + str(len(results)), flush=True)
 
 
