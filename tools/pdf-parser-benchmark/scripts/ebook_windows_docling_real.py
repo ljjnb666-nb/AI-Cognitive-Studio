@@ -52,6 +52,7 @@ def compact(engine, output, elapsed):
 
 def evaluate(fixture, source, converter):
     import fitz
+    from rapidfuzz.distance.Levenshtein import distance
     from docling.datamodel.base_models import ConversionStatus
     physical = PAGES[fixture["id"]]
     with fitz.open(stream=source, filetype="pdf") as doc:
@@ -59,8 +60,9 @@ def evaluate(fixture, source, converter):
             raise ValueError("physical page count mismatch")
         page = doc[physical - 1]
         started = time.perf_counter()
-        simple = compact("PyMuPDF", page.get_text("text", sort=True),
-                         time.perf_counter() - started)
+        native_text = page.get_text("text", sort=True)
+        native_reference = normalized(native_text)
+        simple = compact("PyMuPDF", native_text, time.perf_counter() - started)
         single = fitz.open()
         single.insert_pdf(doc, from_page=physical - 1, to_page=physical - 1)
         one_page = single.tobytes()
@@ -88,7 +90,14 @@ def evaluate(fixture, source, converter):
         duration = time.perf_counter() - started
         if result.status != ConversionStatus.SUCCESS:
             raise RuntimeError("Docling status: " + str(result.status))
-        rows.append(compact("Docling", result.document.export_to_markdown(), duration))
+        recognized = normalized(result.document.export_to_markdown())
+        docling_metric = compact("Docling", recognized, duration)
+        if native_reference:
+            docling_metric["native_reference_edit_distance"] = distance(native_reference, recognized)
+            docling_metric["native_reference_cer"] = round(
+                docling_metric["native_reference_edit_distance"] / len(native_reference), 4)
+            docling_metric["reference_quality"] = "NATIVE_PDF_TEXT_LAYER_PROXY_NOT_GROUND_TRUTH"
+        rows.append(docling_metric)
     return {"book_id": fixture["id"], "physical_page": physical,
             "source_sha256": fixture["sha256"], "results": rows,
             "docling_status": "SUCCESS"}
