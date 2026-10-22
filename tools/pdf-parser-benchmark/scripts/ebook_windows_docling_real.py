@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+from ebook_layout_signals import docling_layout_signals
 import re
 import shutil
 import subprocess
@@ -105,6 +106,7 @@ def evaluate(fixture, source, converter):
             raise RuntimeError("Docling status: " + str(result.status))
         recognized = normalized(result.document.export_to_markdown())
         docling_metric = compact("Docling", recognized, duration)
+        docling_metric["layout_evidence"] = docling_layout_signals(result.document)
         if native_reference:
             docling_metric["native_reference_edit_distance"] = edit_distance(native_reference, recognized)
             docling_metric["native_reference_cer"] = round(
