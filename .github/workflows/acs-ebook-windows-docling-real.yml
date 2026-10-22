@@ -118,6 +118,10 @@ jobs:
               } else {
                 Write-Output ('ACS_DOCLING_REAL_METRIC=' + $label + '|CHARS=' + $metric.characters + '|MS=' + $metric.wall_ms)
                 if ($null -ne $metric.native_reference_cer) { Write-Output ('ACS_DOCLING_REAL_NATIVE_REFERENCE_CER=' + $label + '|' + $metric.native_reference_cer) }
+                if ($metric.engine -eq 'Docling') {
+                  if ($null -eq $metric.layout_evidence -or $metric.layout_evidence.graph_semantics -ne 'UNVERIFIED') { throw 'ACS_DOCLING_LAYOUT_EVIDENCE_MISSING_OR_UNSAFE' }
+                  Write-Output ('ACS_DOCLING_LAYOUT=' + $label + '|TEXT=' + $metric.layout_evidence.text_items + '|PICTURES=' + $metric.layout_evidence.picture_items + '|TABLES=' + $metric.layout_evidence.table_items + '|PROVENANCE=' + $metric.layout_evidence.items_with_provenance + '|GRAPH=UNVERIFIED')
+                }
               }
             }
           }
