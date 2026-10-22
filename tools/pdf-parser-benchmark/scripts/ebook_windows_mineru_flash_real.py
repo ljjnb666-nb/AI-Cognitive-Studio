@@ -151,6 +151,56 @@ def classify_verify(result, stderr_log, stdout_log):
     return "MODEL_VERIFY_NONZERO_UNCLASSIFIED_PRIVATE_LOG"
 
 
+def summarize_model_verify(result, stdout_path, stderr_path):
+    """Classify local model verification without disclosing paths or raw output."""
+    data = []
+    total = 0
+    for filename in (stdout_path, stderr_path):
+        if Path(filename).is_file():
+            binary = Path(filename).read_bytes()
+            total += len(binary)
+            data.append(binary.decode("utf-8", errors="replace"))
+    message = "\n".join(data).lower()
+    message = re.sub(r"\\x1b\\[[0-9;]*m", "", message)
+    # All values below are aggregate classifications, never excerpts from logs.
+    patterns = {
+        "missing": r"\\bmissing\\b|not found|not present|does not exist|❌|✗",
+        "incomplete": r"\\bincomplete\\b|not ready|not_ready|ready\\s*[:=]\\s*(?:no|false|0)",
+        "permission": r"permission denied|access is denied",
+        "dependency": r"modulenotfounderror|importerror|no module named",
+        "invalid_cli": r"no such option|unrecognized arguments|no such command|unexpected argument",
+        "traceback": r"traceback \\(most recent call last\\)",
+        "onnx_bundle": r"mineru-4_models_onnx",
+        "torch_bundle": r"mineru-4_models_torch",
+        "ready_true": r"ready\\s*[:=]\\s*(?:yes|true|1)",
+        "error": r"\\berror\\b|\\bfailed\\b",
+    }
+    flags = {key: bool(re.search(regex, message)) for key, regex in patterns.items()}
+    if result.get("status") == "TIMEOUT":
+        category = "TIMEOUT"
+    elif result["exit_code"] == 0:
+        category = "READY_FILES_ONLY_NOT_INFERRED"
+    elif flags["invalid_cli"]:
+        category = "CLI_ARGUMENT_INVALID"
+    elif flags["dependency"] or flags["traceback"]:
+        category = "RUNTIME_ERROR"
+    elif flags["permission"]:
+        category = "ACCESS_ERROR"
+    elif flags["incomplete"] or flags["missing"]:
+        category = "MODEL_ASSET_INCOMPLETE"
+    elif total == 0:
+        category = "NONZERO_WITHOUT_CAPTURED_OUTPUT"
+    else:
+        category = "NONZERO_UNCLASSIFIED_PRIVATE_LOG"
+    return {
+        "class": category,
+        "exit_code": result["exit_code"],
+        "captured_bytes": total,
+        "flags": flags,
+        "log_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+    }
+
+
 def summarize_model_show(result, stdout_path, stderr_path):
     """Return coarse, non-sensitive signals only; keep full CLI output on D:."""
     out = Path(stdout_path).read_text(encoding="utf-8", errors="replace") if Path(stdout_path).is_file() else ""
@@ -260,7 +310,12 @@ def main():
         verification, private_logs / (prefix + ".stderr.private.log"),
         private_logs / (prefix + ".stdout.private.log"),
     )
+    explicit_verify_diagnostics = summarize_model_verify(
+        verification, private_logs / (prefix + ".stdout.private.log"),
+        private_logs / (prefix + ".stderr.private.log"))
     print("ACS_MINERU_BASIC_ONNX_CLASS=" + verified, flush=True)
+    print("ACS_MINERU_BASIC_ONNX_VERIFICATION_DETAIL="
+          + explicit_verify_diagnostics["class"], flush=True)
     # Diagnostic ablation: the old installed models may live under MinerU's
     # configured default root, not the new benchmark's explicit models root.
     # Both invocations are file-only, enforce the local source and use the
@@ -281,11 +336,18 @@ def main():
         "inherited_root_verify_class": inherited_class,
         "inherited_root_verify_exit_code": inherited["exit_code"],
         "inherited_root_verify_ms": inherited["wall_ms"],
-        "models_show_not_yet_queried": True,
+
     }
     print("ACS_MINERU_ONNX_BUNDLE_AT_BENCHMARK_ROOT="
           + str(explicit_bundle.is_dir()).lower(), flush=True)
+    inherited_verify_diagnostics = summarize_model_verify(
+        inherited, private_logs / (inherited_prefix + ".stdout.private.log"),
+        private_logs / (inherited_prefix + ".stderr.private.log"))
+    model_checks["explicit_verify_detail"] = explicit_verify_diagnostics
+    model_checks["inherited_verify_detail"] = inherited_verify_diagnostics
     print("ACS_MINERU_BASIC_ONNX_INHERITED_CLASS=" + inherited_class, flush=True)
+    print("ACS_MINERU_BASIC_ONNX_INHERITED_VERIFICATION_DETAIL="
+          + inherited_verify_diagnostics["class"], flush=True)
     show_cmd = [str(kit), "models", "show", "--small-backend", "onnx"]
     for label, show_env in (("explicit", env), ("inherited", inherited_env)):
         show_prefix = run_id + "-" + label + "-models-show"
