@@ -62,6 +62,9 @@ jobs:
           $kit=@($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
           if ($kit.Count -ne 1) { throw 'ACS_MINERU_FLASH_VERIFIED_KIT_NOT_FOUND' }
           $py=(Get-Command python -ErrorAction Stop).Source
+          $tests='acs-ebook-mineru-flash/tools/pdf-parser-benchmark/tests/test_mineru_flash_metrics.py'
+          & $py $tests
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_MINERU_FLASH_METADATA_SANITIZER_UNIT_TEST_FAILED' }
           $runner='acs-ebook-mineru-flash/tools/pdf-parser-benchmark/scripts/ebook_windows_mineru_flash_real.py'
           $manifest='acs-ebook-mineru-flash/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
           $unique=[guid]::NewGuid().ToString('N')
