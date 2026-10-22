@@ -18,6 +18,44 @@ class EvidenceGate(unittest.TestCase):
             validate(data)
     def test_valid_ledger(self):
         self.assertEqual(validate(self.sample), 12)
+    def test_plausible_character_count_drift_rejected(self):
+        d=copy.deepcopy(self.sample)
+        self.row(d,"PaddleOCR","B15")["characters"]=223
+        self.rejected(d)
+    def test_plausible_latency_drift_rejected(self):
+        d=copy.deepcopy(self.sample)
+        self.row(d,"Docling","B31")["wall_ms"]=10044.2
+        self.rejected(d)
+    def test_native_proxy_drift_rejected(self):
+        d=copy.deepcopy(self.sample)
+        self.row(d,"Docling","B16")["native_text_layer_proxy_cer"]=0.0035
+        self.rejected(d)
+    def test_document_hash_mismatch_rejected(self):
+        d=copy.deepcopy(self.sample)
+        self.row(d,"PaddleOCR","B31")["source_document_sha256"]="a"*64
+        self.rejected(d)
+    def test_cross_book_hash_swap_rejected(self):
+        d=copy.deepcopy(self.sample)
+        self.row(d,"Docling","B15")["source_document_sha256"]=self.row(d,"Docling","B16")["source_document_sha256"]
+        self.rejected(d)
+    def test_manifest_hash_drift_rejected(self):
+        d=copy.deepcopy(self.sample)
+        manifest=json.loads((BASE/"corpus"/"ebook-20261022.manifest.json").read_text(encoding="utf-8"))
+        entry=next(x for x in manifest["sources"] if x["id"]=="B15")
+        entry["sha256"]="a"*64
+        with self.assertRaises(GateError):
+            validate(d, manifest)
+    def test_manifest_page_mismatch_rejected(self):
+        d=copy.deepcopy(self.sample)
+        manifest=json.loads((BASE/"corpus"/"ebook-20261022.manifest.json").read_text(encoding="utf-8"))
+        entry=next(x for x in manifest["sources"] if x["id"]=="B31")
+        entry["selected_physical_pages"]=[15]
+        with self.assertRaises(GateError):
+            validate(d, manifest)
+    def test_spatial_box_invented_on_non_docling_rejected(self):
+        d=copy.deepcopy(self.sample)
+        self.row(d,"PaddleOCR","B15")["picture_boxes"]=2
+        self.rejected(d)
     def test_winner_rejected(self):
         d=copy.deepcopy(self.sample); d["selection_status"]="FINAL"; self.rejected(d)
     def test_wrong_sha(self):

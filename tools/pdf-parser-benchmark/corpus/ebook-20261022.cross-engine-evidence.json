@@ -41,7 +41,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "62750b026c0f908d7e637dc2f774a29ac539b82ee145eb878cbabc0ba9f0654b"
     },
     {
       "engine": "Docling",
@@ -63,7 +64,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "922b2cffaac356b0ad04d949b988490a1b4a2b673c6e41075383b6a776a49126"
     },
     {
       "engine": "Docling",
@@ -85,7 +87,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "bf0b7038334a1485462670c3589bf3f09f7c8e5c37621bc3b6940633b5e04fc8"
     },
     {
       "engine": "PaddleOCR",
@@ -107,7 +110,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "62750b026c0f908d7e637dc2f774a29ac539b82ee145eb878cbabc0ba9f0654b"
     },
     {
       "engine": "PaddleOCR",
@@ -129,7 +133,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "922b2cffaac356b0ad04d949b988490a1b4a2b673c6e41075383b6a776a49126"
     },
     {
       "engine": "PaddleOCR",
@@ -151,7 +156,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "bf0b7038334a1485462670c3589bf3f09f7c8e5c37621bc3b6940633b5e04fc8"
     },
     {
       "engine": "MinerU Flash",
@@ -173,7 +179,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "62750b026c0f908d7e637dc2f774a29ac539b82ee145eb878cbabc0ba9f0654b"
     },
     {
       "engine": "MinerU Flash",
@@ -195,7 +202,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "922b2cffaac356b0ad04d949b988490a1b4a2b673c6e41075383b6a776a49126"
     },
     {
       "engine": "MinerU Flash",
@@ -217,7 +225,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "bf0b7038334a1485462670c3589bf3f09f7c8e5c37621bc3b6940633b5e04fc8"
     },
     {
       "engine": "PyMuPDF",
@@ -239,7 +248,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "62750b026c0f908d7e637dc2f774a29ac539b82ee145eb878cbabc0ba9f0654b"
     },
     {
       "engine": "PyMuPDF",
@@ -261,7 +271,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "922b2cffaac356b0ad04d949b988490a1b4a2b673c6e41075383b6a776a49126"
     },
     {
       "engine": "PyMuPDF",
@@ -283,7 +294,8 @@
       "accuracy_claim": "NOT_ESTABLISHED",
       "graph_semantics": "UNVERIFIED",
       "human_verified": false,
-      "graph_verified": false
+      "graph_verified": false,
+      "source_document_sha256": "bf0b7038334a1485462670c3589bf3f09f7c8e5c37621bc3b6940633b5e04fc8"
     }
   ]
 }
