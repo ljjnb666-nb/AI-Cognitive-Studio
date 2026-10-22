@@ -84,6 +84,37 @@ class Geometry(unittest.TestCase):
         candidate=copy.deepcopy(CAND)
         candidate["picture_boxes_normalized"]=[[.2,.2,.8,.8]]
         self.assertLessEqual(match(REF,candidate)["one_to_one_region_matches"],1)
+    def test_ambiguous_overlap_preserves_two_possible_matches(self):
+        # R0 matches both boxes but R1 can only match B0.
+        # Greedy highest-IoU would take R0->B0 and undercount as one.
+        reference = {"authority": "L2_AI_VISUAL_PROVISIONAL_NOT_HUMAN_GROUND_TRUTH",
+                     "regions": [
+                         {"book_id": "B15", "physical_page": 109,
+                          "source_document_sha256": SHA,
+                          "evidence": "L2_AI_VISUAL_PROVISIONAL",
+                          "roi_xyxy_normalized": [.1, .1, .7, .7]},
+                         {"book_id": "B15", "physical_page": 109,
+                          "source_document_sha256": SHA,
+                          "evidence": "L2_AI_VISUAL_PROVISIONAL",
+                          "roi_xyxy_normalized": [.1, .1, .4, .4]}]}
+        candidate = copy.deepcopy(CAND)
+        candidate["picture_boxes_normalized"] = [
+            [.1, .1, .7, .7], [.4, .4, .7, .7]]
+        result = match(reference, candidate)
+        self.assertEqual(result["one_to_one_region_matches"], 2)
+        self.assertEqual(result["unmatched_reference_regions"], 0)
+        self.assertEqual(result["unmatched_picture_boxes"], 0)
+        self.assertEqual(result["status"], "PROVISIONAL_SPATIAL_OVERLAP_ONLY")
+        self.assertFalse(result["graph_verified"])
+        self.assertIsNone(result["certified_graph_f1"])
+
+    def test_ambiguous_matching_is_deterministic(self):
+        reference = copy.deepcopy(REF)
+        candidate = copy.deepcopy(CAND)
+        first = match(reference, candidate)
+        for _ in range(3):
+            self.assertEqual(match(reference, candidate), first)
+
     def test_empty_boxes_is_not_accuracy_zero(self):
         candidate=copy.deepcopy(CAND)
         candidate["picture_boxes_normalized"]=[]
