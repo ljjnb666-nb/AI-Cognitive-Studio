@@ -1,0 +1,75 @@
+name: ACS Ebook Windows Docling Real Private Pages
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/pdf-parser-benchmark/scripts/ebook_windows_docling_real.py'
+      - 'tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+      - '.github/workflows/acs-ebook-windows-docling-real.yml'
+permissions:
+  contents: read
+concurrency:
+  group: acs-ebook-windows-docling-private
+  cancel-in-progress: false
+jobs:
+  docling-real:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-tool-selection-20261022' && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact same-repo PR head
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          persist-credentials: false
+          clean: false
+          path: acs-ebook-docling-private
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Resource-gated isolated Docling install and 3 real-page evaluation
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          OMP_NUM_THREADS: '2'
+          MKL_NUM_THREADS: '2'
+          HF_HUB_DISABLE_TELEMETRY: '1'
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git -C acs-ebook-docling-private rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'ACS_DOCLING_EXACT_SHA_MISMATCH' }
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ([double]$os.FreePhysicalMemory -lt 4194304) { throw 'ACS_DOCLING_FREE_RAM_UNDER_4GIB' }
+          $drive=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='D:'" -ErrorAction Stop
+          if ([double]$drive.FreeSpace -lt 17179869184) { throw 'ACS_DOCLING_D_DRIVE_FREE_UNDER_16GIB' }
+          $private='D:\ai-cognitive-pdf-benchmark-data'
+          if (-not (Test-Path -LiteralPath $private -PathType Container)) { throw 'ACS_DOCLING_PRIVATE_CORPUS_NOT_FOUND' }
+          $cache=Join-Path $private 'model-cache'
+          $tool=Join-Path $private 'tool-env\docling-2.141.0'
+          $temp=Join-Path $private 'temp'
+          foreach($dir in @($cache,$temp,(Split-Path $tool -Parent))) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+          $env:HF_HOME=$cache
+          $env:TORCH_HOME=(Join-Path $cache 'torch')
+          $env:TEMP=$temp
+          $env:TMP=$temp
+          $env:HTTPS_PROXY='socks5h://127.0.0.1:10808'
+          $env:HTTP_PROXY='socks5h://127.0.0.1:10808'
+          $env:ALL_PROXY='socks5h://127.0.0.1:10808'
+          $python=(Get-Command python -ErrorAction Stop).Source
+          $venvPython=Join-Path $tool 'Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+            & $python -m venv $tool
+            if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_VENV_CREATE_FAILED' }
+          }
+          $check=(& $venvPython -m pip show docling 2>$null | Select-String '^Version: ' | Select-Object -First 1)
+          $version=if ($null -eq $check) { '' } else { ($check.ToString() -split ':\s*')[1].Trim() }
+          if ($version -ne '2.141.0') {
+            & $venvPython -m pip install --disable-pip-version-check --no-input --no-cache-dir --retries 2 --timeout 20 'docling==2.141.0' 'pymupdf>=1.24,<2'
+            if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_ISOLATED_INSTALL_FAILED' }
+          }
+          $script='acs-ebook-docling-private/tools/pdf-parser-benchmark/scripts/ebook_windows_docling_real.py'
+          $manifest='acs-ebook-docling-private/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $output=Join-Path $private ('reports\ebook-docling-real-' + $env:EXPECTED_SHA.Substring(0,12) + '.private.json')
+          & $venvPython $script --root $private --manifest $manifest --output $output
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_REAL_PAGE_BENCHMARK_FAILED' }
+          Write-Output 'ACS_DOCLING_REAL_PAGE_METADATA_SAVED_TO_D_DRIVE_ONLY'
