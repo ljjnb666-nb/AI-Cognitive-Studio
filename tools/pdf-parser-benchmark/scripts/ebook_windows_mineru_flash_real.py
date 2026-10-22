@@ -241,6 +241,31 @@ def main():
         private_logs / (prefix + ".stdout.private.log"),
     )
     print("ACS_MINERU_BASIC_ONNX_CLASS=" + verified, flush=True)
+    # Diagnostic ablation: the old installed models may live under MinerU's
+    # configured default root, not the new benchmark's explicit models root.
+    # Both invocations are file-only, enforce the local source and use the
+    # same known-good installed kit; no model download or cloud fallback.
+    inherited_env = env.copy()
+    inherited_env.pop("MINERU_MODEL_BASE_DIR", None)
+    inherited_prefix = run_id + "-basic-onnx-inherited-dir-verify"
+    inherited = run_private(cmd, inherited_env, private_logs, inherited_prefix, 90)
+    inherited_class = classify_verify(
+        inherited, private_logs / (inherited_prefix + ".stderr.private.log"),
+        private_logs / (inherited_prefix + ".stdout.private.log"),
+    )
+    explicit_bundle = root / "models" / "MinerU-4_models_onnx"
+    model_checks = {
+        "explicit_root_bundle_dir_present": explicit_bundle.is_dir(),
+        "explicit_root_verify_class": verified,
+        "explicit_root_verify_exit_code": verification["exit_code"],
+        "inherited_root_verify_class": inherited_class,
+        "inherited_root_verify_exit_code": inherited["exit_code"],
+        "inherited_root_verify_ms": inherited["wall_ms"],
+        "models_show_not_yet_queried": True,
+    }
+    print("ACS_MINERU_ONNX_BUNDLE_AT_BENCHMARK_ROOT="
+          + str(explicit_bundle.is_dir()).lower(), flush=True)
+    print("ACS_MINERU_BASIC_ONNX_INHERITED_CLASS=" + inherited_class, flush=True)
     for data in candidates(root):
         item = required.get(hashlib.sha256(data).hexdigest())
         if item is None or item["id"] in rows:
@@ -279,6 +304,7 @@ def main():
         "model_verification_class": verified,
         "model_verification_exit_code": verification["exit_code"],
         "model_verification_ms": verification["wall_ms"],
+        "model_root_diagnostics": model_checks,
         "missing": missing, "failed": failed,
         "rows": [rows[key] for key in sorted(rows)],
         "limits": [
