@@ -9,6 +9,7 @@ import importlib.metadata
 import io
 import json
 from pathlib import Path
+from ebook_layout_signals import paddle_layout_signals
 import re
 import time
 import zipfile
@@ -45,17 +46,19 @@ def extract_text(ocr, image):
     import numpy as np
     results = ocr.predict(input=np.asarray(image))
     parts = []
+    layout_records = []
     for item in results:
         data = item.json
         if callable(data):
             data = data()
+        layout_records.append(data)
         if "res" in data:
             data = data["res"]
         words = data.get("rec_texts")
         if not isinstance(words, list):
             raise TypeError("PaddleOCR result rec_texts missing or invalid")
         parts.extend(str(x) for x in words)
-    return normalize("".join(parts))
+    return normalize("".join(parts)), paddle_layout_signals(layout_records)
 
 
 def assess(item, raw, ocr):
@@ -72,13 +75,14 @@ def assess(item, raw, ocr):
                                  colorspace=pymupdf.csRGB, alpha=False)
         image = Image.open(io.BytesIO(raster.tobytes("png"))).convert("RGB")
         t = time.perf_counter()
-        output = extract_text(ocr, image)
+        output, layout = extract_text(ocr, image)
         duration = round((time.perf_counter() - t) * 1000, 1)
     result = {
         "book_id": item["id"], "physical_page": page_id, "status": "SUCCESS",
         "recognized_characters": len(output), "wall_ms": duration,
         "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
         "reference_layer_characters": len(reference),
+        "layout_evidence": layout,
     }
     if reference:
         errors = distance(reference, output)
