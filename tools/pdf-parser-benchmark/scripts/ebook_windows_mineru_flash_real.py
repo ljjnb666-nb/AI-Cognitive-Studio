@@ -316,6 +316,10 @@ def main():
     print("ACS_MINERU_BASIC_ONNX_CLASS=" + verified, flush=True)
     print("ACS_MINERU_BASIC_ONNX_VERIFICATION_DETAIL="
           + explicit_verify_diagnostics["class"], flush=True)
+    print("ACS_MINERU_BASIC_ONNX_VERIFY_SAFE_FLAGS="
+          + (",".join(key for key, value in explicit_verify_diagnostics["flags"].items()
+                      if value) or "none")
+          + "|BYTES=" + str(explicit_verify_diagnostics["captured_bytes"]), flush=True)
     # Diagnostic ablation: the old installed models may live under MinerU's
     # configured default root, not the new benchmark's explicit models root.
     # Both invocations are file-only, enforce the local source and use the
@@ -348,6 +352,10 @@ def main():
     print("ACS_MINERU_BASIC_ONNX_INHERITED_CLASS=" + inherited_class, flush=True)
     print("ACS_MINERU_BASIC_ONNX_INHERITED_VERIFICATION_DETAIL="
           + inherited_verify_diagnostics["class"], flush=True)
+    print("ACS_MINERU_BASIC_ONNX_INHERITED_SAFE_FLAGS="
+          + (",".join(key for key, value in inherited_verify_diagnostics["flags"].items()
+                      if value) or "none")
+          + "|BYTES=" + str(inherited_verify_diagnostics["captured_bytes"]), flush=True)
     show_cmd = [str(kit), "models", "show", "--small-backend", "onnx"]
     for label, show_env in (("explicit", env), ("inherited", inherited_env)):
         show_prefix = run_id + "-" + label + "-models-show"
