@@ -43,6 +43,20 @@ def inputs(root):
                 continue
 
 
+def edit_distance(a, b):
+    """Exact Levenshtein distance using bounded linear workspace."""
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, 1):
+        row = [i]
+        for j, char_b in enumerate(b, 1):
+            row.append(min(row[j - 1] + 1, prev[j] + 1,
+                           prev[j - 1] + (char_a != char_b)))
+        prev = row
+    return prev[-1]
+
+
 def compact(engine, output, elapsed):
     value = normalized(output)
     return {"engine": engine, "wall_ms": round(elapsed * 1000, 1),
@@ -52,7 +66,6 @@ def compact(engine, output, elapsed):
 
 def evaluate(fixture, source, converter):
     import fitz
-    from rapidfuzz.distance.Levenshtein import distance
     from docling.datamodel.base_models import ConversionStatus
     physical = PAGES[fixture["id"]]
     with fitz.open(stream=source, filetype="pdf") as doc:
@@ -93,7 +106,7 @@ def evaluate(fixture, source, converter):
         recognized = normalized(result.document.export_to_markdown())
         docling_metric = compact("Docling", recognized, duration)
         if native_reference:
-            docling_metric["native_reference_edit_distance"] = distance(native_reference, recognized)
+            docling_metric["native_reference_edit_distance"] = edit_distance(native_reference, recognized)
             docling_metric["native_reference_cer"] = round(
                 docling_metric["native_reference_edit_distance"] / len(native_reference), 4)
             docling_metric["reference_quality"] = "NATIVE_PDF_TEXT_LAYER_PROXY_NOT_GROUND_TRUTH"
