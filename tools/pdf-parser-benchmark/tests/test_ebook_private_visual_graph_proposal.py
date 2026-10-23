@@ -143,6 +143,77 @@ class PrivateGraphProposal(unittest.TestCase):
                 with self.assertRaisesRegex(VisualGateError, "PRIVATE_SOURCE_MISSING"):
                     prepare(Path(t), MANIFEST)
 
+    def test_b31_only_ignores_b15_quarantine_and_never_reads_b15_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            ledger = folder / "semantic_gate"
+            ledger.mkdir()
+            b15 = ledger / "visual_graph_proposal_B15.request.private.json"
+            b15.write_text('{"status":"QUARANTINED_LEGACY_ATTEMPT"}', encoding="utf-8")
+            unchanged = b15.read_bytes()
+            fake = FakeRequests([B31])
+            # The selected B31 path reads only B31; B15 is not supplied.
+            with patch("ebook_private_visual_graph_proposal._raw_sources",
+                       return_value=iter([("B31", RAW["B31"])])) as scan, patch(
+                       "ebook_private_visual_graph_proposal.render_page",
+                       side_effect=fake_render):
+                results = run(MANIFEST, folder, "sufficiently_long_key",
+                              fitz=None, requests_module=fake, allow_cloud=True,
+                              books=["B31"])
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["book"], "B31")
+            self.assertEqual(len(fake.calls), 1)
+            self.assertEqual(b15.read_bytes(), unchanged)
+            self.assertFalse((ledger / "visual_graph_proposal_B15.reply.private.json").exists())
+            self.assertFalse((ledger / "visual_graph_proposal_B15.candidate.private.json").exists())
+            self.assertTrue((ledger / "visual_graph_proposal_B31.candidate.private.json").exists())
+            requested = scan.call_args.args[1]
+            self.assertEqual(set(requested.values()), {"B31"})
+
+    def test_b31_only_preflight_is_readonly_with_legacy_b15_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            ledger = folder / "semantic_gate"
+            ledger.mkdir()
+            marker = ledger / "visual_graph_proposal_B15.request.private.json"
+            marker.write_text("legacy B15 marker", encoding="utf-8")
+            before = marker.read_bytes()
+            with patch("ebook_private_visual_graph_proposal._raw_sources",
+                       return_value=iter([("B31", RAW["B31"])])):
+                result = prepare(folder, MANIFEST, ["B31"], readonly=True)
+            self.assertEqual(set(result[1]), {"B31"})
+            self.assertEqual(set(result[2]), {"B31"})
+            self.assertEqual(marker.read_bytes(), before)
+            self.assertEqual(len(list(ledger.iterdir())), 1)
+
+    def test_b31_scope_still_rejects_existing_b31_request_or_reply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            ledger = folder / "semantic_gate"
+            ledger.mkdir()
+            for suffix in ("request", "reply", "candidate"):
+                record = ledger / ("visual_graph_proposal_B31." + suffix + ".private.json")
+                record.write_text("already exists", encoding="utf-8")
+                with self.assertRaisesRegex(VisualGateError, "PAID_REQUEST_ALREADY_STARTED"):
+                    prepare(folder, MANIFEST, ["B31"], readonly=True)
+                record.unlink()
+
+    def test_duplicate_and_invalid_scope_rejected_before_pdf_scan(self):
+        from ebook_private_visual_graph_proposal import selected_books
+        for scope in ([], ["B31", "B31"], ["B16"], ["B31", "unknown"], "B31"):
+            with self.subTest(scope=scope):
+                with self.assertRaises(VisualGateError):
+                    selected_books(scope)
+        self.assertEqual(selected_books(["B31"]), ("B31",))
+        self.assertEqual(selected_books(None), ("B15", "B31"))
+
+    def test_readonly_preflight_never_creates_private_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(VisualGateError, "PRIVATE_OUTPUT_DIRECTORY_MISSING_READONLY"):
+                prepare(root, MANIFEST, ["B31"], readonly=True)
+            self.assertFalse((root / "semantic_gate").exists())
+
     def test_model_cannot_submit_claims_or_change_page(self):
         altered = dict(B15)
         altered["graphVerified"] = True
