@@ -148,29 +148,49 @@ def _exclusive_json(path, value):
         file.write(data)
 
 
-def prepare(root, manifest):
+def selected_books(books=None):
+    """Normalize caller scope; never widen an explicitly selected page set."""
+    if books is None:
+        return tuple(sorted(PAGES))
+    if not isinstance(books, (tuple, list, set)) or not books:
+        raise VisualGateError("TARGET_BOOK_SCOPE_INVALID")
+    if any(type(book) is not str or book not in PAGES for book in books):
+        raise VisualGateError("TARGET_BOOK_SCOPE_INVALID")
+    if len(set(books)) != len(books):
+        raise VisualGateError("TARGET_BOOK_SCOPE_DUPLICATE")
+    return tuple(sorted(books))
+
+
+def prepare(root, manifest, books=None, *, readonly=False):
     if not root.is_dir() or root.is_symlink():
         raise VisualGateError("PRIVATE_ROOT_UNSAFE")
-    selected = source_manifest(manifest)
+    # Manifest integrity still covers BOTH pinned books, while ownership,
+    # marker checks and PDF reads are strictly limited to the selected book(s).
+    all_sources = source_manifest(manifest)
+    scope = selected_books(books)
+    selected = {book: all_sources[book] for book in scope}
     folder = root / "semantic_gate"
     if folder.exists() and (folder.is_symlink() or not folder.is_dir()):
         raise VisualGateError("PRIVATE_OUTPUT_DIRECTORY_UNSAFE")
     if not folder.exists():
+        if readonly:
+            raise VisualGateError("PRIVATE_OUTPUT_DIRECTORY_MISSING_READONLY")
         folder.mkdir(mode=0o700)
     if not folder.resolve().is_relative_to(root.resolve()):
         raise VisualGateError("PRIVATE_OUTPUT_OUTSIDE_ROOT")
-    for book in PAGES:
+    for book in scope:
         for suffix in ("request", "reply", "candidate"):
-            if (folder / (FILE_PREFIX + book + "." + suffix + ".private.json")).exists():
+            record = folder / (FILE_PREFIX + book + "." + suffix + ".private.json")
+            if record.exists() or record.is_symlink():
                 raise VisualGateError("PAID_REQUEST_ALREADY_STARTED_NO_AUTO_RETRY")
     identities = {(row["size"], row["sha256"]): book for book, row in selected.items()}
     sources = {}
     for book, raw in _raw_sources(root, identities):
         if book not in sources:
             sources[book] = raw
-        if len(sources) == len(PAGES):
+        if len(sources) == len(scope):
             break
-    if set(sources) != set(PAGES):
+    if set(sources) != set(scope):
         raise VisualGateError("PRIVATE_SOURCE_MISSING")
     for book, raw in sources.items():
         if (len(raw) != selected[book]["size"] or
@@ -179,14 +199,15 @@ def prepare(root, manifest):
     return folder, selected, sources
 
 
-def run(manifest, root, key, *, fitz, requests_module, allow_cloud):
-    folder, selected, sources = prepare(root, manifest)
+def run(manifest, root, key, *, fitz, requests_module, allow_cloud, books=None):
+    scope = selected_books(books)
+    folder, selected, sources = prepare(root, manifest, scope)
     if not allow_cloud:
         raise VisualGateError("CLOUD_VISION_NOT_EXPLICITLY_ENABLED")
     if not key:
         raise VisualGateError("VISION_API_KEY_NOT_CONFIGURED")
     counts = []
-    for book in sorted(PAGES):
+    for book in scope:
         raw = sources[book]
         image, rotation, _ = render_page(raw, PAGES[book][0], fitz)
         if rotation != (270 if book == "B15" else 0):
@@ -239,18 +260,22 @@ def main(argv=None):
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--allow-cloud-vision", action="store_true")
     ap.add_argument("--preflight-only", action="store_true")
+    ap.add_argument("--book", choices=sorted(PAGES), action="append",
+                    help="Limit to exact SHA-pinned page(s); omit for original two-page mode")
     args = ap.parse_args(argv)
     root = Path(args.root).resolve(strict=True)
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    scope = selected_books(args.book)
     if args.preflight_only:
-        prepare(root, manifest)
+        prepare(root, manifest, scope, readonly=True)
         print("ACS_PRIVATE_GRAPH_PREFLIGHT=PASS")
+        print("ACS_PRIVATE_GRAPH_PREFLIGHT_BOOK_COUNT=" + str(len(scope)))
         return 0
     secret = os.getenv("ACS_GLM_VISION_API_KEY") or os.getenv("GLM_API_KEY")
     import fitz
     import requests
     run(manifest, root, secret, fitz=fitz, requests_module=requests,
-        allow_cloud=args.allow_cloud_vision)
+        allow_cloud=args.allow_cloud_vision, books=scope)
     return 0
 
 
