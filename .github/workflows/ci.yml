@@ -523,9 +523,10 @@ jobs:
             exit 1
           fi
           echo "All validation domains succeeded."
-  # Temporary B31 source-only pixel topology gate; exact owner PR only.
-  synthetic-b31-pixel-topology:
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-pixel-topology-20261023' }}
+
+  # B31 source-only OCR observation: exact owner PR, no model downloads.
+  synthetic-b31-offline-ocr:
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-private-offline-ocr-20261023' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
@@ -536,33 +537,33 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Pinned CPU-only CV wheels for synthetic tests
+      - name: Pinned CPU-only image decoder for synthetic tests
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: numpy==1.26.4 opencv-python-headless==4.10.0.84
-      - name: Blind source-only pixel topology with SHA-linked complete candidate preservation
+      - name: Exact HEAD offline OCR synthetic gates and prior source regression
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b31_pixel_topology.py
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b31_offline_ocr.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_offline_ocr.py' -v
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_pixel_topology.py' -v
-          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_wing_continuity_controls.py' -v
-          echo "ACS_B31_PIXEL_TOPOLOGY_SYNTHETIC=PASS"
-          echo "ACS_B31_PIXEL_TOPOLOGY_PROVIDER_CALLS=0"
+          echo "ACS_B31_OFFLINE_OCR_SYNTHETIC=PASS"
+          echo "ACS_B31_OFFLINE_OCR_PROVIDER_REQUESTS=0"
 
-  owner-only-windows-b31-pixel-topology:
-    needs: synthetic-b31-pixel-topology
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-pixel-topology-20261023' }}
+  owner-only-windows-b31-offline-ocr:
+    needs: synthetic-b31-offline-ocr
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-private-offline-ocr-20261023' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
-    timeout-minutes: 12
+    timeout-minutes: 15
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
     steps:
-      - name: Checkout exact owner HEAD without provider secrets
+      - name: Checkout exact owner HEAD without provider credentials
         uses: actions/checkout@v4
         env:
           GIT_CONFIG_COUNT: '1'
@@ -572,20 +573,20 @@ jobs:
           persist-credentials: false
           clean: false
           ref: ${{ github.event.pull_request.head.sha }}
-          path: acs-b31-pixel
-      - name: Validate private original source and all 103 pixel connectivity observations
+          path: acs-b31-local-ocr
+      - name: Observe source PDF image using bundled offline OCR only
         shell: powershell
         run: |
           $ErrorActionPreference='Stop'
-          if ((git -C acs-b31-pixel rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'B31_PIXEL_TOPOLOGY_HEAD_SHA_MISMATCH' }
+          if ((git -C acs-b31-local-ocr rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'B31_OFFLINE_OCR_EXACT_HEAD_MISMATCH' }
           $root='D:\ai-cognitive-pdf-benchmark-data'
           $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
-          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'B31_PIXEL_TOPOLOGY_PRIVATE_PYTHON_MISSING' }
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'B31_OFFLINE_OCR_CACHED_PYTHON_MISSING' }
           & $python -c "import cv2,numpy; assert cv2.__version__ and numpy.__version__"
-          if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_CV_DEPENDENCY_MISSING' }
+          if ($LASTEXITCODE -ne 0) { throw 'B31_OFFLINE_OCR_DECODER_MISSING' }
           $folder=Join-Path $root 'semantic_gate'
-          $output=Join-Path $folder 'b31_pixel_topology_review.private.json'
-          $already=Test-Path -LiteralPath $output
+          $output=Join-Path $folder 'b31_source_offline_ocr.private.json'
+          $exists=Test-Path -LiteralPath $output
           $protected=@(
             (Join-Path $folder 'b31_source_only_page126.private.png'),
             (Join-Path $folder 'b31_source_only_page126.private.json'),
@@ -597,34 +598,40 @@ jobs:
             (Join-Path $folder 'b31_vtip_clutter_triage.private.json'),
             (Join-Path $folder 'b31_vtip_contact_sheet.private.png'),
             (Join-Path $folder 'b31_vtip_wing_continuity.private.json'),
+            (Join-Path $folder 'b31_pixel_topology_review.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B15.request.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B31.request.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B31.reply.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B31.candidate.private.json')
           )
-          $before=@{}
+          $sha=@{}
           foreach ($p in $protected) {
-            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'B31_PIXEL_TOPOLOGY_REQUIRED_PRIVATE_SOURCE_MISSING' }
-            $before[$p]=(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
+            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'B31_OFFLINE_OCR_HISTORIC_EVIDENCE_MISSING' }
+            $sha[$p]=(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
           }
-          $script='acs-b31-pixel/tools/pdf-parser-benchmark/scripts/ebook_b31_pixel_topology.py'
-          $manifest='acs-b31-pixel/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
-          if ($already) {
+          $script='acs-b31-local-ocr/tools/pdf-parser-benchmark/scripts/ebook_b31_offline_ocr.py'
+          $manifest='acs-b31-local-ocr/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          # Disallow any HTTP model download or cloud provider call during OCR.
+          $env:HTTP_PROXY='http://127.0.0.1:1'
+          $env:HTTPS_PROXY='http://127.0.0.1:1'
+          $env:ALL_PROXY='http://127.0.0.1:1'
+          $env:NO_PROXY=''
+          if ($exists) {
             & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_EXISTING_RECEIPT_INVALID' }
+            if ($LASTEXITCODE -ne 0) { throw 'B31_OFFLINE_OCR_EXISTING_PRIVATE_INVALID' }
           } else {
             & $python $script --private-root $root --manifest $manifest
-            if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_READONLY_PREVIEW_FAILED' }
-            if (Test-Path -LiteralPath $output) { throw 'B31_PIXEL_TOPOLOGY_READONLY_PREVIEW_MUTATED_FILE' }
+            if ($LASTEXITCODE -ne 0) { throw 'B31_OFFLINE_OCR_READONLY_FAILED' }
+            if (Test-Path -LiteralPath $output) { throw 'B31_OFFLINE_OCR_PREVIEW_MUTATED_EVIDENCE' }
             & $python $script --private-root $root --manifest $manifest --write
-            if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_PRIVATE_CREATE_FAILED' }
+            if ($LASTEXITCODE -ne 0) { throw 'B31_OFFLINE_OCR_PRIVATE_WRITE_FAILED' }
             & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_POSTWRITE_RECEIPT_INVALID' }
+            if ($LASTEXITCODE -ne 0) { throw 'B31_OFFLINE_OCR_POSTWRITE_AUDIT_FAILED' }
           }
           foreach ($p in $protected) {
-            if ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -ne $before[$p]) { throw 'B31_PIXEL_TOPOLOGY_HISTORICAL_RECORD_CHANGED' }
+            if ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -ne $sha[$p]) { throw 'B31_OFFLINE_OCR_PRIOR_FILE_CHANGED' }
           }
-          if (-not (Test-Path -LiteralPath $output -PathType Leaf)) { throw 'B31_PIXEL_TOPOLOGY_RECEIPT_NOT_FOUND' }
-          Write-Output 'ACS_B31_PIXEL_TOPOLOGY_PRIVATE_SOURCE_EVIDENCE=VERIFIED'
-          Write-Output 'ACS_B31_PIXEL_TOPOLOGY_INDEPENDENT_GOLD=UNVERIFIED'
-          Write-Output 'ACS_B31_PIXEL_TOPOLOGY_MODEL_REQUESTS=0'
+          if (-not (Test-Path -LiteralPath $output -PathType Leaf)) { throw 'B31_OFFLINE_OCR_REPORT_MISSING' }
+          Write-Output 'ACS_B31_OFFLINE_OCR_PRIVATE_OBSERVATION=VERIFIED'
+          Write-Output 'ACS_B31_OFFLINE_OCR_GRAPH_GOLD=UNVERIFIED'
+          Write-Output 'ACS_B31_OFFLINE_OCR_PROVIDER_CALLS=0'
