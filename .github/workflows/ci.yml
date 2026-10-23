@@ -524,11 +524,11 @@ jobs:
           fi
           echo "All validation domains succeeded."
 
-  # Six-books/24-pages native source plus five books offline OCR; owner exact PR.
-  synthetic-multibook-matrix:
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-multibook-native-ocr-matrix-20261023' }}
+  # Same six books/24 fixed PDF pages through REAL Docling NativePdfPipeline.
+  synthetic-multibook-docling-native:
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-multiengine-offline-readiness-20261023' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
@@ -537,24 +537,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install synthetic-only deterministic PDF and raster dependencies
+      - name: Synthetic source PDF only; no model downloads
         shell: bash
         run: |
-          python -m pip install --disable-pip-version-check --only-binary=:all: numpy==1.26.4 opencv-python-headless==4.10.0.84 pymupdf==1.26.5
-      - name: Test six synthetic PDFs, 24 pages and five local OCR cases
+          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
+      - name: Verify exact SHA six-PDF 24-page Docling Native source contracts
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_multibook_native_matrix.py tools/pdf-parser-benchmark/scripts/ebook_multibook_rapidocr_matrix.py
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_multibook_docling_native.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_multibook_docling_native.py' -v
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_multibook_matrix.py' -v
-          echo "ACS_MULTIBOOK_MATRIX_SYNTHETIC=PASS"
-          echo "ACS_MULTIBOOK_MATRIX_PROVIDER_CALLS=0"
+          echo "ACS_DOCLING_NATIVE_SYNTHETIC=PASS"
+          echo "ACS_DOCLING_NATIVE_MODEL_DOWNLOADS=0"
 
-  owner-only-windows-multibook-matrix:
-    needs: synthetic-multibook-matrix
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-multibook-native-ocr-matrix-20261023' }}
+  owner-only-windows-multibook-docling-native:
+    needs: synthetic-multibook-docling-native
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-multiengine-offline-readiness-20261023' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 50
     env:
@@ -562,7 +563,7 @@ jobs:
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
     steps:
-      - name: Checkout exact six-book benchmark code, never book bytes
+      - name: Checkout owner exact HEAD; no source PDF in GitHub
         uses: actions/checkout@v4
         env:
           GIT_CONFIG_COUNT: '1'
@@ -570,36 +571,29 @@ jobs:
           GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          clean: false
+          path: acs-six-docling-native
           persist-credentials: false
-          path: acs-six-pdf-matrix
-      - name: Verify six true PDF sources and 24-page native inventory privately
+          clean: false
+      - name: Real Docling native model-free 24-page same-input benchmark
         shell: powershell
-        timeout-minutes: 30
+        timeout-minutes: 42
         run: |
           $ErrorActionPreference='Stop'
-          if ((git -C acs-six-pdf-matrix rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'MULTIBOOK_SOURCE_EXACT_HEAD_MISMATCH' }
+          if ((git -C acs-six-docling-native rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'DOCLING_NATIVE_HEAD_MISMATCH' }
           $root='D:\ai-cognitive-pdf-benchmark-data'
-          $native=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
-          if (-not (Test-Path -LiteralPath $native -PathType Leaf)) { throw 'MULTIBOOK_NATIVE_PYTHON_MISSING' }
-          & $native -c "import fitz; assert fitz.VersionBind"
-          if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_PYMUPDF_MISSING' }
+          $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'DOCLING_NATIVE_INTERPRETER_MISSING' }
+          & $python -c "from importlib.metadata import version; import fitz; assert version('docling')=='2.141.0'; from docling.document_converter import NativePdfFormatOption; from docling.datamodel.pipeline_options import NativePdfPipelineOptions"
+          if ($LASTEXITCODE -ne 0) { throw 'DOCLING_NATIVE_MODEL_FREE_API_NOT_AVAILABLE' }
           $folder=Join-Path $root 'semantic_gate'
-          $baseline=Join-Path $folder 'multibook_matrix_20261023'
-          $nativeReport=Join-Path $baseline 'multibook_native_24pages.private.json'
-          $protected=@(
+          $matrix=Join-Path $folder 'multibook_matrix_20261023'
+          $report=Join-Path $matrix 'multibook_docling_native_24pages.private.json'
+          $pdfs=Join-Path $matrix 'docling_native_single_pages'
+          $previous=@(
+            (Join-Path $matrix 'multibook_native_24pages.private.json'),
+            (Join-Path $matrix 'multibook_rapidocr_five_pages.private.json'),
             (Join-Path $folder 'b31_source_only_page126.private.png'),
             (Join-Path $folder 'b31_source_only_page126.private.json'),
-            (Join-Path $folder 'b31_source_raster_geometry.private.json'),
-            (Join-Path $folder 'b31_opencv_source_candidates.private.json'),
-            (Join-Path $folder 'b31_arrow_shaft_consensus.private.json'),
-            (Join-Path $folder 'b31_multiscale_vtip_source.private.json'),
-            (Join-Path $folder 'b31_multiscale_vtip_review.private.png'),
-            (Join-Path $folder 'b31_vtip_clutter_triage.private.json'),
-            (Join-Path $folder 'b31_vtip_contact_sheet.private.png'),
-            (Join-Path $folder 'b31_vtip_wing_continuity.private.json'),
-            (Join-Path $folder 'b31_pixel_topology_review.private.json'),
-            (Join-Path $folder 'b31_source_offline_ocr.private.json'),
             (Join-Path $folder 'b31_source_rapidocr392.private.json'),
             (Join-Path $folder 'b31_ocr_spatial_confounds.private.json'),
             (Join-Path $folder 'b31_ocr_spatial_confounds.private.png'),
@@ -608,63 +602,44 @@ jobs:
             (Join-Path $folder 'visual_graph_proposal_B31.reply.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B31.candidate.private.json')
           )
-          $sha=@{}
-          foreach ($p in $protected) {
-            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'MULTIBOOK_PROTECTED_HISTORY_MISSING' }
-            $sha[$p]=(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
+          $previous+=@(Get-ChildItem -LiteralPath $matrix -File -Filter '*.private.png' | Select-Object -ExpandProperty FullName)
+          $before=@{}
+          foreach ($f in $previous) {
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw 'DOCLING_NATIVE_PROTECTED_EVIDENCE_MISSING' }
+            $before[$f]=(Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash
           }
-          $script='acs-six-pdf-matrix/tools/pdf-parser-benchmark/scripts/ebook_multibook_native_matrix.py'
-          $manifest='acs-six-pdf-matrix/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
           $env:HTTP_PROXY='http://127.0.0.1:1'
           $env:HTTPS_PROXY='http://127.0.0.1:1'
           $env:ALL_PROXY='http://127.0.0.1:1'
           $env:NO_PROXY=''
-          if (Test-Path -LiteralPath $nativeReport) {
-            & $native $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_NATIVE_EXISTING_REPORT_INVALID' }
+          $env:HF_HUB_OFFLINE='1'
+          $env:TRANSFORMERS_OFFLINE='1'
+          $script='acs-six-docling-native/tools/pdf-parser-benchmark/scripts/ebook_multibook_docling_native.py'
+          $manifest='acs-six-docling-native/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $privateLog=Join-Path $matrix 'docling_native_execution.private.log'
+          if ((Test-Path -LiteralPath $report) -xor (Test-Path -LiteralPath $pdfs)) { throw 'DOCLING_NATIVE_PARTIAL_OUTPUT_NEEDS_MANUAL_RECOVERY' }
+          if (Test-Path -LiteralPath $report) {
+            & $python $script --private-root $root --manifest $manifest --audit-only 2>&1 | Out-File -LiteralPath $privateLog -Encoding utf8
+            if ($LASTEXITCODE -ne 0) { throw 'DOCLING_NATIVE_EXISTING_RECEIPT_INVALID' }
           } else {
-            & $native $script --private-root $root --manifest $manifest --write
-            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_NATIVE_REAL_PDF_SCAN_FAILED' }
-            & $native $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_NATIVE_POSTWRITE_AUDIT_FAILED' }
+            # Preview would repeat the expensive 24-page run; --write is the only
+            # run, with exclusive outputs and a subsequent independent audit.
+            & $python $script --private-root $root --manifest $manifest --write 2>&1 | Out-File -LiteralPath $privateLog -Encoding utf8
+            if ($LASTEXITCODE -ne 0) { throw 'DOCLING_NATIVE_REAL_24_PAGE_RUN_FAILED' }
+            & $python $script --private-root $root --manifest $manifest --audit-only 2>&1 | Out-File -LiteralPath $privateLog -Encoding utf8 -Append
+            if ($LASTEXITCODE -ne 0) { throw 'DOCLING_NATIVE_POSTWRITE_RECEIPT_INVALID' }
           }
-          foreach ($p in $protected) {
-            if ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -ne $sha[$p]) { throw 'MULTIBOOK_EXISTING_EVIDENCE_CHANGED' }
+          foreach ($f in $previous) {
+            if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne $before[$f]) { throw 'DOCLING_NATIVE_HISTORY_CHANGED' }
           }
-          Write-Output 'ACS_MULTIBOOK_NATIVE_REAL_PAGES=VERIFIED'
-          Write-Output 'ACS_MULTIBOOK_PROTECTED_HISTORY=UNCHANGED'
-          Write-Output 'ACS_MULTIBOOK_NATIVE_CLOUD_CALLS=0'
-
-      - name: Five-book fixed-page CPU RapidOCR offline and immutable receipt
-        shell: powershell
-        timeout-minutes: 18
-        run: |
-          $ErrorActionPreference='Stop'
-          if ((git -C acs-six-pdf-matrix rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'MULTIBOOK_OCR_EXACT_HEAD_MISMATCH' }
-          $root='D:\ai-cognitive-pdf-benchmark-data'
-          $python=Join-Path $root 'tool-env\rapidocr-3.9.2-onnx-1.22.1\Scripts\python.exe'
-          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'MULTIBOOK_OCR_ISOLATED_PYTHON_MISSING' }
-          & $python -c "import cv2,numpy; from importlib.metadata import version; assert version('rapidocr')=='3.9.2' and version('onnxruntime')=='1.22.1' and version('numpy')=='2.2.6'"
-          if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_OCR_DEPENDENCY_VERSIONS_CHANGED' }
-          $output=Join-Path $root 'semantic_gate\multibook_matrix_20261023\multibook_rapidocr_five_pages.private.json'
-          $source=Join-Path $root 'semantic_gate\multibook_matrix_20261023\multibook_native_24pages.private.json'
-          $before=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
-          $env:HTTP_PROXY='http://127.0.0.1:1'
-          $env:HTTPS_PROXY='http://127.0.0.1:1'
-          $env:ALL_PROXY='http://127.0.0.1:1'
-          $env:NO_PROXY=''
-          $script='acs-six-pdf-matrix/tools/pdf-parser-benchmark/scripts/ebook_multibook_rapidocr_matrix.py'
-          $manifest='acs-six-pdf-matrix/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
-          if (Test-Path -LiteralPath $output) {
-            & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_OCR_EXISTING_RECEIPT_INVALID' }
-          } else {
-            & $python $script --private-root $root --manifest $manifest --write
-            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_OCR_REAL_FIVE_BOOKS_FAILED' }
-            & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_OCR_POSTWRITE_AUDIT_FAILED' }
-          }
-          if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $before) { throw 'MULTIBOOK_NATIVE_RECEIPT_CHANGED_DURING_OCR' }
-          Write-Output 'ACS_MULTIBOOK_FIVE_BOOK_OFFLINE_OCR=VERIFIED'
-          Write-Output 'ACS_MULTIBOOK_INDEPENDENT_ACCURACY_GOLD=UNVERIFIED'
-          Write-Output 'ACS_MULTIBOOK_PROVIDER_CALLS=0'
+          $records=@(Get-Content -LiteralPath $privateLog | Where-Object { $_ -match '^ACS_DOCLING_NATIVE_' })
+          foreach ($record in $records) { Write-Output $record }
+          if (-not (Test-Path -LiteralPath $report -PathType Leaf)) { throw 'DOCLING_NATIVE_REPORT_MISSING' }
+          # Only a bounded allowed-root candidate inventory; package readiness
+          # here is NOT a MinerU model-load or inference success claim.
+          $candidate=@(Get-ChildItem -LiteralPath (Join-Path $root 'tool-env') -Directory |
+            Where-Object { $_.Name -match 'mineru' })
+          Write-Output ('ACS_MINERU_NAMED_VENV_CANDIDATES=' + $candidate.Count)
+          Write-Output 'ACS_MINERU_LOCAL_MODEL_AND_PARSE=NOT_YET_VERIFIED'
+          Write-Output 'ACS_DOCLING_NATIVE_PROTECTED_PRIOR_EVIDENCE=UNCHANGED'
+          Write-Output 'ACS_DOCLING_NATIVE_NEW_PROVIDER_CALLS=0'
