@@ -9,3 +9,4 @@ export * from "./product-execution.js";
 export * from "./ownership.js";
 export * from "./gateway-materialization.js";
 export * from "./analysis-versions.js";
+export * from "./embedding-deferred-recovery.js";
