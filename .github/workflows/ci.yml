@@ -525,6 +525,7 @@ jobs:
           echo "All validation domains succeeded."
   # Temporary owner-only private B31 source benchmark on the exact PR branch.
   synthetic-v-wing-source:
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-multiscale-vtip-review-20261023' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
