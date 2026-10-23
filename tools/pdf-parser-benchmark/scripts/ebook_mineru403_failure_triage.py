@@ -50,8 +50,9 @@ EXCEPTION_NAMES=(
 )
 
 
-def _fingerprint(path):
-    if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=MAX_LOG:
+def _fingerprint(path,*,allow_empty=False):
+    if (path.is_symlink() or not path.is_file() or
+            not (0 if allow_empty else 1)<=path.stat().st_size<=MAX_LOG):
         raise VisualGateError("MINERU_TRIAGE_FAILURE_LOG_MISSING_OR_UNSAFE")
     return sha_file(path)
 
@@ -132,7 +133,7 @@ def model_probe(root,exe,*,write=False,runner=None):
         "kit_present":True,"models_verify_ran":True,
         "basic_models_verified":code==0,
         "verify_exit_code":code,
-        "private_verify_log_sha256":_fingerprint(log),
+        "private_verify_log_sha256":_fingerprint(log,allow_empty=True),
         "verify_diagnostic":classify_private_bytes(log.read_bytes())["categories"]
     }
 
@@ -212,7 +213,7 @@ def audit_existing(root,manifest):
     if probe.get("models_verify_ran"):
         logfile=folder/VERIFY_LOG
         if (not logfile.is_file() or logfile.is_symlink() or
-                probe.get("private_verify_log_sha256")!=_fingerprint(logfile)):
+                probe.get("private_verify_log_sha256")!=_fingerprint(logfile,allow_empty=True)):
             raise VisualGateError("MINERU_TRIAGE_VERIFY_LOG_CHANGED")
     return data
 
