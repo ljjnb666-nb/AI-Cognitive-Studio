@@ -536,7 +536,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Pinned synthetic OpenCV dependency only
-        run: python -m pip install --disable-pip-version-check --only-binary=:all: numpy==1.26.4 opencv-python-headless==4.10.0.84
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: numpy==1.26.4 opencv-python-headless==4.10.0.84
       - name: Exact-head isolated source wing test
         shell: bash
         env:
