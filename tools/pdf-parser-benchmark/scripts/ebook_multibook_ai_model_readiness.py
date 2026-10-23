@@ -89,7 +89,8 @@ def scan_cache(roots):
                 continue
             for filename in sorted(files):
                 p=current/filename
-                if p.suffix.lower() not in WEIGHTS or p.is_symlink():
+                if (p.suffix.lower() not in WEIGHTS or p.is_symlink() or
+                        not _looks_related(p,base)):
                     continue
                 try:
                     size=p.stat().st_size
