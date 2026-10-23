@@ -788,6 +788,39 @@ describe("durable Phase 2 orchestration", () => {
     expect((await recoverSettledDeferredBookEmbeddings({ now })).recovered).toBe(0);
   });
 
+  it("auto-recovery keyset visits paid receipts behind quarantined older rows", async () => {
+    const quarantined = await fixture();
+    await prisma.$transaction([
+      prisma.bookAnalysisRun.update({ where: { id: quarantined.run.id }, data: {
+        status: "FAILED", analysisStage: "EMBEDDINGS",
+        errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+        completedAt: new Date(Date.now() - 5_000),
+      } }),
+      prisma.job.update({ where: { id: quarantined.job.id }, data: { status: "FAILED", completedAt: new Date() } }),
+    ]);
+    const eligible = await fixture();
+    await expect(processBookAnalysisRun(eligible.run.id, deps(eligible, new DurableProvider(eligible.blocks), {
+      faultInjector: (point) => { if (point === "afterEmbeddingGatewayPersist") throw new Error("EMBEDDING_RECEIPT_CRASH"); },
+    }))).rejects.toThrow("EMBEDDING_RECEIPT_CRASH");
+    await prisma.bookAnalysisRun.update({ where: { id: eligible.run.id }, data: {
+      errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+    } });
+    const now = new Date(Date.now() + 60_000);
+    const first = await recoverSettledDeferredBookEmbeddings({ now, limit: 1 });
+    expect([first.discovered, first.recovered, first.skipped]).toEqual([1, 0, 1]);
+    expect(first.nextCursor?.id).toBe(quarantined.run.id);
+    const second = await recoverSettledDeferredBookEmbeddings({ now, limit: 1, cursor: first.nextCursor });
+    expect([second.discovered, second.recovered]).toEqual([1, 1]);
+    expect(second.nextCursor?.id).toBe(eligible.run.id);
+    const frontier = await recoverSettledDeferredBookEmbeddings({ now, limit: 1, cursor: second.nextCursor });
+    expect([frontier.discovered, frontier.nextCursor]).toEqual([0, null]);
+    await processBookAnalysisRun(eligible.run.id, deps(eligible, new DurableProvider(eligible.blocks)), 1);
+    expect(eligible.gateway.remoteCallCount()).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: eligible.workspace.id } })).toBe(1);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: eligible.run.id } })).status).toBe("SUCCEEDED");
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: quarantined.run.id } })).dispatchGeneration).toBe(0);
+  });
+
   it("auto-recovery quarantines missing or ambiguous gateway receipts", async () => {
     const missing = await fixture();
     await prisma.$transaction([
