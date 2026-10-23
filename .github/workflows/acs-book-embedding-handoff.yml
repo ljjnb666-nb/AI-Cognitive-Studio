@@ -5,6 +5,8 @@ on:
     paths:
       - ".github/workflows/acs-book-embedding-handoff.yml"
       - "packages/book-intelligence/src/pipeline.ts"
+      - "packages/book-intelligence/src/embedding-deferred-recovery.ts"
+      - "apps/worker/src/runtime.ts"
       - "packages/book-intelligence/tests/phase2-durability.integration.test.ts"
       - "packages/book-intelligence/tests/helpers/book-analysis-embedding-gateway.ts"
       - "packages/book-intelligence/src/gateway-materialization.ts"
@@ -89,6 +91,7 @@ jobs:
       - name: Fail-closed ownership, duplicate billing, and 10s deferral tests
         run: |
           pnpm --filter @ai-cognitive/book-intelligence exec vitest run --config vitest.integration.config.ts tests/phase2-durability.integration.test.ts \
-            -t 'does not bill a second Gateway invocation|rejects vectors returned by an embedding call whose owner became stale|fails closed after a prolonged Gateway handoff'
+            -t 'does not bill a second Gateway invocation|rejects vectors returned by an embedding call whose owner became stale|fails closed after a prolonged Gateway handoff|auto-rearms one settled paid deferred run|auto-recovery quarantines missing'
           echo "ACS_BOOK_EMBEDDING_HANDOFF_REAL_POSTGRES=PASS"
-          echo "ACS_BOOK_EMBEDDING_AUTOMATIC_RECOVERY=NOT_VERIFIED"
+          echo "ACS_BOOK_EMBEDDING_AUTO_RECOVERY_SETTLED_RECEIPT=PASS"
+          echo "ACS_BOOK_EMBEDDING_AUTO_RECOVERY_UNKNOWN_OUTCOME=QUARANTINED"
