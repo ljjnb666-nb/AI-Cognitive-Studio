@@ -20,10 +20,10 @@ from ebook_multibook_docling_native import audit_existing as audit_docling
 from ebook_private_graph_receipt_audit import no_duplicate_keys, reject_constant
 from ebook_private_glm_visual_reference import VisualGateError
 
-REPORT="b31_mineru403_flash_source_only.private.json"
-MARKDOWN="b31_mineru403_flash_p0126.private.md"
-PRIVATE_LOG="b31_mineru403_flash_execution.private.log"
-EVIDENCE="B31_ORIGINAL_PAGE126_MINERU403_LOCAL_FLASH_NOT_GOLD"
+REPORT="b31_mineru403_flash_source_only.v2.private.json"
+MARKDOWN="b31_mineru403_flash_p0126.v2.private.md"
+PRIVATE_LOG="b31_mineru403_flash_execution.v2.private.log"
+EVIDENCE="B31_ORIGINAL_PAGE126_MINERU403_LOCAL_FLASH_V2_NOT_GOLD"
 MODEL_SUBDIR="MinerU-4_models_onnx"
 MAX_REPORT=120_000
 MAX_MARKDOWN=750_000
@@ -133,7 +133,7 @@ def capture(root,manifest,*,write=False,runner=None):
     env=safe_environment(root)
     command=[
         str(exe),"parse",str(stage),"--tier","flash",
-        "--pages","all","--output",str(mdfile),"--json","--force",
+        "--pages","all","--output",str(mdfile),
     ]
     try:
         # The actual MinerU 4.0.3 process reads a single-page PDF ONLY.
