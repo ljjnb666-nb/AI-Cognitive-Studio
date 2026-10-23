@@ -102,6 +102,9 @@ def run(root, manifest, cv2, np, *, write=False, engine=None,
         from rapidocr import RapidOCR
         engine = RapidOCR()
     rows = ocr_rows(bgr, engine)
+    rows_sha = hashlib.sha256(json.dumps(
+        rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
     data = {
         "schema_version": 1,
         "evidence": EVIDENCE,
@@ -114,6 +117,7 @@ def run(root, manifest, cv2, np, *, write=False, engine=None,
         "recognized_line_count": len(rows),
         "recognized_character_count": sum(len(row["text"]) for row in rows),
         "private_source_ocr_rows": rows,
+        "private_rows_sha256": rows_sha,
         "ocr_quality_gold": None,
         "independent_graph_gold": None,
         "arrow_direction_verified": False,
@@ -176,7 +180,11 @@ def audit_existing(root, manifest):
                              meta["render_width"],meta["render_height"])
     except (ValueError, TypeError, KeyError) as err:
         raise VisualGateError("RAPID_OCR_PRIVATE_RECEIPT_ROWS_INVALID") from err
-    if (rows != data["private_source_ocr_rows"] or
+    rows_sha = hashlib.sha256(json.dumps(
+        rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    if (data.get("private_rows_sha256") != rows_sha or
+            rows != data["private_source_ocr_rows"] or
             len(rows) != data.get("recognized_line_count") or
             sum(len(x["text"]) for x in rows) != data.get("recognized_character_count")):
         raise VisualGateError("RAPID_OCR_PRIVATE_RECEIPT_COUNT_MISMATCH")
