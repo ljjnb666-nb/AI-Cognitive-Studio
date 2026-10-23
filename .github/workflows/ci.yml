@@ -523,10 +523,9 @@ jobs:
             exit 1
           fi
           echo "All validation domains succeeded."
-
-  # Temporary B31 source-only wing-controls gate; exact owner PR only.
-  synthetic-b31-wing-controls:
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-wing-continuity-controls-20261023' }}
+  # Temporary B31 source-only pixel topology gate; exact owner PR only.
+  synthetic-b31-pixel-topology:
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-pixel-topology-20261023' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
@@ -541,21 +540,21 @@ jobs:
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: numpy==1.26.4 opencv-python-headless==4.10.0.84
-      - name: Source-only wing continuity negative controls and provenance
+      - name: Blind source-only pixel topology with SHA-linked complete candidate preservation
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b31_wing_continuity_controls.py
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b31_pixel_topology.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_pixel_topology.py' -v
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_wing_continuity_controls.py' -v
-          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_vtip_clutter_triage.py' -v
-          echo "ACS_B31_WING_SYNTHETIC=PASS"
-          echo "ACS_B31_WING_PROVIDER_CALLS=0"
+          echo "ACS_B31_PIXEL_TOPOLOGY_SYNTHETIC=PASS"
+          echo "ACS_B31_PIXEL_TOPOLOGY_PROVIDER_CALLS=0"
 
-  owner-only-windows-b31-wing-controls:
-    needs: synthetic-b31-wing-controls
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-wing-continuity-controls-20261023' }}
+  owner-only-windows-b31-pixel-topology:
+    needs: synthetic-b31-pixel-topology
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-pixel-topology-20261023' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 12
     env:
@@ -573,19 +572,19 @@ jobs:
           persist-credentials: false
           clean: false
           ref: ${{ github.event.pull_request.head.sha }}
-          path: acs-b31-wings
-      - name: Validate private original source and all 103 blind wing controls
+          path: acs-b31-pixel
+      - name: Validate private original source and all 103 pixel connectivity observations
         shell: powershell
         run: |
           $ErrorActionPreference='Stop'
-          if ((git -C acs-b31-wings rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'B31_WING_HEAD_SHA_MISMATCH' }
+          if ((git -C acs-b31-pixel rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'B31_PIXEL_TOPOLOGY_HEAD_SHA_MISMATCH' }
           $root='D:\ai-cognitive-pdf-benchmark-data'
           $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
-          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'B31_WING_PRIVATE_PYTHON_MISSING' }
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'B31_PIXEL_TOPOLOGY_PRIVATE_PYTHON_MISSING' }
           & $python -c "import cv2,numpy; assert cv2.__version__ and numpy.__version__"
-          if ($LASTEXITCODE -ne 0) { throw 'B31_WING_CV_DEPENDENCY_MISSING' }
+          if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_CV_DEPENDENCY_MISSING' }
           $folder=Join-Path $root 'semantic_gate'
-          $output=Join-Path $folder 'b31_vtip_wing_continuity.private.json'
+          $output=Join-Path $folder 'b31_pixel_topology_review.private.json'
           $already=Test-Path -LiteralPath $output
           $protected=@(
             (Join-Path $folder 'b31_source_only_page126.private.png'),
@@ -597,6 +596,7 @@ jobs:
             (Join-Path $folder 'b31_multiscale_vtip_review.private.png'),
             (Join-Path $folder 'b31_vtip_clutter_triage.private.json'),
             (Join-Path $folder 'b31_vtip_contact_sheet.private.png'),
+            (Join-Path $folder 'b31_vtip_wing_continuity.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B15.request.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B31.request.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B31.reply.private.json'),
@@ -604,27 +604,27 @@ jobs:
           )
           $before=@{}
           foreach ($p in $protected) {
-            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'B31_WING_REQUIRED_PRIVATE_SOURCE_MISSING' }
+            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'B31_PIXEL_TOPOLOGY_REQUIRED_PRIVATE_SOURCE_MISSING' }
             $before[$p]=(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
           }
-          $script='acs-b31-wings/tools/pdf-parser-benchmark/scripts/ebook_b31_wing_continuity_controls.py'
-          $manifest='acs-b31-wings/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $script='acs-b31-pixel/tools/pdf-parser-benchmark/scripts/ebook_b31_pixel_topology.py'
+          $manifest='acs-b31-pixel/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
           if ($already) {
             & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'B31_WING_EXISTING_RECEIPT_INVALID' }
+            if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_EXISTING_RECEIPT_INVALID' }
           } else {
             & $python $script --private-root $root --manifest $manifest
-            if ($LASTEXITCODE -ne 0) { throw 'B31_WING_READONLY_PREVIEW_FAILED' }
-            if (Test-Path -LiteralPath $output) { throw 'B31_WING_READONLY_PREVIEW_MUTATED_FILE' }
+            if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_READONLY_PREVIEW_FAILED' }
+            if (Test-Path -LiteralPath $output) { throw 'B31_PIXEL_TOPOLOGY_READONLY_PREVIEW_MUTATED_FILE' }
             & $python $script --private-root $root --manifest $manifest --write
-            if ($LASTEXITCODE -ne 0) { throw 'B31_WING_PRIVATE_CREATE_FAILED' }
+            if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_PRIVATE_CREATE_FAILED' }
             & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'B31_WING_POSTWRITE_RECEIPT_INVALID' }
+            if ($LASTEXITCODE -ne 0) { throw 'B31_PIXEL_TOPOLOGY_POSTWRITE_RECEIPT_INVALID' }
           }
           foreach ($p in $protected) {
-            if ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -ne $before[$p]) { throw 'B31_WING_HISTORICAL_RECORD_CHANGED' }
+            if ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -ne $before[$p]) { throw 'B31_PIXEL_TOPOLOGY_HISTORICAL_RECORD_CHANGED' }
           }
-          if (-not (Test-Path -LiteralPath $output -PathType Leaf)) { throw 'B31_WING_RECEIPT_NOT_FOUND' }
-          Write-Output 'ACS_B31_WING_PRIVATE_SOURCE_EVIDENCE=VERIFIED'
-          Write-Output 'ACS_B31_WING_INDEPENDENT_GOLD=UNVERIFIED'
-          Write-Output 'ACS_B31_WING_MODEL_REQUESTS=0'
+          if (-not (Test-Path -LiteralPath $output -PathType Leaf)) { throw 'B31_PIXEL_TOPOLOGY_RECEIPT_NOT_FOUND' }
+          Write-Output 'ACS_B31_PIXEL_TOPOLOGY_PRIVATE_SOURCE_EVIDENCE=VERIFIED'
+          Write-Output 'ACS_B31_PIXEL_TOPOLOGY_INDEPENDENT_GOLD=UNVERIFIED'
+          Write-Output 'ACS_B31_PIXEL_TOPOLOGY_MODEL_REQUESTS=0'
