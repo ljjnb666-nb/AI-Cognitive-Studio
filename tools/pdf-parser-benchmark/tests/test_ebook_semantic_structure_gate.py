@@ -123,6 +123,69 @@ class SyntheticStructureGate(unittest.TestCase):
         with self.assertRaisesRegex(Rejected, "ABSTENTION_WITH_STRUCTURE"):
             evaluate(reference(), pred)
 
+    def test_cyclic_parent_graph_rejected(self):
+        pred = candidate()
+        # source -> left -> source is not a valid diagram hierarchy.
+        pred["objects"][2]["parent_role"] = "source"
+        with self.assertRaisesRegex(Rejected, "CYCLIC_OBJECT_CONTAINMENT"):
+            evaluate(reference(), pred)
+
+    def test_conflicting_same_dimension_axis_rejected(self):
+        pred = candidate()
+        pred["axes"].append({"chart_role": "plot", "dimension": "x",
+                             "meaning": "distance"})
+        with self.assertRaisesRegex(Rejected, "AMBIGUOUS_CHART_AXIS"):
+            evaluate(reference(), pred)
+
+    def test_multiseries_same_shape_is_not_collapsed(self):
+        ref, pred = reference(), candidate()
+        additions = [
+            {"role": "curve_a", "kind": "series", "parent_role": "plot"},
+            {"role": "curve_b", "kind": "series", "parent_role": "plot"},
+        ]
+        curves = [
+            {"chart_role": "plot", "series_role": "curve_a", "shape": "rise"},
+            {"chart_role": "plot", "series_role": "curve_b", "shape": "rise"},
+        ]
+        for doc in (ref, pred):
+            doc["objects"].extend(copy.deepcopy(additions))
+            doc["trends"] = copy.deepcopy(curves)
+        correct = evaluate(ref, pred)
+        self.assertEqual(correct["counts"]["missing"], 0)
+        self.assertEqual(correct["counts"]["candidate_facts"],
+                         correct["counts"]["reference_facts"])
+        self.assertIsNone(correct["certified_graph_f1"])
+        pred["trends"][1]["shape"] = "fall"
+        wrong = evaluate(ref, pred)
+        self.assertEqual((wrong["counts"]["missing"], wrong["counts"]["unexpected"]), (1, 1))
+
+    def test_series_must_be_inside_named_chart(self):
+        pred = candidate()
+        pred["objects"].append({"role": "curve_a", "kind": "series",
+                                "parent_role": "left"})
+        pred["trends"] = [{"chart_role": "plot", "series_role": "curve_a",
+                           "shape": "rise"}]
+        with self.assertRaisesRegex(Rejected, "SERIES_OUTSIDE_CHART"):
+            evaluate(reference(), pred)
+
+    def test_duplicate_curve_trend_is_ambiguous(self):
+        pred = candidate()
+        pred["objects"].append({"role": "curve_a", "kind": "series",
+                                "parent_role": "plot"})
+        pred["trends"] = [
+            {"chart_role": "plot", "series_role": "curve_a", "shape": "rise"},
+            {"chart_role": "plot", "series_role": "curve_a", "shape": "fall"},
+        ]
+        with self.assertRaisesRegex(Rejected, "AMBIGUOUS_CHART_TREND"):
+            evaluate(reference(), pred)
+
+    def test_unknown_series_role_is_rejected(self):
+        pred = candidate()
+        pred["trends"] = [{"chart_role": "plot", "series_role": "ghost",
+                           "shape": "rise"}]
+        with self.assertRaisesRegex(Rejected, "INVALID_TREND_SERIES"):
+            evaluate(reference(), pred)
+
     def test_private_report_omits_graph_facts(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
