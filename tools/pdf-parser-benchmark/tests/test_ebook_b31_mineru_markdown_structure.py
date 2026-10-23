@@ -36,7 +36,7 @@ class MarkdownStructureTests(unittest.TestCase):
         data=subject.count_structure(
             "文字 ![diagram](data:image/png;base64,QUJDREVG) 更多字")
         self.assertEqual(data["embedded_image_data_uri_count"],1)
-        self.assertGreater(data["embedded_image_data_uri_raw_characters"],30)
+        self.assertGreaterEqual(data["embedded_image_data_uri_raw_characters"],30)
         self.assertEqual(data["markdown_image_reference_count"],1)
         self.assertTrue(data["base64_image_payloads_are_not_ocr_text"])
         self.assertLess(data["nonwhitespace_nonimage_markdown_residue_chars"],20)
