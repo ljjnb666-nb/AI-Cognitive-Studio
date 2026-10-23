@@ -65,7 +65,7 @@ def _allowed_roots(root, extra=None):
 def _looks_related(path, root):
     rel = path.relative_to(root)
     words = str(rel).lower()
-    return bool(re.search(r"docling|mineru|layout|tableformer|easyocr|rapidocr|onnx|vlm|huggingface|models--",words))
+    return bool(re.search(r"docling|mineru|layout|tableformer|easyocr|rapidocr|vlm|huggingface|models--",words))
 
 
 def scan_cache(roots):
