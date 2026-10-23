@@ -74,11 +74,7 @@ class VTipSourceOnly(unittest.TestCase):
     def test_lone_horizontal_line_does_not_certify_v_tip(self):
         png=synthetic(with_wings=False)
         mask=np.array(cv2.imdecode(np.frombuffer(png,np.uint8),cv2.IMREAD_GRAYSCALE)<128)
-        # Pixel support may make an unverified hypothesis, but can never
-        # imply a verified arrow or gold. Distinguish direct source evidence.
-        possible=subject.wing_score(mask,[130.,80.],[15.,80.])
-        if possible:
-            self.assertTrue(possible["support_min"]<=len(subject.SAMPLE_STEPS))
+        self.assertIsNone(subject.wing_score(mask,[130.,80.],[15.,80.]))
 
     def test_blank_pixels_do_not_inherit_cv_source_line_as_arrow(self):
         with tempfile.TemporaryDirectory() as folder:
