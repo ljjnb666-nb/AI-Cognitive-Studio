@@ -19,6 +19,7 @@ from ebook_private_glm_visual_reference import (
 )
 from ebook_private_native_pages import _raw_sources
 from ebook_semantic_structure_gate import Rejected, facts
+from ebook_private_graph_reply_recovery import capture_reply, strict_payload
 
 MAX_REPLY = 24000
 MAX_RESPONSE_TOKENS = 3000
@@ -60,10 +61,7 @@ def build_prompt(book, kind):
 def parse_candidate(reply, book, manifest_item):
     if not isinstance(reply, str) or len(reply) > MAX_REPLY:
         raise VisualGateError("STRUCTURE_MODEL_REPLY_OVERSIZED")
-    try:
-        payload = json.loads(reply)
-    except (TypeError, ValueError):
-        raise VisualGateError("STRUCTURE_MODEL_JSON_INVALID") from None
+    payload = strict_payload(reply)
     expected = {"objects", "relations", "axes", "trends", "abstained"}
     if not isinstance(payload, dict) or set(payload) != expected:
         raise VisualGateError("STRUCTURE_MODEL_SCHEMA_INVALID")
@@ -152,7 +150,7 @@ def prepare(root, manifest):
     if not folder.resolve().is_relative_to(root.resolve()):
         raise VisualGateError("PRIVATE_OUTPUT_OUTSIDE_ROOT")
     for book in PAGES:
-        for suffix in ("request", "candidate"):
+        for suffix in ("request", "reply", "candidate"):
             if (folder / (FILE_PREFIX + book + "." + suffix + ".private.json")).exists():
                 raise VisualGateError("PAID_REQUEST_ALREADY_STARTED_NO_AUTO_RETRY")
     identities = {(row["size"], row["sha256"]): book for book, row in selected.items()}
@@ -196,6 +194,10 @@ def run(manifest, root, key, *, fitz, requests_module, allow_cloud):
         })
         response = request_structure(image, build_prompt(book, PAGES[book][1]),
                                      key, requests_module)
+        # Persist the exact returned text on private D: before attempting JSON
+        # parsing. If parsing fails, never lose the one paid-attempt response.
+        # No automatic retry: the request marker and reply are immutable.
+        capture_reply(root, book, selected[book]["sha256"], response)
         candidate = parse_candidate(response, book, selected[book])
         _exclusive_json(output, candidate)
         counts.append({
