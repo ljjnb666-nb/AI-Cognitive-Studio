@@ -61,11 +61,13 @@ def seed(root, book):
 class FakeResponse:
     status_code = 200
 
-    def __init__(self, content):
+    def __init__(self, content, finish_reason="stop"):
         self.content = content
+        self.finish_reason = finish_reason
 
     def json(self):
-        return {"choices": [{"message": {"content": self.content}}]}
+        return {"choices": [{"message": {"content": self.content},
+                             "finish_reason": self.finish_reason}]}
 
 
 class FakeRequests:
@@ -75,7 +77,10 @@ class FakeRequests:
 
     def post(self, *args, **kwargs):
         self.calls += 1
-        return FakeResponse(self.replies.pop(0))
+        reply = self.replies.pop(0)
+        if isinstance(reply, tuple):
+            return FakeResponse(*reply)
+        return FakeResponse(reply)
 
 
 def render(raw, page, fitz):
@@ -116,7 +121,7 @@ class OfflineReplyRecovery(unittest.TestCase):
             root = Path(d)
             seed(root, "B15")
             reply = fence(CHART)
-            snapshot = capture_reply(root, "B15", ROWS["B15"]["sha256"], reply)
+            snapshot = capture_reply(root, "B15", ROWS["B15"]["sha256"], reply, finish_reason="stop")
             raw_saved = snapshot.read_bytes()
             self.assertEqual(offline_recover(root, MANIFEST, "B15"),
                              "RECOVERABLE_OFFLINE_NO_WRITE")
@@ -206,11 +211,60 @@ class OfflineReplyRecovery(unittest.TestCase):
         with self.assertRaisesRegex(VisualGateError, "STRUCTURE_MODEL_REPLY_SIZE_INVALID"):
             strict_payload("a" * 32769)
 
+    def test_truncated_paid_response_is_saved_but_never_accepted(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            fake = FakeRequests([(json.dumps(CHART), "length")])
+            with patch("ebook_private_visual_graph_proposal._raw_sources",
+                       return_value=iter(SOURCE.items())), patch(
+                       "ebook_private_visual_graph_proposal.render_page", side_effect=render):
+                with self.assertRaisesRegex(VisualGateError, "REPLY_COMPLETION_NOT_FINAL"):
+                    run(MANIFEST, root, "synthetic_fake_key_not_real",
+                        fitz=None, requests_module=fake, allow_cloud=True)
+                self.assertEqual(fake.calls, 1)
+                folder = root / "semantic_gate"
+                snapshot = folder / "visual_graph_proposal_B15.reply.private.json"
+                self.assertEqual(json.loads(snapshot.read_text())["finish_reason"], "length")
+                self.assertFalse((folder / "visual_graph_proposal_B15.candidate.private.json").exists())
+                with self.assertRaisesRegex(VisualGateError, "REPLY_COMPLETION_NOT_FINAL"):
+                    offline_recover(root, MANIFEST, "B15")
+                with self.assertRaisesRegex(VisualGateError, "PAID_REQUEST_ALREADY_STARTED_NO_AUTO_RETRY"):
+                    run(MANIFEST, root, "synthetic_fake_key_not_real",
+                        fitz=None, requests_module=fake, allow_cloud=True)
+                self.assertEqual(fake.calls, 1)
+
+    def test_missing_finish_reason_is_unknown_and_not_candidate(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            fake = FakeRequests([(json.dumps(CHART), None)])
+            with patch("ebook_private_visual_graph_proposal._raw_sources",
+                       return_value=iter(SOURCE.items())), patch(
+                       "ebook_private_visual_graph_proposal.render_page", side_effect=render):
+                with self.assertRaisesRegex(VisualGateError, "REPLY_COMPLETION_NOT_FINAL"):
+                    run(MANIFEST, root, "synthetic_fake_key_not_real",
+                        fitz=None, requests_module=fake, allow_cloud=True)
+            self.assertEqual(fake.calls, 1)
+            captured = json.loads((root/"semantic_gate"/
+                "visual_graph_proposal_B15.reply.private.json").read_text())
+            self.assertEqual(captured["finish_reason"], "unknown")
+
+    def test_tampered_finish_reason_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            seed(root, "B15")
+            p = capture_reply(root, "B15", ROWS["B15"]["sha256"],
+                              json.dumps(CHART), finish_reason="stop")
+            value = json.loads(p.read_text())
+            value["finish_reason"] = "anything_else"
+            p.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(VisualGateError, "REPLY_CUSTODY_INTEGRITY_INVALID"):
+                offline_recover(root, MANIFEST, "B15")
+
     def test_candidate_b31_supported(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             seed(root, "B31")
-            capture_reply(root, "B31", ROWS["B31"]["sha256"], json.dumps(NETWORK))
+            capture_reply(root, "B31", ROWS["B31"]["sha256"], json.dumps(NETWORK), finish_reason="stop")
             self.assertEqual(offline_recover(root, MANIFEST, "B31"),
                              "RECOVERABLE_OFFLINE_NO_WRITE")
 
