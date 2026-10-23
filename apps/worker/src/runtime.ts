@@ -1,4 +1,4 @@
-import { reconcileStaleBookAnalysisJobs, type EmbeddingProvider, type ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
+import { recoverSettledDeferredBookEmbeddings, reconcileStaleBookAnalysisJobs, type EmbeddingProvider, type ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
 import type { PodcastGenerationProvider, DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
 import { logger } from "@ai-cognitive/shared";
 import type { Environment } from "@ai-cognitive/shared/server";
@@ -130,6 +130,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   // This bounded domain sweep has its own dispatch guard and error boundary;
   // the PR #46 durable-operation sweep is scheduled independently below.
   const reconcileBookAnalysisStale = dispatch("book-analysis-stale-reconciliation", () => reconcileStaleBookAnalysisJobs(25), 60_000);
+  const reconcileDeferredBookEmbedding = bookQueue ? dispatch("book-embedding-deferred-recovery", () => recoverSettledDeferredBookEmbeddings({ limit: 25, ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}) }), 60_000) : undefined;
   // Durable ingestion delivery reconciliation: PostgreSQL first, BullMQ second.
   // Redis state loss may delay a delivery; it can never exceed the durable
   // attempt guard or strand an expired RUNNING run.
@@ -151,6 +152,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const reconcileOcrServersSweep = sourceIngestionOcrRuntime ? (() => { const ocrRuntime = sourceIngestionOcrRuntime; return dispatch("ocr-server-reconciliation", () => reconcileOcrServerInstances({ hostId: ocrRuntime.config.hostId, executable: ocrRuntime.config.executable, executableArgs: ocrRuntime.config.executableArgs, stopTimeoutMs: ocrRuntime.config.serverStopTimeoutMs, homeRoot: ocrRuntime.config.homeRoot }), 60_000); })() : undefined;
   const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); }];
   initial.push(reconcileBookAnalysisStale);
+  if (reconcileDeferredBookEmbedding) initial.push(reconcileDeferredBookEmbedding);
   initial.push(reconcileIngestionDeliveriesSweep);
   if (reconcileOcrServersSweep) initial.push(reconcileOcrServersSweep);
   if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
