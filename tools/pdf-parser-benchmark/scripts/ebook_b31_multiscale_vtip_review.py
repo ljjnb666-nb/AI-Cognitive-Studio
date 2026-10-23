@@ -24,7 +24,7 @@ MAX_TIPS = 128
 MAX_REVIEW_BYTES = 8_000_000
 LENGTHS = (0.75, 1.0, 1.5)
 SLOPES = (0.45, 0.7)
-SAMPLE_STEPS = (4, 6, 8, 10, 12)
+SAMPLE_STEPS = (6, 8, 10, 12, 14)
 
 
 def _image(png, meta, cv2, np):
@@ -70,7 +70,7 @@ def wing_score(mask, endpoint, other):
                 for side in (-1, 1):
                     x = endpoint[0] - ux*k + side*nx*k*slope
                     y = endpoint[1] - uy*k + side*ny*k*slope
-                    counts[0 if side == -1 else 1] += int(_hit(mask, x, y, radius=2))
+                    counts[0 if side == -1 else 1] += int(_hit(mask, x, y, radius=1))
             low = min(counts)
             if low < 3:
                 continue
