@@ -1,0 +1,94 @@
+name: ACS B31 Original-PDF Independent Visual Evidence
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/acs-b31-original-pdf-evidence.yml"
+      - "tools/pdf-parser-benchmark/scripts/ebook_b31_independent_source_packet.py"
+      - "tools/pdf-parser-benchmark/tests/test_ebook_b31_independent_source_packet.py"
+      - "tools/pdf-parser-benchmark/docs/BOOK_B31_INDEPENDENT_SOURCE_EVIDENCE_20261023.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acs-b31-independent-source-evidence
+  cancel-in-progress: false
+
+jobs:
+  offline-source-only-synthetic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact-head source rendering contract, never use model reference
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b31_independent_source_packet.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_independent_source_packet.py' -v
+          echo "ACS_B31_ORIGINAL_PDF_SYNTHETIC=PASS"
+          echo "ACS_B31_NEW_MODEL_PROVIDER_CALLS=0"
+
+  owner-only-windows-private-original-page:
+    needs: offline-source-only-synthetic
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-independent-source-evidence-20261023' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 15
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout owner-only exact HEAD without cloud credentials
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          persist-credentials: false
+          clean: false
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-b31-original-evidence
+      - name: Generate PDF source-only evidence in D drive without model calls
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git -C acs-b31-original-evidence rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'B31_ORIGINAL_EVIDENCE_HEAD_MISMATCH' }
+          $root='D:\ai-cognitive-pdf-benchmark-data'
+          if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'B31_ORIGINAL_EVIDENCE_PRIVATE_ROOT_MISSING' }
+          $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'B31_ORIGINAL_EVIDENCE_PYTHON_MISSING' }
+          $folder=Join-Path $root 'semantic_gate'
+          $out=Join-Path $folder 'b31_source_only_page126.private.png'
+          $meta=Join-Path $folder 'b31_source_only_page126.private.json'
+          if ((Test-Path -LiteralPath $out) -or (Test-Path -LiteralPath $meta)) { throw 'B31_ORIGINAL_EVIDENCE_ALREADY_EXISTS_STOP' }
+          $b15=Join-Path $folder 'visual_graph_proposal_B15.request.private.json'
+          $b31marker=Join-Path $folder 'visual_graph_proposal_B31.request.private.json'
+          $b31reply=Join-Path $folder 'visual_graph_proposal_B31.reply.private.json'
+          $b31candidate=Join-Path $folder 'visual_graph_proposal_B31.candidate.private.json'
+          foreach ($f in @($b15,$b31marker,$b31reply,$b31candidate)) { if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw 'B31_ORIGINAL_EVIDENCE_PRIOR_EVIDENCE_MISSING' } }
+          $before=@{}
+          foreach ($f in @($b15,$b31marker,$b31reply,$b31candidate)) { $before[$f]=(Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash }
+          $script='acs-b31-original-evidence/tools/pdf-parser-benchmark/scripts/ebook_b31_independent_source_packet.py'
+          $manifest='acs-b31-original-evidence/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          & $python $script --private-root $root --manifest $manifest
+          if ($LASTEXITCODE -ne 0) { throw 'B31_ORIGINAL_EVIDENCE_SOURCE_PREFLIGHT_FAILED' }
+          if ((Test-Path -LiteralPath $out) -or (Test-Path -LiteralPath $meta)) { throw 'B31_ORIGINAL_EVIDENCE_READONLY_CHANGED_DISK' }
+          & $python $script --private-root $root --manifest $manifest --write-packet
+          if ($LASTEXITCODE -ne 0) { throw 'B31_ORIGINAL_EVIDENCE_PACKET_WRITE_FAILED' }
+          foreach ($f in @($b15,$b31marker,$b31reply,$b31candidate)) { if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne $before[$f]) { throw 'B31_ORIGINAL_EVIDENCE_PREVIOUS_ARTIFACT_CHANGED' } }
+          if (-not (Test-Path -LiteralPath $out -PathType Leaf) -or -not (Test-Path -LiteralPath $meta -PathType Leaf)) { throw 'B31_ORIGINAL_EVIDENCE_PACKET_INCOMPLETE' }
+          Write-Output 'ACS_B31_INDEPENDENT_PIXEL_EVIDENCE=PRIVATE_SOURCE_ONLY_CREATED'
+          Write-Output 'ACS_B31_ARROWS_VERIFIED=FALSE'
+          Write-Output 'ACS_B31_GRAPH_REFERENCE=NOT_YET_ADJUDICATED'
+          Write-Output 'ACS_B31_PROVIDER_CALLS=0'
