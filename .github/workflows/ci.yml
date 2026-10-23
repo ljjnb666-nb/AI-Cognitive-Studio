@@ -524,9 +524,9 @@ jobs:
           fi
           echo "All validation domains succeeded."
 
-  # Inspect two pre-existing MinerU failures only; no new parse or downloads.
-  synthetic-mineru403-private-triage:
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-mineru403-private-failure-triage-20261023' }}
+  # One real B31 source-page stateless Basic ONNX OCR; prior models verify required.
+  synthetic-mineru403-basic-stateless:
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-mineru-basic-stateless-20261023' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
@@ -537,34 +537,35 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Synthetic PDF and fake old error traces only
+      - name: Synthetic PDF/ONNX test prerequisites only
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
-      - name: Exact HEAD safe failure classifier, model integrity and no-parse tests
+      - name: Exact SHA one-page stateless Basic ONNX OCR provenance regression
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_mineru403_failure_triage.py
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b31_mineru_basic_stateless.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_mineru_basic_stateless.py' -v
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_mineru403_failure_triage.py' -v
-          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_mineru403_reuse.py' -v
-          echo 'ACS_MINERU_TRIAGE_SYNTHETIC=PASS'
-          echo 'ACS_MINERU_TRIAGE_NEW_PARSE_CALLS=0'
+          echo 'ACS_MINERU_BASIC_STATELESS_SYNTHETIC=PASS'
+          echo 'ACS_MINERU_BASIC_PAID_PROVIDER_CALLS=0'
 
-  owner-only-windows-mineru403-private-triage:
-    needs: synthetic-mineru403-private-triage
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-mineru403-private-failure-triage-20261023' }}
+  owner-only-windows-mineru403-basic-stateless:
+    needs: synthetic-mineru403-basic-stateless
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-mineru-basic-stateless-20261023' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
-    timeout-minutes: 15
+    timeout-minutes: 28
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
       MINERU_MODEL_SOURCE: local
+      MINERU_MODEL_SMALL_BACKEND: onnx
     steps:
-      - name: Checkout owner exact SHA, no private book files
+      - name: Checkout exact owner SHA without ebook files
         uses: actions/checkout@v4
         env:
           GIT_CONFIG_COUNT: '1'
@@ -572,24 +573,33 @@ jobs:
           GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          path: acs-mineru403-private-triage
-          persist-credentials: false
           clean: false
-      - name: Classify two failed MinerU attempts and verify ONNX basic cached models only
+          persist-credentials: false
+          path: acs-b31-mineru-basic
+      - name: Stateless MinerU Basic ONNX OCR on exact B31 physical 126 private PDF
         shell: powershell
-        timeout-minutes: 9
+        timeout-minutes: 21
         run: |
           $ErrorActionPreference='Stop'
-          if ((git -C acs-mineru403-private-triage rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'MINERU_TRIAGE_EXACT_HEAD_MISMATCH' }
+          if ((git -C acs-b31-mineru-basic rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'MINERU_BASIC_EXACT_HEAD_MISMATCH' }
           $root='D:\ai-cognitive-pdf-benchmark-data'
           $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
-          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'MINERU_TRIAGE_PYTHON_MISSING' }
+          $kit=Join-Path $root 'python\mineru\Scripts\mineru-kit.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'MINERU_BASIC_SOURCE_PYTHON_MISSING' }
+          if (-not (Test-Path -LiteralPath $kit -PathType Leaf)) { throw 'MINERU_BASIC_VERIFIED_KIT_MISSING' }
           $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
-          $first=Join-Path $folder 'b31_mineru403_flash_execution.private.log'
-          $second=Join-Path $folder 'b31_mineru403_flash_execution.v2.private.log'
-          $report=Join-Path $folder 'b31_mineru403_failure_triage.private.json'
+          $report=Join-Path $folder 'b31_mineru403_basic_onnx_stateless.private.json'
+          $markdown=Join-Path $folder 'b31_mineru403_basic_onnx_stateless.private.md'
+          $executionLog=Join-Path $folder 'b31_mineru403_basic_onnx_stateless.private.log'
+          if (-not (Test-Path -LiteralPath $report) -and
+             ((Test-Path -LiteralPath $markdown) -or (Test-Path -LiteralPath $executionLog))) {
+            throw 'MINERU_BASIC_EXISTING_PARTIAL_PROOF_PRESERVED'
+          }
           $protected=@(
-            $first, $second,
+            (Join-Path $folder 'b31_mineru403_flash_execution.private.log'),
+            (Join-Path $folder 'b31_mineru403_flash_execution.v2.private.log'),
+            (Join-Path $folder 'b31_mineru403_failure_triage.private.json'),
+            (Join-Path $folder 'b31_mineru403_basic_models_verify.private.log'),
             (Join-Path $folder 'multibook_native_24pages.private.json'),
             (Join-Path $folder 'multibook_docling_native_24pages.private.json'),
             (Join-Path $folder 'multibook_rapidocr_five_pages.private.json'),
@@ -602,38 +612,40 @@ jobs:
             (Join-Path $root 'semantic_gate\visual_graph_proposal_B31.reply.private.json'),
             (Join-Path $root 'semantic_gate\visual_graph_proposal_B31.candidate.private.json')
           )
-          $protected+=@(Get-ChildItem -LiteralPath (Join-Path $folder 'docling_native_single_pages') -Filter '*.private.pdf' -File | Select-Object -ExpandProperty FullName)
           $protected+=@(Get-ChildItem -LiteralPath $folder -Filter '*.private.png' -File | Select-Object -ExpandProperty FullName)
+          $protected+=@(Get-ChildItem -LiteralPath (Join-Path $folder 'docling_native_single_pages') -Filter '*.private.pdf' -File | Select-Object -ExpandProperty FullName)
           $before=@{}
           foreach ($item in $protected) {
-            if (-not (Test-Path -LiteralPath $item -PathType Leaf)) { throw 'MINERU_TRIAGE_PRIOR_EVIDENCE_MISSING' }
+            if (-not (Test-Path -LiteralPath $item -PathType Leaf)) { throw 'MINERU_BASIC_PRIOR_EVIDENCE_MISSING' }
             $before[$item]=(Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash
           }
           $env:MINERU_HOME=Join-Path $root 'cache\mineru\home'
+          $env:MINERU_MODEL_BASE_DIR=Join-Path $root 'cache\mineru\home\models'
           $env:MINERU_MODEL_SOURCE='local'
           $env:MINERU_MODEL_SMALL_BACKEND='onnx'
-          $env:HF_HUB_OFFLINE='1'
-          $env:TRANSFORMERS_OFFLINE='1'
+          $env:MINERU_TABLE_DEVICE='cpu'
           $env:HTTP_PROXY='http://127.0.0.1:1'
           $env:HTTPS_PROXY='http://127.0.0.1:1'
           $env:ALL_PROXY='http://127.0.0.1:1'
           $env:NO_PROXY=''
-          $script='acs-mineru403-private-triage/tools/pdf-parser-benchmark/scripts/ebook_mineru403_failure_triage.py'
-          $manifest='acs-mineru403-private-triage/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $env:HF_HUB_OFFLINE='1'
+          $env:TRANSFORMERS_OFFLINE='1'
+          $script='acs-b31-mineru-basic/tools/pdf-parser-benchmark/scripts/ebook_b31_mineru_basic_stateless.py'
+          $manifest='acs-b31-mineru-basic/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
           if (Test-Path -LiteralPath $report) {
             & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'MINERU_TRIAGE_PRIOR_RECEIPT_INVALID' }
+            if ($LASTEXITCODE -ne 0) { throw 'MINERU_BASIC_PREVIOUS_RECEIPT_INVALID' }
           } else {
             & $python $script --private-root $root --manifest $manifest
-            if ($LASTEXITCODE -ne 0) { throw 'MINERU_TRIAGE_READONLY_FAILED' }
+            if ($LASTEXITCODE -ne 0) { throw 'MINERU_BASIC_PRECHECK_MODEL_PROVENANCE_INVALID' }
             & $python $script --private-root $root --manifest $manifest --write
-            if ($LASTEXITCODE -ne 0) { throw 'MINERU_TRIAGE_VERIFY_OR_PRIVATE_WRITE_FAILED' }
+            if ($LASTEXITCODE -ne 0) { throw 'MINERU_BASIC_ACTUAL_OCR_CONVERSION_FAILED' }
             & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'MINERU_TRIAGE_PRIVATE_RECEIPT_INVALID' }
+            if ($LASTEXITCODE -ne 0) { throw 'MINERU_BASIC_NEW_RECEIPT_AUDIT_FAILED' }
           }
           foreach ($item in $protected) {
-            if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $before[$item]) { throw 'MINERU_TRIAGE_HISTORICAL_EVIDENCE_MUTATED' }
+            if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $before[$item]) { throw 'MINERU_BASIC_PROTECTED_HISTORY_MUTATED' }
           }
-          Write-Output 'ACS_MINERU_TRIAGE_TWO_ORIGINAL_FAILURE_LOGS=UNMODIFIED'
-          Write-Output 'ACS_MINERU_TRIAGE_SOURCE_PDF_AND_MODELS=PROTECTED'
-          Write-Output 'ACS_MINERU_TRIAGE_NEW_MINERU_PARSE_CALLS=0'
+          Write-Output 'ACS_MINERU_BASIC_ORIGINAL_PAGE_AND_MODELS=VERIFIED'
+          Write-Output 'ACS_MINERU_BASIC_PREVIOUS_FAILURE_LOGS=UNCHANGED'
+          Write-Output 'ACS_MINERU_BASIC_NEW_CLOUD_REQUESTS=0'
