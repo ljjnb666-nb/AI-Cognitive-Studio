@@ -1,7 +1,6 @@
 name: ACS Diagram Semantic Gate Synthetic
 on:
   pull_request:
-    branches: [main]
     paths:
       - 'tools/pdf-parser-benchmark/scripts/ebook_semantic_structure_gate.py'
       - 'tools/pdf-parser-benchmark/tests/test_ebook_semantic_structure_gate.py'
