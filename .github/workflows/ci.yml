@@ -524,11 +524,11 @@ jobs:
           fi
           echo "All validation domains succeeded."
 
-  # B31 MinerU Markdown structural accounting, no new OCR inference.
-  synthetic-b31-mineru-markdown-structure:
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-mineru-markdown-structure-audit-20261023' }}
+  # B03/B08/B15/B29 from real original PDF pages, B31 reuses verified result.
+  synthetic-fivebook-mineru-basic-matrix:
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-fivebook-mineru-basic-source-matrix-20261023' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
@@ -537,33 +537,35 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Lightweight synthetic PDF dependencies without AI models
+      - name: Test synthetic-only deterministic PDF inputs without model fetch
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
-      - name: Test exact-head private base64/image/text residue accounting
+      - name: Verify five exact OCR-focus pages and four new offline parses
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b31_mineru_markdown_structure.py
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_mineru_basic_matrix.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_mineru_basic_matrix.py' -v
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_mineru_markdown_structure.py' -v
-          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_mineru_basic_stateless.py' -v
-          echo 'ACS_MINERU_MD_STRUCTURE_SYNTHETIC=PASS'
-          echo 'ACS_MINERU_MD_STRUCTURE_PROVIDER_REQUESTS=0'
+          echo 'ACS_FIVEBOOK_MINERU_BASIC_SYNTHETIC=PASS'
+          echo 'ACS_FIVEBOOK_MINERU_MODEL_DOWNLOADS=0'
 
-  owner-only-windows-b31-mineru-markdown-structure:
-    needs: synthetic-b31-mineru-markdown-structure
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-mineru-markdown-structure-audit-20261023' }}
+  owner-only-windows-fivebook-mineru-basic-matrix:
+    needs: synthetic-fivebook-mineru-basic-matrix
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-fivebook-mineru-basic-source-matrix-20261023' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
-    timeout-minutes: 13
+    timeout-minutes: 70
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
+      MINERU_MODEL_SOURCE: local
+      MINERU_MODEL_SMALL_BACKEND: onnx
     steps:
-      - name: Checkout exact owner SHA, source content stays private
+      - name: Checkout owner exact SHA without source PDFs
         uses: actions/checkout@v4
         env:
           GIT_CONFIG_COUNT: '1'
@@ -571,58 +573,88 @@ jobs:
           GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          path: acs-b31-mineru-markdown
-          clean: false
+          path: acs-fivebook-mineru
           persist-credentials: false
-      - name: Classify genuine 106990-character MinerU output without sharing text
+          clean: false
+      - name: Four additional real OCR pages, one-at-a-time, fail closed on first error
         shell: powershell
-        timeout-minutes: 7
+        timeout-minutes: 64
         run: |
           $ErrorActionPreference='Stop'
-          if ((git -C acs-b31-mineru-markdown rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'MINERU_MD_STRUCTURE_EXACT_HEAD_MISMATCH' }
+          if ((git -C acs-fivebook-mineru rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'FIVEBOOK_MINERU_EXACT_SHA_MISMATCH' }
           $root='D:\ai-cognitive-pdf-benchmark-data'
           $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+          $kit=Join-Path $root 'python\mineru\Scripts\mineru-kit.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf) -or -not (Test-Path -LiteralPath $kit -PathType Leaf)) { throw 'FIVEBOOK_MINERU_ISOLATED_ENVIRONMENT_MISSING' }
           $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
-          $output=Join-Path $folder 'b31_mineru403_basic_markdown_structure.private.json'
           $protected=@(
+            (Join-Path $folder 'multibook_native_24pages.private.json'),
+            (Join-Path $folder 'multibook_rapidocr_five_pages.private.json'),
+            (Join-Path $folder 'multibook_docling_native_24pages.private.json'),
+            (Join-Path $folder 'b31_mineru403_basic_onnx_stateless.private.json'),
             (Join-Path $folder 'b31_mineru403_basic_onnx_stateless.private.md'),
             (Join-Path $folder 'b31_mineru403_basic_onnx_stateless.private.log'),
-            (Join-Path $folder 'b31_mineru403_basic_onnx_stateless.private.json'),
+            (Join-Path $folder 'b31_mineru403_basic_markdown_structure.private.json'),
             (Join-Path $folder 'b31_mineru403_failure_triage.private.json'),
             (Join-Path $folder 'b31_mineru403_flash_execution.private.log'),
             (Join-Path $folder 'b31_mineru403_flash_execution.v2.private.log'),
-            (Join-Path $folder 'multibook_native_24pages.private.json'),
-            (Join-Path $folder 'multibook_docling_native_24pages.private.json'),
-            (Join-Path $folder 'multibook_rapidocr_five_pages.private.json'),
-            (Join-Path $root 'semantic_gate\b31_source_rapidocr392.private.json'),
             (Join-Path $root 'semantic_gate\b31_source_only_page126.private.png'),
-            (Join-Path $root 'semantic_gate\visual_graph_proposal_B31.reply.private.json')
+            (Join-Path $root 'semantic_gate\b31_source_rapidocr392.private.json'),
+            (Join-Path $root 'semantic_gate\visual_graph_proposal_B31.reply.private.json'),
+            (Join-Path $root 'semantic_gate\visual_graph_proposal_B15.request.private.json')
           )
-          $prior=@{}
-          foreach ($f in $protected) {
-            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw 'MINERU_MD_STRUCTURE_PRIOR_PRIVATE_EVIDENCE_MISSING' }
-            $prior[$f]=(Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash
+          $protected+=@(Get-ChildItem -LiteralPath $folder -Filter '*.private.png' -File | Select-Object -ExpandProperty FullName)
+          $protected+=@(Get-ChildItem -LiteralPath (Join-Path $folder 'docling_native_single_pages') -Filter '*.private.pdf' -File | Select-Object -ExpandProperty FullName)
+          $before=@{}
+          foreach ($file in $protected) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'FIVEBOOK_MINERU_PREVIOUS_PRIVATE_EVIDENCE_MISSING' }
+            $before[$file]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
           }
+          $env:MINERU_HOME=Join-Path $root 'cache\mineru\home'
+          $env:MINERU_MODEL_BASE_DIR=Join-Path $root 'cache\mineru\home\models'
+          $env:MINERU_MODEL_SOURCE='local'
+          $env:MINERU_MODEL_SMALL_BACKEND='onnx'
+          $env:MINERU_TABLE_DEVICE='cpu'
+          $env:HF_HUB_OFFLINE='1'
+          $env:TRANSFORMERS_OFFLINE='1'
           $env:HTTP_PROXY='http://127.0.0.1:1'
           $env:HTTPS_PROXY='http://127.0.0.1:1'
           $env:ALL_PROXY='http://127.0.0.1:1'
           $env:NO_PROXY=''
-          $script='acs-b31-mineru-markdown/tools/pdf-parser-benchmark/scripts/ebook_b31_mineru_markdown_structure.py'
-          $manifest='acs-b31-mineru-markdown/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
-          if (Test-Path -LiteralPath $output) {
-            & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'MINERU_MD_STRUCTURE_EXISTING_RECEIPT_INVALID' }
+          $script='acs-fivebook-mineru/tools/pdf-parser-benchmark/scripts/ebook_fivebook_mineru_basic_matrix.py'
+          $manifest='acs-fivebook-mineru/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $newBooks=@('B03','B08','B15','B29')
+          foreach ($book in $newBooks) {
+            $receipt=Join-Path $folder ("fivebook_mineru_basic_"+$book+".private.json")
+            $markdown=Join-Path $folder ("fivebook_mineru_basic_"+$book+".private.md")
+            $executionLog=Join-Path $folder ("fivebook_mineru_basic_"+$book+".private.log")
+            if (Test-Path -LiteralPath $receipt -PathType Leaf) {
+              & $python $script --private-root $root --manifest $manifest --book $book --audit-only
+              if ($LASTEXITCODE -ne 0) { throw 'FIVEBOOK_MINERU_EXISTING_RECEIPT_INVALID' }
+            } else {
+              if ((Test-Path -LiteralPath $markdown) -or (Test-Path -LiteralPath $executionLog)) { throw 'FIVEBOOK_MINERU_PARTIAL_OUTPUT_PRESERVED_NO_RETRY' }
+              & $python $script --private-root $root --manifest $manifest --book $book
+              if ($LASTEXITCODE -ne 0) { throw 'FIVEBOOK_MINERU_SOURCE_PREFLIGHT_FAILED' }
+              & $python $script --private-root $root --manifest $manifest --book $book --write
+              if ($LASTEXITCODE -ne 0) { throw 'FIVEBOOK_MINERU_ACTUAL_PAGE_CONVERSION_FAILED' }
+              & $python $script --private-root $root --manifest $manifest --book $book --audit-only
+              if ($LASTEXITCODE -ne 0) { throw 'FIVEBOOK_MINERU_POSTWRITE_RECEIPT_INVALID' }
+            }
+          }
+          $summary=Join-Path $folder 'fivebook_mineru_rapidocr_comparison.private.json'
+          if (Test-Path -LiteralPath $summary -PathType Leaf) {
+            & $python $script --private-root $root --manifest $manifest --audit-summary
+            if ($LASTEXITCODE -ne 0) { throw 'FIVEBOOK_MINERU_EXISTING_SUMMARY_INVALID' }
           } else {
-            & $python $script --private-root $root --manifest $manifest
-            if ($LASTEXITCODE -ne 0) { throw 'MINERU_MD_STRUCTURE_READONLY_PREVIEW_FAILED' }
-            & $python $script --private-root $root --manifest $manifest --write
-            if ($LASTEXITCODE -ne 0) { throw 'MINERU_MD_STRUCTURE_PRIVATE_CREATE_FAILED' }
-            & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'MINERU_MD_STRUCTURE_PRIVATE_READBACK_FAILED' }
+            & $python $script --private-root $root --manifest $manifest --summary
+            if ($LASTEXITCODE -ne 0) { throw 'FIVEBOOK_MINERU_PRIVATE_SUMMARY_FAILED' }
+            & $python $script --private-root $root --manifest $manifest --audit-summary
+            if ($LASTEXITCODE -ne 0) { throw 'FIVEBOOK_MINERU_PRIVATE_SUMMARY_RECHECK_FAILED' }
           }
-          foreach ($f in $protected) {
-            if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne $prior[$f]) { throw 'MINERU_MD_STRUCTURE_PRIOR_SOURCE_MUTATED' }
+          foreach ($file in $protected) {
+            if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'FIVEBOOK_MINERU_HISTORICAL_EVIDENCE_CHANGED' }
           }
-          Write-Output 'ACS_MINERU_MD_STRUCTURE_PRIOR_EVIDENCE=UNCHANGED'
-          Write-Output 'ACS_MINERU_MD_STRUCTURE_NEW_AI_INFERENCE=0'
-          Write-Output 'ACS_MINERU_MD_STRUCTURE_GRAPH_GOLD=UNVERIFIED'
+          Write-Output 'ACS_FIVEBOOK_MINERU_SAME_SOURCE_PAGE_MATRIX=VERIFIED'
+          Write-Output 'ACS_FIVEBOOK_MINERU_PREVIOUS_B31_RESULT=REUSED_NOT_RERUN'
+          Write-Output 'ACS_FIVEBOOK_MINERU_GOLD=UNVERIFIED'
+          Write-Output 'ACS_FIVEBOOK_MINERU_PAID_PROVIDER_CALLS=0'
