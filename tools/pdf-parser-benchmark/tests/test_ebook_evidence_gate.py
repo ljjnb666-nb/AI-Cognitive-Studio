@@ -56,6 +56,18 @@ class EvidenceGate(unittest.TestCase):
         d=copy.deepcopy(self.sample)
         self.row(d,"PaddleOCR","B15")["picture_boxes"]=2
         self.rejected(d)
+    def test_duplicate_manifest_source_rejected(self):
+        d=copy.deepcopy(self.sample)
+        manifest=json.loads((BASE/"corpus"/"ebook-20261022.manifest.json").read_text(encoding="utf-8"))
+        entry=next(x for x in manifest["sources"] if x["id"]=="B15")
+        manifest["sources"].append(copy.deepcopy(entry))
+        with self.assertRaises(GateError):
+            validate(d,manifest)
+
+    def test_boolean_run_id_cannot_impersonate_number(self):
+        d=copy.deepcopy(self.sample)
+        self.row(d,"Docling","B15")["run_id"]=True
+        self.rejected(d)
     def test_winner_rejected(self):
         d=copy.deepcopy(self.sample); d["selection_status"]="FINAL"; self.rejected(d)
     def test_wrong_sha(self):
