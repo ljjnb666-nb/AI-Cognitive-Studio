@@ -1,0 +1,47 @@
+name: ACS Ebook Rotation Frame Contract
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/acs-ebook-rotation-frame.yml"
+      - "tools/pdf-parser-benchmark/scripts/ebook_private_roi_alignment.py"
+      - "tools/pdf-parser-benchmark/scripts/ebook_roi_rotation_contract.py"
+      - "tools/pdf-parser-benchmark/scripts/ebook_windows_docling_real.py"
+      - "tools/pdf-parser-benchmark/tests/test_ebook_roi_rotation_contract.py"
+      - "tools/pdf-parser-benchmark/tests/test_ebook_private_roi_alignment.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-coordinate-contract:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Assert exact HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || { echo "::error::EXACT_HEAD_MISMATCH"; exit 1; }
+          echo "ACS_EBOOK_ROTATION_HEAD=$EXPECTED_SHA"
+      - name: Python runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Assert offline Python syntax
+        run: |
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_private_roi_alignment.py tools/pdf-parser-benchmark/scripts/ebook_roi_rotation_contract.py tools/pdf-parser-benchmark/scripts/ebook_windows_docling_real.py
+      - name: Execute standalone synthetic rotation and existing ROI regression
+        run: |
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_roi_rotation_contract.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_private_roi_alignment.py' -v
+          echo "ACS_EBOOK_ROTATION_SYNTHETIC_COORDINATE_PASS"
+          echo "ACS_EBOOK_B15_B31_REAL_SPATIAL_ACCURACY=UNVERIFIED"
+          echo "ACS_EBOOK_GRAPH_SEMANTICS=UNVERIFIED"
