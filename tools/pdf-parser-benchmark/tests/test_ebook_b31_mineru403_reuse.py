@@ -57,6 +57,7 @@ def runner_success(command,env,logfile):
     assert env["HTTP_PROXY"].endswith(":1")
     assert "--pages" in command and command[command.index("--pages")+1]=="all"
     assert "--tier" in command and command[command.index("--tier")+1]=="flash"
+    assert "--json" not in command and "--force" not in command
     output=Path(command[command.index("--output")+1])
     output.write_text("# mock private MinerU result\n\nnot gold\n",encoding="utf-8")
     return 0
