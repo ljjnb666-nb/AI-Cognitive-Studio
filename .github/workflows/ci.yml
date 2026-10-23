@@ -619,9 +619,9 @@ jobs:
           $env:HTTPS_PROXY=$proxy
           $env:HTTP_PROXY=$proxy
           $env:ALL_PROXY=$proxy
-          & $python -m pip install --no-input --only-binary=:all: --retries 2 --timeout 35 "rapidocr==3.9.2" "onnxruntime==1.22.1" "numpy==1.26.4"
+          & $python -m pip install --no-input --only-binary=:all: --retries 2 --timeout 35 "rapidocr==3.9.2" "onnxruntime==1.22.1" "numpy==2.2.6"
           if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_ISOLATED_WHEEL_INSTALL_FAILED' }
-          & $python -c "from importlib.metadata import version; import cv2; assert version('rapidocr')=='3.9.2' and version('onnxruntime')=='1.22.1' and version('numpy')=='1.26.4'"
+          & $python -c "from importlib.metadata import version; import cv2; assert version('rapidocr')=='3.9.2' and version('onnxruntime')=='1.22.1' and version('numpy')=='2.2.6'"
           if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_VERSION_PROBE_FAILED' }
           Write-Output 'ACS_B31_RAPIDOCR_ISOLATED_PACKAGES=READY'
           Write-Output 'ACS_B31_RAPIDOCR_SOURCE_DATA_SENT_TO_INSTALLER=NONE'
