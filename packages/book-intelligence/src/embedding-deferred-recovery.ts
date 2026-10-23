@@ -10,7 +10,9 @@ import { rearmBookAnalysisRunById } from "./pipeline.js";
 
 export const BOOK_EMBEDDING_DEFERRED_CODE = "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED";
 export const BOOK_EMBEDDING_AUTO_REARM_MIN_AGE_MS = 45_000;
+export type DeferredEmbeddingRecoveryCursor = { completedAt: Date; id: string };
 export type DeferredEmbeddingRecoveryResult = {
+  nextCursor: DeferredEmbeddingRecoveryCursor | null;
   discovered: number; recovered: number; skipped: number; capacityBlocked: number; raced: number; errors: number;
 };
 
@@ -18,13 +20,19 @@ export async function recoverSettledDeferredBookEmbeddings(options: {
   now?: Date;
   limit?: number;
   topic?: string;
+  cursor?: DeferredEmbeddingRecoveryCursor | null;
 } = {}): Promise<DeferredEmbeddingRecoveryResult> {
   const limit = options.limit ?? 25;
   const now = options.now ?? new Date();
+  const cursor = options.cursor ?? null;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25 ||
-      !Number.isFinite(now.getTime())) throw new RangeError("BOOK_EMBEDDING_AUTO_REARM_SCAN_INVALID");
+      !Number.isFinite(now.getTime()) ||
+      (cursor !== null && (!(cursor.completedAt instanceof Date) ||
+        !Number.isFinite(cursor.completedAt.getTime()) || !cursor.id))) throw new RangeError("BOOK_EMBEDDING_AUTO_REARM_SCAN_INVALID");
   const cutoff = new Date(now.getTime() - BOOK_EMBEDDING_AUTO_REARM_MIN_AGE_MS);
   // Generation zero only: one automatic retry at most per BookAnalysisRun.
+  // Forward keyset pagination prevents a fixed collection of quarantined
+  // rows from starving later eligible records forever.
   const runs = await prisma.bookAnalysisRun.findMany({
     where: {
       status: "FAILED",
@@ -32,13 +40,18 @@ export async function recoverSettledDeferredBookEmbeddings(options: {
       errorCode: BOOK_EMBEDDING_DEFERRED_CODE,
       dispatchGeneration: 0,
       completedAt: { lte: cutoff },
+      ...(cursor ? { OR: [
+        { completedAt: { gt: cursor.completedAt } },
+        { completedAt: cursor.completedAt, id: { gt: cursor.id } },
+      ] } : {}),
       job: { is: { type: "book.analysis", status: "FAILED" } },
     },
     orderBy: [{ completedAt: "asc" }, { id: "asc" }],
     take: limit,
-    select: { id: true, workspaceId: true, jobId: true },
+    select: { id: true, workspaceId: true, jobId: true, completedAt: true },
   });
   const result: DeferredEmbeddingRecoveryResult = {
+    nextCursor: runs.length === limit ? { completedAt: runs[runs.length - 1]!.completedAt!, id: runs[runs.length - 1]!.id } : null,
     discovered: runs.length, recovered: 0, skipped: 0, capacityBlocked: 0, raced: 0, errors: 0,
   };
   for (const run of runs) {
