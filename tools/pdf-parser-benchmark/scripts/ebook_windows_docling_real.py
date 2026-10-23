@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 from ebook_private_roi_alignment import docling_picture_boxes, geometry_gate, match as align_private_roi
+from ebook_roi_rotation_contract import calibrated_match
 from ebook_layout_signals import docling_layout_signals
 import re
 import shutil
@@ -66,7 +67,7 @@ def compact(engine, output, elapsed):
             "content_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest()}
 
 
-def evaluate(fixture, source, converter, private_reference=None):
+def evaluate(fixture, source, converter, private_reference=None, private_frame_calibration=None):
     import fitz
     from docling.datamodel.base_models import ConversionStatus
     physical = PAGES[fixture["id"]]
@@ -117,7 +118,9 @@ def evaluate(fixture, source, converter, private_reference=None):
         docling_metric["layout_evidence"]["source_pdf_rotation_degrees"] = pdf_page_rotation
         status = geometry_gate(fixture["id"], docling_metric["layout_evidence"]["picture_items"], picture_boxes, pdf_page_rotation, private_reference is not None)
         docling_metric["layout_evidence"]["spatial_alignment_status"] = status
-        if status == "PRIVATE_REFERENCE_READY_TO_MATCH" and fixture["id"] in ("B15", "B31"):
+        if (status == "PRIVATE_REFERENCE_READY_TO_MATCH" or
+                (status == "ROTATED_DISPLAY_TRANSFORM_UNVERIFIED" and
+                 fixture["id"] == "B15" and private_frame_calibration is not None)) and fixture["id"] in ("B15", "B31"):
             candidate = {
                 "schema_version": 1,
                 "book_id": fixture["id"],
@@ -126,7 +129,9 @@ def evaluate(fixture, source, converter, private_reference=None):
                 "engine": "Docling",
                 "picture_boxes_normalized": [list(box) for box in picture_boxes],
             }
-            alignment = align_private_roi(private_reference, candidate)
+            alignment = (calibrated_match(private_reference, candidate, private_frame_calibration)
+                         if status == "ROTATED_DISPLAY_TRANSFORM_UNVERIFIED"
+                         else align_private_roi(private_reference, candidate))
             docling_metric["layout_evidence"]["spatial_alignment"] = alignment
             docling_metric["layout_evidence"]["spatial_alignment_status"] = alignment["status"]
         if native_reference:
@@ -168,6 +173,15 @@ def main():
         if roi_path.is_symlink() or roi_path.stat().st_size > 262144:
             raise ValueError("Private ROI reference unsafe or oversized")
         private_reference = json.loads(roi_path.read_text(encoding="utf-8"))
+    # Optional: three independently marked private page anchors must prove the
+    # Docling-to-PDF-display frame before B15 rotation alignment. Never infer
+    # the frame from a tool name or rotated source PDF metadata alone.
+    calibration_path = Path(args.root) / "semantic_gate" / "B15_roi_frame_calibration.private.json"
+    private_frame_calibration = None
+    if calibration_path.is_file():
+        if calibration_path.is_symlink() or calibration_path.stat().st_size > 262144:
+            raise ValueError("Private frame calibration unsafe or oversized")
+        private_frame_calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
     results = {}
     for raw in inputs(args.root):
         fixture = expected.get(hashlib.sha256(raw).hexdigest())
@@ -178,7 +192,7 @@ def main():
         try:
             results[fixture["id"]] = {
                 "status": "SUCCESS",
-                **evaluate(fixture, raw, pipeline, private_reference),
+                **evaluate(fixture, raw, pipeline, private_reference, private_frame_calibration),
             }
             print("ACS_DOCLING_REAL_BOOK_COMPLETE=" + fixture["id"], flush=True)
         except Exception as exc:
