@@ -548,7 +548,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b31_pixel_topology.py
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_pixel_topology.py' -v
-          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_pixel_topology.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_wing_continuity_controls.py' -v
           echo "ACS_B31_PIXEL_TOPOLOGY_SYNTHETIC=PASS"
           echo "ACS_B31_PIXEL_TOPOLOGY_PROVIDER_CALLS=0"
 
