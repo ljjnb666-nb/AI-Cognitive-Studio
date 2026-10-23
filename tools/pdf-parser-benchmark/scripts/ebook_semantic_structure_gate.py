@@ -85,13 +85,25 @@ def facts(doc, reference):
             raise Rejected("DUPLICATE_OBJECT_ROLE")
         roles[role] = kind
         atoms.add(("object", role, kind))
+    parent_of = {}
     for node in doc.get("objects", []):
         parent = node.get("parent_role")
         if parent is not None:
             token(parent)
             if parent not in roles or parent == node["role"]:
                 raise Rejected("INVALID_PARENT_RELATION")
+            parent_of[node["role"]] = parent
             atoms.add(("contains", parent, node["role"]))
+    # Cyclic containment cannot describe a valid diagram hierarchy.
+    # Bound traversal by the existing 128-object input limit.
+    for child in parent_of:
+        seen = set()
+        current = child
+        while current in parent_of:
+            if current in seen:
+                raise Rejected("CYCLIC_OBJECT_CONTAINMENT")
+            seen.add(current)
+            current = parent_of[current]
     for edge in rows(doc, "relations", 512):
         keys(edge, {"source_role", "target_role", "relation", "directed"})
         src, dst, kind = token(edge.get("source_role")), token(edge.get("target_role")), token(edge.get("relation"))
@@ -104,21 +116,46 @@ def facts(doc, reference):
         if atom in atoms:
             raise Rejected("DUPLICATE_RELATION")
         atoms.add(atom)
+    axis_slots = set()
     for axis in rows(doc, "axes", 128):
         keys(axis, {"chart_role", "dimension", "meaning"})
         chart, dimension, meaning = token(axis.get("chart_role")), axis.get("dimension"), token(axis.get("meaning"))
         if roles.get(chart) != "chart" or dimension not in ("x", "y"):
             raise Rejected("INVALID_CHART_AXIS")
+        slot = (chart, dimension)
+        if slot in axis_slots:
+            raise Rejected("AMBIGUOUS_CHART_AXIS")
+        axis_slots.add(slot)
         atom = ("axis", chart, dimension, meaning)
         if atom in atoms:
             raise Rejected("DUPLICATE_CHART_AXIS")
         atoms.add(atom)
+    trend_slots = set()
     for trend in rows(doc, "trends", 128):
-        keys(trend, {"chart_role", "shape"})
+        # B15 can contain several independently behaving curves in one chart.
+        # Legacy chart-wide trends stay supported; an optional series_role
+        # disambiguates curve-specific claims instead of collapsing them.
+        keys(trend, {"chart_role", "shape", "series_role"})
         chart, shape = token(trend.get("chart_role")), token(trend.get("shape"))
         if roles.get(chart) != "chart":
             raise Rejected("INVALID_TREND_CHART")
-        atom = ("trend", chart, shape)
+        series = trend.get("series_role")
+        if series is not None:
+            series = token(series)
+            if roles.get(series) != "series":
+                raise Rejected("INVALID_TREND_SERIES")
+            ancestor = series
+            while ancestor in parent_of:
+                ancestor = parent_of[ancestor]
+                if ancestor == chart:
+                    break
+            if ancestor != chart:
+                raise Rejected("SERIES_OUTSIDE_CHART")
+        slot = (chart, series)
+        if slot in trend_slots:
+            raise Rejected("AMBIGUOUS_CHART_TREND")
+        trend_slots.add(slot)
+        atom = ("trend", chart, series or "", shape)
         if atom in atoms:
             raise Rejected("DUPLICATE_CHART_TREND")
         atoms.add(atom)
