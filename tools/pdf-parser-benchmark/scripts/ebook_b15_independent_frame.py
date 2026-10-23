@@ -54,9 +54,9 @@ def _mapping(x, y, width, height, rotation):
     raise Rejected("FRAME_ROTATION_UNSUPPORTED")
 
 
-def _sample(image, x, y):
+def _sample(image, buffer, x, y):
     offset = (y * image.width + x) * image.n
-    return image.samples[offset:offset+3]
+    return buffer[offset:offset+3]
 
 
 def _image_anchors(unrotated, displayed, rotation):
@@ -72,6 +72,8 @@ def _image_anchors(unrotated, displayed, rotation):
         raise Rejected("FRAME_RENDER_DIMENSIONS_INCONSISTENT")
     if min(w, h) < 150 or unrotated.n < 3 or displayed.n < 3:
         raise Rejected("FRAME_RASTER_INVALID")
+    source_bytes = unrotated.samples
+    display_bytes = displayed.samples
     samples = []
     # 21x21 grid; 9x9 texture patch. Scan isn't driven by parser picture boxes.
     for yi in range(2, 23):
@@ -81,7 +83,7 @@ def _image_anchors(unrotated, displayed, rotation):
             if x < 6 or y < 6 or x >= w-6 or y >= h-6:
                 continue
             positions = [(x+dx,y+dy) for dy in (-4,-2,0,2,4) for dx in (-4,-2,0,2,4)]
-            grays = [sum(_sample(unrotated, xx, yy))//3 for xx,yy in positions]
+            grays = [sum(_sample(unrotated, source_bytes, xx, yy))//3 for xx,yy in positions]
             texture = max(grays)-min(grays)
             if texture < 45:
                 continue
@@ -98,8 +100,8 @@ def _image_anchors(unrotated, displayed, rotation):
                         if not (0<=dx<displayed.width and 0<=dy<displayed.height):
                             valid=False
                             break
-                        a=_sample(unrotated,xx,yy)
-                        b=_sample(displayed,dx,dy)
+                        a=_sample(unrotated,source_bytes,xx,yy)
+                        b=_sample(displayed,display_bytes,dx,dy)
                         distance+=sum(abs(v-z) for v,z in zip(a,b))
                     if valid:
                         mae=distance/(len(positions)*3)
