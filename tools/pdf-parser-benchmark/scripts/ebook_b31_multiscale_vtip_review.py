@@ -6,6 +6,7 @@ Results and full-resolution review image remain ONLY on the private D drive.
 All V-wing observations are unverified source-pixel *hypotheses*, NOT gold.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -14,6 +15,7 @@ import sys
 
 from ebook_b31_source_raster_geometry import read_evidence
 from ebook_b31_arrow_shaft_consensus import load_source_report, merge_fragments
+from ebook_private_graph_receipt_audit import no_duplicate_keys, reject_constant
 from ebook_private_glm_visual_reference import VisualGateError
 
 REPORT_NAME = "b31_multiscale_vtip_source.private.json"
@@ -166,6 +168,7 @@ def run(root, manifest, cv2, np, *, write=False):
         raise VisualGateError("VTIP_REPORT_ALREADY_EXISTS_NO_OVERWRITE")
     cv_data = load_source_report(folder, meta)
     results, overlay = source_vtip_hypotheses(png, meta, cv_data, cv2, np)
+    results["private_review_png_sha256"] = hashlib.sha256(overlay).hexdigest()
     results["source_document_sha256"] = meta["source_document_sha256"]
     results["source_page_png_sha256"] = meta["private_png_sha256"]
     results["source_cv_input_truncated"] = bool(
@@ -180,18 +183,56 @@ def run(root, manifest, cv2, np, *, write=False):
     return results
 
 
+def audit_existing(root, manifest):
+    """Idempotent read-only verification for subsequent exact-head CI runs."""
+    _, meta, folder = read_evidence(root, manifest)
+    load_source_report(folder, meta)
+    p_json, p_png = folder / REPORT_NAME, folder / OVERLAY_NAME
+    for p, limit in ((p_json, 150_000), (p_png, MAX_REVIEW_BYTES)):
+        if p.is_symlink() or not p.is_file() or not 0 < p.stat().st_size <= limit:
+            raise VisualGateError("VTIP_EXISTING_PACKET_INCOMPLETE_OR_UNSAFE")
+    try:
+        report = json.loads(p_json.read_text(encoding="utf-8"),
+                            object_pairs_hook=no_duplicate_keys,
+                            parse_constant=reject_constant)
+    except (ValueError, UnicodeError, TypeError):
+        raise VisualGateError("VTIP_EXISTING_JSON_INVALID") from None
+    if (not isinstance(report, dict) or
+            report.get("schema_version") != 1 or
+            report.get("evidence") != "B31_ORIGINAL_RASTER_V_WING_MULTISCALE_UNVERIFIED" or
+            report.get("book_id") != "B31" or
+            type(report.get("physical_page")) is not int or
+            report["physical_page"] != 126 or
+            report.get("source_document_sha256") != meta["source_document_sha256"] or
+            report.get("source_page_png_sha256") != meta["private_png_sha256"] or
+            report.get("node_count_verified") is not False or
+            report.get("arrow_direction_verified") is not False or
+            report.get("independent_graph_gold", object()) is not None or
+            report.get("certified_graph_f1", object()) is not None or
+            report.get("provider_calls") != 0 or
+            report.get("private_review_png_sha256") !=
+            hashlib.sha256(p_png.read_bytes()).hexdigest()):
+        raise VisualGateError("VTIP_EXISTING_PACKET_PROVENANCE_INVALID")
+    return report
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--private-root", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--write", action="store_true")
+    parser.add_argument("--audit-only", action="store_true")
     args = parser.parse_args(argv)
     import cv2
     import numpy as np
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
-    info = run(Path(args.private_root), manifest, cv2, np, write=args.write)
+    if args.write and args.audit_only:
+        raise VisualGateError("VTIP_MUTUAL_EXCLUSIVE_MODES")
+    info = (audit_existing(Path(args.private_root), manifest) if args.audit_only
+            else run(Path(args.private_root), manifest, cv2, np, write=args.write))
     print("ACS_B31_VTIP_STATUS=" +
-          ("PRIVATE_REVIEW_PACKET_CREATED" if args.write else "READONLY_READY"))
+          ("PRIVATE_REVIEW_PACKET_CREATED" if args.write else
+           "EXISTING_PRIVATE_PACKET_VERIFIED" if args.audit_only else "READONLY_READY"))
     print("ACS_B31_VTIP_MERGED_SHAFTS=" + str(info["original_shaft_hypotheses"]))
     print("ACS_B31_VTIP_GEOMETRIC_ENDPOINT_CANDIDATES=" +
           str(info["candidate_endpoint_count_total"]))
