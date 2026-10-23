@@ -524,11 +524,11 @@ jobs:
           fi
           echo "All validation domains succeeded."
 
-  # Source-only OCR+Vtip spatial confound verification on exact owner's PR only.
-  synthetic-b31-ocr-spatial:
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-ocr-spatial-confounds-20261023' }}
+  # Six-books/24-pages native source plus five books offline OCR; owner exact PR.
+  synthetic-multibook-matrix:
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-multibook-native-ocr-matrix-20261023' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -537,33 +537,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Fixed CPU decoder wheels for synthetic geometry only
+      - name: Install synthetic-only deterministic PDF and raster dependencies
         shell: bash
         run: |
-          python -m pip install --disable-pip-version-check --only-binary=:all: numpy==1.26.4 opencv-python-headless==4.10.0.84
-      - name: Verify exact commit OCR polygon spatial audit and prior RapidOCR receipts
+          python -m pip install --disable-pip-version-check --only-binary=:all: numpy==1.26.4 opencv-python-headless==4.10.0.84 pymupdf==1.26.5
+      - name: Test six synthetic PDFs, 24 pages and five local OCR cases
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b31_ocr_spatial_confounds.py
-          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_ocr_spatial_confounds.py' -v
-          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b31_rapidocr_isolated.py' -v
-          echo 'ACS_B31_SPATIAL_SYNTHETIC=PASS'
-          echo 'ACS_B31_SPATIAL_PROVIDER_CALLS=0'
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_multibook_native_matrix.py tools/pdf-parser-benchmark/scripts/ebook_multibook_rapidocr_matrix.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_multibook_matrix.py' -v
+          echo "ACS_MULTIBOOK_MATRIX_SYNTHETIC=PASS"
+          echo "ACS_MULTIBOOK_MATRIX_PROVIDER_CALLS=0"
 
-  owner-only-windows-b31-ocr-spatial:
-    needs: synthetic-b31-ocr-spatial
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b31-ocr-spatial-confounds-20261023' }}
+  owner-only-windows-multibook-matrix:
+    needs: synthetic-multibook-matrix
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-multibook-native-ocr-matrix-20261023' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
-    timeout-minutes: 12
+    timeout-minutes: 50
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
     steps:
-      - name: Checkout exact SHA without model keys
+      - name: Checkout exact six-book benchmark code, never book bytes
         uses: actions/checkout@v4
         env:
           GIT_CONFIG_COUNT: '1'
@@ -573,23 +572,21 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           clean: false
           persist-credentials: false
-          path: acs-b31-spatial
-      - name: Inspect existing offline OCR and source V tips, private no-leak spatial proof
+          path: acs-six-pdf-matrix
+      - name: Verify six true PDF sources and 24-page native inventory privately
         shell: powershell
+        timeout-minutes: 30
         run: |
           $ErrorActionPreference='Stop'
-          if ((git -C acs-b31-spatial rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'B31_SPATIAL_EXACT_HEAD_MISMATCH' }
+          if ((git -C acs-six-pdf-matrix rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'MULTIBOOK_SOURCE_EXACT_HEAD_MISMATCH' }
           $root='D:\ai-cognitive-pdf-benchmark-data'
-          $python=Join-Path $root 'tool-env\rapidocr-3.9.2-onnx-1.22.1\Scripts\python.exe'
-          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'B31_SPATIAL_ISOLATED_PYTHON_MISSING' }
-          & $python -c "import cv2,numpy; from importlib.metadata import version; assert version('rapidocr')=='3.9.2' and version('onnxruntime')=='1.22.1'"
-          if ($LASTEXITCODE -ne 0) { throw 'B31_SPATIAL_ISOLATED_VERSIONS_MISMATCH' }
+          $native=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $native -PathType Leaf)) { throw 'MULTIBOOK_NATIVE_PYTHON_MISSING' }
+          & $native -c "import fitz; assert fitz.VersionBind"
+          if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_PYMUPDF_MISSING' }
           $folder=Join-Path $root 'semantic_gate'
-          $report=Join-Path $folder 'b31_ocr_spatial_confounds.private.json'
-          $overlay=Join-Path $folder 'b31_ocr_spatial_confounds.private.png'
-          $reportExists=Test-Path -LiteralPath $report
-          $overlayExists=Test-Path -LiteralPath $overlay
-          if ($reportExists -xor $overlayExists) { throw 'B31_SPATIAL_PARTIAL_OUTPUT_FAIL_CLOSED' }
+          $baseline=Join-Path $folder 'multibook_matrix_20261023'
+          $nativeReport=Join-Path $baseline 'multibook_native_24pages.private.json'
           $protected=@(
             (Join-Path $folder 'b31_source_only_page126.private.png'),
             (Join-Path $folder 'b31_source_only_page126.private.json'),
@@ -604,38 +601,70 @@ jobs:
             (Join-Path $folder 'b31_pixel_topology_review.private.json'),
             (Join-Path $folder 'b31_source_offline_ocr.private.json'),
             (Join-Path $folder 'b31_source_rapidocr392.private.json'),
+            (Join-Path $folder 'b31_ocr_spatial_confounds.private.json'),
+            (Join-Path $folder 'b31_ocr_spatial_confounds.private.png'),
             (Join-Path $folder 'visual_graph_proposal_B15.request.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B31.request.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B31.reply.private.json'),
             (Join-Path $folder 'visual_graph_proposal_B31.candidate.private.json')
           )
-          $before=@{}
+          $sha=@{}
           foreach ($p in $protected) {
-            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'B31_SPATIAL_HISTORICAL_INPUT_MISSING' }
-            $before[$p]=(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
+            if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'MULTIBOOK_PROTECTED_HISTORY_MISSING' }
+            $sha[$p]=(Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash
           }
+          $script='acs-six-pdf-matrix/tools/pdf-parser-benchmark/scripts/ebook_multibook_native_matrix.py'
+          $manifest='acs-six-pdf-matrix/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
           $env:HTTP_PROXY='http://127.0.0.1:1'
           $env:HTTPS_PROXY='http://127.0.0.1:1'
           $env:ALL_PROXY='http://127.0.0.1:1'
           $env:NO_PROXY=''
-          $script='acs-b31-spatial/tools/pdf-parser-benchmark/scripts/ebook_b31_ocr_spatial_confounds.py'
-          $manifest='acs-b31-spatial/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
-          if ($reportExists -and $overlayExists) {
-            & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'B31_SPATIAL_EXISTING_RECEIPT_INVALID' }
+          if (Test-Path -LiteralPath $nativeReport) {
+            & $native $script --private-root $root --manifest $manifest --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_NATIVE_EXISTING_REPORT_INVALID' }
           } else {
-            & $python $script --private-root $root --manifest $manifest
-            if ($LASTEXITCODE -ne 0) { throw 'B31_SPATIAL_READONLY_PREVIEW_FAILED' }
-            if ((Test-Path -LiteralPath $report) -or (Test-Path -LiteralPath $overlay)) { throw 'B31_SPATIAL_PREVIEW_MUTATED_PRIVATE_FILES' }
-            & $python $script --private-root $root --manifest $manifest --write
-            if ($LASTEXITCODE -ne 0) { throw 'B31_SPATIAL_PRIVATE_WRITE_FAILED' }
-            & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'B31_SPATIAL_POSTWRITE_RECEIPT_INVALID' }
+            & $native $script --private-root $root --manifest $manifest --write
+            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_NATIVE_REAL_PDF_SCAN_FAILED' }
+            & $native $script --private-root $root --manifest $manifest --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_NATIVE_POSTWRITE_AUDIT_FAILED' }
           }
           foreach ($p in $protected) {
-            if ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -ne $before[$p]) { throw 'B31_SPATIAL_PREVIOUS_EVIDENCE_CHANGED' }
+            if ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -ne $sha[$p]) { throw 'MULTIBOOK_EXISTING_EVIDENCE_CHANGED' }
           }
-          if (-not (Test-Path -LiteralPath $report -PathType Leaf) -or -not (Test-Path -LiteralPath $overlay -PathType Leaf)) { throw 'B31_SPATIAL_PRIVATE_PAIR_MISSING' }
-          Write-Output 'ACS_B31_SPATIAL_SOURCE_ONLY_PRIVATE_EVIDENCE=VERIFIED'
-          Write-Output 'ACS_B31_SPATIAL_TRUE_ARROW_REFERENCE=UNVERIFIED'
-          Write-Output 'ACS_B31_SPATIAL_PROVIDER_CALLS=0'
+          Write-Output 'ACS_MULTIBOOK_NATIVE_REAL_PAGES=VERIFIED'
+          Write-Output 'ACS_MULTIBOOK_PROTECTED_HISTORY=UNCHANGED'
+          Write-Output 'ACS_MULTIBOOK_NATIVE_CLOUD_CALLS=0'
+
+      - name: Five-book fixed-page CPU RapidOCR offline and immutable receipt
+        shell: powershell
+        timeout-minutes: 18
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git -C acs-six-pdf-matrix rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'MULTIBOOK_OCR_EXACT_HEAD_MISMATCH' }
+          $root='D:\ai-cognitive-pdf-benchmark-data'
+          $python=Join-Path $root 'tool-env\rapidocr-3.9.2-onnx-1.22.1\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'MULTIBOOK_OCR_ISOLATED_PYTHON_MISSING' }
+          & $python -c "import cv2,numpy; from importlib.metadata import version; assert version('rapidocr')=='3.9.2' and version('onnxruntime')=='1.22.1' and version('numpy')=='2.2.6'"
+          if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_OCR_DEPENDENCY_VERSIONS_CHANGED' }
+          $output=Join-Path $root 'semantic_gate\multibook_matrix_20261023\multibook_rapidocr_five_pages.private.json'
+          $source=Join-Path $root 'semantic_gate\multibook_matrix_20261023\multibook_native_24pages.private.json'
+          $before=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+          $env:HTTP_PROXY='http://127.0.0.1:1'
+          $env:HTTPS_PROXY='http://127.0.0.1:1'
+          $env:ALL_PROXY='http://127.0.0.1:1'
+          $env:NO_PROXY=''
+          $script='acs-six-pdf-matrix/tools/pdf-parser-benchmark/scripts/ebook_multibook_rapidocr_matrix.py'
+          $manifest='acs-six-pdf-matrix/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          if (Test-Path -LiteralPath $output) {
+            & $python $script --private-root $root --manifest $manifest --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_OCR_EXISTING_RECEIPT_INVALID' }
+          } else {
+            & $python $script --private-root $root --manifest $manifest --write
+            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_OCR_REAL_FIVE_BOOKS_FAILED' }
+            & $python $script --private-root $root --manifest $manifest --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'MULTIBOOK_OCR_POSTWRITE_AUDIT_FAILED' }
+          }
+          if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $before) { throw 'MULTIBOOK_NATIVE_RECEIPT_CHANGED_DURING_OCR' }
+          Write-Output 'ACS_MULTIBOOK_FIVE_BOOK_OFFLINE_OCR=VERIFIED'
+          Write-Output 'ACS_MULTIBOOK_INDEPENDENT_ACCURACY_GOLD=UNVERIFIED'
+          Write-Output 'ACS_MULTIBOOK_PROVIDER_CALLS=0'
