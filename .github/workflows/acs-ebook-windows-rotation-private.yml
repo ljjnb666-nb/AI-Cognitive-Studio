@@ -5,6 +5,8 @@ on:
       - ".github/workflows/acs-ebook-windows-rotation-private.yml"
       - "tools/pdf-parser-benchmark/scripts/ebook_roi_rotation_contract.py"
       - "tools/pdf-parser-benchmark/scripts/ebook_windows_docling_real.py"
+      - "tools/pdf-parser-benchmark/scripts/ebook_windows_private_preflight.py"
+      - "tools/pdf-parser-benchmark/tests/test_ebook_windows_private_preflight.py"
   workflow_dispatch:
 
 permissions:
@@ -15,6 +17,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  streaming-private-preflight-synthetic:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run pure-stdlib private preflight synthetic tests
+        run: |
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_windows_private_preflight.py' -v
+          echo "ACS_PRIVATE_PREFLIGHT_SYNTHETIC_PASS"
+          echo "ACS_PRIVATE_REAL_B15_B31_IOU=UNVERIFIED"
   sha-pinned-real-docling:
     if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.ref == 'bench/ebook-windows-private-rotation-20261023' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
@@ -31,6 +50,20 @@ jobs:
           clean: false
           path: acs-ebook-rotation-private
           ref: ${{ github.event.pull_request.head.sha }}
+      - name: Inventory SHA-pinned books and private visual reference without OCR or 4-GiB gate
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git -C acs-ebook-rotation-private rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'ACS_PREFLIGHT_EXACT_SHA_MISMATCH' }
+          $private = 'D:\ai-cognitive-pdf-benchmark-data'
+          if (-not (Test-Path -LiteralPath $private -PathType Container)) { throw 'ACS_PREFLIGHT_PRIVATE_ROOT_MISSING' }
+          $python = (Get-Command python -ErrorAction Stop).Source
+          $script = 'acs-ebook-rotation-private/tools/pdf-parser-benchmark/scripts/ebook_windows_private_preflight.py'
+          $manifest = 'acs-ebook-rotation-private/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          & $python $script --root $private --manifest $manifest
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_PREFLIGHT_PRIVATE_CORPUS_OR_REFERENCE_INVALID' }
       - name: Verify local-only SHA-pinned source and model cache
         shell: powershell
         env:
