@@ -7,7 +7,7 @@
 
 ## 可复现离线架构
 
-依照 RapidOCR 官方发行文档：统一包 `rapidocr` 接替长期停止维护的旧 `rapidocr_onnxruntime`；RapidOCR 3.9.2 与 ONNXRuntime CPU 1.22.1 + NumPy 1.26.4 在 Windows x64 CPython 环境可使用预编译 wheel。**仅在新建 D: 隔离虚拟环境中**安装：
+依照 RapidOCR 官方发行文档：统一包 `rapidocr` 接替长期停止维护的旧 `rapidocr_onnxruntime`；RapidOCR 3.9.2 与 ONNXRuntime CPU 1.22.1 + NumPy 2.2.6 在真实 Windows CPython 3.13 x64 环境可使用预编译 wheel。**仅在新建 D: 隔离虚拟环境中**安装：
 
 `D:\ai-cognitive-pdf-benchmark-data\tool-env\rapidocr-3.9.2-onnx-1.22.1\Scripts\python.exe`
 
@@ -32,3 +32,7 @@ Windows 的 Docling 2.141.0 既有环境不得污染、升级或删改。安装�
 - Linux仅对合成图/模拟 RapidOCROutput 跑新10+旧10测试，永不下载真实书或运行模型。
 - Windows owner-only exact PR branch，先安装仅三个指定核心包的隔离 venv，再封锁 OCR 期间网络，确保 SHA 私有读写与文档里的可复现状态。
 - 记录首次失败、网络 retry、依赖下载/资源 warning 和 Node20→24 Actions 弃用 warning。所有堆叠 PR 保持 Draft/Open/Unmerged，未经用户明确授权不得合并。
+
+## Python 3.13 真实安装兼容性修复
+
+Windows Runner 的 Docling 缓存解释器实际上运行 CPython 3.13，因此先前固定的 `numpy==1.26.4` 缺少 CPython 3.13 Windows wheel；在保留 `rapidocr==3.9.2`、`onnxruntime==1.22.1` 后，将全新隔离 venv 的 NumPy 固定为 `numpy==2.2.6`（官方 PyPI 已有 cp313 win_amd64 wheel）。仅 Ubuntu Python3.12 **合成测试**仍使用 NumPy 1.26.4。PySocks 引导 SHA 固定、所有首次失败与网络 warnings 继续在 PR #135 评论归档。
