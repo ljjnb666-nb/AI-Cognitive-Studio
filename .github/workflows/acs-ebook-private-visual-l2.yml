@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 25
     env:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
-      ACS_GLM_VISION_API_KEY: ${{ secrets.ACS_GLM_VISION_API_KEY }}
+      ACS_GLM_VISION_API_KEY: ${{ secrets.ACS_GLM_VISION_API_KEY || secrets.ZHIPU_API_KEY }}
       GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
       HF_HUB_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
