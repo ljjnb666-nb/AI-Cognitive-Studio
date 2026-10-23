@@ -23,13 +23,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: \${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Exact-head private receipt simulation with zero external requests
         env:
-          EXPECTED_SHA: \${{ github.event.pull_request.head.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
@@ -40,11 +40,11 @@ jobs:
 
   owner-only-private-readonly:
     needs: synthetic-private-receipt-audit
-    if: \${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-private-graph-receipt-audit-20261023' }}
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-private-graph-receipt-audit-20261023' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 10
     env:
-      EXPECTED_SHA: \${{ github.event.pull_request.head.sha }}
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     steps:
@@ -58,7 +58,7 @@ jobs:
           persist-credentials: false
           clean: false
           path: acs-ebook-graph-audit
-          ref: \${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Inspect only existing D drive request and candidate statuses
         shell: powershell
         run: |
