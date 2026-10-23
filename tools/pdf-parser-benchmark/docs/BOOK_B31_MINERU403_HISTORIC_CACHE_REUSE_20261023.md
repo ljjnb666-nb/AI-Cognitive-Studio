@@ -30,3 +30,9 @@ Draft #139 的 Windows owner-only 任务仅在四个当时存在的有限目录�
 下一步扩展到五本书同一页，再至全部24页，同时尽量加入已经缓存的 Docling Standard 所需完整模型资源；必须在每个引擎上声明实际是否使用 OCR/布局/表格模型，禁止用“包已安装”代替模型已执行。
 
 所有 PR Draft/Open/Unmerged，未经用户明确批准不得合并。上游 #137 apt 540s 首错、#139 首次 synthetic 正则误报、Node20→24 warnings 均不抹除。
+
+## 同源初次真实调用失败与 v2 限定修正
+
+第一版真实 Windows exact-head `4c12e556bef1eaa59fa2a944e0d4fa581b473b7d` 已确证 MinerU 4.0.3 executable、8 个缓存 ONNX 权重及同源物理页预检，但实际 `mineru parse` 非零退出，私有 D: 首次 stderr log 保存、没有成功报告。第二版只读诊断显示 `--tier`、`--pages`、`--output`、`--json`、`--force` 均为 CLI 支持选项，但原文错误仍未可安全分类，故不得宣称某参数已被证明为根因。
+
+基于 MinerU 官方单文件 Markdown CLI 用法，范围受限地**仅去除 `--json` 和 `--force`**，仍固定 `--tier flash --pages all --output`、源单页 SHA、缓存模型和离线环境。新的成功输出仅允许落入名称带 `.v2.private.` 的新文件，旧失败日志的 SHA 必须前后不变。此举是一次可审计的最小实验，**不是已证明修复**；任何第二次失败仍保留私有证据，不自动继续重试。
