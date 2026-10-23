@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"scripts"))
 from ebook_private_roi_alignment import Rejected
 from ebook_roi_rotation_contract import (
     AUTHORITY, FRAME_DISPLAY, FRAME_UNROTATED,
-    calibrated_match, main, rotate_box, rotate_point,
+    calibrated_match as _calibrated_match, main, rotate_box, rotate_point,
 )
 
 SHA = "b" * 64
@@ -38,6 +38,10 @@ CALIBRATION = {
         "display_point": list(rotate_point(point, 270)),
     } for point in ANCHORS],
 }
+
+def calibrated_match(reference, candidate, calibration):
+    # This synthetic fixture treats independent PyMuPDF-observed rotation as 270.
+    return _calibrated_match(reference, candidate, calibration, 270)
 
 
 class RotationContract(unittest.TestCase):
@@ -105,6 +109,14 @@ class RotationContract(unittest.TestCase):
             with self.assertRaisesRegex(Rejected, "INVALID_PDF_PAGE_ROTATION"):
                 calibrated_match(REFERENCE, CANDIDATE, cal)
 
+    def test_sidecar_rotation_must_equal_real_pdf_page_rotation(self):
+        cal = copy.deepcopy(CALIBRATION)
+        cal["source_pdf_rotation_degrees"] = 90
+        with self.assertRaisesRegex(Rejected, "FRAME_MEASURED_ROTATION_MISMATCH"):
+            _calibrated_match(REFERENCE, CANDIDATE, cal, 270)
+        with self.assertRaisesRegex(Rejected, "FRAME_MEASURED_ROTATION_MISMATCH"):
+            _calibrated_match(REFERENCE, CANDIDATE, CALIBRATION, 90)
+
     def test_wrong_reference_frame_not_allowed(self):
         cal = copy.deepcopy(CALIBRATION)
         cal["reference_frame"] = "PDF_UNROTATED_TOPLEFT"
@@ -161,6 +173,7 @@ class RotationContract(unittest.TestCase):
                 "--reference", str(root/"reference.json"),
                 "--candidate", str(root/"candidate.json"),
                 "--calibration", str(root/"calibration.json"),
+                "--observed-pdf-rotation-degrees", "270",
                 "--output", str(out),
             ]), 0)
             report = out.read_text(encoding="utf-8")
@@ -179,6 +192,7 @@ class RotationContract(unittest.TestCase):
                     "--reference", str(root/"reference.json"),
                     "--candidate", str(root/"candidate.json"),
                     "--calibration", str(root/"calibration.json"),
+                "--observed-pdf-rotation-degrees", "270",
                     "--output", str(root.parent/"leak.json"),
                 ])
 
