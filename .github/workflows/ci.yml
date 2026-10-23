@@ -602,14 +602,15 @@ jobs:
             & curl.exe -fsSL --retry 2 --connect-timeout 25 --max-time 95 --proto '=https' --tlsv1.2 --proxy $proxy --output $bootstrapJson 'https://pypi.org/pypi/PySocks/1.7.1/json'
             if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_PYSOCKS_METADATA_FETCH_FAILED' }
             $metadata=Get-Content -LiteralPath $bootstrapJson -Raw | ConvertFrom-Json
-            $wheel=@($metadata.urls | Where-Object { $_.filename -like '*.whl' -and $_.packagetype -eq 'bdist_wheel' })
+            $wheel=@($metadata.urls | Where-Object { $_.filename -ceq 'PySocks-1.7.1-py3-none-any.whl' -and $_.packagetype -eq 'bdist_wheel' })
             if ($wheel.Count -ne 1 -or $wheel[0].filename -ne 'PySocks-1.7.1-py3-none-any.whl') { throw 'B31_RAPID_OCR_PYSOCKS_WHEEL_IDENTITY_INVALID' }
             if ($wheel[0].url -notmatch '^https://files.pythonhosted.org/') { throw 'B31_RAPID_OCR_PYSOCKS_WHEEL_DOMAIN_INVALID' }
             $wheelPath=Join-Path $isolated $wheel[0].filename
             & curl.exe -fsSL --retry 2 --connect-timeout 25 --max-time 100 --proto '=https' --tlsv1.2 --proxy $proxy --output $wheelPath $wheel[0].url
             if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_PYSOCKS_WHEEL_FETCH_FAILED' }
             $got=(Get-FileHash -LiteralPath $wheelPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($got -ne $wheel[0].digests.sha256.ToLowerInvariant()) { throw 'B31_RAPID_OCR_PYSOCKS_SHA256_MISMATCH' }
+            $pinned='2725bd0a9925919b9b51739eea5f9e2bae91e83288108a9ad338b2e3a4435ee5'
+            if ($got -ne $pinned -or $got -ne $wheel[0].digests.sha256.ToLowerInvariant()) { throw 'B31_RAPID_OCR_PYSOCKS_SHA256_MISMATCH' }
             & $python -m pip install --no-index --no-deps --no-input $wheelPath
             if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_PYSOCKS_BOOTSTRAP_INSTALL_FAILED' }
           }
