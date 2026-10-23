@@ -105,7 +105,10 @@ class SourceOnlyPacketTests(unittest.TestCase):
             data=json.loads(meta.read_text())
             self.assertEqual(data["source_document_sha256"], SHA)
             self.assertEqual(data["physical_page"], 126)
-            self.assertNotIn("GLM", meta.read_text())
+            self.assertEqual(data["provenance"], "PDF_NATIVE_INDEPENDENT_OF_GLM_PREDICTION")
+            self.assertNotIn("model_response", data)
+            self.assertNotIn("prediction", data)
+            self.assertNotIn("candidate", data)
             original=png.read_bytes()
             with patch.object(target, "_raw_sources", return_value=iter([("B31", PDF)])):
                 with self.assertRaisesRegex(target.VisualGateError, "ALREADY_EXISTS"):
