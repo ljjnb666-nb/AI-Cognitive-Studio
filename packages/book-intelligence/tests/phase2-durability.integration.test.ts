@@ -667,6 +667,52 @@ describe("durable Phase 2 orchestration", () => {
     expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status).toBe("SUCCEEDED");
   });
 
+  it("does not bill a second Gateway invocation when a successor reclaims an in-flight embedding", async () => {
+    const data = await fixture(undefined, { pauseRemote: true });
+    const a = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
+    await data.gateway.remoteEntered;
+    const previous = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } });
+    expect(previous.executionClaimToken).toBeTruthy();
+    await expireLease(data.run.id);
+    const b = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
+    // Observe B's durable ownership claim, not merely starting its Promise.
+    let claimed = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const current = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } });
+      if (current.executionClaimToken && current.executionClaimToken !== previous.executionClaimToken) {
+        claimed = true;
+        break;
+      }
+      await sleep(10);
+    }
+    expect(claimed).toBe(true);
+    // Give B time to inspect A's still-RUNNING Gateway invocation. It must
+    // wait for A to finish, rather than minting a new :retry: key.
+    await sleep(400);
+    const midflight = await prisma.providerInvocation.findMany({
+      where: { workspaceId: data.workspace.id }, select: { idempotencyKey: true },
+    });
+    data.gateway.releaseRemote();
+    await expect(a).rejects.toThrow(BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST);
+    await b;
+    expect(midflight).toHaveLength(1);
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    const calls = await prisma.providerInvocation.findMany({
+      where: { workspaceId: data.workspace.id }, select: { status: true, idempotencyKey: true },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.status).toBe("SUCCEEDED");
+    const receipt = await prisma.providerEmbeddingResult.findFirstOrThrow({
+      where: { workspaceId: data.workspace.id },
+    });
+    expect(receipt.consumedAt).not.toBeNull();
+    expect(receipt.purgedAt).not.toBeNull();
+    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } }))
+      .toBe(await prisma.documentChunk.count({ where: { chunkSetId: data.chunkSet.id } }));
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status)
+      .toBe("SUCCEEDED");
+  });
+
   it("rejects vectors returned by an embedding call whose owner became stale", async () => {
     const data = await fixture(undefined, { pauseRemote: true });
     const a = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
