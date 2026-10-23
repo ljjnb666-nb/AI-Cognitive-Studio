@@ -590,36 +590,20 @@ jobs:
           if (-not (Test-Path -LiteralPath $models -PathType Container)) { throw 'B31_MINERU403_HISTORICAL_MODEL_CACHE_MISSING' }
           $matrix=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
           $oldLog=Join-Path $matrix 'b31_mineru403_flash_execution.private.log'
+          $oldMd=Join-Path $matrix 'b31_mineru403_flash_p0126.private.md'
           $oldReport=Join-Path $matrix 'b31_mineru403_flash_source_only.private.json'
-          if ((Test-Path -LiteralPath $oldLog -PathType Leaf) -and -not (Test-Path -LiteralPath $oldReport)) {
-            $snippet=@(Get-Content -LiteralPath $oldLog -TotalCount 350) -join ' '
-            $category='UNKNOWN_PRIVATE_ERROR'
-            if ($snippet -match '(?i)no such option|unrecognized arguments|unexpected extra argument|unknown option') { $category='CLI_UNSUPPORTED_FLAG_OR_ARGUMENT' }
-            elseif ($snippet -match '(?i)invalid value|invalid choice|bad parameter|parse error') { $category='CLI_PARAMETER_VALIDATION_FAILED' }
-            elseif ($snippet -match '(?i)ModuleNotFoundError|No module named|ImportError|DLL load failed') { $category='MINERU_ENV_DEPENDENCY_OR_IMPORT' }
-            elseif ($snippet -match '(?i)model.+not found|cache.+missing|local model.+missing|model resolution') { $category='LOCAL_MODEL_RESOLUTION_FAILED' }
-            elseif ($snippet -match '(?i)PermissionError|access is denied|access denied') { $category='FILESYSTEM_ACCESS_REJECTED' }
-            $privateHelp=Join-Path $matrix 'b31_mineru403_parse_help.private.log'
-            if (-not (Test-Path -LiteralPath $privateHelp)) {
-              & $mineru parse --help *> $privateHelp
-              if ($LASTEXITCODE -ne 0) { throw 'B31_MINERU403_PRIVATE_HELP_COMMAND_FAILED' }
-            }
-            $helpText=Get-Content -LiteralPath $privateHelp -Raw
-            foreach ($flag in @('--tier','--pages','--output','--json','--force')) {
-              $label=($flag.TrimStart('-')).ToUpperInvariant()
-              $found=$helpText.Contains($flag)
-              Write-Output ('ACS_MINERU403_HELP_'+$label+'='+$found.ToString().ToUpperInvariant())
-            }
-            Write-Output ('ACS_MINERU403_FIRST_PRIVATE_FAILURE_CLASS='+$category)
-            Write-Output 'ACS_MINERU403_PARSE_RETRY=BLOCKED_BY_PARTIAL_EVIDENCE'
-            throw 'B31_MINERU403_FIRST_REAL_ERROR_PRESERVED_REQUIRES_SCOPED_REMEDIATION'
+          if (-not (Test-Path -LiteralPath $oldLog -PathType Leaf) -or (Test-Path -LiteralPath $oldReport)) {
+            throw 'B31_MINERU403_FIRST_FAILED_RUN_PROVENANCE_MISSING'
           }
+          $oldErrorDigest=(Get-FileHash -LiteralPath $oldLog -Algorithm SHA256).Hash
+          Write-Output 'ACS_MINERU403_FIRST_FAILURE=HISTORICAL_PRIVATE_LOG_PRESERVED'
+          Write-Output 'ACS_MINERU403_SCOPED_V2=DROP_JSON_AND_FORCE_FLAGS_ONLY'
           $exeVersionLog=Join-Path $matrix 'b31_mineru403_runtime_version.private.log'
           & $mineru --version *> $exeVersionLog
           if ($LASTEXITCODE -ne 0 -or -not (Select-String -LiteralPath $exeVersionLog -Pattern '4\.0\.3' -Quiet)) { throw 'B31_MINERU403_HISTORIC_VERSION_MISMATCH' }
-          $report=Join-Path $matrix 'b31_mineru403_flash_source_only.private.json'
-          $markdown=Join-Path $matrix 'b31_mineru403_flash_p0126.private.md'
-          $privateExecutionLog=Join-Path $matrix 'b31_mineru403_flash_execution.private.log'
+          $report=Join-Path $matrix 'b31_mineru403_flash_source_only.v2.private.json'
+          $markdown=Join-Path $matrix 'b31_mineru403_flash_p0126.v2.private.md'
+          $privateExecutionLog=Join-Path $matrix 'b31_mineru403_flash_execution.v2.private.log'
           $exists=Test-Path -LiteralPath $report
           if (-not $exists -and ((Test-Path -LiteralPath $markdown) -or (Test-Path -LiteralPath $privateExecutionLog))) { throw 'B31_MINERU403_PREVIOUS_PARTIAL_OUTPUT_NOT_OVERWRITTEN' }
           $protected=@(
@@ -668,6 +652,7 @@ jobs:
           foreach ($file in $protected) {
             if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'B31_MINERU403_SOURCE_CHANGED' }
           }
+          if ((Get-FileHash -LiteralPath $oldLog -Algorithm SHA256).Hash -ne $oldErrorDigest) { throw 'B31_MINERU403_FIRST_FAILED_LOG_CHANGED' }
           Write-Output 'ACS_B31_MINERU403_TRUE_ORIGINAL_PAGE=VERIFIED'
           Write-Output 'ACS_B31_MINERU403_EXISTING_MODEL_CACHE=UNCHANGED'
           Write-Output 'ACS_B31_MINERU403_NEW_PAID_PROVIDER_CALLS=0'
