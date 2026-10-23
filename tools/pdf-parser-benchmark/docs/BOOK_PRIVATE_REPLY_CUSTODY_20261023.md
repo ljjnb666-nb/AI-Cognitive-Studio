@@ -28,3 +28,13 @@
 ## 验收和非目标
 
 本 PR 只运行纯合成数据单元测试及一个 owner-only Windows 只读确认（读取旧 B15 已存在的账本，不会发起新的模型调用）。全量 CI 需在准确 HEAD 通过。该 PR 不改变生产解析路由、不合并上游 PR、不创建真实 AI 图结构参考或准确率排名，保持 `certified_graph_f1=null`、`human_verified=false`。
+
+## 2026-10-23 增量：GLM completion finish_reason 门禁
+
+仅保存回复文本仍不足以证明回复完整。即使文本在语法上是合法 JSON，如果模型在生成上限触发 `finish_reason=length`，它可能只给出了部分图表结构、漏掉箭头或曲线。此类结果绝不能进入候选数据集或引擎排名。
+
+- 视觉请求响应必须只包含一个 choice。除原文本外，读取它的 `finish_reason`（缺失/未知记作 `unknown`）；不得凭文本形式推断停止原因。
+- 收到模型文本后，先在 D: 私有回复 envelope 中按原样保存文本与 `finish_reason`，同时保留之前的请求 marker。只有 `finish_reason=stop` 才允许继续严格 JSON、结构合同校验并写入候选。
+- `length`、`content_filter`、`tool_calls`、`unknown` 全部 **fail-closed**。回复在私有文件内可供离线审计，但不能被 `--write-candidate` 恢复为正常预测；不自动追加调用、不扩展 token 限额重试。
+- `finish_reason` 也参与离线完整性检查，未经授权不得编辑快照或将其从 `length` 改成 `stop`。仅此新增门禁不会证明模型准确率，也不解决历史 B15 缺失原始回复的问题。
+- 由于现阶段对 GLM-4.6V 强制 JSON response_format 的兼容性没有在既有实际工作流中完成专门验证，本切片 **不擅自添加新的云端请求参数**。先将响应完整性证据和不可重试屏障落实到本地代码、合成测试及准确 HEAD CI。
