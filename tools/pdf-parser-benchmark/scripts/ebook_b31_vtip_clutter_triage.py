@@ -15,7 +15,7 @@ import sys
 
 from ebook_b31_arrow_shaft_consensus import load_source_report, merge_fragments
 from ebook_b31_multiscale_vtip_review import (
-    LENGTHS, SLOPES, MAX_TIPS, _image, audit_existing,
+    LENGTHS, SLOPES, MAX_TIPS, _image, audit_existing as audit_vtip_packet,
 )
 from ebook_b31_source_raster_geometry import read_evidence
 from ebook_private_graph_receipt_audit import no_duplicate_keys, reject_constant
@@ -96,7 +96,7 @@ def analyze(root, manifest, cv2, np, *, write=False):
     if any(p.exists() or p.is_symlink() for p in (path, sheet_path)):
         raise VisualGateError("TRIAGE_REPORT_ALREADY_EXISTS_NO_OVERWRITE")
     source = load_source_report(folder, meta)
-    prior = audit_existing(root, manifest)
+    prior = audit_vtip_packet(root, manifest)
     bgr = _image(png, meta, cv2, np)
     shafts = merge_fragments(
         source["hough_line_candidates"], meta["render_width"], meta["render_height"])
