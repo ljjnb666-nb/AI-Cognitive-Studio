@@ -7,6 +7,8 @@ on:
       - "tools/pdf-parser-benchmark/scripts/ebook_windows_docling_real.py"
       - "tools/pdf-parser-benchmark/scripts/ebook_windows_private_preflight.py"
       - "tools/pdf-parser-benchmark/tests/test_ebook_windows_private_preflight.py"
+      - "tools/pdf-parser-benchmark/scripts/ebook_private_native_pages.py"
+      - "tools/pdf-parser-benchmark/tests/test_ebook_private_native_pages.py"
   workflow_dispatch:
 
 permissions:
@@ -32,7 +34,9 @@ jobs:
       - name: Run pure-stdlib private preflight synthetic tests
         run: |
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_windows_private_preflight.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_private_native_pages.py' -v
           echo "ACS_PRIVATE_PREFLIGHT_SYNTHETIC_PASS"
+          echo "ACS_PRIVATE_NATIVE_FAKE_PDF_BACKEND_SYNTHETIC_PASS"
           echo "ACS_PRIVATE_REAL_B15_B31_IOU=UNVERIFIED"
   sha-pinned-real-docling:
     if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.ref == 'bench/ebook-windows-private-rotation-20261023' }}
@@ -64,6 +68,31 @@ jobs:
           $manifest = 'acs-ebook-rotation-private/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
           & $python $script --root $private --manifest $manifest
           if ($LASTEXITCODE -ne 0) { throw 'ACS_PREFLIGHT_PRIVATE_CORPUS_OR_REFERENCE_INVALID' }
+      - name: Check real private physical pages using lightweight PyMuPDF (no OCR)
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $private = 'D:\ai-cognitive-pdf-benchmark-data'
+          $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ([double]$os.FreePhysicalMemory -lt 1048576) {
+            Write-Output 'ACS_PRIVATE_NATIVE_SKIPPED_FREE_RAM_UNDER_1GIB'
+            exit 0
+          }
+          $python = Join-Path $private 'tool-env\docling-2.141.0\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+            Write-Output 'ACS_PRIVATE_NATIVE_SKIPPED_CACHED_PYMUPDF_NOT_FOUND'
+            exit 0
+          }
+          & $python -c "import fitz"
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_PRIVATE_NATIVE_PYMUPDF_MISSING' }
+          $script = 'acs-ebook-rotation-private/tools/pdf-parser-benchmark/scripts/ebook_private_native_pages.py'
+          $manifest = 'acs-ebook-rotation-private/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $output = Join-Path $private ('reports\ebook-native-lowram-' + $env:EXPECTED_SHA.Substring(0,12) + '.private.json')
+          & $python $script --root $private --manifest $manifest --output $output
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_PRIVATE_NATIVE_PAGE_EVIDENCE_INCOMPLETE' }
+          Write-Output 'ACS_PRIVATE_NATIVE_REPORT_STORED_ON_D_DRIVE_ONLY'
       - name: Verify local-only SHA-pinned source and model cache
         shell: powershell
         env:
