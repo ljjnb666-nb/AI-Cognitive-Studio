@@ -102,6 +102,8 @@ class VTipSourceOnly(unittest.TestCase):
             self.assertEqual(json.loads(report.read_text()),results)
             self.assertEqual((private/"b31_source_only_page126.private.png").read_bytes(),raw)
             self.assertEqual(model.read_text(),"DO NOT READ PREDICTION")
+            self.assertEqual(subject.audit_existing(root,MANIFEST)["candidate_endpoint_count_total"],
+                             results["candidate_endpoint_count_total"])
             self.assertFalse(results["arrow_direction_verified"])
             with self.assertRaisesRegex(subject.VisualGateError,"ALREADY_EXISTS"):
                 subject.run(root,MANIFEST,cv2,np,write=True)
@@ -138,6 +140,27 @@ class VTipSourceOnly(unittest.TestCase):
     def test_short_segment_no_tip(self):
         m=np.ones((160,240),dtype=bool)
         self.assertIsNone(subject.wing_score(m,[12.,12.],[0.,12.]))
+
+
+    def test_existing_packet_tamper_fails_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            private=setup(root,synthetic())
+            subject.run(root,MANIFEST,cv2,np,write=True)
+            overlay=private/subject.OVERLAY_NAME
+            overlay.write_bytes(overlay.read_bytes()+b"changed")
+            with self.assertRaisesRegex(subject.VisualGateError,"PROVENANCE_INVALID"):
+                subject.audit_existing(root,MANIFEST)
+
+    def test_incomplete_private_packet_does_not_silently_rewrite(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            private=setup(root,synthetic())
+            (private/subject.OVERLAY_NAME).write_bytes(b"partial")
+            with self.assertRaisesRegex(subject.VisualGateError,"INCOMPLETE_OR_UNSAFE"):
+                subject.audit_existing(root,MANIFEST)
+            with self.assertRaisesRegex(subject.VisualGateError,"ALREADY_EXISTS"):
+                subject.run(root,MANIFEST,cv2,np,write=True)
 
 
 if __name__=="__main__":
