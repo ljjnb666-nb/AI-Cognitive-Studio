@@ -36,7 +36,7 @@ def _digest(stream, max_bytes=MAX_PDF_BYTES):
 
 
 def _iter_pdf_digests(root):
-    for path in sorted(root.rglob("*")):
+    for path in root.rglob("*"):
         if not path.is_file() or path.is_symlink():
             continue
         if path.suffix.lower() == ".pdf":
