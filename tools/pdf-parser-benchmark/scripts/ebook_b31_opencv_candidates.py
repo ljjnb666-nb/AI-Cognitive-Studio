@@ -22,6 +22,19 @@ MAX_TIPS = 128
 
 
 def source_candidates(png, source, cv2, np):
+    # Validate PNG IHDR before OpenCV allocates decoded pixels.
+    if (len(png) < 24 or png[:8] != b"\x89PNG\r\n\x1a\n" or
+            png[12:16] != b"IHDR"):
+        raise VisualGateError("CV_PNG_IHDR_INVALID")
+    declared_w = int.from_bytes(png[16:20], "big")
+    declared_h = int.from_bytes(png[20:24], "big")
+    if (type(source.get("render_width")) is not int or
+            type(source.get("render_height")) is not int or
+            declared_w != source["render_width"] or
+            declared_h != source["render_height"] or
+            declared_w < 32 or declared_h < 32 or
+            declared_w * declared_h > MAX_PIXELS):
+        raise VisualGateError("CV_PNG_IHDR_DIMENSIONS_INVALID")
     raw = np.frombuffer(png, dtype=np.uint8)
     img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
     if img is None or len(img.shape) != 3 or img.shape[2] != 3:
