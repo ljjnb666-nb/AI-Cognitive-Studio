@@ -32,7 +32,7 @@ ALLOWED_FINISH_REASONS = {"stop", "length", "content_filter", "tool_calls", "unk
 
 
 def require_terminal_finish_reason(reason):
-    if reason not in ALLOWED_FINISH_REASONS:
+    if type(reason) is not str or reason not in ALLOWED_FINISH_REASONS:
         raise VisualGateError("REPLY_FINISH_REASON_INVALID")
     if reason != "stop":
         raise VisualGateError("REPLY_COMPLETION_NOT_FINAL")
