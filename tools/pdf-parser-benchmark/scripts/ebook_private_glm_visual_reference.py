@@ -21,7 +21,7 @@ import sys
 import time
 
 from ebook_private_native_pages import _raw_sources
-from ebook_private_roi_alignment import normalized_box, overlap
+from ebook_private_roi_alignment import normalized_box, overlap, Rejected as InvalidBBox
 
 PAGES = {"B15": (109, "chart"), "B31": (126, "directed_graph")}
 AUTHORITY = "L2_AI_VISUAL_PROVISIONAL_NOT_HUMAN_GROUND_TRUTH"
@@ -81,7 +81,10 @@ def parse_model_regions(answer, expected_kind):
             for v in raw
         ):
             raise VisualGateError("MODEL_REGION_BBOX_INVALID")
-        box = normalized_box([v/1000 for v in raw])
+        try:
+            box = normalized_box([v/1000 for v in raw])
+        except InvalidBBox:
+            raise VisualGateError("MODEL_REGION_BBOX_INVALID") from None
         if (box[2]-box[0])*(box[3]-box[1]) < 0.001:
             raise VisualGateError("MODEL_REGION_TOO_SMALL")
         if box in boxes:
