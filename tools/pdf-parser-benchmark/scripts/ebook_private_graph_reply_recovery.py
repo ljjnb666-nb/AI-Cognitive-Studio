@@ -25,6 +25,17 @@ FENCE = re.compile(r"\s*" + re.escape(chr(96) * 3) +
                    re.escape(chr(96) * 3) + r"[ \t]*\s*\Z",
                    re.DOTALL | re.IGNORECASE)
 CUSTODY_STATUS = "HTTP_200_TEXT_CAPTURED_UNVERIFIED"
+# Exactly one completed model message is required to produce a candidate.
+# A truncated, filtered, tool-directed or missing completion reason is retained
+# for private diagnostics but MUST NOT be treated as a valid final answer.
+ALLOWED_FINISH_REASONS = {"stop", "length", "content_filter", "tool_calls", "unknown"}
+
+
+def require_terminal_finish_reason(reason):
+    if type(reason) is not str or reason not in ALLOWED_FINISH_REASONS:
+        raise VisualGateError("REPLY_FINISH_REASON_INVALID")
+    if reason != "stop":
+        raise VisualGateError("REPLY_COMPLETION_NOT_FINAL")
 
 
 def strict_payload(raw):
@@ -90,7 +101,7 @@ def _save_exclusive(path, data):
         stream.write(payload)
 
 
-def capture_reply(root, book, digest, reply):
+def capture_reply(root, book, digest, reply, *, finish_reason="unknown"):
     """Call only AFTER provider has returned text and BEFORE JSON parsing."""
     safe, folder = _folder(root)
     marker, path, candidate = _paths(folder, book)
@@ -99,6 +110,8 @@ def capture_reply(root, book, digest, reply):
         raise VisualGateError("CANDIDATE_ALREADY_EXISTS_NO_OVERWRITE")
     if not isinstance(reply, str):
         raise VisualGateError("STRUCTURE_MODEL_NON_TEXT")
+    if type(finish_reason) is not str or finish_reason not in ALLOWED_FINISH_REASONS:
+        raise VisualGateError("REPLY_FINISH_REASON_INVALID")
     encoded = reply.encode("utf-8")
     if not 0 < len(encoded) <= MAX_RAW_BYTES:
         raise VisualGateError("STRUCTURE_MODEL_REPLY_SIZE_INVALID")
@@ -109,6 +122,7 @@ def capture_reply(root, book, digest, reply):
         "source_document_sha256": digest,
         "model": MODEL,
         "status": CUSTODY_STATUS,
+        "finish_reason": finish_reason,
         "raw_text_utf8": reply,
         "reply_sha256": hashlib.sha256(encoded).hexdigest(),
         "reply_byte_count": len(encoded),
@@ -127,7 +141,7 @@ def _validated_snapshot(root, book, digest):
         return None, candidate_path
     required = {
         "schema_version", "book_id", "physical_page",
-        "source_document_sha256", "model", "status", "raw_text_utf8",
+        "source_document_sha256", "model", "status", "finish_reason", "raw_text_utf8",
         "reply_sha256", "reply_byte_count",
     }
     if not isinstance(snapshot, dict) or set(snapshot) != required:
@@ -144,11 +158,13 @@ def _validated_snapshot(root, book, digest):
             snapshot["source_document_sha256"] != digest or
             snapshot["model"] != MODEL or
             snapshot["status"] != CUSTODY_STATUS or
+            type(snapshot["finish_reason"]) is not str or
+            snapshot["finish_reason"] not in ALLOWED_FINISH_REASONS or
             type(snapshot["reply_byte_count"]) is not int or
             snapshot["reply_byte_count"] != len(raw) or
             snapshot["reply_sha256"] != hashlib.sha256(raw).hexdigest()):
         raise VisualGateError("REPLY_CUSTODY_INTEGRITY_INVALID")
-    return reply, candidate_path
+    return (reply, snapshot["finish_reason"]), candidate_path
 
 
 def offline_recover(root, manifest, book, *, write_candidate=False):
@@ -156,11 +172,13 @@ def offline_recover(root, manifest, book, *, write_candidate=False):
     if book not in PAGES:
         raise VisualGateError("UNKNOWN_BOOK_NOT_ALLOWED")
     digest = identities(manifest)[book]
-    reply, output = _validated_snapshot(root, book, digest)
-    if reply is None:
+    saved, output = _validated_snapshot(root, book, digest)
+    if saved is None:
         if write_candidate:
             raise VisualGateError("NO_CAPTURED_REPLY_NO_RECOVERY")
         return "NO_CAPTURED_REPLY_LEGACY_ATTEMPT"
+    reply, finish_reason = saved
+    require_terminal_finish_reason(finish_reason)
     # Late import avoids cycles: online proposal imports capture_reply.
     from ebook_private_visual_graph_proposal import parse_candidate
     candidate = parse_candidate(reply, book, {"sha256": digest})

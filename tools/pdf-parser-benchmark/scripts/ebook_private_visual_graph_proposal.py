@@ -19,7 +19,7 @@ from ebook_private_glm_visual_reference import (
 )
 from ebook_private_native_pages import _raw_sources
 from ebook_semantic_structure_gate import Rejected, facts
-from ebook_private_graph_reply_recovery import capture_reply, strict_payload
+from ebook_private_graph_reply_recovery import (capture_reply, strict_payload, require_terminal_finish_reason)
 
 MAX_REPLY = 24000
 MAX_RESPONSE_TOKENS = 3000
@@ -122,12 +122,22 @@ def request_structure(image, prompt, key, requests_module):
     if response.status_code != 200:
         raise VisualGateError("VISION_PROVIDER_NON_200")
     try:
-        raw = response.json()["choices"][0]["message"]["content"]
+        parsed = response.json()
+        choices = parsed["choices"]
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise VisualGateError("VISION_PROVIDER_CHOICES_INVALID")
+        reply = choices[0]
+        raw = reply["message"]["content"]
+        finish = reply.get("finish_reason", "unknown")
     except (KeyError, IndexError, ValueError, TypeError):
         raise VisualGateError("VISION_PROVIDER_RESPONSE_INVALID") from None
     if not isinstance(raw, str):
         raise VisualGateError("VISION_PROVIDER_NON_TEXT")
-    return raw
+    if type(finish) is not str or finish not in (
+            "stop", "length", "content_filter", "tool_calls", "unknown"):
+        # Unknown or absent metadata cannot silently count as a full answer.
+        finish = "unknown"
+    return {"text": raw, "finish_reason": finish}
 
 
 def _exclusive_json(path, value):
@@ -197,8 +207,10 @@ def run(manifest, root, key, *, fitz, requests_module, allow_cloud):
         # Persist the exact returned text on private D: before attempting JSON
         # parsing. If parsing fails, never lose the one paid-attempt response.
         # No automatic retry: the request marker and reply are immutable.
-        capture_reply(root, book, selected[book]["sha256"], response)
-        candidate = parse_candidate(response, book, selected[book])
+        capture_reply(root, book, selected[book]["sha256"], response["text"],
+                      finish_reason=response["finish_reason"])
+        require_terminal_finish_reason(response["finish_reason"])
+        candidate = parse_candidate(response["text"], book, selected[book])
         _exclusive_json(output, candidate)
         counts.append({
             "book": book,

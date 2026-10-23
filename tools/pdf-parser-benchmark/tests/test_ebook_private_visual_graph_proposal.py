@@ -55,7 +55,7 @@ class FakeResponse:
         self.data = data
 
     def json(self):
-        return {"choices": [{"message": {"content": json.dumps(self.data)}}]}
+        return {"choices": [{"message": {"content": json.dumps(self.data)}, "finish_reason": "stop"}]}
 
 
 class FakeRequests:
