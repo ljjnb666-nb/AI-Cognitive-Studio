@@ -591,11 +591,33 @@ jobs:
           }
           if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'B31_RAPID_OCR_ISOLATED_PYTHON_MISSING' }
           # Dependencies only: network may download wheels; original ebook is never sent.
+          # Fresh venv has pip but NOT PySocks, so pip cannot initially use SOCKS.
+          # Bootstrap ONLY PySocks from official TLS PyPI JSON and verify sha256.
           $env:PIP_INDEX_URL='https://pypi.org/simple'
-          $env:HTTPS_PROXY='socks5h://127.0.0.1:10808'
-          $env:HTTP_PROXY='socks5h://127.0.0.1:10808'
-          $env:ALL_PROXY='socks5h://127.0.0.1:10808'
           $env:PIP_DISABLE_PIP_VERSION_CHECK='1'
+          $proxy='socks5h://127.0.0.1:10808'
+          & $python -c "import socks"
+          if ($LASTEXITCODE -ne 0) {
+            $bootstrapJson=Join-Path $isolated 'pysocks-1.7.1-pypi.json'
+            & curl.exe -fsSL --retry 2 --connect-timeout 25 --max-time 95 --proto '=https' --tlsv1.2 --proxy $proxy --output $bootstrapJson 'https://pypi.org/pypi/PySocks/1.7.1/json'
+            if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_PYSOCKS_METADATA_FETCH_FAILED' }
+            $metadata=Get-Content -LiteralPath $bootstrapJson -Raw | ConvertFrom-Json
+            $wheel=@($metadata.urls | Where-Object { $_.filename -like '*.whl' -and $_.packagetype -eq 'bdist_wheel' })
+            if ($wheel.Count -ne 1 -or $wheel[0].filename -ne 'PySocks-1.7.1-py3-none-any.whl') { throw 'B31_RAPID_OCR_PYSOCKS_WHEEL_IDENTITY_INVALID' }
+            if ($wheel[0].url -notmatch '^https://files.pythonhosted.org/') { throw 'B31_RAPID_OCR_PYSOCKS_WHEEL_DOMAIN_INVALID' }
+            $wheelPath=Join-Path $isolated $wheel[0].filename
+            & curl.exe -fsSL --retry 2 --connect-timeout 25 --max-time 100 --proto '=https' --tlsv1.2 --proxy $proxy --output $wheelPath $wheel[0].url
+            if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_PYSOCKS_WHEEL_FETCH_FAILED' }
+            $got=(Get-FileHash -LiteralPath $wheelPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($got -ne $wheel[0].digests.sha256.ToLowerInvariant()) { throw 'B31_RAPID_OCR_PYSOCKS_SHA256_MISMATCH' }
+            & $python -m pip install --no-index --no-deps --no-input $wheelPath
+            if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_PYSOCKS_BOOTSTRAP_INSTALL_FAILED' }
+          }
+          & $python -c "import socks; assert hasattr(socks, 'socksocket')"
+          if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_PYSOCKS_BOOTSTRAP_IMPORT_FAILED' }
+          $env:HTTPS_PROXY=$proxy
+          $env:HTTP_PROXY=$proxy
+          $env:ALL_PROXY=$proxy
           & $python -m pip install --no-input --only-binary=:all: --retries 2 --timeout 35 "rapidocr==3.9.2" "onnxruntime==1.22.1" "numpy==1.26.4"
           if ($LASTEXITCODE -ne 0) { throw 'B31_RAPID_OCR_ISOLATED_WHEEL_INSTALL_FAILED' }
           & $python -c "from importlib.metadata import version; import cv2; assert version('rapidocr')=='3.9.2' and version('onnxruntime')=='1.22.1' and version('numpy')=='1.26.4'"
