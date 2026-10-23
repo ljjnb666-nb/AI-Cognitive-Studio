@@ -129,7 +129,7 @@ def evaluate(fixture, source, converter, private_reference=None, private_frame_c
                 "engine": "Docling",
                 "picture_boxes_normalized": [list(box) for box in picture_boxes],
             }
-            alignment = (calibrated_match(private_reference, candidate, private_frame_calibration)
+            alignment = (calibrated_match(private_reference, candidate, private_frame_calibration, pdf_page_rotation)
                          if status == "ROTATED_DISPLAY_TRANSFORM_UNVERIFIED"
                          else align_private_roi(private_reference, candidate))
             docling_metric["layout_evidence"]["spatial_alignment"] = alignment
