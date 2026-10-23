@@ -130,7 +130,17 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   // This bounded domain sweep has its own dispatch guard and error boundary;
   // the PR #46 durable-operation sweep is scheduled independently below.
   const reconcileBookAnalysisStale = dispatch("book-analysis-stale-reconciliation", () => reconcileStaleBookAnalysisJobs(25), 60_000);
-  const reconcileDeferredBookEmbedding = bookQueue ? dispatch("book-embedding-deferred-recovery", () => recoverSettledDeferredBookEmbeddings({ limit: 25, ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}) }), 60_000) : undefined;
+  let deferredBookRecoveryCursor: { completedAt: Date; id: string } | null = null;
+  const reconcileDeferredBookEmbedding = bookQueue ? dispatch("book-embedding-deferred-recovery", async () => {
+    const result = await recoverSettledDeferredBookEmbeddings({
+      limit: 25, cursor: deferredBookRecoveryCursor,
+      ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}),
+    });
+    // A null cursor intentionally wraps to the oldest eligible row after
+    // reaching the bounded frontier. No fixed quarantined page can starve
+    // later paid receipts forever.
+    deferredBookRecoveryCursor = result.nextCursor;
+  }, 60_000) : undefined;
   // Durable ingestion delivery reconciliation: PostgreSQL first, BullMQ second.
   // Redis state loss may delay a delivery; it can never exceed the durable
   // attempt guard or strand an expired RUNNING run.
