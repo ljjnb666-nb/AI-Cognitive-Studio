@@ -1,0 +1,94 @@
+name: ACS Book Embedding Handoff (PostgreSQL)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/acs-book-embedding-handoff.yml"
+      - "packages/book-intelligence/src/pipeline.ts"
+      - "packages/book-intelligence/tests/phase2-durability.integration.test.ts"
+      - "packages/book-intelligence/tests/helpers/book-analysis-embedding-gateway.ts"
+      - "packages/book-intelligence/src/gateway-materialization.ts"
+      - "packages/book-intelligence/src/ownership.ts"
+      - "packages/provider-gateway/**"
+      - "packages/db/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-postgres-handoff:
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: ai_cognitive_studio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d ai_cognitive_studio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ai-cognitive-studio-dev
+      S3_ACCESS_KEY: local-development-only
+      S3_SECRET_KEY: local-development-only
+      S3_FORCE_PATH_STYLE: "true"
+      BETTER_AUTH_SECRET: phase7-ci-secret-must-be-at-least-32-characters
+      BETTER_AUTH_URL: http://localhost:3001
+      BETTER_AUTH_TRUSTED_ORIGINS: http://localhost:3001
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Assert exact PR HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || { echo "::error::PR_HEAD_MISMATCH"; exit 1; }
+          echo "ACS_HANDOFF_TEST_HEAD=$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies (lockfile)
+        run: pnpm install --frozen-lockfile
+      - name: Create isolated PostgreSQL test database
+        run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Deploy real PostgreSQL schema
+        run: pnpm --filter @ai-cognitive/db prisma migrate deploy
+      - name: Fail-closed ownership, duplicate billing, and 10s deferral tests
+        run: |
+          pnpm --filter @ai-cognitive/book-intelligence exec vitest run --config vitest.integration.config.ts tests/phase2-durability.integration.test.ts \
+            -t 'does not bill a second Gateway invocation|rejects vectors returned by an embedding call whose owner became stale|fails closed after a prolonged Gateway handoff'
+          echo "ACS_BOOK_EMBEDDING_HANDOFF_REAL_POSTGRES=PASS"
+          echo "ACS_BOOK_EMBEDDING_AUTOMATIC_RECOVERY=NOT_VERIFIED"
