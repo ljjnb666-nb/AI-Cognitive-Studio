@@ -66,9 +66,9 @@ def fixture(root, *, change_vtip=None):
     (folder/"b31_multiscale_vtip_review.private.png").write_bytes(review)
     cand=[
         {"endpoint":[125.0,100.0],"wing_support":[4,4],"scale":1.0,
-         "slope":0.7,"support_min":4,"shaft_index":0,"end_index":1},
-        {"endpoint":[125.0,40.0],"wing_support":[4,4],"scale":1.0,
          "slope":0.7,"support_min":4,"shaft_index":1,"end_index":1},
+        {"endpoint":[125.0,40.0],"wing_support":[4,4],"scale":1.0,
+         "slope":0.7,"support_min":4,"shaft_index":0,"end_index":1},
     ]
     vtip={
         "schema_version":1,"book_id":"B31","physical_page":126,
@@ -145,11 +145,16 @@ class B31TriageTests(unittest.TestCase):
             root=Path(path)
             fixture(root)
             with self.assertRaisesRegex(subject.VisualGateError,"CANDIDATE_SCHEMA_INVALID"):
-                subject.check_candidates([
-                    {"shaft_index":0,"end_index":1,"endpoint":[125.,100.],
-                     "wing_support":[9,9],"support_min":9,
-                     "scale":1.0,"slope":0.7},
-                ],[{"endpoints":[[12.,100.],[125.,100.]]}],240,160)
+                subject.check_candidates({
+                    "endpoint_candidates":[
+                        {"shaft_index":0,"end_index":1,"endpoint":[125.,100.],
+                         "wing_support":[9,9],"support_min":9,
+                         "scale":1.0,"slope":0.7},
+                    ],
+                    "candidate_endpoint_count_total":1,
+                    "endpoint_candidates_truncated":False,
+                    "original_shaft_hypotheses":1,
+                },[{"endpoints":[[12.,100.],[125.,100.]]}],240,160)
 
     def test_forged_prior_gold_and_source_digest_rejected(self):
         with tempfile.TemporaryDirectory() as path:
