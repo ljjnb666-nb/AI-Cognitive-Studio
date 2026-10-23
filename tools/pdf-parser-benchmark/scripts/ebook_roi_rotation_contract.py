@@ -57,7 +57,7 @@ def _triangle_area(a, b, c):
     return abs((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]))/2
 
 
-def calibrated_match(reference, candidate, calibration):
+def calibrated_match(reference, candidate, calibration, observed_pdf_rotation):
     """One-to-one ROI overlap only after independent private frame anchors agree.
 
     The output intentionally omits all reference boxes, source hashes and anchor
@@ -76,6 +76,8 @@ def calibrated_match(reference, candidate, calibration):
         if type(calibration[key]) is not type(candidate.get(key)) or calibration[key] != candidate.get(key):
             raise Rejected("FRAME_PROVENANCE_MISMATCH")
     d = _rotation(calibration["source_pdf_rotation_degrees"])
+    if d != _rotation(observed_pdf_rotation):
+        raise Rejected("FRAME_MEASURED_ROTATION_MISMATCH")
     if calibration["candidate_frame"] not in (FRAME_UNROTATED, FRAME_DISPLAY) or calibration["reference_frame"] != FRAME_DISPLAY:
         raise Rejected("FRAME_COORDINATE_CONVENTION_INVALID")
     anchors = calibration["anchor_pairs"]
@@ -122,13 +124,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Private-only rotated ROI matcher")
     for name in ("private-root", "reference", "candidate", "calibration", "output"):
         parser.add_argument("--"+name, required=True)
+    parser.add_argument("--observed-pdf-rotation-degrees", type=int, required=True,
+                        help="Independently observed from PyMuPDF page.rotation, never inferred from sidecar")
     args = parser.parse_args(argv)
     root = Path(args.private_root).resolve(strict=True)
     if not root.is_dir():
         raise Rejected("PRIVATE_ROOT_INVALID")
     result = calibrated_match(_private_json(args.reference, root),
                               _private_json(args.candidate, root),
-                              _private_json(args.calibration, root))
+                              _private_json(args.calibration, root),
+                              args.observed_pdf_rotation_degrees)
     output = Path(args.output).resolve()
     if not output.is_relative_to(root) or output.suffix.lower() != ".json":
         raise Rejected("PRIVATE_REPORT_PATH_REQUIRED")
