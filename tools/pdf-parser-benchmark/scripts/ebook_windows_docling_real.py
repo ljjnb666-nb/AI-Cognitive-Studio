@@ -110,6 +110,13 @@ def evaluate(fixture, source, converter, private_reference=None, private_frame_c
         recognized = normalized(result.document.export_to_markdown())
         docling_metric = compact("Docling", recognized, duration)
         docling_metric["layout_evidence"] = docling_layout_signals(result.document)
+        # Private report only: independently establish whether Docling's
+        # document page coordinates are unrotated or displayed. Never select
+        # this frame by trying to maximize overlap with AI reference ROIs.
+        page_size = result.document.pages[1].size
+        docling_metric["layout_evidence"]["private_docling_page_size"] = [
+            float(page_size.width), float(page_size.height),
+        ]
         # Actual bounding boxes stay in the private D: report, never Actions stdout.
         picture_boxes = docling_picture_boxes(result.document)
         docling_metric["layout_evidence"]["private_picture_boxes_normalized"] = [
