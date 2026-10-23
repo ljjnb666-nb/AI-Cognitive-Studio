@@ -65,10 +65,14 @@ def parse_results(raw, width, height):
         if (type(confidence) not in (float, int) or not
                 math.isfinite(confidence) or not 0 <= confidence <= 1):
             raise VisualGateError("OCR_CONFIDENCE_INVALID")
+        if hasattr(box, 'tolist'):
+            box = box.tolist()
         if not isinstance(box, (list, tuple)) or len(box) != 4:
             raise VisualGateError("OCR_BOX_INVALID")
         pts = []
         for p in box:
+            if hasattr(p, 'tolist'):
+                p = p.tolist()
             if (not isinstance(p, (list, tuple)) or len(p) != 2 or
                     any(type(x) not in (int, float) or
                         not math.isfinite(x) for x in p) or
