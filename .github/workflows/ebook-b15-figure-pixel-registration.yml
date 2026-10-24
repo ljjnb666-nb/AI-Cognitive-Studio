@@ -1,0 +1,100 @@
+name: B15 Figure Pixel Registration Candidate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-pixel-registration:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-figure-pixel-registration-20261024' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run purely synthetic figure pixel alignment tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 numpy==2.2.6 opencv-python-headless==4.12.0.88
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_private_b15_figure_pixel_registration.py' -v
+          echo 'ACS_PIXEL_REG_SYNTHETIC=PASS'
+          echo 'ACS_PIXEL_REG_GEOMETRY=UNVERIFIED'
+          echo 'ACS_PIXEL_REG_GOLD=UNVERIFIED'
+
+  windows-private-proposal:
+    needs: synthetic-pixel-registration
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-figure-pixel-registration-20261024' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout exact head using established local proxy
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-pixel-reg
+          persist-credentials: false
+          clean: false
+      - name: Produce immutable private pixel proposal and read-only audit
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-pixel-reg rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'PYTHON_ENV_MISSING' }
+            & $py -c 'import cv2, PIL, numpy'
+            if ($LASTEXITCODE -ne 0) { throw 'OFFLINE_PIXEL_LIBRARIES_MISSING' }
+            $page=Join-Path $folder 'B15_p0109.private.png'
+            $md=Join-Path $folder 'fivebook_mineru_basic_B15.private.md'
+            $v1=Join-Path $folder 'b15_mineru_figure_rapidocr_anchor.v1.private.json'
+            $out=Join-Path $folder 'b15_mineru_figure_pixel_registration.v3.private.json'
+            $before=@{}
+            foreach ($path in @($page,$md,$v1)) {
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'PRIVATE_SOURCE_MISSING' }
+              $before[$path]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            }
+            $script='acs-pixel-reg/tools/pdf-parser-benchmark/scripts/ebook_private_b15_figure_pixel_registration.py'
+            $argsList=@('--page-png',$page,'--mineru-markdown',$md,'--anchor-v1',$v1,'--private-output',$out)
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            if (-not (Test-Path -LiteralPath $out -PathType Leaf)) {
+              & $py $script @argsList
+              if ($LASTEXITCODE -ne 0) { throw 'PIXEL_PROPOSAL_CREATE_FAILED' }
+            }
+            & $py $script @argsList --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'PIXEL_PROPOSAL_AUDIT_FAILED' }
+            foreach ($path in @($page,$md,$v1)) {
+              if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $before[$path]) { throw 'ORIGINAL_SOURCE_CHANGED' }
+            }
+            Write-Output 'ACS_PIXEL_REG_ORIGINAL_SOURCES=UNCHANGED'
+            Write-Output 'ACS_PIXEL_REG_PRIVATE_CANDIDATE_ONLY=PASS'
+            Write-Output 'ACS_PIXEL_REG_GOLD=UNVERIFIED'
+          } catch {
+            # Do not echo source file names/paths, OCR, hashes or raw exceptions.
+            Write-Output 'ACS_PIXEL_REG_WINDOWS_GATE=REJECTED'
+            exit 2
+          }
