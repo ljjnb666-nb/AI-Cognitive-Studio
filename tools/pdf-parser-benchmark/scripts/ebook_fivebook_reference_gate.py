@@ -74,6 +74,12 @@ def admit_reference(candidate,baseline,corpus,*,reference_file=None):
             not re.fullmatch(r"[A-Za-z0-9_-]{8,80}",
                              candidate["reviewer_record_id"])):
         raise VisualGateError("REFERENCE_IDENTITY_OR_INDEPENDENCE_ATTESTATION_INVALID")
+    if candidate["verification_method"]=="PUBLISHER_SOURCE_VERIFICATION" and (
+        candidate["reference_origin"]!="PUBLISHER_ORIGINAL_TEXT"):
+        raise VisualGateError("REFERENCE_ORIGIN_METHOD_CONFLICT")
+    if candidate["verification_method"]=="MANUAL_SOURCE_PAGE_REVIEW" and (
+        candidate["reference_origin"]!="INDEPENDENT_PAGE_TRANSCRIPTION"):
+        raise VisualGateError("REFERENCE_ORIGIN_METHOD_CONFLICT")
     # A claimed source digest without the source artifact is not evidence.
     if candidate["reference_origin"]=="INDEPENDENT_PAGE_TRANSCRIPTION":
         if candidate["independent_source_sha256"]!=baseline["source_pdf_sha256_private"]:
@@ -97,12 +103,6 @@ def admit_reference(candidate,baseline,corpus,*,reference_file=None):
         raise VisualGateError("REFERENCE_TEXT_EMPTY_OR_TOO_LARGE")
     if hashlib.sha256(value.encode("utf-8")).hexdigest()!=candidate["reference_text_sha256"]:
         raise VisualGateError("REFERENCE_TEXT_SHA_CHANGED")
-    if candidate["verification_method"]=="PUBLISHER_SOURCE_VERIFICATION" and (
-        candidate["reference_origin"]!="PUBLISHER_ORIGINAL_TEXT"):
-        raise VisualGateError("REFERENCE_ORIGIN_METHOD_CONFLICT")
-    if candidate["verification_method"]=="MANUAL_SOURCE_PAGE_REVIEW" and (
-        candidate["reference_origin"]!="INDEPENDENT_PAGE_TRANSCRIPTION"):
-        raise VisualGateError("REFERENCE_ORIGIN_METHOD_CONFLICT")
     ref=lexical(value)
     if not ref:
         raise VisualGateError("REFERENCE_NORMALIZED_TEXT_EMPTY")
