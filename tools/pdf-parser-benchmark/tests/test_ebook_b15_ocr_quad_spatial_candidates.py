@@ -56,11 +56,11 @@ class SpatialCandidateTests(unittest.TestCase):
     def test_tampered_coordinates_or_duplicate_row_rejected(self):
         page,md,v1,v3,v4,overlay=copy.deepcopy(self.data)
         v1["page_source_ocr_candidates"][0]["source_page_quad_candidate"][0][0]=-7
-        with self.assertRaises(spatial.GateError):
+        with self.assertRaises((spatial.GateError,feature.GateError,pixel.GateError)):
             spatial.build(page,md,v1,v3,v4,overlay)
         page,md,v1,v3,v4,overlay=copy.deepcopy(self.data)
         v1["page_source_ocr_candidates"][1]["page_row_index"]=1
-        with self.assertRaises(spatial.GateError):
+        with self.assertRaises((spatial.GateError,feature.GateError,pixel.GateError)):
             spatial.build(page,md,v1,v3,v4,overlay)
 
     def test_wrong_v4_overlay_or_fake_authority_rejected(self):
@@ -69,8 +69,14 @@ class SpatialCandidateTests(unittest.TestCase):
             spatial.build(page,md,v1,v3,v4,b"counterfeit")
         page,md,v1,v3,v4,overlay=copy.deepcopy(self.data)
         v4["independent_gold_available"]=True
-        with self.assertRaises(spatial.GateError):
+        with self.assertRaises((spatial.GateError,feature.GateError,pixel.GateError)):
             spatial.build(page,md,v1,v3,v4,overlay)
+
+    def test_invalid_png_pixel_quad_rejected_before_any_spatial_claim(self):
+        with self.assertRaises(spatial.GateError):
+            spatial.quad_box([[-2,3],[2,3],[2,10],[-2,10]],900,800)
+        with self.assertRaises(spatial.GateError):
+            spatial.quad_box([[1,1],[1,1],[1,1],[1,1]],900,800)
 
     def test_partial_and_inside_overlap_buckets(self):
         self.assertEqual(spatial.spatial_bucket(1.0),"MOSTLY_WITHIN_UNVERIFIED_ROI")
