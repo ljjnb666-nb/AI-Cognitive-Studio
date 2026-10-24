@@ -1,5 +1,7 @@
 """Synthetic figure anchor gates: no real book text or images in public CI."""
 import base64
+from contextlib import redirect_stdout
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -108,6 +110,45 @@ class FigureAnchorTests(unittest.TestCase):
             m.canonical(rapid['pages'][0]['rapidocr_private_rows']))
         with self.assertRaisesRegex(m.GateError,'ROW_INVALID'):
             m.build(raw,receipt,rapid)
+
+    def test_cli_audit_only_rejects_wrong_count_without_public_text_leak(self):
+        from unittest.mock import patch
+        raw,receipt,rapid=sample()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'source.md').write_bytes(raw)
+            (root/'receipt.json').write_bytes(m.canonical(receipt))
+            (root/'rapid.json').write_bytes(m.canonical(rapid))
+            target=root/'anchor.private.json'
+            m.run(root/'source.md',root/'receipt.json',root/'rapid.json',target,
+                  audit_only=False)
+            cli_args=['program','--mineru-markdown',str(root/'source.md'),
+                      '--mineru-receipt',str(root/'receipt.json'),
+                      '--rapidocr-json',str(root/'rapid.json'),
+                      '--private-output',str(target),'--audit-only',
+                      '--require-candidate-count','19']
+            with patch.object(sys,'argv',cli_args):
+                output=io.StringIO()
+                with redirect_stdout(output):
+                    m.main()
+                self.assertIn('CANDIDATE_COUNT=4',output.getvalue())
+                # Wrong count must be refused without leaking any OCR text.
+                rejected=io.StringIO()
+                with patch.object(sys,'argv',cli_args[:-1]+['999']):
+                    with redirect_stdout(rejected):
+                        with self.assertRaises(SystemExit) as outcome:
+                            m.main()
+                self.assertEqual(outcome.exception.code,2)
+                self.assertIn('ACS_FIGURE_ANCHOR_REJECTED=',rejected.getvalue())
+                self.assertNotIn('标签A',rejected.getvalue())
+                self.assertNotIn('PRIVATE',rejected.getvalue().replace('PRIVATE_SOURCE_OR_SPATIAL_GATE',''))
+
+    def test_windows_workflow_never_dumps_private_json_via_powershell(self):
+        workflow=(Path(__file__).resolve().parents[3]/'.github'/'workflows'/
+                  'ebook-b15-figure-rapidocr-flow-anchor.yml').read_text('utf-8')
+        self.assertNotIn('ConvertFrom-Json',workflow.split('run: |')[-1])
+        self.assertNotIn('Get-Content -LiteralPath $output',workflow)
+        self.assertIn('--audit-only --require-candidate-count 19',workflow)
 
 
 if __name__=='__main__':
