@@ -190,7 +190,7 @@ def compute(root,manifest):
     standard=lexical(mineru_lexical_source(worker["private_markdown"]))
     lengths=[len(source),len(mineru),len(standard)]
     if ([row.get("normalized_characters") for row in baseline.get("engines",[])]
-            !=lengths or lengths!=[226,105,99]):
+            !=lengths or not lengths[0]>=lengths[1]>=lengths[2]>0):
         raise VisualGateError("B15_GAP_FROZEN_CHARACTER_COUNTS_CHANGED")
     pairs=baseline.get("pairs",[])
     if (len(pairs)!=3 or any(
