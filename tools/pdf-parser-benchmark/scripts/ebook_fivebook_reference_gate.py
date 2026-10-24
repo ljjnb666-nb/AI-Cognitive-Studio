@@ -37,6 +37,8 @@ MAX_DISTANCE_CELLS=6_000_000
 SHA=re.compile(r"^[0-9a-f]{64}$")
 ORIGINS={"PUBLISHER_ORIGINAL_TEXT","INDEPENDENT_PAGE_TRANSCRIPTION"}
 METHODS={"PUBLISHER_SOURCE_VERIFICATION","MANUAL_SOURCE_PAGE_REVIEW"}
+FULL_PAGE_SCOPE="COMPLETE_PHYSICAL_PAGE_TEXT"
+REVIEW_GRID=tuple(f"R{r}C{c}" for r in range(1,4) for c in range(1,4))
 MAX_SNAPSHOT_VERSION=8
 
 
@@ -63,6 +65,26 @@ def identity(row):
     return row["book_id"],row["physical_page"]
 
 
+def require_full_page_coverage(candidate):
+    """A paragraph/legend/8-span spot-check must never be scored as full-page CER.
+
+    This validates the reviewer's explicit full-page *claim*, not its factual
+    truth. Source-level independence still requires an external review audit.
+    Image/diagram structure is separately evaluated and is NOT OCR CER.
+    """
+    coverage=candidate.get("full_page_coverage")
+    if (candidate.get("reference_scope")!=FULL_PAGE_SCOPE or
+            not isinstance(coverage,dict) or
+            coverage.get("coverage_scope")!=FULL_PAGE_SCOPE or
+            coverage.get("reviewed_grid_cells")!=list(REVIEW_GRID) or
+            coverage.get("sidebars_and_vertical_text_reviewed") is not True or
+            coverage.get("all_visible_text_and_punctuation_transcribed") is not True or
+            coverage.get("page_reading_order_reviewed") is not True or
+            type(coverage.get("unresolved_text_regions")) is not list or
+            coverage["unresolved_text_regions"]!=[]):
+        raise VisualGateError("REFERENCE_FULL_PAGE_COVERAGE_UNVERIFIED")
+
+
 def admit_reference(candidate,baseline,corpus,*,reference_file=None):
     """Never accept either compared model as the purported independent source."""
     if (not isinstance(candidate,dict) or candidate.get("schema_version")!=1 or
@@ -84,6 +106,7 @@ def admit_reference(candidate,baseline,corpus,*,reference_file=None):
             not re.fullmatch(r"[A-Za-z0-9_-]{8,80}",
                              candidate["reviewer_record_id"])):
         raise VisualGateError("REFERENCE_IDENTITY_OR_INDEPENDENCE_ATTESTATION_INVALID")
+    require_full_page_coverage(candidate)
     if candidate["verification_method"]=="PUBLISHER_SOURCE_VERIFICATION" and (
         candidate["reference_origin"]!="PUBLISHER_ORIGINAL_TEXT"):
         raise VisualGateError("REFERENCE_ORIGIN_METHOD_CONFLICT")
@@ -158,6 +181,8 @@ def compute(root,manifest,*,snapshot_version=1):
             "book_id":book,"physical_page":page,
             "original_pdf_source_sha256_private":item["source_pdf_sha256_private"],
             "reference_state":"INDEPENDENT_REFERENCE_NOT_PROVIDED",
+            "reference_scope":None,
+            "reference_coverage_attestation_is_external_claim":None,
             "cer_rapidocr":None,"cer_mineru_basic":None,
             "reference_normalized_chars":None,"source_attestation_is_external_claim":None,
         }
@@ -184,6 +209,8 @@ def compute(root,manifest,*,snapshot_version=1):
                 raise VisualGateError("REFERENCE_COMPARED_TEXT_IDENTITY_CHANGED")
             record.update({
                 "reference_state":"ATTESTED_REFERENCE_CER_COMPUTED",
+                "reference_scope":FULL_PAGE_SCOPE,
+                "reference_coverage_attestation_is_external_claim":True,
                 "reference_normalized_chars":len(ref),
                 "cer_rapidocr":round(edit_distance(ref,r)/len(ref),6),
                 "cer_mineru_basic":round(edit_distance(ref,m)/len(ref),6),
