@@ -111,7 +111,7 @@ class BlindReviewTests(unittest.TestCase):
             updated=s.form("B15",109,"R3C2",
                            v6["original_page_png_sha256_private"],s.sha(img.read_bytes()))
             form.write_bytes((__import__("json").dumps(updated,ensure_ascii=False,
-                sort_keys=True,separators=(",",":"))+"\\n").encode("utf-8"))
+                sort_keys=True,separators=(",",":"))+"\n").encode("utf-8"))
             with self.assertRaisesRegex(VisualGateError,"FROZEN_REPORT_CHANGED"):
                 self.run_packet(root,folder,native,v8,v6,audit=True)
 
