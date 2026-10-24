@@ -1,0 +1,98 @@
+name: B15 OCR Coarse Spatial Disagreement
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  synthetic:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b15-spatial-disagreement-map-20261024' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install offline-fixture dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
+      - name: Run exact-head B15 coarse geometry source-only regression
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b15_spatial_disagreement.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_spatial_disagreement.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_order_sections.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_disagreement_triage.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_text_consensus.py' -v
+          echo 'ACS_B15_SPATIAL_SYNTHETIC=PASS'
+          echo 'ACS_B15_SPATIAL_PAID_PROVIDER_CALLS=0'
+
+  windows-private-evidence:
+    needs: synthetic
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b15-spatial-disagreement-map-20261024' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-b15-spatial-map
+          persist-credentials: false
+          clean: false
+      - name: Audit immutable B15 receipts and diagnose private disagreement
+        shell: powershell
+        timeout-minutes: 19
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git -C acs-b15-spatial-map rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'B15_TRIAGE_HEAD_MISMATCH' }
+          $root='D:\ai-cognitive-pdf-benchmark-data'
+          $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'B15_PYTHON_NOT_FOUND' }
+          $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+          $output=Join-Path $folder 'b15_spatial_disagreement_heatmap_3x3.private.json'
+          $sources=@('fivebook_rapidocr_mineru_text_consensus.private.json','fivebook_mineru_rapidocr_comparison.private.json','multibook_rapidocr_five_pages.private.json','fivebook_mineru_basic_B15.private.md','fivebook_mineru_basic_B15.private.json','fivebook_mineru_basic_B15.private.log','b15_samepage_ocr_disagreement_triage.private.json','b15_ordinal_quarters_and_order_gap.private.json')
+          $before=@{}
+          foreach ($name in $sources) {
+            $file=Join-Path $folder $name
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'B15_PROTECTED_SOURCE_MISSING' }
+            $before[$file]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+          }
+          $env:HTTP_PROXY='http://127.0.0.1:1'
+          $env:HTTPS_PROXY='http://127.0.0.1:1'
+          $env:ALL_PROXY='http://127.0.0.1:1'
+          $env:NO_PROXY=''
+          $script='acs-b15-spatial-map/tools/pdf-parser-benchmark/scripts/ebook_b15_spatial_disagreement.py'
+          $manifest='acs-b15-spatial-map/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          if (Test-Path -LiteralPath $output -PathType Leaf) {
+            & $python $script --private-root $root --manifest $manifest --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'B15_EXISTING_RECEIPT_INVALID' }
+          } else {
+            & $python $script --private-root $root --manifest $manifest
+            if ($LASTEXITCODE -ne 0) { throw 'B15_PREFLIGHT_FAILED' }
+            & $python $script --private-root $root --manifest $manifest --write
+            if ($LASTEXITCODE -ne 0) { throw 'B15_WRITE_FAILED' }
+            & $python $script --private-root $root --manifest $manifest --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'B15_AUDIT_FAILED' }
+          }
+          foreach ($name in $sources) {
+            $file=Join-Path $folder $name
+            if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'B15_SOURCE_MUTATED' }
+          }
+          Write-Output 'ACS_B15_SPATIAL_UPSTREAM_SOURCES=UNCHANGED'
+          Write-Output 'ACS_B15_SPATIAL_OCR_ACCURACY=UNVERIFIED'
+          Write-Output 'ACS_B15_SPATIAL_NEW_MODEL_CALLS=0'
