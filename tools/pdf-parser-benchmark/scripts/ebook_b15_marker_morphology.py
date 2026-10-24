@@ -74,8 +74,8 @@ def shape_candidate(gray,box):
     for index in range(1,n):
         xx,yy,ww,hh,area=[int(z) for z in stats[index]]
         # Reject corner/frame traces and unstable tiny text fragments.
-        if (xx==0 or yy==0 or xx+ww>=black.shape[1] or
-                yy+hh>=black.shape[0] or not(5<=ww<=25 and 5<=hh<=25) or
+        if (xx==0 or yy==0 or xx+ww>black.shape[1] or
+                yy+hh>black.shape[0] or not(5<=ww<=25 and 5<=hh<=25) or
                 not(.55<=ww/hh<=1.55) or area<12):
             continue
         part=(labels[yy:yy+hh,xx:xx+ww]==index).astype(np.uint8)
@@ -95,7 +95,7 @@ def shape_candidate(gray,box):
         cy0=max(0,int(hh*.35));cy1=min(hh,max(cy0+1,int(hh*.65)))
         cx0=max(0,int(ww*.35));cx1=min(ww,max(cx0+1,int(ww*.65)))
         center=float(segment[yy+cy0:yy+cy1,xx+cx0:xx+cx1].mean())
-        filled=(True if center<100 else False if center>175 else None)
+        filled=(True if center<100 else False if center>=165 else None)
         candidate=(start+xx, top+yy,ww,hh,int(area),vertices,kind,filled,center)
         candidates.append(candidate)
     candidates.sort(key=lambda r:(r[0],r[1]))
