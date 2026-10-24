@@ -75,3 +75,19 @@
 - 不建立百分比“谁最好”的结论；若真实参考暂缺，继续把五书一致性测量作为质量诊断，**不转化为正确率或最终架构选型**。
 - #145 Windows 仍需看真实是否通过；如果被 Runner 队列阻塞，不把合成测试成功视为同源真实文本对比已完成。
 - 保留 #137 Ubuntu 540s apt 下载失败、#139 模型分类误报、#140 两次旧 MinerU 失败和 Node20→24 警告；全部 PR Draft/Open/Unmerged，未经授权不得合并。
+
+
+## 独立参考持续更新：不可变 v1→v2 快照协议（后续 Draft）
+
+首次 v1 报告可能如实记录五本均没有独立参考，因此五页 CER 全部为 `null`。这是初次准入检查，**不是最终准确率结论，也不是将来不能补充参考**。
+
+之后在独立完成来源核对、具备合法审核依据时：
+
+1. **绝不覆盖** `fivebook_independent_reference_admission.private.json`，也绝不向旧 `independent_reference_v1` 添加/改写资料。旧报告仍能按原始输入重算并核验。
+2. 将新取得的、与固定书 ID/物理页/SHA 匹配的独立参考 JSON **单独**置于 D: 私有 `independent_reference_v2`。文件名仍使用 `B03_p0067.verified.private.json` 等格式。不从 RapidOCR、MinerU、Docling 或 GLM 的输出派生。
+3. 首先只读确认旧快照：`python ebook_fivebook_reference_gate.py --private-root <D盘私有根目录> --manifest <已固定清单> --snapshot-version 1 --audit-only`。
+4. 新版 **只读预检**：把命令中的版本改为 `--snapshot-version 2`，先不带 `--write`。程序重新验证 v1，评估 v2 参考，只有独立参考合格才计算条件 CER。
+5. 经过来源与独立审核事实复核后，才对 v2 运行一次 `--write`，随后 `--audit-only`。新报告为 `fivebook_independent_reference_admission.v2.private.json`，附上前一快照 SHA256、版本号及上一报告重验事实；第 3 版同理继承第 2 版。版本号限定为 1～8，不接受任意路径。
+6. 未满足审核条件时，不写 v2。**新版合成 CI 故意不运行 Windows v2 创建动作**，避免在没有独立参考时提前冻结无信息快照。
+
+**关键边界**：哈希链能检测快照与来源变动，不能从数学上证明现实审核的独立性；外部审核真实性仍需独立核验。此机制也不代替公式 F1、表格 F1、图结构 F1 或最终多引擎择优。所有来源书页、参考文本、模型输出、哈希与 CER 明细仅保存在 D: 私有目录，不上传到公共 GitHub。
