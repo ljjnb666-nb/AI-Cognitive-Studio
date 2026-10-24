@@ -1,0 +1,34 @@
+name: Security Private CI Receipt Guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  private-receipt-no-leak-synthetic:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'security/private-ci-receipt-gate-stacked-20261024' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Assert no private OCR receipt can be printed on parser failure
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_private_ci_receipt_gate.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_private_ci_receipt_gate.py' -v
+          echo 'ACS_PRIVATE_CI_SECURITY_SYNTHETIC=PASS'
+          echo 'ACS_PRIVATE_CI_SOURCE_TEXT_EXPORTED=FALSE'
+          echo 'ACS_PRIVATE_CI_LOG_DELETION=SEPARATELY_REQUIRED'
