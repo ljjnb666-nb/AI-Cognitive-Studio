@@ -1,0 +1,37 @@
+name: Fivebook Complete-Page Reference Coverage
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-full-page-reference-coverage:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-full-page-reference-coverage-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run source-free independent reference scope tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_reference_gate.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_reference_gate.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_text_consensus.py' -v
+          echo 'ACS_FULL_PAGE_REFERENCE_SYNTHETIC=PASS'
+          echo 'ACS_FULL_PAGE_REFERENCE_SCOPE=FULL_PHYSICAL_PAGE_ONLY'
+          echo 'ACS_FULL_PAGE_REFERENCE_INDEPENDENT_GOLD=NOT_AUTO_GENERATED'
+          echo 'ACS_FULL_PAGE_REFERENCE_NEW_MODEL_CALLS=0'
