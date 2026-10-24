@@ -62,6 +62,14 @@ SMOKE=r"""
    let capturedBlob=null;
    const orig=URL.createObjectURL.bind(URL);
    URL.createObjectURL=(blob)=>{capturedBlob=blob;return orig(blob)};
+   // Test-only interception: exercise the real export code and inspect the
+   // generated Blob, but never allow the test token to land in Downloads
+   // outside our D: private, disposable browser profile.
+   const originalAnchorClick=HTMLAnchorElement.prototype.click;
+   HTMLAnchorElement.prototype.click=function(){
+     if(this.download&&this.download.endsWith("_DRAFT_UNVERIFIED.json"))return;
+     return originalAnchorClick.call(this);
+   };
    get("export").click();
    let exported=false;
    if(capturedBlob){
