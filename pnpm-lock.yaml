@@ -259,6 +259,9 @@ importers:
 
   packages/ingestion:
     dependencies:
+      '@napi-rs/canvas':
+        specifier: 1.0.5
+        version: 1.0.5
       '@ai-cognitive/db':
         specifier: workspace:*
         version: link:../db
