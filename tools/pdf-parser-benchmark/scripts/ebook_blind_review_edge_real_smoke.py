@@ -228,6 +228,14 @@ def main():
 if __name__=="__main__":
     try:
         main()
-    except (VisualGateError,ValueError,TypeError,OSError,UnicodeError,RuntimeError):
-        print("ACS_EDGE_SMOKE_REJECTED=PRIVATE_BROWSER_OR_SOURCE_GATE")
+    except VisualGateError as error:
+        # Only a fixed enum is allowed in public CI: no private paths, model
+        # errors, OCR strings, DOM content or browser process diagnostics.
+        code=str(error)
+        if not re.fullmatch(r"EDGE_SMOKE_[A-Z0-9_]{3,90}",code):
+            code="EDGE_SMOKE_UNCLASSIFIED_PRIVATE_REJECTION"
+        print("ACS_EDGE_SMOKE_REJECTED="+code)
+        sys.exit(2)
+    except (ValueError,TypeError,OSError,UnicodeError,RuntimeError):
+        print("ACS_EDGE_SMOKE_REJECTED=EDGE_SMOKE_PRIVATE_OR_IO_EXCEPTION")
         sys.exit(2)
