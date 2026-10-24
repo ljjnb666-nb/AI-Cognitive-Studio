@@ -99,7 +99,7 @@ def compute(root,manifest):
     if (row.get("source_document_sha256")!=spatial.get(
             "original_source_pdf_sha256_private")
             or row.get("private_rows_sha256")!=order.get(
-                "rapid_private_rows_sha256")
+                "rapidocr_rows_sha256_private")
             or row.get("rapidocr_line_count")!=order.get("rapidocr_line_count")):
         raise VisualGateError("B15_THREE_RAPIDOCR_SOURCE_CHANGED")
     lines=row.get("rapidocr_private_rows")
@@ -111,7 +111,7 @@ def compute(root,manifest):
     md_file=folder/file_names("B15")[1]
     md_bytes=_source_file(md_file,MAX_MD)
     if hashlib.sha256(md_bytes).hexdigest()!=order.get(
-            "mineru_private_markdown_sha256"):
+            "mineru_markdown_sha256_private"):
         raise VisualGateError("B15_THREE_MINERU_SOURCE_SHA_CHANGED")
     try:
         b=lexical(mineru_lexical_source(md_bytes.decode("utf-8")))
@@ -128,8 +128,8 @@ def compute(root,manifest):
             or not isinstance(worker.get("private_markdown"),str)):
         raise VisualGateError("B15_THREE_STANDARD_WORKER_NOT_OCR")
     c=lexical(mineru_lexical_source(worker["private_markdown"]))
-    if (len(a)!=order.get("rapidocr_alnum_chars")
-            or len(b)!=order.get("mineru_nonimage_alnum_chars")
+    if (len(a)!=order.get("rapidocr_chars")
+            or len(b)!=order.get("mineru_chars")
             or len(c)!=standard.get("markdown_normalized_character_count")):
         raise VisualGateError("B15_THREE_NORMALIZED_COUNTS_CHANGED")
     views=(a,b,c)
