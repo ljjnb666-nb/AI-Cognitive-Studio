@@ -77,10 +77,10 @@ export function assessPdfVisualFidelity(
         typeof page.hasAnnotationEvidence !== "boolean" ||
         typeof page.hasTextEvidence !== "boolean" ||
         (page.route !== "NATIVE_TEXT" && page.route !== "OCR_REQUIRED") ||
-        published.blocks.some((block) => !block || typeof block.kind !== "string")) {
+        published.blocks.some((block: { kind: string }) => !block || typeof block.kind !== "string")) {
       throw new Error(invalid);
     }
-    const imageBlocks = published.blocks.filter((block) => block.kind === "IMAGE").length;
+    const imageBlocks = published.blocks.filter((block: { kind: string }) => block.kind === "IMAGE").length;
     const hasVisual = page.hasImageEvidence || page.hasVectorEvidence || page.hasAnnotationEvidence;
     const isMixed = page.hasTextEvidence && hasVisual;
     if (hasVisual) visual++;
