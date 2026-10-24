@@ -165,7 +165,13 @@ def registration(page, figure):
                               m['rotation_clockwise_degrees'], m['scale']))
     # Do not assert a unique match based only on one template peak.
     top = found[0]
+    x1, y1, x2, y2 = top['source_page_pixel_box_candidate']
+    # Prior v9 review ROI was lower-middle R3C2. Intersection is evidence
+    # for triage only, NOT verified pixel registration or semantic meaning.
+    prior_roi_intersection = (x1 < (2 * page_w // 3) and x2 > (page_w // 3)
+                              and y1 < page_h and y2 > (2 * page_h // 3))
     return {'hypotheses': found[:6],
+            'top_candidate_intersects_prior_R3C2_not_proof': prior_roi_intersection,
             'candidate_generated': True,
             'high_correlation_signal_not_proof': top['match_score_not_accuracy'] >= 0.65,
             'source_image_dimensions_pixels': [page_w, page_h],
@@ -234,6 +240,8 @@ def main(argv=None):
             raise GateError('FROZEN_AUTHORITY_CONSTRAINT_VIOLATED')
         print('ACS_FIGURE_PIXEL_PROPOSAL=' + ('PRIVATE_AUDIT_PASS' if args.audit_only else 'PRIVATE_CREATED'))
         print('ACS_FIGURE_PIXEL_CANDIDATE_COUNT=' + str(len(result['registration']['hypotheses'])))
+        print('ACS_FIGURE_PIXEL_CORRELATION_SIGNAL=' + str(result['registration']['high_correlation_signal_not_proof']).upper())
+        print('ACS_FIGURE_PIXEL_TOP_INTERSECTS_R3C2=' + str(result['registration']['top_candidate_intersects_prior_R3C2_not_proof']).upper())
         print('ACS_FIGURE_PIXEL_GEOMETRY=UNVERIFIED')
         print('ACS_FIGURE_PIXEL_SYMBOL_MAPPING=UNVERIFIED')
         print('ACS_FIGURE_PIXEL_CLOUD_OCR_CALLS=0')
