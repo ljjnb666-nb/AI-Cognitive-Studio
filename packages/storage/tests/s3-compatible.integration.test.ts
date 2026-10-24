@@ -31,6 +31,27 @@ afterAll(async () => {
 });
 
 describe("S3CompatibleStorageProvider against MinIO", () => {
+  it("atomically creates immutable visual objects and rejects content overwrite", async () => {
+    const objectKey = key("private-source-page.png");
+    const first = encoder.encode("SYNTHETIC_TEST_PAYLOAD_A");
+    const overwriteAttempt = encoder.encode("SYNTHETIC_TEST_PAYLOAD_B");
+    expect(await provider.putObjectIfAbsent({ key: objectKey, body: first, contentType: "image/png" })).toBe("CREATED");
+    expect(await provider.putObjectIfAbsent({ key: objectKey, body: overwriteAttempt, contentType: "image/png" })).toBe("ALREADY_EXISTS");
+    expect(decoder.decode(await provider.getObjectBytes(objectKey))).toBe("SYNTHETIC_TEST_PAYLOAD_A");
+    expect(await provider.headObject(objectKey)).toMatchObject({ size: first.length, contentType: "image/png" });
+    // Two concurrent candidates target exactly the same missing key.
+    const concurrentKey = key("racing-visual-object.png");
+    const outcomes = await Promise.all(
+      Array.from({ length: 4 }, (_, i) => provider.putObjectIfAbsent({
+        key: concurrentKey,
+        body: encoder.encode("SYNTHETIC_RACE_" + i),
+        contentType: "image/png",
+      })),
+    );
+    expect(outcomes.filter((item) => item === "CREATED")).toHaveLength(1);
+    expect(outcomes.filter((item) => item === "ALREADY_EXISTS")).toHaveLength(3);
+  });
+
   it("streams, copies, deletes, and supports a browser-style presigned upload", async () => {
     expect(await provider.bucketExists()).toBe(true);
     await expect(provider.createPresignedUpload({ key: " ", contentType: "text/plain", expiresInSeconds: 60 })).rejects.toThrow("STORAGE_INVALID_KEY");
