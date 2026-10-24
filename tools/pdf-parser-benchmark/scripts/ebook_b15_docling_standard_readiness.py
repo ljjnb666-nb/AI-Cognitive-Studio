@@ -42,7 +42,10 @@ def discover_assets(root):
     evidence=[]
     for relative in ARTIFACT_FOLDERS:
         candidate=root/relative
-        if candidate.is_symlink():
+        # A symlink at any ancestor (for example, tool-env/) can also
+        # redirect discovery outside the sanctioned private evidence root.
+        if any((root/Path(*Path(relative).parts[:j])).is_symlink()
+               for j in range(1,len(Path(relative).parts)+1)):
             raise VisualGateError("DOCLING_STANDARD_ARTIFACT_SYMLINK")
         if not candidate.is_dir():
             evidence.append({"candidate":relative,"exists":False,
