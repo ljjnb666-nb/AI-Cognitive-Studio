@@ -1,0 +1,135 @@
+name: B15 Source Marker Shape Morphology
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-marker-shapes:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-legend-marker-morphology-20261024' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run purely synthetic marker shapes and private authority tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 numpy==2.2.6 opencv-python-headless==4.12.0.88
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_marker_morphology.py' -v
+          echo 'ACS_B15_MARKER_SYNTHETIC=PASS'
+          echo 'ACS_B15_MARKER_GOLD=UNVERIFIED'
+
+  owner-only-private-marker-geometry:
+    needs: synthetic-marker-shapes
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-legend-marker-morphology-20261024' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout exact trusted PR SHA
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-b15-marker-morph
+          persist-credentials: false
+          clean: false
+      - name: Create and audit private source marker morphology candidates
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-b15-marker-morph rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $dir=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'LOCAL_PYTHON_MISSING' }
+            & $py -c 'import PIL,cv2,numpy'
+            if ($LASTEXITCODE -ne 0) { throw 'LOCAL_PIXEL_LIBRARIES_MISSING' }
+            $inputs=@(
+              'B15_p0109.private.png',
+              'fivebook_mineru_basic_B15.private.md',
+              'b15_mineru_figure_rapidocr_anchor.v1.private.json',
+              'b15_mineru_figure_pixel_registration.v3.private.json',
+              'b15_figure_feature_crosscheck.v4.private.json',
+              'b15_figure_feature_crosscheck.v4.private.png',
+              'b15_ocr_quad_spatial_candidates.v5.private.json',
+              'b15_ocr_quad_spatial_candidates.v5.private.png',
+              'b15_legend_source_context_atlas.v6.private.json',
+              'b15_legend_source_context_atlas.v6.private.png',
+              'b15_legend_source_context_atlas.v6.private.html',
+              'b15_four_legend_source_cells.v7.private.json',
+              'b15_four_legend_source_cells.v7.private.png'
+            )
+            $before=@{}
+            foreach ($file in $inputs) {
+              $path=Join-Path $dir $file
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'PRIVATE_EVIDENCE_MISSING' }
+              $before[$path]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            }
+            $v8=Join-Path $dir 'b15_legend_marker_morphology.v8.private.json'
+            $png=Join-Path $dir 'b15_legend_marker_morphology.v8.private.png'
+            $isJson=Test-Path -LiteralPath $v8 -PathType Leaf
+            $isPng=Test-Path -LiteralPath $png -PathType Leaf
+            if ($isJson -ne $isPng) { throw 'PRIVATE_V8_PARTIAL_PAIR' }
+            $names=@(
+              '--page-png',$inputs[0],
+              '--mineru-markdown',$inputs[1],
+              '--anchor-v1',$inputs[2],
+              '--pixel-v3',$inputs[3],
+              '--feature-v4',$inputs[4],
+              '--feature-overlay-v4',$inputs[5],
+              '--quad-v5',$inputs[6],
+              '--quad-overlay-v5',$inputs[7],
+              '--atlas-v6',$inputs[8],
+              '--atlas-image-v6',$inputs[9],
+              '--atlas-html-v6',$inputs[10],
+              '--legend-v7',$inputs[11],
+              '--legend-image-v7',$inputs[12]
+            )
+            $argsList=@()
+            for ($i=0; $i -lt $names.Count; $i+=2) {
+              $argsList+=@($names[$i],(Join-Path $dir $names[$i+1]))
+            }
+            $argsList+=@('--private-dir',$dir)
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            $tool='acs-b15-marker-morph/tools/pdf-parser-benchmark/scripts/ebook_b15_marker_morphology.py'
+            if (-not $isJson) {
+              & $py $tool @argsList
+              if ($LASTEXITCODE -ne 0) { throw 'MARKER_SOURCE_CREATE_REJECTED' }
+            }
+            & $py $tool @argsList --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'MARKER_SOURCE_AUDIT_REJECTED' }
+            foreach ($path in $before.Keys) {
+              if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $before[$path]) { throw 'UPSTREAM_PRIVATE_BYTES_CHANGED' }
+            }
+            Write-Output 'ACS_B15_MARKER_PRIVATE_PAIR=VERIFIED'
+            Write-Output 'ACS_B15_MARKER_UPSTREAM_SHA=UNCHANGED'
+            Write-Output 'ACS_B15_MARKER_SOURCE_GOLD=UNVERIFIED'
+          } catch {
+            # Intentionally do not echo raw exception, OCR, coordinates or SHA.
+            Write-Output 'ACS_B15_MARKER_WINDOWS=REJECTED'
+            exit 2
+          }
