@@ -18,6 +18,7 @@
     "@ai-cognitive/domain": "workspace:*",
     "@ai-cognitive/shared": "workspace:*",
     "@ai-cognitive/storage": "workspace:*",
+    "@napi-rs/canvas": "1.0.5",
     "@xmldom/xmldom": "0.9.12",
     "bullmq": "^5.61.0",
     "pdfjs-dist": "^6.2.108",
