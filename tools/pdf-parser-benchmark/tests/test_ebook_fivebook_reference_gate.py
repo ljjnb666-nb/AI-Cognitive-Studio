@@ -52,7 +52,7 @@ def create_reference(folder,book,page,sha,text="HELLO 你好",**updates):
       "not_derived_from_rapidocr_or_mineru":True,
       "reviewer_approval":"INDEPENDENTLY_APPROVED",
       "reviewer_record_id":"REVIEW_20261024_X1",
-      "independent_source_sha256":"a"*64,
+      "independent_source_sha256":sha,
       "reference_text":text,
       "reference_text_sha256":hashlib.sha256(text.encode("utf-8")).hexdigest(),
     }
@@ -131,6 +131,42 @@ class GoldProtocolTests(unittest.TestCase):
             with self.patch_sources(folder,matrix,rapid,consensus):
                 with self.assertRaises(VisualGateError):
                     gate.execute(root,{},write=True)
+
+    def test_false_manual_source_sha_is_not_accepted_even_when_sha_format_valid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);folder,matrix,rapid,consensus=fixtures(root)
+            first=matrix["rows"][0]
+            create_reference(folder,first["book_id"],first["physical_page"],
+                first["source_pdf_sha256_private"],
+                independent_source_sha256="b"*64)
+            with self.patch_sources(folder,matrix,rapid,consensus):
+                with self.assertRaisesRegex(VisualGateError,"MANUAL_SOURCE_PDF_SHA_MISMATCH"):
+                    gate.execute(root,{},write=True)
+                self.assertFalse((folder/gate.REPORT).exists())
+
+    def test_publisher_reference_requires_real_private_artifact_and_matching_sha(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);folder,matrix,rapid,consensus=fixtures(root)
+            first=matrix["rows"][0]
+            ref=create_reference(folder,first["book_id"],first["physical_page"],
+                first["source_pdf_sha256_private"],
+                reference_origin="PUBLISHER_ORIGINAL_TEXT",
+                verification_method="PUBLISHER_SOURCE_VERIFICATION")
+            source=ref.with_name(ref.name.replace(
+                ".verified.private.json",".publisher_source.private.txt"))
+            with self.patch_sources(folder,matrix,rapid,consensus):
+                with self.assertRaisesRegex(VisualGateError,"PUBLISHER_SOURCE_ARTIFACT_MISSING"):
+                    gate.execute(root,{},write=True)
+                source.write_text("Publisher source excerpt from a truly separate edition",
+                                  encoding="utf-8")
+                with self.assertRaisesRegex(VisualGateError,"PUBLISHER_SOURCE_SHA_MISMATCH"):
+                    gate.execute(root,{},write=True)
+                raw=json.loads(ref.read_text("utf-8"))
+                raw["independent_source_sha256"]=hashlib.sha256(source.read_bytes()).hexdigest()
+                ref.write_text(json.dumps(raw),encoding="utf-8")
+                record=gate.execute(root,{},write=True)
+                self.assertEqual(record["reference_attested_count"],1)
+                self.assertTrue(record["reference_provenance_truth_requires_external_audit"])
 
     def test_changed_gold_text_sha_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
