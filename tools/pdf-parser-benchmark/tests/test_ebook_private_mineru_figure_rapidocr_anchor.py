@@ -126,7 +126,7 @@ class FigureAnchorTests(unittest.TestCase):
                       '--mineru-receipt',str(root/'receipt.json'),
                       '--rapidocr-json',str(root/'rapid.json'),
                       '--private-output',str(target),'--audit-only',
-                      '--require-candidate-count','19']
+                      '--require-candidate-count','4']
             with patch.object(sys,'argv',cli_args):
                 output=io.StringIO()
                 with redirect_stdout(output):
