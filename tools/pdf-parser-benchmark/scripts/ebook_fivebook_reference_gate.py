@@ -181,8 +181,6 @@ def compute(root,manifest,*,snapshot_version=1):
             "book_id":book,"physical_page":page,
             "original_pdf_source_sha256_private":item["source_pdf_sha256_private"],
             "reference_state":"INDEPENDENT_REFERENCE_NOT_PROVIDED",
-            "reference_scope":None,
-            "reference_coverage_attestation_is_external_claim":None,
             "cer_rapidocr":None,"cer_mineru_basic":None,
             "reference_normalized_chars":None,"source_attestation_is_external_claim":None,
         }
