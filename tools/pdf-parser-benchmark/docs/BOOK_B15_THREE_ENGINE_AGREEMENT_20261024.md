@@ -34,4 +34,4 @@
 - 真实 CER 必须依据独立已验证的参考文字和页面映射，不能将三个 OCR 结果的投票伪称为 ground truth。
 - 若后续要评测“哪种架构最好”，在这项同源页数字对照完成后，还必须扩展到有扫描/数字文字/图表/公式的不同页和 EPUB，并同时记录耗时、内存和多模型调度成本。
 
-验收要求：45/45 新旧 synthetic、owner-only Windows v5 真实来源数值重算、主 CI exact-head 全部 SUCCESS。以上完成之前不得报“新一轮评测正式通过”。所有 stacked Draft PR 继续 Open / Unmerged。
+验收要求：46/46 新旧 synthetic、owner-only Windows v5 真实来源数值重算、主 CI exact-head 全部 SUCCESS。以上完成之前不得报“新一轮评测正式通过”。所有 stacked Draft PR 继续 Open / Unmerged。
