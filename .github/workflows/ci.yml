@@ -687,7 +687,7 @@ jobs:
           echo 'ACS_FIVEBOOK_REFERENCE_SNAPSHOTS_SYNTHETIC=PASS'
           echo 'ACS_REFERENCE_SNAPSHOT_NEW_MODEL_CALLS=0'
 
-synthetic-b15-disagreement-triage:
+  synthetic-b15-disagreement-triage:
     if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-b15-private-disagreement-triage-20261024' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 12
