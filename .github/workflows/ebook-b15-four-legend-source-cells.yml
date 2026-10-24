@@ -1,0 +1,127 @@
+name: B15 Four Legend Source-Pixel Candidates
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-legend-source:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-four-legend-cell-candidates-20261024' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run synthetic source frame extraction, SHA and no-leak tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 numpy==2.2.6 opencv-python-headless==4.12.0.88
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b15_four_legend_source_cells.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_four_legend_source_cells.py' -v
+          echo 'ACS_B15_LEGEND_CELLS_SYNTHETIC=PASS'
+          echo 'ACS_B15_LEGEND_CELLS_GOLD=UNVERIFIED'
+
+  windows-private-legend-source:
+    needs: synthetic-legend-source
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-four-legend-cell-candidates-20261024' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout exact owner PR SHA
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-b15-four-legend
+          persist-credentials: false
+          clean: false
+      - name: Create and audit immutable four-cell source-pixel candidates
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-b15-four-legend rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'PRIVATE_PYTHON_MISSING' }
+            & $py -c 'import numpy, cv2, PIL'
+            if ($LASTEXITCODE -ne 0) { throw 'NO_PRIVATE_PIXEL_DEPENDENCIES' }
+            $inputs=@{
+              page_p='B15_p0109.private.png'
+              markdown='fivebook_mineru_basic_B15.private.md'
+              v1='b15_mineru_figure_rapidocr_anchor.v1.private.json'
+              v3='b15_mineru_figure_pixel_registration.v3.private.json'
+              v4='b15_figure_feature_crosscheck.v4.private.json'
+              v4img='b15_figure_feature_crosscheck.v4.private.png'
+              v5='b15_ocr_quad_spatial_candidates.v5.private.json'
+              v5img='b15_ocr_quad_spatial_candidates.v5.private.png'
+              v6='b15_legend_source_context_atlas.v6.private.json'
+              v6img='b15_legend_source_context_atlas.v6.private.png'
+              v6html='b15_legend_source_context_atlas.v6.private.html'
+            }
+            $before=@{}
+            foreach ($file in $inputs.Values) {
+              $full=Join-Path $folder $file
+              if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw 'PRIVATE_UPSTREAM_NOT_READY' }
+              $before[$full]=(Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash
+            }
+            $outA=Join-Path $folder 'b15_four_legend_source_cells.v7.private.json'
+            $outB=Join-Path $folder 'b15_four_legend_source_cells.v7.private.png'
+            $presentA=Test-Path -LiteralPath $outA -PathType Leaf
+            $presentB=Test-Path -LiteralPath $outB -PathType Leaf
+            if ($presentA -ne $presentB) { throw 'PARTIAL_PRIVATE_OUTPUT' }
+            $argsList=@(
+              '--page-png',(Join-Path $folder $inputs['page_p']),
+              '--mineru-markdown',(Join-Path $folder $inputs['markdown']),
+              '--anchor-v1',(Join-Path $folder $inputs['v1']),
+              '--pixel-v3',(Join-Path $folder $inputs['v3']),
+              '--feature-v4',(Join-Path $folder $inputs['v4']),
+              '--feature-overlay-v4',(Join-Path $folder $inputs['v4img']),
+              '--quad-v5',(Join-Path $folder $inputs['v5']),
+              '--quad-overlay-v5',(Join-Path $folder $inputs['v5img']),
+              '--atlas-v6',(Join-Path $folder $inputs['v6']),
+              '--atlas-image-v6',(Join-Path $folder $inputs['v6img']),
+              '--atlas-html-v6',(Join-Path $folder $inputs['v6html']),
+              '--private-dir',$folder
+            )
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            $script='acs-b15-four-legend/tools/pdf-parser-benchmark/scripts/ebook_b15_four_legend_source_cells.py'
+            if (-not $presentA) {
+              & $py $script @argsList
+              if ($LASTEXITCODE -ne 0) { throw 'FOUR_LEGEND_CREATION_FAILED' }
+            }
+            & $py $script @argsList --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'FOUR_LEGEND_REAUDIT_FAILED' }
+            foreach ($key in $before.Keys) {
+              if ((Get-FileHash -LiteralPath $key -Algorithm SHA256).Hash -ne $before[$key]) { throw 'PRIVATE_UPSTREAM_CHANGED' }
+            }
+            Write-Output 'ACS_B15_LEGEND_CELLS_PRIVATE_PAIR=VERIFIED'
+            Write-Output 'ACS_B15_LEGEND_CELLS_SOURCE_SHA=UNCHANGED'
+            Write-Output 'ACS_B15_LEGEND_CELLS_SEMANTICS=UNVERIFIED'
+          } catch {
+            Write-Output 'ACS_B15_LEGEND_CELLS_WINDOWS=REJECTED'
+            exit 2
+          }
