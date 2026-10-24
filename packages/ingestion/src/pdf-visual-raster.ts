@@ -47,7 +47,7 @@ async function runWorker(sourcePath: string, outputPath: string, page: number, s
       if(error)reject(error); else resolve();
     };
     const timer=setTimeout(()=>{
-      try { child.kill(); } catch {}
+      try { child.kill(); } catch { /* child may have already terminated */ void 0; }
       end(new Error(RENDER_ERROR));
     },RENDER_TIMEOUT_MS);
     child.on("error",()=>end(new Error(RENDER_ERROR)));
