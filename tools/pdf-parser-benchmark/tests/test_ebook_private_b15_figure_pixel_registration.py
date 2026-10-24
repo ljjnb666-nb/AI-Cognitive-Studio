@@ -49,6 +49,7 @@ class PixelRegistrationTests(unittest.TestCase):
         page, md, anchor = fixture()
         result = m.build(page, md, anchor)
         self.assertEqual(result['status'], m.STATUS)
+        self.assertEqual(result['schema_version'], 3)
         self.assertFalse(result['image_to_page_geometry_verified'])
         self.assertFalse(result['series_to_curve_correspondence_verified'])
         self.assertFalse(result['label_to_marker_correspondence_verified'])
