@@ -170,8 +170,9 @@ def main(argv=None):
         verify(read_private(args.private_input),args.policy)
         print("ACS_PRIVATE_RECEIPT_GATE=PASS")
         print("ACS_PRIVATE_RECEIPT_PRIVACY=NO_PRIVATE_JSON_IN_LOG")
-    except (PrivateGateError,OSError,ValueError,TypeError,KeyError,AttributeError):
-        # No path, source, private SHA, traceback, or object repr on failure.
+    except Exception:
+        # Privacy boundary: even unexpected Python/JSON exceptions must never
+        # print traceback, path, text, coordinates, private SHA, or object repr.
         print("ACS_PRIVATE_RECEIPT_GATE=REJECTED")
         sys.exit(2)
 
