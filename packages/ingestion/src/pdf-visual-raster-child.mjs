@@ -49,7 +49,7 @@ async function main() {
     await writeFile(destination,png,{flag:"wx",mode:0o600});
   } finally {
     // Best-effort cleanup, never log PDF.js errors or source descriptions.
-    try { await task.destroy(); } catch {}
+    try { await task.destroy(); } catch { /* preserve stable empty stdout */ void 0; }
   }
 }
 
