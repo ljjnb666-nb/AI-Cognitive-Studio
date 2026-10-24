@@ -38,11 +38,11 @@ def fixture(root):
                      "private_rows_sha256":"b"*64,
                      "rapidocr_line_count":2,"rapidocr_private_rows":rows}]}
     order={"book_id":"B15","physical_page":109,"corpus_id":"SYNTHETIC",
-           "rapid_private_rows_sha256":"b"*64,
+           "rapidocr_rows_sha256_private":"b"*64,
            "rapidocr_line_count":2,
-           "rapidocr_alnum_chars":len(normalized),
-           "mineru_nonimage_alnum_chars":len(lexical(mineru_md)),
-           "mineru_private_markdown_sha256":hashlib.sha256(
+           "rapidocr_chars":len(normalized),
+           "mineru_chars":len(lexical(mineru_md)),
+           "mineru_markdown_sha256_private":hashlib.sha256(
                mineru_md.encode("utf-8")).hexdigest()}
     spatial={"book_id":"B15","physical_page":109,"corpus_id":"SYNTHETIC",
              "original_source_pdf_sha256_private":original_sha}
