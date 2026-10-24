@@ -1,0 +1,89 @@
+name: B15 Frozen OCR Quad Safe Coverage
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-safe-numeric-coverage:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-v5-safe-spatial-coverage-20261024' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Six synthetic privacy checks and strict numeric only projection
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 numpy==2.2.6 opencv-python-headless==4.12.0.88
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_safe_spatial_coverage.py' -v
+          echo 'ACS_B15_V5_AGGREGATE_SYNTHETIC=PASS'
+          echo 'ACS_B15_V5_GOLD=UNVERIFIED'
+
+  owner-only-windows-existing-v5:
+    needs: synthetic-safe-numeric-coverage
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-v5-safe-spatial-coverage-20261024' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout pinned PR source without saved token
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-safe-coverage
+          persist-credentials: false
+          clean: false
+      - name: Recompute frozen 19 OCR row geometry and emit only bounded totals
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-safe-coverage rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'PYTHON_MISSING' }
+            & $py -c 'import cv2, numpy, PIL'
+            if ($LASTEXITCODE -ne 0) { throw 'IMAGE_DEPENDENCIES_MISSING' }
+            $fileArgs=@(
+              '--page-png',(Join-Path $folder 'B15_p0109.private.png'),
+              '--mineru-markdown',(Join-Path $folder 'fivebook_mineru_basic_B15.private.md'),
+              '--anchor-v1',(Join-Path $folder 'b15_mineru_figure_rapidocr_anchor.v1.private.json'),
+              '--pixel-v3',(Join-Path $folder 'b15_mineru_figure_pixel_registration.v3.private.json'),
+              '--feature-v4',(Join-Path $folder 'b15_figure_feature_crosscheck.v4.private.json'),
+              '--feature-overlay-v4',(Join-Path $folder 'b15_figure_feature_crosscheck.v4.private.png'),
+              '--quad-v5',(Join-Path $folder 'b15_ocr_quad_spatial_candidates.v5.private.json')
+            )
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            & $py 'acs-safe-coverage/tools/pdf-parser-benchmark/scripts/ebook_b15_safe_spatial_coverage.py' @fileArgs
+            if ($LASTEXITCODE -ne 0) { throw 'PRIVATE_AGGREGATE_REJECTED' }
+            Write-Output 'ACS_B15_V5_SAFE_PROJECTION=PASS'
+            Write-Output 'ACS_B15_V5_PRIVATE_INPUTS=READ_ONLY'
+          } catch {
+            # Never interpolate raw exceptions, OCR strings, paths, SHA or quads.
+            Write-Output 'ACS_B15_V5_SAFE_PROJECTION=REJECTED'
+            exit 2
+          }
