@@ -36,6 +36,16 @@ MAX_DISTANCE_CELLS=6_000_000
 SHA=re.compile(r"^[0-9a-f]{64}$")
 ORIGINS={"PUBLISHER_ORIGINAL_TEXT","INDEPENDENT_PAGE_TRANSCRIPTION"}
 METHODS={"PUBLISHER_SOURCE_VERIFICATION","MANUAL_SOURCE_PAGE_REVIEW"}
+MAX_SNAPSHOT_VERSION=8
+
+
+def snapshot_names(version):
+    """Fixed filenames only. Each revision has a private reference directory."""
+    if type(version) is not int or not 1<=version<=MAX_SNAPSHOT_VERSION:
+        raise VisualGateError("REFERENCE_SNAPSHOT_VERSION_INVALID")
+    if version==1:
+        return REPORT,REFERENCES
+    return REPORT.replace(".private.json",f".v{version}.private.json"),f"independent_reference_v{version}"
 
 
 def private_load(path):
@@ -105,7 +115,8 @@ def edit_distance(reference,prediction):
     return row[m]
 
 
-def compute(root,manifest):
+def compute(root,manifest,*,snapshot_version=1):
+    _,reference_dir=snapshot_names(snapshot_version)
     consensus=compute_consensus(root,manifest)
     matrix=combined(root,manifest,audit=True)
     rapid=audit_rapid(root,manifest)
@@ -115,7 +126,7 @@ def compute(root,manifest):
         raise VisualGateError("REFERENCE_PRIOR_FIVE_PAGE_BENCHMARK_INVALID")
     ri={(row["book_id"],row["physical_page"]):row for row in rapid["pages"]}
     folder=_private_folder(root)
-    refdir=folder/REFERENCES
+    refdir=folder/reference_dir
     if refdir.is_symlink() or (refdir.exists() and not refdir.is_dir()):
         raise VisualGateError("REFERENCE_DIRECTORY_UNSAFE")
     rows=[]
@@ -181,11 +192,24 @@ def compute(root,manifest):
     }
 
 
-def execute(root,manifest,*,write=False,audit=False):
-    output=_private_folder(root)/REPORT
+def execute(root,manifest,*,write=False,audit=False,snapshot_version=1):
+    report_name,_=snapshot_names(snapshot_version)
+    folder=_private_folder(root)
+    output=folder/report_name
     if not audit and (output.exists() or output.is_symlink()):
         raise VisualGateError("REFERENCE_REPORT_ALREADY_EXISTS")
-    result=compute(root,manifest)
+    previous_hash=None
+    if snapshot_version>1:
+        # Audit the frozen predecessor against its *own* reference directory.
+        # A later reference must never mutate or retroactively rescore v1.
+        execute(root,manifest,audit=True,snapshot_version=snapshot_version-1)
+        prior_name,_=snapshot_names(snapshot_version-1)
+        previous_hash=hashlib.sha256((folder/prior_name).read_bytes()).hexdigest()
+    result=compute(root,manifest,snapshot_version=snapshot_version)
+    if previous_hash is not None:
+        result["snapshot_version"]=snapshot_version
+        result["previous_snapshot_sha256_private"]=previous_hash
+        result["prior_report_revalidated"]=True
     blob=(json.dumps(result,sort_keys=True,ensure_ascii=False,
                      separators=(",",":"))+"\n").encode("utf-8")
     if len(blob)>MAX_REPORT:
@@ -208,13 +232,16 @@ def main(argv=None):
     group=parser.add_mutually_exclusive_group()
     group.add_argument("--write",action="store_true")
     group.add_argument("--audit-only",action="store_true")
+    parser.add_argument("--snapshot-version",type=int,default=1,
+                        help="Immutable independent-reference revision (1..8); v1 default")
     args=parser.parse_args(argv)
     manifest=json.loads(Path(args.manifest).read_text("utf-8"))
     data=execute(Path(args.private_root),manifest,write=args.write,
-                 audit=args.audit_only)
+                 audit=args.audit_only,snapshot_version=args.snapshot_version)
     print("ACS_REFERENCE_GATE_STATUS="+(
         "PRIVATE_CREATED" if args.write else
         "RECEIPT_VERIFIED" if args.audit_only else "READONLY_READY"))
+    print("ACS_REFERENCE_GATE_SNAPSHOT=v"+str(args.snapshot_version))
     print("ACS_REFERENCE_GATE_PAGES="+str(data["page_count"]))
     print("ACS_REFERENCE_GATE_ATTESTED="+str(data["reference_attested_count"]))
     print("ACS_REFERENCE_GATE_MISSING="+str(data["no_reference_count"]))
