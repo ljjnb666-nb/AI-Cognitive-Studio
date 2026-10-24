@@ -57,7 +57,7 @@ jobs:
           path: acs-b15-layout-real
           persist-credentials: false
           clean: false
-      - name: Audit immutable B15 receipts and diagnose private disagreement
+      - name: Run real B15 Docling Standard layout offline with private diagnostic logs
         shell: powershell
         timeout-minutes: 19
         run: |
@@ -98,4 +98,4 @@ jobs:
           }
           Write-Output 'ACS_B15_LAYOUT_UPSTREAM_SOURCES=UNCHANGED'
           Write-Output 'ACS_B15_LAYOUT_OCR_ACCURACY=UNVERIFIED'
-          Write-Output 'ACS_B15_LAYOUT_PAID_MODEL_CALLS=0'
+          Write-Output 'ACS_B15_LAYOUT_NEW_PAID_CALLS=0'
