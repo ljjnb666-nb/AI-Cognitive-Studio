@@ -102,14 +102,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'BLIND_REVIEW_AUDIT_FAILED' }
           }
           # A local draft viewer is NEVER an independently certified transcript.
-          $privateSummary=Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
-          if ($privateSummary.pages.Count -ne 2 -or
-              $privateSummary.independent_reference_created -ne $false -or
-              $privateSummary.independent_review_count -ne 0 -or
-              $privateSummary.review_draft_export_only -ne $true -or
-              $privateSummary.external_network_calls -ne 0) {
-            throw 'OFFLINE_WORKBENCH_FALSE_APPROVAL_OR_MISSING_PAGE'
-          }
+          # Never deserialize private source text in PowerShell: parse failure
+          # must not echo candidate OCR text/coordinates/SHAs into Actions logs.
+          & $python 'acs-review-offline/tools/pdf-parser-benchmark/scripts/ebook_private_ci_receipt_gate.py' --private-input $output --policy blind-workbench
+          if ($LASTEXITCODE -ne 0) { throw 'OFFLINE_WORKBENCH_FALSE_APPROVAL_OR_MISSING_PAGE' }
           foreach ($name in $sources) {
             $file=Join-Path $folder $name
             if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'BLIND_REVIEW_SOURCE_MUTATED' }
