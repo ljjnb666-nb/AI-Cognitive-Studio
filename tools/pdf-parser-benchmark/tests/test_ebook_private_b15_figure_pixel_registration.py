@@ -55,6 +55,8 @@ class PixelRegistrationTests(unittest.TestCase):
         self.assertIsNone(result['cer'])
         best = result['registration']['hypotheses'][0]
         self.assertGreater(best['match_score_not_accuracy'], 0.65)
+        self.assertTrue(result['registration']['high_correlation_signal_not_proof'])
+        self.assertTrue(result['registration']['top_candidate_intersects_prior_R3C2_not_proof'])
         self.assertEqual(best['rotation_clockwise_degrees'], 0)
         self.assertEqual(best['source_page_pixel_box_candidate'], [245, 378, 415, 513])
 
