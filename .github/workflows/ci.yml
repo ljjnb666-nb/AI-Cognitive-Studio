@@ -496,7 +496,7 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [static, core-tests, product-acceptance, quality-performance, stability-beta]
+    needs: [static, core-tests, product-acceptance, quality-performance, stability-beta, synthetic-fivebook-reference-snapshot-chain]
     if: always()
     steps:
       - name: Verify all validation domains succeeded
@@ -506,18 +506,27 @@ jobs:
           PRODUCT_ACCEPTANCE_RESULT: ${{ needs.product-acceptance.result }}
           QUALITY_PERFORMANCE_RESULT: ${{ needs.quality-performance.result }}
           STABILITY_BETA_RESULT: ${{ needs.stability-beta.result }}
+          SNAPSHOT_SYNTHETIC_RESULT: ${{ needs.synthetic-fivebook-reference-snapshot-chain.result }}
+          REQUIRE_SNAPSHOT_SYNTHETIC: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'bench/ebook-fivebook-reference-snapshots-v2-20261024' }}
         run: |
           echo "static:              ${STATIC_RESULT}"
           echo "core-tests:          ${CORE_TESTS_RESULT}"
           echo "product-acceptance:  ${PRODUCT_ACCEPTANCE_RESULT}"
           echo "quality-performance: ${QUALITY_PERFORMANCE_RESULT}"
           echo "stability-beta:      ${STABILITY_BETA_RESULT}"
+          if [ "${REQUIRE_SNAPSHOT_SYNTHETIC}" = "true" ]; then
+            echo "fivebook-snapshot:   ${SNAPSHOT_SYNTHETIC_RESULT}"
+          fi
           failed=0
           for result in "${STATIC_RESULT}" "${CORE_TESTS_RESULT}" "${PRODUCT_ACCEPTANCE_RESULT}" "${QUALITY_PERFORMANCE_RESULT}" "${STABILITY_BETA_RESULT}"; do
             if [ "${result}" != "success" ]; then
               failed=1
             fi
           done
+          if [ "${REQUIRE_SNAPSHOT_SYNTHETIC}" = "true" ] && [ "${SNAPSHOT_SYNTHETIC_RESULT}" != "success" ]; then
+            echo "::error::Snapshot-chain synthetic gate failed, cancelled, or skipped."
+            failed=1
+          fi
           if [ "${failed}" -ne 0 ]; then
             echo "::error::One or more validation domains did not succeed (failed, cancelled, or skipped)."
             exit 1
