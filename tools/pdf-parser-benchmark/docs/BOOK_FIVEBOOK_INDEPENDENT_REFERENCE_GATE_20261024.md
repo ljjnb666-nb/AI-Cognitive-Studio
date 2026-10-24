@@ -12,8 +12,11 @@
 
 - corpus_id、BXX 书 ID、**真实物理页码**、上游已固定的**单页原 PDF SHA256**（不是引擎新生成的 Markdown SHA）。
 - 独立来源种类：`PUBLISHER_ORIGINAL_TEXT` 或 `INDEPENDENT_PAGE_TRANSCRIPTION`；相匹配的 `PUBLISHER_SOURCE_VERIFICATION` 或 `MANUAL_SOURCE_PAGE_REVIEW`。
+- **现在必须把来源摘要绑定真实文件**：`INDEPENDENT_PAGE_TRANSCRIPTION` 的 `independent_source_sha256` 必须等于已校验的同物理页**原始单页 PDF SHA**；`PUBLISHER_ORIGINAL_TEXT` 额外要求同目录存在 `BXX_pXXXX.publisher_source.private.txt`，文件大小受限且文件真实 SHA 必须等于该来源字段（拒绝 symlink、占位 digest 和缺失来源文件）。此文件只能放 D: 私有目录，不能上传 GitHub。
 - 独立来源证据 SHA、外部审核记录 ID、`reviewed_source_page=true`、`not_derived_from_rapidocr_or_mineru=true`、`reviewer_approval=INDEPENDENTLY_APPROVED`。
 - 私有 `reference_text` 与其 UTF-8 SHA。所有标记均必须具备；缺一或页号、SHA、文本改动将拒绝该参考，不允许输出 CER。
+
+**来源哈希绑定不等于文本独立性证明。** 一份外部来源文件仍可能被不实地标记为出版社原文；来源、页码、审批人的真实性需要现实中的独立检查。计算出的 CER 即使存在，也只能标记为“参考来源声明条件下的误差”，不可自动发布为认证准确率。
 
 **重要的工程事实**：上述程序可以检查元数据格式与哈希**完整性**，但无法密码学地证明“审核人实际独立比对了图像”这一现实行为，亦不能只根据 `reviewer_approval` 的自我声明把数据认证为绝对正确。执行真实准确率报告前仍须独立检查来源证明。本 PR 的报告显式标记 `reference_provenance_truth_requires_external_audit=true`。
 
@@ -38,7 +41,7 @@
   "not_derived_from_rapidocr_or_mineru": true,
   "reviewer_approval": "INDEPENDENTLY_APPROVED",
   "reviewer_record_id": "<external review identifier>",
-  "independent_source_sha256": "<publisher/source reference SHA256>",
+  "independent_source_sha256": "<the exact staged original-page PDF SHA256 for manual transcription>",
   "reference_text": "<independently established private page text>",
   "reference_text_sha256": "<UTF-8 SHA256 of reference_text>"
 }
