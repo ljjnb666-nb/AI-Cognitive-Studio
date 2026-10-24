@@ -85,12 +85,46 @@ jobs:
             $env:HTTP_PROXY='http://127.0.0.1:1'
             $env:HTTPS_PROXY='http://127.0.0.1:1'
             $env:ALL_PROXY='http://127.0.0.1:1'
+            # Keep script stdout private until it passes the strict non-sensitive
+            # two-integer whitelist. Discard stderr to avoid traceback paths.
             if (Test-Path -LiteralPath $report -PathType Leaf) {
-              & $python $script --private-root $root --manifest $manifest --audit-only
+              $result=@(& $python $script --private-root $root --manifest $manifest --audit-only 2>$null)
             } else {
-              & $python $script --private-root $root --manifest $manifest
+              $result=@(& $python $script --private-root $root --manifest $manifest 2>$null)
             }
             if ($LASTEXITCODE -ne 0) { throw 'READONLY_REFERENCE_SCOPE_REJECTED' }
+            $attested=@($result | Where-Object { $_ -match '^ACS_REFERENCE_GATE_ATTESTED=[0-5]
+            foreach ($item in $protected) {
+              if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $prior[$item]) { throw 'FROZEN_INPUT_CHANGED' }
+            }
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=READ_ONLY_VERIFIED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_SOURCE_FILES=UNCHANGED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_GOLD_SELF_GENERATION=FORBIDDEN'
+          } catch {
+            # Never echo raw error, paths, model text, private hashes or page crops.
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=REJECTED'
+            exit 2
+          }
+ })
+            $missing=@($result | Where-Object { $_ -match '^ACS_REFERENCE_GATE_MISSING=[0-5]
+            foreach ($item in $protected) {
+              if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $prior[$item]) { throw 'FROZEN_INPUT_CHANGED' }
+            }
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=READ_ONLY_VERIFIED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_SOURCE_FILES=UNCHANGED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_GOLD_SELF_GENERATION=FORBIDDEN'
+          } catch {
+            # Never echo raw error, paths, model text, private hashes or page crops.
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=REJECTED'
+            exit 2
+          }
+ })
+            if ($attested.Count -ne 1 -or $missing.Count -ne 1) { throw 'PRIVATE_REFERENCE_RECEIPT_NOT_WHITELISTED' }
+            $attestedNum=[int]($attested[0].Split('=')[1])
+            $missingNum=[int]($missing[0].Split('=')[1])
+            if ($attestedNum+$missingNum -ne 5) { throw 'PRIVATE_REFERENCE_COUNTERS_INVALID' }
+            Write-Output ('ACS_FULL_PAGE_REFERENCE_ATTESTED='+$attestedNum)
+            Write-Output ('ACS_FULL_PAGE_REFERENCE_MISSING='+$missingNum)
             foreach ($item in $protected) {
               if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $prior[$item]) { throw 'FROZEN_INPUT_CHANGED' }
             }
