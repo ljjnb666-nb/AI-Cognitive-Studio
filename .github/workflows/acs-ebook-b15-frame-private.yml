@@ -120,16 +120,7 @@ jobs:
           $report=Join-Path $root ('reports\ebook-b15-calibrated-'+$env:EXPECTED_SHA.Substring(0,12)+'.private.json')
           & $python $tool --root $root --manifest $manifest --output $report
           if ($LASTEXITCODE -ne 0) { throw 'ACS_B15_PRIVATE_POST_CALIBRATION_FAILED' }
-          $json=Get-Content -LiteralPath $report -Raw -Encoding UTF8 | ConvertFrom-Json
-          $b15=@($json.rows | Where-Object book_id -eq 'B15')
-          if ($b15.Count -ne 1) { throw 'ACS_B15_REAL_PAGE_REPORT_MISSING' }
-          $metric=@($b15[0].results | Where-Object engine -eq 'Docling')
-          if ($metric.Count -ne 1) { throw 'ACS_B15_REAL_DOCLING_METRIC_MISSING' }
-          $layout=$metric[0].layout_evidence
-          if ($null -eq $layout.spatial_alignment) { throw 'ACS_B15_PRIVATE_ALIGNMENT_MISSING' }
-          if ($layout.graph_semantics -ne 'UNVERIFIED') { throw 'ACS_B15_GRAPH_SEMANTICS_CLAIM_INVALID' }
-          $match=$layout.spatial_alignment
-          Write-Output ('ACS_B15_REAL_PROVISIONAL_STATUS='+$layout.spatial_alignment_status)
-          Write-Output ('ACS_B15_REAL_PROVISIONAL_MATCHED='+$match.one_to_one_region_matches+'|REFS='+$match.reference_region_count+'|PICTURES='+$match.detected_picture_box_count)
-          Write-Output 'ACS_B15_REAL_REFERENCE=AI_L2_PROVISIONAL_NOT_HUMAN_GOLD'
-          Write-Output 'ACS_B15_REAL_GRAPH_F1=UNVERIFIED'
+          # Preserve original acceptance in Python; never print or deserialize
+          # private OCR/figure JSON in PowerShell, including on exceptions.
+          & $python 'acs-ebook-b15-private/tools/pdf-parser-benchmark/scripts/ebook_private_ci_receipt_gate.py' --private-input $report --policy legacy-b15-frame
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_B15_PRIVATE_RECEIPT_REJECTED' }

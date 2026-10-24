@@ -96,11 +96,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'FIVE_STD_AUDIT_FAILED' }
           }
           # This audit is text agreement only: source v7 is already complete.
-          $privateSummary=Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
-          if ($privateSummary.same_original_page_count -ne 5 -or
-              $privateSummary.rows.Count -ne 5) {
-            throw 'FIVEBOOK_THREEWAY_NOT_ALL_FIVE_SOURCE_ROWS'
-          }
+          # Never deserialize private source text in PowerShell: parse failure
+          # must not echo candidate OCR text/coordinates/SHAs into Actions logs.
+          & $python 'acs-fivebook-consensus/tools/pdf-parser-benchmark/scripts/ebook_private_ci_receipt_gate.py' --private-input $output --policy fivebook-consensus
+          if ($LASTEXITCODE -ne 0) { throw 'FIVEBOOK_THREEWAY_NOT_ALL_FIVE_SOURCE_ROWS' }
           foreach ($name in $sources) {
             $file=Join-Path $folder $name
             if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'FIVE_STD_SOURCE_MUTATED' }

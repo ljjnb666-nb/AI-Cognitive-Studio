@@ -100,10 +100,10 @@ jobs:
           }
           # Workflow green must mean all five ACTUALLY converted, not merely
           # that private failed receipts were safely recorded.
-          $privateSummary=Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
-          if ($privateSummary.all_five_real_standard_ocr_succeeded -ne $true) {
-            throw 'FIVE_STD_NOT_ALL_FIVE_REAL_OCR_SUCCEEDED_PRIVATE_DETAILS_RETAINED'
-          }
+          # Never deserialize private source text in PowerShell: parse failure
+          # must not echo candidate OCR text/coordinates/SHAs into Actions logs.
+          & $python 'acs-fivebook-std/tools/pdf-parser-benchmark/scripts/ebook_private_ci_receipt_gate.py' --private-input $output --policy fivebook-standard
+          if ($LASTEXITCODE -ne 0) { throw 'FIVE_STD_NOT_ALL_FIVE_REAL_OCR_SUCCEEDED_PRIVATE_DETAILS_RETAINED' }
           foreach ($name in $sources) {
             $file=Join-Path $folder $name
             if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'FIVE_STD_SOURCE_MUTATED' }
