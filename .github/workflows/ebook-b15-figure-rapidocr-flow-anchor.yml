@@ -78,19 +78,11 @@ jobs:
             & $python $script @anchorArgs
             if ($LASTEXITCODE -ne 0) { throw 'FIGURE_ANCHOR_PRIVATE_CREATE_FAILED' }
           }
-          & $python $script @anchorArgs --audit-only
-          if ($LASTEXITCODE -ne 0) { throw 'FIGURE_ANCHOR_PRIVATE_AUDIT_FAILED' }
-          $report=Get-Content -LiteralPath $output -Raw | ConvertFrom-Json
-          if ($report.status -ne 'FIGURE_TEXT_CANDIDATES_UNVERIFIED' -or
-              $report.candidate_count -ne 19 -or
-              $report.retained_figures.Count -ne 2 -or
-              $report.selected_figure_id -ne '1-4-16' -or
-              $report.image_to_page_geometry_verified -ne $false -or
-              $report.series_to_curve_correspondence_verified -ne $false -or
-              $report.independent_gold_available -ne $false -or
-              $null -ne $report.cer) {
-            throw 'FIGURE_ANCHOR_FALSE_GOLD_OR_UNEXPECTED_SOURCE'
-          }
+          # The Python worker validates frozen JSON and authority flags itself.
+          # NEVER pipe private OCR receipts through PowerShell ConvertFrom-Json:
+          # PowerShell 5.1 can echo the entire private document on parse errors.
+          & $python $script @anchorArgs --audit-only --require-candidate-count 19
+          if ($LASTEXITCODE -ne 0) { throw 'FIGURE_ANCHOR_PRIVATE_AUDIT_OR_AUTHORITY_FAILED' }
           foreach ($name in $names) {
             $file=Join-Path $folder $name
             if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'FIGURE_ANCHOR_ORIGINAL_SOURCE_MUTATED' }
