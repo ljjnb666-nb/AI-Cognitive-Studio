@@ -146,7 +146,7 @@ class FigureAnchorTests(unittest.TestCase):
     def test_windows_workflow_never_dumps_private_json_via_powershell(self):
         workflow=(Path(__file__).resolve().parents[3]/'.github'/'workflows'/
                   'ebook-b15-figure-rapidocr-flow-anchor.yml').read_text('utf-8')
-        self.assertNotIn('ConvertFrom-Json',workflow.split('run: |')[-1])
+        self.assertNotIn(' | ConvertFrom-Json',workflow)
         self.assertNotIn('Get-Content -LiteralPath $output',workflow)
         self.assertIn('--audit-only --require-candidate-count 19',workflow)
 
