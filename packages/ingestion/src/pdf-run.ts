@@ -6,6 +6,7 @@ import { INGESTION_EXECUTION_OWNERSHIP_LOST } from "./ingestion-run-claim.js";
 import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, failOcrPageAttempt, writeRoutingPlan } from "./ocr-durability.js";
 import { PDF_EXTRACTION_PARSER, PDF_ROUTING_GENERATION, assertRoutingPlanReplay, evaluatePdfExtractionQuality, parseRoutingPlan, type PdfExtractionQualityDecision, type PdfOcrExecutor, type PdfOcrPageResult, type PdfPageExtractionOutcome, type PdfRoutingPlan } from "./pdf-routing.js";
 import { OcrCapacityDeferralError } from "./ocr-capacity-errors.js";
+import { assessPdfVisualFidelity, type PdfVisualAudit } from "./pdf-visual-fidelity.js";
 import { SourceError } from "./source-errors.js";
 
 export type PdfRunExtractionInput = {
@@ -28,7 +29,7 @@ export type PdfRunExtractionInput = {
 };
 
 export type PdfRunExtraction =
-  | { kind: "PUBLISH"; parsed: Parsed; routingPlan: PdfRoutingPlan; routingGeneration: number; decision: PdfExtractionQualityDecision }
+  | { kind: "PUBLISH"; parsed: Parsed; routingPlan: PdfRoutingPlan; routingGeneration: number; decision: PdfExtractionQualityDecision; visualAudit: PdfVisualAudit }
   | { kind: "OCR_REQUIRED"; routingPlan: PdfRoutingPlan; routingGeneration: number; decision: PdfExtractionQualityDecision }
   | { kind: "REJECTED"; routingPlan: PdfRoutingPlan; routingGeneration: number; decision: PdfExtractionQualityDecision };
 
@@ -93,7 +94,11 @@ export async function runPdfExtraction(input: PdfRunExtractionInput): Promise<Pd
   if (decision.status === "REJECTED") return { kind: "REJECTED", routingPlan: plan, routingGeneration: generation, decision };
 
   const parsed: Parsed = { parser: { ...PDF_EXTRACTION_PARSER }, pages, qualityWarnings: [...decision.qualityWarnings] };
-  return { kind: "PUBLISH", parsed, routingPlan: plan, routingGeneration: generation, decision };
+  // Reporting only: a text-complete PDF may still lose source figures. Do not
+  // silently treat successful OCR text or native text as visual fidelity.
+  // The persisted routing plan and extraction quality gate remain unchanged.
+  const visualAudit = assessPdfVisualFidelity(native.inspections, pages);
+  return { kind: "PUBLISH", parsed, routingPlan: plan, routingGeneration: generation, decision, visualAudit };
 }
 
 /**
