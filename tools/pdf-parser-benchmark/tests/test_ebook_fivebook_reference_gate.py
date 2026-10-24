@@ -219,5 +219,61 @@ class GoldProtocolTests(unittest.TestCase):
                     gate.execute(root,{},write=True)
 
 
+    def test_v2_reference_is_scored_without_changing_or_rescoring_v1(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); folder,matrix,rapid,consensus=fixtures(root)
+            with self.patch_sources(folder,matrix,rapid,consensus):
+                first=gate.execute(root,{},write=True)
+                v1=(folder/gate.REPORT)
+                frozen=v1.read_bytes()
+                self.assertEqual(first["reference_attested_count"],0)
+                row=matrix["rows"][0]
+                reference=create_reference(folder,row["book_id"],
+                    row["physical_page"],row["source_pdf_sha256_private"],
+                    text="HELLO 你")
+                v2dir=folder/"independent_reference_v2"
+                v2dir.mkdir()
+                reference.rename(v2dir/reference.name)
+                new=gate.execute(root,{},write=True,snapshot_version=2)
+                self.assertEqual(new["snapshot_version"],2)
+                self.assertEqual(new["reference_attested_count"],1)
+                self.assertEqual(new["no_reference_count"],4)
+                self.assertEqual(new["previous_snapshot_sha256_private"],
+                                 hashlib.sha256(frozen).hexdigest())
+                self.assertTrue(new["prior_report_revalidated"])
+                self.assertEqual(new["rows"][0]["cer_rapidocr"],round(1/6,6))
+                self.assertEqual(v1.read_bytes(),frozen)
+                self.assertEqual(gate.execute(root,{},audit=True),first)
+                self.assertEqual(gate.execute(root,{},audit=True,
+                                              snapshot_version=2),new)
+                self.assertNotIn("HELLO",json.dumps(new))
+
+    def test_v2_requires_verified_v1_and_cannot_replace_existing_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);folder,matrix,rapid,consensus=fixtures(root)
+            with self.patch_sources(folder,matrix,rapid,consensus):
+                with self.assertRaises(VisualGateError):
+                    gate.execute(root,{},write=True,snapshot_version=2)
+                self.assertFalse((folder/gate.snapshot_names(2)[0]).exists())
+                gate.execute(root,{},write=True)
+                gate.execute(root,{},write=True,snapshot_version=2)
+                with self.assertRaisesRegex(VisualGateError,"ALREADY_EXISTS"):
+                    gate.execute(root,{},write=True,snapshot_version=2)
+                # If an older report is changed, new snapshot verification
+                # cannot conceal or ignore broken historical provenance.
+                (folder/gate.REPORT).write_text("{}",encoding="utf-8")
+                with self.assertRaises(VisualGateError):
+                    gate.execute(root,{},audit=True,snapshot_version=2)
+
+    def test_snapshot_versions_are_bounded_not_paths(self):
+        for value in (0,9,-1,True,"2",1.0):
+            with self.assertRaisesRegex(VisualGateError,"VERSION_INVALID"):
+                gate.snapshot_names(value)
+        self.assertEqual(gate.snapshot_names(1),(gate.REPORT,gate.REFERENCES))
+        self.assertEqual(gate.snapshot_names(2)[1],"independent_reference_v2")
+        self.assertEqual(gate.snapshot_names(8)[0],
+                         "fivebook_independent_reference_admission.v8.private.json")
+
+
 if __name__=="__main__":
     unittest.main()
