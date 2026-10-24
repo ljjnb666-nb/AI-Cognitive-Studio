@@ -51,6 +51,15 @@ def create_reference(folder,book,page,sha,text="HELLO 你好",**updates):
       "reviewed_source_page":True,
       "not_derived_from_rapidocr_or_mineru":True,
       "reviewer_approval":"INDEPENDENTLY_APPROVED",
+      "reference_scope":gate.FULL_PAGE_SCOPE,
+      "full_page_coverage":{
+          "coverage_scope":gate.FULL_PAGE_SCOPE,
+          "reviewed_grid_cells":list(gate.REVIEW_GRID),
+          "sidebars_and_vertical_text_reviewed":True,
+          "all_visible_text_and_punctuation_transcribed":True,
+          "page_reading_order_reviewed":True,
+          "unresolved_text_regions":[],
+      },
       "reviewer_record_id":"REVIEW_20261024_X1",
       "independent_source_sha256":sha,
       "reference_text":text,
@@ -121,6 +130,59 @@ class GoldProtocolTests(unittest.TestCase):
                 with self.assertRaisesRegex(VisualGateError,"ATTESTATION_INVALID"):
                     gate.execute(root,{},write=True)
                 self.assertFalse((folder/gate.REPORT).exists())
+
+    def test_b03_eight_span_spot_check_cannot_be_promoted_to_full_page_cer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);folder,matrix,rapid,consensus=fixtures(root)
+            first=matrix["rows"][0]
+            ref=create_reference(folder,first["book_id"],first["physical_page"],
+                first["source_pdf_sha256_private"],text="SELECTED SHORT SPAN")
+            receipt=json.loads(ref.read_text("utf-8"))
+            receipt["reference_scope"]="SCOPED_SPOT_CHECK_ONLY"
+            receipt["full_page_coverage"]["coverage_scope"]="SCOPED_SPOT_CHECK_ONLY"
+            ref.write_text(json.dumps(receipt),encoding="utf-8")
+            with self.patch_sources(folder,matrix,rapid,consensus):
+                with self.assertRaisesRegex(VisualGateError,"FULL_PAGE_COVERAGE_UNVERIFIED"):
+                    gate.execute(root,{},write=True)
+                self.assertFalse((folder/gate.REPORT).exists())
+
+    def test_missing_sidebar_or_unreviewed_grid_cell_blocks_cer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);folder,matrix,rapid,consensus=fixtures(root)
+            first=matrix["rows"][0]
+            ref=create_reference(folder,first["book_id"],first["physical_page"],
+                first["source_pdf_sha256_private"])
+            receipt=json.loads(ref.read_text("utf-8"))
+            receipt["full_page_coverage"]["sidebars_and_vertical_text_reviewed"]=False
+            ref.write_text(json.dumps(receipt),encoding="utf-8")
+            with self.patch_sources(folder,matrix,rapid,consensus):
+                with self.assertRaisesRegex(VisualGateError,"FULL_PAGE_COVERAGE_UNVERIFIED"):
+                    gate.execute(root,{},write=True)
+            receipt["full_page_coverage"]["sidebars_and_vertical_text_reviewed"]=True
+            receipt["full_page_coverage"]["reviewed_grid_cells"].pop()
+            ref.write_text(json.dumps(receipt),encoding="utf-8")
+            with self.patch_sources(folder,matrix,rapid,consensus):
+                with self.assertRaisesRegex(VisualGateError,"FULL_PAGE_COVERAGE_UNVERIFIED"):
+                    gate.execute(root,{},write=True)
+
+    def test_unresolved_source_text_or_missing_punctuation_review_blocks_full_page_cer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);folder,matrix,rapid,consensus=fixtures(root)
+            first=matrix["rows"][0]
+            ref=create_reference(folder,first["book_id"],first["physical_page"],
+                first["source_pdf_sha256_private"])
+            receipt=json.loads(ref.read_text("utf-8"))
+            receipt["full_page_coverage"]["unresolved_text_regions"]=["R3C2"]
+            ref.write_text(json.dumps(receipt),encoding="utf-8")
+            with self.patch_sources(folder,matrix,rapid,consensus):
+                with self.assertRaisesRegex(VisualGateError,"FULL_PAGE_COVERAGE_UNVERIFIED"):
+                    gate.execute(root,{},write=True)
+            receipt["full_page_coverage"]["unresolved_text_regions"]=[]
+            receipt["full_page_coverage"]["all_visible_text_and_punctuation_transcribed"]=False
+            ref.write_text(json.dumps(receipt),encoding="utf-8")
+            with self.patch_sources(folder,matrix,rapid,consensus):
+                with self.assertRaisesRegex(VisualGateError,"FULL_PAGE_COVERAGE_UNVERIFIED"):
+                    gate.execute(root,{},write=True)
 
     def test_wrong_page_and_source_sha_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

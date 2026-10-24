@@ -1,0 +1,138 @@
+name: Fivebook Complete-Page Reference Coverage
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-full-page-reference-coverage:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-full-page-reference-coverage-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run source-free independent reference scope tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_reference_gate.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_reference_gate.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_text_consensus.py' -v
+          echo 'ACS_FULL_PAGE_REFERENCE_SYNTHETIC=PASS'
+          echo 'ACS_FULL_PAGE_REFERENCE_SCOPE=FULL_PHYSICAL_PAGE_ONLY'
+          echo 'ACS_FULL_PAGE_REFERENCE_INDEPENDENT_GOLD=NOT_AUTO_GENERATED'
+          echo 'ACS_FULL_PAGE_REFERENCE_NEW_MODEL_CALLS=0'
+
+  owner-only-windows-reference-readonly:
+    needs: synthetic-full-page-reference-coverage
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-full-page-reference-coverage-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout exact source without reusable credentials
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-reference-coverage
+          persist-credentials: false
+          clean: false
+      - name: Read-only fivebook full-page gold readiness, never create a fake reference
+        shell: powershell
+        timeout-minutes: 14
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-reference-coverage rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'EXACT_HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'CACHED_PYTHON_MISSING' }
+            $script='acs-reference-coverage/tools/pdf-parser-benchmark/scripts/ebook_fivebook_reference_gate.py'
+            $manifest='acs-reference-coverage/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+            $report=Join-Path $folder 'fivebook_independent_reference_admission.private.json'
+            $protected=@(
+              (Join-Path $folder 'multibook_native_24pages.private.json'),
+              (Join-Path $folder 'multibook_rapidocr_five_pages.private.json'),
+              (Join-Path $folder 'fivebook_mineru_rapidocr_comparison.private.json')
+            )
+            if (Test-Path -LiteralPath $report -PathType Leaf) { $protected+=@($report) }
+            $prior=@{}
+            foreach ($item in $protected) {
+              if (-not (Test-Path -LiteralPath $item -PathType Leaf)) { throw 'PRIVATE_FROZEN_INPUT_MISSING' }
+              $prior[$item]=(Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash
+            }
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            # Keep script stdout private until it passes the strict non-sensitive
+            # two-integer whitelist. Discard stderr to avoid traceback paths.
+            if (Test-Path -LiteralPath $report -PathType Leaf) {
+              $result=@(& $python $script --private-root $root --manifest $manifest --audit-only 2>$null)
+            } else {
+              $result=@(& $python $script --private-root $root --manifest $manifest 2>$null)
+            }
+            if ($LASTEXITCODE -ne 0) { throw 'READONLY_REFERENCE_SCOPE_REJECTED' }
+            $attested=@($result | Where-Object { $_ -match '^ACS_REFERENCE_GATE_ATTESTED=[0-5]
+            foreach ($item in $protected) {
+              if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $prior[$item]) { throw 'FROZEN_INPUT_CHANGED' }
+            }
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=READ_ONLY_VERIFIED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_SOURCE_FILES=UNCHANGED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_GOLD_SELF_GENERATION=FORBIDDEN'
+          } catch {
+            # Never echo raw error, paths, model text, private hashes or page crops.
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=REJECTED'
+            exit 2
+          }
+ })
+            $missing=@($result | Where-Object { $_ -match '^ACS_REFERENCE_GATE_MISSING=[0-5]
+            foreach ($item in $protected) {
+              if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $prior[$item]) { throw 'FROZEN_INPUT_CHANGED' }
+            }
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=READ_ONLY_VERIFIED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_SOURCE_FILES=UNCHANGED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_GOLD_SELF_GENERATION=FORBIDDEN'
+          } catch {
+            # Never echo raw error, paths, model text, private hashes or page crops.
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=REJECTED'
+            exit 2
+          }
+ })
+            if ($attested.Count -ne 1 -or $missing.Count -ne 1) { throw 'PRIVATE_REFERENCE_RECEIPT_NOT_WHITELISTED' }
+            $attestedNum=[int]($attested[0].Split('=')[1])
+            $missingNum=[int]($missing[0].Split('=')[1])
+            if ($attestedNum+$missingNum -ne 5) { throw 'PRIVATE_REFERENCE_COUNTERS_INVALID' }
+            Write-Output ('ACS_FULL_PAGE_REFERENCE_ATTESTED='+$attestedNum)
+            Write-Output ('ACS_FULL_PAGE_REFERENCE_MISSING='+$missingNum)
+            foreach ($item in $protected) {
+              if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $prior[$item]) { throw 'FROZEN_INPUT_CHANGED' }
+            }
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=READ_ONLY_VERIFIED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_SOURCE_FILES=UNCHANGED'
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_GOLD_SELF_GENERATION=FORBIDDEN'
+          } catch {
+            # Never echo raw error, paths, model text, private hashes or page crops.
+            Write-Output 'ACS_FULL_PAGE_REFERENCE_WINDOWS=REJECTED'
+            exit 2
+          }
