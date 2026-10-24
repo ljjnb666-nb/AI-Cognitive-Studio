@@ -54,22 +54,24 @@ def patch_boxes(row,w,h,figure_roi):
     ht=max(8,int(round(y2-y1)))
     pad=max(6,ht//2)
     side=min(260,max(65,ht*5))
-    top=max(figure_roi[1],y1-pad,0)
-    bottom=min(figure_roi[3],y2+pad,h)
+    top=max(0,y1-pad)
+    bottom=min(h,y2+pad)
     require(top<bottom)
     region=clamp_box([x1-pad,top,x2+pad,bottom],w,h)
     left=None
     right=None
-    if x1-side< x1 and x1>figure_roi[0]:
+    context_top=max(figure_roi[1],top)
+    context_bottom=min(figure_roi[3],bottom)
+    if context_top<context_bottom and x1>figure_roi[0]:
         lo=max(figure_roi[0],x1-side,0)
         hi=min(figure_roi[2],x1-3,w)
         if hi>lo+4:
-            left=clamp_box([lo,top,hi,bottom],w,h)
-    if x2 <figure_roi[2]:
+            left=clamp_box([lo,context_top,hi,context_bottom],w,h)
+    if context_top<context_bottom and x2<figure_roi[2]:
         lo=max(figure_roi[0],x2+3,0)
         hi=min(figure_roi[2],x2+side,w)
         if hi>lo+4:
-            right=clamp_box([lo,top,hi,bottom],w,h)
+            right=clamp_box([lo,context_top,hi,context_bottom],w,h)
     return left,region,right
 
 def pack_page(page,v5):
