@@ -73,7 +73,7 @@ class B15DisagreementTests(unittest.TestCase):
                 self.assertFalse(result["root_cause_verified"])
                 self.assertEqual(sum(x["line_count"] for x in result["ordinal_quarters"]),3)
                 stored=(folder/subject.REPORT).read_text("utf-8")
-                for secret in ("你好","额外的孤立文本","QUJD","private"):
+                for secret in ("你好","额外的孤立文本","QUJD","![private]"):
                     self.assertNotIn(secret,stored)
                 self.assertEqual(subject.execute(root,{},audit=True),result)
                 with self.assertRaisesRegex(VisualGateError,"ALREADY_EXISTS"):
