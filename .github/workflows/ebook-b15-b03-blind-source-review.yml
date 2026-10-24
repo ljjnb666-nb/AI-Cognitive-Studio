@@ -85,8 +85,10 @@ jobs:
           $env:HTTPS_PROXY='http://127.0.0.1:1'
           $env:ALL_PROXY='http://127.0.0.1:1'
           $env:NO_PROXY=''
-          & $python -c 'from PIL import Image; print("ACS_BLIND_REVIEW_LOCAL_IMAGE_CODEC=AVAILABLE")'
+          # Avoid shell quoting on Windows PowerShell -> external Python process.
+          & $python -c 'from PIL import Image'
           if ($LASTEXITCODE -ne 0) { throw 'BLIND_REVIEW_PILLOW_REQUIRED_OFFLINE' }
+          Write-Output 'ACS_BLIND_REVIEW_LOCAL_IMAGE_CODEC=AVAILABLE'
           $script='acs-blind-images/tools/pdf-parser-benchmark/scripts/ebook_b15_b03_blind_source_review.py'
           $manifest='acs-blind-images/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
           if (Test-Path -LiteralPath $output -PathType Leaf) {
