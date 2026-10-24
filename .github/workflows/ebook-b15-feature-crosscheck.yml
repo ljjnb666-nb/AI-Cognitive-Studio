@@ -1,0 +1,104 @@
+name: B15 Private Figure Feature Crosscheck
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-feature-crosscheck:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-feature-crosscheck-20261024' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test synthetic figures and private receipt isolation
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 numpy==2.2.6 opencv-python-headless==4.12.0.88
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_feature_crosscheck.py' -v
+          echo 'ACS_B15_FEATURE_SYNTHETIC=PASS'
+          echo 'ACS_B15_FEATURE_GEOMETRY_GOLD=UNVERIFIED'
+
+  windows-private-feature-crosscheck:
+    needs: synthetic-feature-crosscheck
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-feature-crosscheck-20261024' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout exact owner PR source
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-feature-crosscheck
+          persist-credentials: false
+          clean: false
+      - name: Frozen v3 to independent v4 private evidence, no model calls
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-feature-crosscheck rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'PYTHON_ENV_MISSING' }
+            & $py -c 'import cv2, numpy, PIL'
+            if ($LASTEXITCODE -ne 0) { throw 'LOCAL_LIBRARIES_MISSING' }
+            $page=Join-Path $folder 'B15_p0109.private.png'
+            $md=Join-Path $folder 'fivebook_mineru_basic_B15.private.md'
+            $v1=Join-Path $folder 'b15_mineru_figure_rapidocr_anchor.v1.private.json'
+            $v3=Join-Path $folder 'b15_mineru_figure_pixel_registration.v3.private.json'
+            $out=Join-Path $folder 'b15_figure_feature_crosscheck.v4.private.json'
+            $overlay=Join-Path $folder 'b15_figure_feature_crosscheck.v4.private.png'
+            $before=@{}
+            foreach ($file in @($page,$md,$v1,$v3)) {
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'IMMUTABLE_PRIVATE_INPUT_MISSING' }
+              $before[$file]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            }
+            $script='acs-feature-crosscheck/tools/pdf-parser-benchmark/scripts/ebook_b15_feature_crosscheck.py'
+            $argv=@('--page-png',$page,'--mineru-markdown',$md,'--anchor-v1',$v1,'--pixel-v3',$v3,'--private-output',$out,'--private-overlay',$overlay)
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            $hasReport=Test-Path -LiteralPath $out -PathType Leaf
+            $hasOverlay=Test-Path -LiteralPath $overlay -PathType Leaf
+            if ($hasReport -ne $hasOverlay) { throw 'PARTIAL_PRIVATE_OUTPUT_FAIL_CLOSED' }
+            if (-not $hasReport) {
+              & $py $script @argv
+              if ($LASTEXITCODE -ne 0) { throw 'FEATURE_PROPOSAL_FAILED' }
+            }
+            & $py $script @argv --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'FEATURE_AUDIT_FAILED' }
+            foreach ($file in @($page,$md,$v1,$v3)) {
+              if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'IMMUTABLE_PRIVATE_SOURCE_CHANGED' }
+            }
+            Write-Output 'ACS_B15_FEATURE_ORIGINAL_SOURCES=UNCHANGED'
+            Write-Output 'ACS_B15_FEATURE_PRIVATE_OVERLAY=CREATED_AND_VERIFIED'
+            Write-Output 'ACS_B15_FEATURE_INDEPENDENT_GOLD=UNVERIFIED'
+          } catch {
+            # Fixed error only: no private OCR text, coordinates, paths, stack.
+            Write-Output 'ACS_B15_FEATURE_WINDOWS=REJECTED'
+            exit 2
+          }
