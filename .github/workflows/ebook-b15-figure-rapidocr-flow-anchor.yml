@@ -17,9 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install offline-fixture dependencies
-        run: |
-          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
+      # No dependencies or model weights installed: this slice is stdlib-only.
       - name: Run six no-inference figure anchor source-contract synthetic gates
         shell: bash
         env:
