@@ -181,7 +181,7 @@ def registration(page, figure):
 def build(source, markdown, anchor):
     image = source_proof(source, markdown, anchor)
     result = registration(grayscale(source, 'PNG'), grayscale(image, 'JPEG'))
-    return {'schema_version': 2, 'status': STATUS,
+    return {'schema_version': 3, 'status': STATUS,
             'book_id': 'B15', 'physical_page': 109, 'figure_id': FIGURE_ID,
             'source_render_png_sha256_private': sha256(source),
             'mineru_markdown_sha256_private': sha256(markdown),
