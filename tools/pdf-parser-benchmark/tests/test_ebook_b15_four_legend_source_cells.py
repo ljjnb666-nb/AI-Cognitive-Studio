@@ -157,7 +157,7 @@ class B15LegendCellTests(unittest.TestCase):
 
     def test_pixel_source_changed_blocks_any_truth_claim(self):
         page,md,v1,v3,v4,over4,v5,over5,v6raw,v6sheet,v6html=self.bundle
-        with self.assertRaises(pixel.GateError):
+        with self.assertRaises(cells.GateError):
             cells.build(page+b"tampered",md,v1,pixel.json.loads(v6raw),v6sheet,v6html)
 
     def test_unexpected_exception_never_leaks_to_logs(self):
