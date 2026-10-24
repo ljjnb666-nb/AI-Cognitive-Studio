@@ -1,0 +1,110 @@
+name: B15 OCR Quad Figure Spatial Candidate Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-quad-spatial:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-ocr-quad-figure-spatial-20261024' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run six public synthetic OCR quad spatial safety tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 numpy==2.2.6 opencv-python-headless==4.12.0.88
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_ocr_quad_spatial_candidates.py' -v
+          echo 'ACS_B15_QUAD_SYNTHETIC=PASS'
+          echo 'ACS_B15_QUAD_GOLD=UNVERIFIED'
+
+  windows-private-quad-spatial:
+    needs: synthetic-quad-spatial
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-ocr-quad-figure-spatial-20261024' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout exact authorized branch SHA
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-quad-spatial
+          persist-credentials: false
+          clean: false
+      - name: Create or audit private v5 quad ROI candidate plus page overlay
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-quad-spatial rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $dir=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'CACHED_PYTHON_MISSING' }
+            & $py -c 'import PIL,numpy'
+            if ($LASTEXITCODE -ne 0) { throw 'CACHED_PIXEL_LIBRARIES_MISSING' }
+            $page=Join-Path $dir 'B15_p0109.private.png'
+            $md=Join-Path $dir 'fivebook_mineru_basic_B15.private.md'
+            $v1=Join-Path $dir 'b15_mineru_figure_rapidocr_anchor.v1.private.json'
+            $v3=Join-Path $dir 'b15_mineru_figure_pixel_registration.v3.private.json'
+            $v4=Join-Path $dir 'b15_figure_feature_crosscheck.v4.private.json'
+            $v4Image=Join-Path $dir 'b15_figure_feature_crosscheck.v4.private.png'
+            $v5=Join-Path $dir 'b15_ocr_quad_spatial_candidates.v5.private.json'
+            $v5Image=Join-Path $dir 'b15_ocr_quad_spatial_candidates.v5.private.png'
+            $originals=@($page,$md,$v1,$v3,$v4,$v4Image)
+            $digests=@{}
+            foreach ($file in $originals) {
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'PRIVATE_UPSTREAM_MISSING' }
+              $digests[$file]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            }
+            $outputPresent=Test-Path -LiteralPath $v5 -PathType Leaf
+            $imagePresent=Test-Path -LiteralPath $v5Image -PathType Leaf
+            if ($outputPresent -ne $imagePresent) { throw 'PARTIAL_PRIVATE_OUTPUT_REJECTED' }
+            $tool='acs-quad-spatial/tools/pdf-parser-benchmark/scripts/ebook_b15_ocr_quad_spatial_candidates.py'
+            $argsList=@('--page-png',$page,'--mineru-markdown',$md,
+              '--anchor-v1',$v1,'--pixel-v3',$v3,
+              '--feature-v4',$v4,'--feature-overlay-v4',$v4Image,
+              '--private-output',$v5,'--private-overlay',$v5Image)
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            if (-not $outputPresent) {
+              & $py $tool @argsList
+              if ($LASTEXITCODE -ne 0) { throw 'PRIVATE_V5_CREATE_REJECTED' }
+            }
+            & $py $tool @argsList --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'PRIVATE_V5_AUDIT_REJECTED' }
+            foreach ($file in $originals) {
+              if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $digests[$file]) { throw 'PRIVATE_ORIGINAL_CHANGED' }
+            }
+            Write-Output 'ACS_B15_QUAD_FROZEN_SOURCES=UNCHANGED'
+            Write-Output 'ACS_B15_QUAD_PRIVATE_OVERLAY=VERIFIED'
+            Write-Output 'ACS_B15_QUAD_SPACE_IS_NOT_SEMANTICS=TRUE'
+          } catch {
+            # Do not stringify exception, coordinates, OCR text, paths or hash.
+            Write-Output 'ACS_B15_QUAD_WINDOWS=REJECTED'
+            exit 2
+          }
