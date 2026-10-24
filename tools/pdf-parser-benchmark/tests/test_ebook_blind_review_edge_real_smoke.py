@@ -70,6 +70,15 @@ class EdgeAcceptanceTests(unittest.TestCase):
             self.assertFalse(result["browser_network_packets_measured"])
             self.assertEqual(list((folder/s.SUBDIR).glob(".edge-smoke-private-*")),[])
 
+    def test_synthetic_draft_does_not_escape_to_browser_default_downloads(self):
+        script=s.SMOKE
+        self.assertIn("HTMLAnchorElement.prototype.click=function()",script)
+        self.assertIn("this.download.endsWith(\"_DRAFT_UNVERIFIED.json\")",script)
+        self.assertIn("capturedBlob=blob",script)
+        # UI export creates the real JSON Blob; test harness suppresses only
+        # its physical download, preventing writes to the user's Downloads.
+        self.assertIn("get(\"export\").click()",script)
+
     def test_browser_negative_verdict_fails_closed_not_a_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);folder,prior,edge=fixture(root)
