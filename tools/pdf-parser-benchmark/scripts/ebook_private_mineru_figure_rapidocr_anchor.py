@@ -228,11 +228,27 @@ def main():
     cli.add_argument('--rapidocr-json',required=True)
     cli.add_argument('--private-output',required=True)
     cli.add_argument('--audit-only',action='store_true')
+    cli.add_argument('--require-candidate-count',type=int)
     args=cli.parse_args()
     try:
         result=run(args.mineru_markdown,args.mineru_receipt,
                    args.rapidocr_json,args.private_output,
                    audit_only=args.audit_only)
+        if args.require_candidate_count is not None and result['candidate_count'] != args.require_candidate_count:
+            raise GateError('PRIVATE_CANDIDATE_COUNT_CHANGED')
+        if not (
+            result['status']==STATUS
+            and result['selected_figure_id']==FIGURE_ID
+            and len(result['retained_figures'])==2
+            and result['image_to_page_geometry_verified'] is False
+            and result['label_to_marker_correspondence_verified'] is False
+            and result['series_to_curve_correspondence_verified'] is False
+            and result['independent_gold_available'] is False
+            and result['cer'] is None
+            and result['new_inference_calls']==0
+            and result['new_downloads']==0
+        ):
+            raise GateError('PRIVATE_FIGURE_AUTHORITY_FLAGS_INVALID')
         print('ACS_FIGURE_ANCHOR_STATUS='+('PRIVATE_VERIFIED' if args.audit_only else 'PRIVATE_CREATED'))
         print('ACS_FIGURE_ANCHOR_FIGURE_COUNT='+str(len(result['retained_figures'])))
         print('ACS_FIGURE_ANCHOR_CANDIDATE_COUNT='+str(result['candidate_count']))
