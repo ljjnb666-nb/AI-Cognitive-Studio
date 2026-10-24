@@ -120,6 +120,19 @@ class PrivateGateTests(unittest.TestCase):
                 "ACS_PRIVATE_RECEIPT_PRIVACY=NO_PRIVATE_JSON_IN_LOG"])
             self.assertNotIn("SYNTHETIC_NEVER_LOG_THIS",buf.getvalue())
 
+    def test_unexpected_exception_also_cannot_escape_private_message(self):
+        from unittest.mock import patch
+        buffer=io.StringIO()
+        with patch.object(guard,"read_private",
+                          side_effect=RuntimeError("PRIVATE_OCR_NEVER_PRINT_THIS")):
+            with redirect_stdout(buffer):
+                with self.assertRaises(SystemExit) as result:
+                    guard.main(["--private-input","/SYNTHETIC/PRIVATE.json",
+                                "--policy","blind-source"])
+        self.assertEqual(result.exception.code,2)
+        self.assertEqual(buffer.getvalue().strip(),"ACS_PRIVATE_RECEIPT_GATE=REJECTED")
+        self.assertNotIn("PRIVATE_OCR_NEVER_PRINT_THIS",buffer.getvalue())
+
     def test_read_private_reject_symlink_without_content(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
