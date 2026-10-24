@@ -524,9 +524,9 @@ jobs:
           fi
           echo "All validation domains succeeded."
 
-  # Five real same-source PDF focus pages: cross-model text agreement only.
-  synthetic-fivebook-text-consensus:
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-fivebook-private-text-consensus-20261024' }}
+  # Five-book independent reference admission; no inference or automatic gold.
+  synthetic-fivebook-reference-gate:
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-fivebook-independent-reference-gate-20261024' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
@@ -537,25 +537,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install synthetic fixtures only (zero AI model downloads)
+      - name: Install only bounded synthetic-PDF fixtures, no model downloads
         shell: bash
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
-      - name: Exact SHA tests for five-book SHA identity and text disagreement
+      - name: Exact SHA independent-reference tests and unchanged five-book comparators
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_text_consensus.py
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_reference_gate.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_reference_gate.py' -v
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_text_consensus.py' -v
-          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_mineru_basic_matrix.py' -v
-          echo 'ACS_FIVEBOOK_CONSENSUS_SYNTHETIC=PASS'
-          echo 'ACS_FIVEBOOK_CONSENSUS_NEW_MODEL_CALLS=0'
+          echo 'ACS_FIVEBOOK_REFERENCE_GATE_SYNTHETIC=PASS'
+          echo 'ACS_FIVEBOOK_REFERENCE_NEW_MODEL_CALLS=0'
 
-  owner-only-windows-fivebook-text-consensus:
-    needs: synthetic-fivebook-text-consensus
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-fivebook-private-text-consensus-20261024' }}
+  owner-only-windows-fivebook-reference-gate:
+    needs: synthetic-fivebook-reference-gate
+    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-fivebook-independent-reference-gate-20261024' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 25
     env:
@@ -563,7 +563,7 @@ jobs:
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
     steps:
-      - name: Checkout owner exact SHA; no ebook source in checkout
+      - name: Checkout exact owner head without private books or credentials
         uses: actions/checkout@v4
         env:
           GIT_CONFIG_COUNT: '1'
@@ -571,20 +571,20 @@ jobs:
           GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          path: acs-fivebook-text-consensus
+          path: acs-fivebook-reference
           persist-credentials: false
           clean: false
-      - name: Five real PDF source pages, OCR lexical agreement only, private
+      - name: Private independent-reference eligibility and conditional CER
         shell: powershell
         timeout-minutes: 19
         run: |
           $ErrorActionPreference='Stop'
-          if ((git -C acs-fivebook-text-consensus rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'CONSENSUS_EXACT_HEAD_MISMATCH' }
+          if ((git -C acs-fivebook-reference rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'REFERENCE_GATE_EXACT_HEAD_MISMATCH' }
           $root='D:\ai-cognitive-pdf-benchmark-data'
           $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
-          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'CONSENSUS_LOCAL_PYTHON_MISSING' }
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'REFERENCE_GATE_HISTORICAL_PYTHON_MISSING' }
           $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
-          $output=Join-Path $folder 'fivebook_rapidocr_mineru_text_consensus.private.json'
+          $report=Join-Path $folder 'fivebook_independent_reference_admission.private.json'
           $protected=@(
             (Join-Path $folder 'fivebook_mineru_rapidocr_comparison.private.json'),
             (Join-Path $folder 'multibook_native_24pages.private.json'),
@@ -597,7 +597,6 @@ jobs:
             (Join-Path $folder 'b31_mineru403_flash_execution.private.log'),
             (Join-Path $folder 'b31_mineru403_flash_execution.v2.private.log'),
             (Join-Path $folder 'b31_mineru403_failure_triage.private.json'),
-            (Join-Path $folder 'b31_mineru403_basic_models_verify.private.log'),
             (Join-Path $root 'semantic_gate\b31_source_only_page126.private.png'),
             (Join-Path $root 'semantic_gate\b31_source_rapidocr392.private.json'),
             (Join-Path $root 'semantic_gate\visual_graph_proposal_B31.reply.private.json')
@@ -609,34 +608,31 @@ jobs:
           }
           $protected+=@(Get-ChildItem -LiteralPath (Join-Path $folder 'docling_native_single_pages') -Filter '*.private.pdf' -File | Select-Object -ExpandProperty FullName)
           $protected+=@(Get-ChildItem -LiteralPath $folder -Filter '*.private.png' -File | Select-Object -ExpandProperty FullName)
-          $before=@{}
-          foreach ($file in $protected) {
-            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'CONSENSUS_PRIOR_EVIDENCE_MISSING' }
-            $before[$file]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+          $prior=@{}
+          foreach ($item in $protected) {
+            if (-not (Test-Path -LiteralPath $item -PathType Leaf)) { throw 'REFERENCE_GATE_PREVIOUS_EVIDENCE_MISSING' }
+            $prior[$item]=(Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash
           }
-          $env:HF_HUB_OFFLINE='1'
-          $env:TRANSFORMERS_OFFLINE='1'
           $env:HTTP_PROXY='http://127.0.0.1:1'
           $env:HTTPS_PROXY='http://127.0.0.1:1'
           $env:ALL_PROXY='http://127.0.0.1:1'
           $env:NO_PROXY=''
-          $script='acs-fivebook-text-consensus/tools/pdf-parser-benchmark/scripts/ebook_fivebook_text_consensus.py'
-          $manifest='acs-fivebook-text-consensus/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
-          if (Test-Path -LiteralPath $output -PathType Leaf) {
+          $script='acs-fivebook-reference/tools/pdf-parser-benchmark/scripts/ebook_fivebook_reference_gate.py'
+          $manifest='acs-fivebook-reference/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          if (Test-Path -LiteralPath $report -PathType Leaf) {
             & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'CONSENSUS_EXISTING_RECEIPT_INVALID' }
+            if ($LASTEXITCODE -ne 0) { throw 'REFERENCE_GATE_EXISTING_PRIVATE_REPORT_INVALID' }
           } else {
             & $python $script --private-root $root --manifest $manifest
-            if ($LASTEXITCODE -ne 0) { throw 'CONSENSUS_SOURCE_ONLY_PREVIEW_FAILED' }
+            if ($LASTEXITCODE -ne 0) { throw 'REFERENCE_GATE_PRIVATE_SOURCE_CHECK_FAILED' }
             & $python $script --private-root $root --manifest $manifest --write
-            if ($LASTEXITCODE -ne 0) { throw 'CONSENSUS_PRIVATE_RECEIPT_CREATION_FAILED' }
+            if ($LASTEXITCODE -ne 0) { throw 'REFERENCE_GATE_PRIVATE_CREATE_FAILED' }
             & $python $script --private-root $root --manifest $manifest --audit-only
-            if ($LASTEXITCODE -ne 0) { throw 'CONSENSUS_PRIVATE_REPORT_RECHECK_FAILED' }
+            if ($LASTEXITCODE -ne 0) { throw 'REFERENCE_GATE_INDEPENDENT_RECHECK_FAILED' }
           }
-          foreach ($file in $protected) {
-            if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'CONSENSUS_HISTORICAL_EVIDENCE_CHANGED' }
+          foreach ($item in $protected) {
+            if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $prior[$item]) { throw 'REFERENCE_GATE_HISTORICAL_PROOF_CHANGED' }
           }
-          Write-Output 'ACS_TEXT_CONSENSUS_PRIOR_PDF_AND_OCR_EVIDENCE=UNCHANGED'
-          Write-Output 'ACS_TEXT_CONSENSUS_SAME_SOURCE_FIVE_PAGES=VERIFIED'
-          Write-Output 'ACS_TEXT_CONSENSUS_NOT_CER_OR_CORRECTNESS=TRUE'
-          Write-Output 'ACS_TEXT_CONSENSUS_NEW_PROVIDER_CALLS=0'
+          Write-Output 'ACS_REFERENCE_GATE_PRIOR_PRIVATE_INPUTS=UNCHANGED'
+          Write-Output 'ACS_REFERENCE_GATE_NO_AUTOMATIC_OCR_GOLD=TRUE'
+          Write-Output 'ACS_REFERENCE_GATE_NEW_PAID_PROVIDER_CALLS=0'
