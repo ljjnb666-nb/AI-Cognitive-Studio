@@ -31,6 +31,7 @@ REFERENCES="independent_reference_v1"
 EVIDENCE="INDEPENDENT_REFERENCE_ATTESTATION_GATE_NOT_AUTOMATIC_GOLD"
 MAX_REPORT=80000
 MAX_REFERENCE=75000
+MAX_PUBLISHER_SOURCE=1_000_000
 MAX_NORMALIZED=5000
 MAX_DISTANCE_CELLS=6_000_000
 SHA=re.compile(r"^[0-9a-f]{64}$")
@@ -52,7 +53,7 @@ def identity(row):
     return row["book_id"],row["physical_page"]
 
 
-def admit_reference(candidate,baseline,corpus):
+def admit_reference(candidate,baseline,corpus,*,reference_file=None):
     """Never accept either compared model as the purported independent source."""
     if (not isinstance(candidate,dict) or candidate.get("schema_version")!=1 or
             candidate.get("corpus_id")!=corpus or
@@ -73,6 +74,24 @@ def admit_reference(candidate,baseline,corpus):
             not re.fullmatch(r"[A-Za-z0-9_-]{8,80}",
                              candidate["reviewer_record_id"])):
         raise VisualGateError("REFERENCE_IDENTITY_OR_INDEPENDENCE_ATTESTATION_INVALID")
+    # A claimed source digest without the source artifact is not evidence.
+    if candidate["reference_origin"]=="INDEPENDENT_PAGE_TRANSCRIPTION":
+        if candidate["independent_source_sha256"]!=baseline["source_pdf_sha256_private"]:
+            raise VisualGateError("REFERENCE_MANUAL_SOURCE_PDF_SHA_MISMATCH")
+    else:
+        if reference_file is None:
+            raise VisualGateError("REFERENCE_PUBLISHER_SOURCE_ARTIFACT_REQUIRED")
+        source_artifact=reference_file.with_name(
+            reference_file.name.replace(".verified.private.json",".publisher_source.private.txt"))
+        if (source_artifact.is_symlink() or not source_artifact.is_file() or
+                not 0<source_artifact.stat().st_size<=MAX_PUBLISHER_SOURCE):
+            raise VisualGateError("REFERENCE_PUBLISHER_SOURCE_ARTIFACT_MISSING")
+        digest=hashlib.sha256()
+        with source_artifact.open("rb") as source:
+            for chunk in iter(lambda:source.read(1024*1024),b""):
+                digest.update(chunk)
+        if digest.hexdigest()!=candidate["independent_source_sha256"]:
+            raise VisualGateError("REFERENCE_PUBLISHER_SOURCE_SHA_MISMATCH")
     value=candidate.get("reference_text")
     if not isinstance(value,str) or not 0<len(value)<=MAX_REFERENCE:
         raise VisualGateError("REFERENCE_TEXT_EMPTY_OR_TOO_LARGE")
@@ -132,7 +151,7 @@ def compute(root,manifest):
             "reference_normalized_chars":None,"source_attestation_is_external_claim":None,
         }
         if candidate.exists() or candidate.is_symlink():
-            ref=admit_reference(private_load(candidate),item,matrix["corpus_id"])
+            ref=admit_reference(private_load(candidate),item,matrix["corpus_id"],reference_file=candidate)
             source=folder/(B31_MD if book=="B31" else file_names(book)[1])
             if source.is_symlink() or not source.is_file():
                 raise VisualGateError("REFERENCE_MINERU_SOURCE_MISSING")
