@@ -48,7 +48,7 @@ def test_bundle():
     rng=random.Random(30)
     backing=Image.frombytes("L",(w,h),bytes(rng.randrange(256) for _ in range(w*h)))
     draw=ImageDraw.Draw(backing)
-    top=215
+    top=222
     draw.rectangle((38,top,199,h-3),fill=252)
     draw.rectangle((38,top,199,h-3),outline=3,width=2)
     draw.ellipse((43,top+8,50,top+15),fill=4)
