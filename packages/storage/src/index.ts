@@ -11,6 +11,8 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export type ObjectHead = { key: string; size: number; contentType?: string };
 export type PutObjectInput = { key: string; body: Uint8Array; contentType: string };
+/** Atomic conditional-create result; ALREADY_EXISTS never overwrites bytes. */
+export type ConditionalPutResult = "CREATED" | "ALREADY_EXISTS";
 export type PresignedUpload = { url: string; headers: Record<string, string> };
 export type StorageProvider = {
   createPresignedUpload(input: { key: string; contentType: string; expiresInSeconds: number }): Promise<PresignedUpload>;
@@ -19,6 +21,8 @@ export type StorageProvider = {
   /** @deprecated Transitional compatibility method; migrate callers to getObjectStream. */
   getObjectBytes(key: string): Promise<Uint8Array>;
   putObject(input: PutObjectInput): Promise<void>;
+  /** Optional write-once primitive for content-addressed assets (not a HEAD+PUT approximation). */
+  putObjectIfAbsent?(input: PutObjectInput): Promise<ConditionalPutResult>;
   copyObject(sourceKey: string, targetKey: string): Promise<void>;
   deleteObject(key: string): Promise<void>;
   objectExists(key: string): Promise<boolean>;
@@ -87,6 +91,24 @@ export class S3CompatibleStorageProvider implements StorageProvider {
   }
 
   async putObject(input: PutObjectInput): Promise<void> { assertKey(input.key); await this.serverClient.send(new PutObjectCommand({ Bucket: this.config.bucket, Key: input.key, Body: input.body, ContentType: input.contentType })); }
+
+  /** The S3 server arbitrates concurrent writers with If-None-Match: *, not a TOCTOU HEAD+PUT. */
+  async putObjectIfAbsent(input: PutObjectInput): Promise<ConditionalPutResult> {
+    assertKey(input.key);
+    try {
+      await this.serverClient.send(new PutObjectCommand({
+        Bucket: this.config.bucket, Key: input.key, Body: input.body,
+        ContentType: input.contentType, IfNoneMatch: "*",
+      }));
+      return "CREATED";
+    } catch (error) {
+      // Only a definitive 412 may be treated as already present. A concurrent
+      // 409, transport failure, permission error, etc. must be retried by the caller.
+      const value = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+      if (value.$metadata?.httpStatusCode === 412 || value.name === "PreconditionFailed") return "ALREADY_EXISTS";
+      throw error;
+    }
+  }
   async copyObject(sourceKey: string, targetKey: string): Promise<void> { assertKey(sourceKey); assertKey(targetKey); await this.serverClient.send(new CopyObjectCommand({ Bucket: this.config.bucket, Key: targetKey, CopySource: copySource(this.config.bucket, sourceKey) })); }
   async deleteObject(key: string): Promise<void> { assertKey(key); await this.serverClient.send(new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key })); }
   async objectExists(key: string): Promise<boolean> { return (await this.headObject(key)) !== null; }
