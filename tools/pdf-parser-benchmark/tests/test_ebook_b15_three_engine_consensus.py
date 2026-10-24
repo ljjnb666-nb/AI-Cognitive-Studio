@@ -119,6 +119,17 @@ class ConsensusTests(unittest.TestCase):
                 with self.assertRaisesRegex(VisualGateError,"STANDARD_WORKER_SHA_CHANGED"):
                     s.execute(root,{},write=True)
 
+    def test_transient_upstream_alias_cannot_masquerade_as_frozen_v1_receipt(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);f,md,rapid,order,spatial,std=fixture(root)
+            with self.bind(f,rapid,order,spatial,std):
+                order["rapid_private_rows_sha256"]=order.pop(
+                    "rapidocr_rows_sha256_private")
+                with self.assertRaisesRegex(VisualGateError,
+                                            "RAPIDOCR_SOURCE_CHANGED"):
+                    s.execute(root,{},write=True)
+                self.assertFalse((f/s.REPORT).exists())
+
     def test_report_frozen_tamper_rejected_without_new_ocr(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);f,md,rapid,order,spatial,std=fixture(root)
