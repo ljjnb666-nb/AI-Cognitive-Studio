@@ -1,4 +1,4 @@
-"""No-private-log synthetic policy tests for all protected Windows receipts."""
+"""No-private-log synthetic policy tests for all eleven protected Windows receipts."""
 import io
 import json
 from pathlib import Path
@@ -54,18 +54,33 @@ def examples():
             {"status":"FLASH_NO_NATIVE_TEXT_CONTROL","markdown_diagnostics":{}}],
             "failed":[],"missing":[],"model_root_diagnostics":{
                 "explicit_model_show":{},"inherited_model_show":{}}},
+        "legacy-docling-real":{
+            "docling_version":"2.141.0","docling_ocr_backend":"RapidOcrOptions",
+            "rows":[{**rows[0],"docling_status":"SUCCESS","physical_page":109},
+                    {**rows[1],"docling_status":"SUCCESS","physical_page":126},
+                    {"book_id":"B16","physical_page":53,"status":"SUCCESS",
+                     "docling_status":"SUCCESS","results":[{"engine":"Docling",
+                     "layout_evidence":{"graph_semantics":"UNVERIFIED"}}]}],
+            "failed":[],"missing":[]},
+        "legacy-paddle-real":{
+            "version":"3.7.0","initialization_ms":123,
+            "rows":[{"book_id":book,"physical_page":page,"status":"SUCCESS",
+                     "recognized_characters":10,
+                     "layout_evidence":{"graph_semantics":"UNVERIFIED"}}
+                    for book,page in (("B15",109),("B16",53),("B31",126))],
+            "failed":[],"missing":[]},
         "legacy-rotation":{"rows":rows,"failed":[],"missing":[]},
         "legacy-visual-l2":{"rows":rows,"failed":[],"missing":[]},
     }
 
 
 class PrivateGateTests(unittest.TestCase):
-    def test_nine_accepted_private_report_policies(self):
+    def test_eleven_accepted_private_report_policies(self):
         for policy,data in examples().items():
             with self.subTest(policy=policy):
                 self.assertTrue(guard.verify(data,policy))
 
-    def test_all_nine_policies_reject_invalid_authority(self):
+    def test_all_eleven_policies_reject_invalid_authority(self):
         for policy,data in examples().items():
             with self.subTest(policy=policy):
                 if policy=="fivebook-standard":
@@ -80,6 +95,10 @@ class PrivateGateTests(unittest.TestCase):
                     data["rows"][0]["results"][0]["layout_evidence"]["spatial_alignment"]=None
                 elif policy=="legacy-mineru-flash":
                     data["rows"][0]["status"]="FAIL"
+                elif policy=="legacy-docling-real":
+                    data["rows"][0]["results"][0]["layout_evidence"]["source_pdf_rotation_degrees"]=0
+                elif policy=="legacy-paddle-real":
+                    data["rows"][0]["layout_evidence"]["graph_semantics"]="VERIFIED"
                 elif policy=="legacy-rotation":
                     data["rows"][0]["results"][0]["layout_evidence"]["source_pdf_rotation_degrees"]=0
                 else:
@@ -143,7 +162,7 @@ class PrivateGateTests(unittest.TestCase):
             with self.assertRaises(guard.PrivateGateError):
                 guard.read_private(alias)
 
-    def test_all_nine_windows_workflows_use_guard_not_powershell_parser(self):
+    def test_all_eleven_windows_workflows_use_guard_not_powershell_parser(self):
         repo=Path(__file__).resolve().parents[3]
         names=[
             "ebook-blind-review-offline-workbench.yml",
@@ -155,11 +174,19 @@ class PrivateGateTests(unittest.TestCase):
             "acs-ebook-windows-mineru-flash-real.yml",
             "acs-ebook-windows-rotation-private.yml",
             "acs-ebook-private-visual-l2.yml",
+            "acs-ebook-windows-docling-real.yml",
+            "acs-ebook-windows-paddle-real.yml",
         ]
         for name in names:
             with self.subTest(name=name):
                 data=(repo/".github"/"workflows"/name).read_text("utf-8")
-                self.assertNotIn(" | ConvertFrom-Json",data)
+                if name=="acs-ebook-windows-docling-real.yml":
+                    # This parser consumes PUBLIC PyPI metadata, not a private OCR receipt.
+                    self.assertEqual(data.count(" | ConvertFrom-Json"),1)
+                    self.assertIn("$metadata=Get-Content -LiteralPath $json -Raw | ConvertFrom-Json",data)
+                    self.assertNotIn("$report=Get-Content",data)
+                else:
+                    self.assertNotIn(" | ConvertFrom-Json",data)
                 self.assertIn("ebook_private_ci_receipt_gate.py",data)
                 self.assertIn("--private-input",data)
                 self.assertIn("--policy",data)

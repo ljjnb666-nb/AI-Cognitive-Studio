@@ -88,7 +88,9 @@ jobs:
               @{ Tag='B15_FRAME'; Policy='legacy-b15-frame'; Pattern='ebook-b15-calibrated-*.private.json' },
               @{ Tag='MINERU_FLASH'; Policy='legacy-mineru-flash'; Pattern='ebook-mineru-flash-*.private.json' },
               @{ Tag='ROTATION'; Policy='legacy-rotation'; Pattern='ebook-rotation-real-*.private.json' },
-              @{ Tag='VISUAL_L2'; Policy='legacy-visual-l2'; Pattern='ebook-l2-visual-roi-*.private.json' }
+              @{ Tag='VISUAL_L2'; Policy='legacy-visual-l2'; Pattern='ebook-l2-visual-roi-*.private.json' },
+              @{ Tag='DOCLING_REAL'; Policy='legacy-docling-real'; Pattern='ebook-docling-real-*.private.json' },
+              @{ Tag='PADDLE_REAL'; Policy='legacy-paddle-real'; Pattern='ebook-paddle-real-*.private.json' }
             )
             foreach ($entry in $legacy) {
               $matches=@()

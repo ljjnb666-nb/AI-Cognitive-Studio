@@ -105,29 +105,7 @@ jobs:
           & $venvPython $script --root $private --manifest $manifest --output $output
           if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_REAL_PAGE_BENCHMARK_FAILED' }
           Write-Output 'ACS_DOCLING_REAL_PAGE_METADATA_SAVED_TO_D_DRIVE_ONLY'
-          $report=Get-Content -LiteralPath $output -Raw -Encoding UTF8 | ConvertFrom-Json
-          if (@($report.rows).Count -ne 3 -or @($report.failed).Count -ne 0 -or @($report.missing).Count -ne 0) { throw 'ACS_DOCLING_REAL_REPORT_ROW_INVARIANT_FAILED' }
-          Write-Output ('ACS_DOCLING_REAL_DOC_VERSION=' + $report.docling_version)
-          Write-Output ('ACS_DOCLING_REAL_OCR_BACKEND=' + $report.docling_ocr_backend)
-          foreach ($entry in $report.rows) {
-            if ($entry.status -ne 'SUCCESS') { throw 'ACS_DOCLING_REAL_REPORT_PAGE_NOT_SUCCESS' }
-            foreach ($metric in $entry.results) {
-              $label=($entry.book_id + '_P' + $entry.physical_page + '_' + ($metric.engine -replace '[^A-Za-z0-9]+','_'))
-              if ($metric.status -eq 'NOT_INSTALLED') {
-                Write-Output ('ACS_DOCLING_REAL_METRIC=' + $label + '|NOT_INSTALLED')
-              } else {
-                Write-Output ('ACS_DOCLING_REAL_METRIC=' + $label + '|CHARS=' + $metric.characters + '|MS=' + $metric.wall_ms)
-                if ($null -ne $metric.native_reference_cer) { Write-Output ('ACS_DOCLING_REAL_NATIVE_REFERENCE_CER=' + $label + '|' + $metric.native_reference_cer) }
-                if ($metric.engine -eq 'Docling') {
-                  if ($null -eq $metric.layout_evidence -or $metric.layout_evidence.graph_semantics -ne 'UNVERIFIED') { throw 'ACS_DOCLING_LAYOUT_EVIDENCE_MISSING_OR_UNSAFE' }
-                  $layout=$metric.layout_evidence
-                  if ($entry.book_id -in @('B15','B31')) {
-                    if ($layout.picture_items -le 0 -or $layout.picture_boxes_with_geometry -ne $layout.picture_items) { throw 'ACS_SCANNED_PICTURE_GEOMETRY_MISSING' }
-                  }
-                  if ($entry.book_id -eq 'B15' -and $layout.source_pdf_rotation_degrees -ne 270) { throw 'ACS_B15_ROTATION_CHANGED' }
-                  if ($entry.book_id -eq 'B31' -and $layout.source_pdf_rotation_degrees -ne 0) { throw 'ACS_B31_ROTATION_CHANGED' }
-                  Write-Output ('ACS_DOCLING_LAYOUT=' + $label + '|TEXT=' + $layout.text_items + '|PICTURES=' + $layout.picture_items + '|BOXES=' + $layout.picture_boxes_with_geometry + '|ROTATION=' + $layout.source_pdf_rotation_degrees + '|ALIGNMENT=' + $layout.spatial_alignment_status + '|GRAPH=UNVERIFIED')
-                }
-              }
-            }
-          }
+          # Private OCR text, coordinates and SHA must not reach PowerShell JSON errors.
+          & $venvPython 'acs-ebook-docling-private/tools/pdf-parser-benchmark/scripts/ebook_private_ci_receipt_gate.py' --private-input $output --policy legacy-docling-real
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_DOCLING_PRIVATE_RECEIPT_REJECTED' }
+          Write-Output 'ACS_DOCLING_PRIVATE_RECEIPT_SAFE=PASS'

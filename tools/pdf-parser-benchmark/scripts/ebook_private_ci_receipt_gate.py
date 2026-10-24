@@ -16,6 +16,7 @@ POLICIES = (
     "blind-workbench", "edge-workbench",
     "legacy-b15-frame", "legacy-mineru-flash",
     "legacy-rotation", "legacy-visual-l2",
+    "legacy-docling-real", "legacy-paddle-real",
 )
 
 
@@ -125,6 +126,40 @@ def verify(data, policy):
         diagnostics=mapping(data.get("model_root_diagnostics"))
         mapping(diagnostics.get("explicit_model_show"))
         mapping(diagnostics.get("inherited_model_show"))
+    elif policy=="legacy-docling-real":
+        require(len(array(data,"rows"))==3)
+        require(len(array(data,"missing"))==0 and len(array(data,"failed"))==0)
+        require(type(data.get("docling_version")) is str and bool(data["docling_version"]))
+        require(data.get("docling_ocr_backend") in ("RapidOcrOptions","TesseractCliOcrOptions"))
+        rows=docling_rows(data,require_success=True)
+        pages={"B15":109,"B16":53,"B31":126}
+        require({row.get("book_id") for row in rows}==set(pages))
+        for row in rows:
+            book=row["book_id"]
+            require(row.get("physical_page")==pages[book])
+            require(row.get("docling_status")=="SUCCESS")
+            metrics=[m for m in row["results"] if m.get("engine")=="Docling"]
+            require(len(metrics)==1)
+            layout=metrics[0]["layout_evidence"]
+            if book in ("B15","B31"):
+                pictures=layout.get("picture_items")
+                require(type(pictures) is int and pictures>0)
+                require(layout.get("picture_boxes_with_geometry")==pictures)
+                require(layout.get("source_pdf_rotation_degrees")==
+                        (270 if book=="B15" else 0))
+    elif policy=="legacy-paddle-real":
+        require(len(array(data,"rows"))==3)
+        require(len(array(data,"missing"))==0 and len(array(data,"failed"))==0)
+        require(type(data.get("version")) is str and bool(data["version"]))
+        pages={"B15":109,"B16":53,"B31":126}
+        rows=data["rows"]
+        require({mapping(row).get("book_id") for row in rows}==set(pages))
+        for row in rows:
+            require(row.get("physical_page")==pages[row["book_id"]])
+            require(row.get("status")=="SUCCESS")
+            chars=row.get("recognized_characters")
+            require(type(chars) is int and chars>=0)
+            require(mapping(row.get("layout_evidence")).get("graph_semantics")=="UNVERIFIED")
     elif policy=="legacy-rotation":
         require(len(array(data,"rows"))==3)
         require(len(array(data,"failed"))==0)
