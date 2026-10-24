@@ -269,6 +269,15 @@ def main():
     print("ACS_B15_LAYOUT_STATUS="+x["status"])
     print("ACS_B15_LAYOUT_CANDIDATE_COUNT="+str(x["candidate_directory_count"]))
     print("ACS_B15_LAYOUT_REAL_SUCCESS="+str(x["actual_layout_success"]).upper())
+    # Only aggregate counts and duration: no OCR text, model paths, SHA or boxes.
+    for key,label in (("duration_ms","DURATION_MS"),
+                      ("text_item_count","TEXT_ITEMS"),
+                      ("picture_item_count","PICTURE_ITEMS"),
+                      ("table_item_count","TABLE_ITEMS"),
+                      ("markdown_character_count","MARKDOWN_CHARACTERS")):
+        value=x.get(key)
+        print("ACS_B15_LAYOUT_"+label+"="+(
+            str(value) if value is not None else "UNAVAILABLE"))
     print("ACS_B15_LAYOUT_OCR_PAGES=0")
     print("ACS_B15_LAYOUT_GOLD=UNVERIFIED")
     print("ACS_B15_LAYOUT_PAID_CALLS=0")
