@@ -19,7 +19,7 @@ def fixture(root):
     for i,book in enumerate(subject.ALL_BOOKS):
         page=126 if book=="B31" else i+11
         # A 40k character Data URI MUST NOT be treated as OCR text.
-        markdown="# sample\n\n![private](data:image/png;base64,"+("QUJD"*10000)+")\n\n你好 世界 ABC"
+        markdown="## 你好 世界 ABC\n\n![private](data:image/png;base64,"+("QUJD"*10000)+")"
         name=(subject.B31_MD if book=="B31" else subject.file_names(book)[1])
         (folder/name).write_text(markdown,encoding="utf-8")
         counts=count_structure(markdown)
