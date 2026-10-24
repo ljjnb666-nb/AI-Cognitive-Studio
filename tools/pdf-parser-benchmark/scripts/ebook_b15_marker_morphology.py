@@ -59,9 +59,9 @@ def shape_candidate(gray,box):
     require(0<=x1<x2<=w and 0<=y1<y2<=h)
     cw=x2-x1
     require(cw>=40 and y2-y1>=14)
-    start=x1+4
+    start=x1+2
     end=x1+min(75,max(37,int(.40*cw)))
-    top=y1+3
+    top=y1+1
     bottom=y2-2
     if not(start<end<=w and top<bottom<=h):
         return {"status":"ABSTAIN_GEOMETRY","classification":None,
