@@ -1,0 +1,116 @@
+name: B15 Private Figure Source Context Atlas
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-source-pixel-atlas:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-legend-source-contact-sheet-20261024' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run seven synthetic provenance and source-only visual privacy tests
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 numpy==2.2.6 opencv-python-headless==4.12.0.88
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b15_private_legend_contact_sheet.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_private_legend_contact_sheet.py' -v
+          echo 'ACS_B15_SOURCE_ATLAS_SYNTHETIC=PASS'
+          echo 'ACS_B15_SOURCE_ATLAS_OCR_GOLD=UNVERIFIED'
+
+  owner-only-windows-source-atlas:
+    needs: synthetic-source-pixel-atlas
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-legend-source-contact-sheet-20261024' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout owner-authorized exact HEAD
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-b15-source-atlas
+          clean: false
+          persist-credentials: false
+      - name: Generate and audit offline private source context atlas
+        shell: powershell
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-b15-source-atlas rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'EXACT_HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $dir=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'LOCAL_PYTHON_MISSING' }
+            & $py -c 'import cv2, numpy, PIL'
+            if ($LASTEXITCODE -ne 0) { throw 'LOCAL_IMAGE_LIBRARIES_MISSING' }
+            $page=Join-Path $dir 'B15_p0109.private.png'
+            $md=Join-Path $dir 'fivebook_mineru_basic_B15.private.md'
+            $v1=Join-Path $dir 'b15_mineru_figure_rapidocr_anchor.v1.private.json'
+            $v3=Join-Path $dir 'b15_mineru_figure_pixel_registration.v3.private.json'
+            $v4=Join-Path $dir 'b15_figure_feature_crosscheck.v4.private.json'
+            $v4Image=Join-Path $dir 'b15_figure_feature_crosscheck.v4.private.png'
+            $v5=Join-Path $dir 'b15_ocr_quad_spatial_candidates.v5.private.json'
+            $v5Image=Join-Path $dir 'b15_ocr_quad_spatial_candidates.v5.private.png'
+            $originals=@($page,$md,$v1,$v3,$v4,$v4Image,$v5,$v5Image)
+            $before=@{}
+            foreach ($file in $originals) {
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'PRIVATE_UPSTREAM_FILE_MISSING' }
+              $before[$file]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            }
+            $names=@(
+              'b15_legend_source_context_atlas.v6.private.json',
+              'b15_legend_source_context_atlas.v6.private.png',
+              'b15_legend_source_context_atlas.v6.private.html'
+            )
+            $existing=@($names | ForEach-Object { Test-Path -LiteralPath (Join-Path $dir $_) })
+            if (@($existing | Where-Object { $_ -eq $true }).Count -ne 0 -and
+                @($existing | Where-Object { $_ -eq $true }).Count -ne 3) { throw 'PRIVATE_ATLAS_PARTIAL_STATE_REJECTED' }
+            $tool='acs-b15-source-atlas/tools/pdf-parser-benchmark/scripts/ebook_b15_private_legend_contact_sheet.py'
+            $cmd=@('--page-png',$page,'--mineru-markdown',$md,
+              '--anchor-v1',$v1,'--pixel-v3',$v3,'--feature-v4',$v4,
+              '--feature-overlay-v4',$v4Image,'--quad-v5',$v5,
+              '--quad-overlay-v5',$v5Image,'--private-output-dir',$dir)
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            if (-not $existing[0]) {
+              & $py $tool @cmd
+              if ($LASTEXITCODE -ne 0) { throw 'PRIVATE_ATLAS_CREATE_REJECTED' }
+            }
+            & $py $tool @cmd --audit-only
+            if ($LASTEXITCODE -ne 0) { throw 'PRIVATE_ATLAS_AUDIT_REJECTED' }
+            foreach ($file in $originals) {
+              if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $before[$file]) { throw 'PRIVATE_ATLAS_SOURCE_CHANGED' }
+            }
+            Write-Output 'ACS_B15_SOURCE_ATLAS_PRIVATE_TRIPLET=VERIFIED'
+            Write-Output 'ACS_B15_SOURCE_ATLAS_SOURCE_SHA=UNCHANGED'
+            Write-Output 'ACS_B15_SOURCE_ATLAS_ROI_SEMANTICS=UNVERIFIED'
+          } catch {
+            # Never print untrusted exception: OCR, exact boxes, raw paths and SHA are private.
+            Write-Output 'ACS_B15_SOURCE_ATLAS_WINDOWS=REJECTED'
+            exit 2
+          }
