@@ -20,33 +20,23 @@ try {
         throw 'PRECHECK_INVALID'
     }
     Write-Output 'ACS_V14_SOURCE_PRECHECK=PASS'
-    $keyPresent = -not [string]::IsNullOrEmpty($env:ACS_GLM_VISION_API_KEY) -or
-                  -not [string]::IsNullOrEmpty($env:GLM_API_KEY) -or
-                  -not [string]::IsNullOrEmpty($env:ZHIPUAI_API_KEY) -or
-                  -not [string]::IsNullOrEmpty($env:ZAI_API_KEY)
-    if (-not $keyPresent) {
-        Write-Output 'ACS_V14_CLOUD_TRIAGE=NOT_EXECUTED'
-        Write-Output 'ACS_V14_GOLD=NOT_APPROVED'
-        exit 0
-    }
-    # Only B03 R1C2/R1C3/R2C2 and B15 R3C2, max 4 calls,
-    # private idempotency journal created *before* each call; never retry unknowns.
-    $result=@(& $py $script --private-root $root --write --allow-cloud-vision 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw 'BOUND_SOURCE_CLOUD_TRIAGE_REJECTED' }
-    if (@($result | Where-Object { $_ -eq 'ACS_V14_VISUAL=PRIVATE_VISUAL_CANDIDATES_CREATED_OR_AUDITED' }).Count -ne 1) {
-        throw 'TRIAGE_RECEIPT_INVALID'
-    }
-    $audit=@(& $py $script --private-root $root --audit-only 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw 'REPLAY_FAILED' }
-    foreach ($line in @('ACS_V14_VISUAL_COMPLETED=4',
-                       'ACS_V14_VISUAL_GOLD=NOT_APPROVED',
-                       'ACS_V14_VISUAL_NEW_MODEL_CALLS=0')) {
-        if (@($audit | Where-Object { $_ -eq $line }).Count -ne 1) {
-            throw 'AUDIT_COUNT_INVALID'
+    # Forensic mode: inspect existing private attempt fences. No cloud requests.
+    # A previous run entered the paid-call path; NEVER replay unknown results.
+    $inventory=@(& $py $script --private-root $root --inventory-only 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'READONLY_INVENTORY_REJECTED' }
+    foreach ($prefix in @('ACS_V14_INVENTORY_COMPLETED=',
+                           'ACS_V14_INVENTORY_UNKNOWN=',
+                           'ACS_V14_INVENTORY_NOT_STARTED=')) {
+        $values=@($inventory | Where-Object { $_.StartsWith($prefix) })
+        if ($values.Count -ne 1 -or $values[0] -notmatch '^ACS_V14_INVENTORY_(COMPLETED|UNKNOWN|NOT_STARTED)=[0-4]$') {
+            throw 'INVENTORY_STATUS_INVALID'
         }
+        Write-Output $values[0]
     }
-    Write-Output 'ACS_V14_CLOUD_TRIAGE=PRIVATE_CANDIDATE_REPLAY_PASS'
-    Write-Output 'ACS_V14_SOURCE_REGIONS=4'
+    if (@($inventory | Where-Object { $_ -eq 'ACS_V14_INVENTORY=PRIVATE_READONLY' }).Count -ne 1) {
+        throw 'INVENTORY_RECEIPT_INVALID'
+    }
+    Write-Output 'ACS_V14_CLOUD_TRIAGE=DIAGNOSTIC_ONLY_NO_NEW_CALLS'
     Write-Output 'ACS_V14_GOLD=NOT_APPROVED'
 } catch {
     Write-Output 'ACS_V14_CLOUD_TRIAGE=REJECTED'
