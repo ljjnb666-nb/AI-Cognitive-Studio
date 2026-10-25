@@ -47,6 +47,8 @@ export type DoclingLayoutResult =
 
 export type DoclingLayoutHandle = {
   readonly parserName: typeof DOCLING_LAYOUT_ID;
+  /** Immutable model identity, bound to a successful startup asset digest. */
+  readonly modelSha256: string;
   inspect(request: DoclingLayoutRequest): Promise<DoclingLayoutResult>;
   close(): Promise<void>;
 };
@@ -194,6 +196,7 @@ export function createDoclingLayoutCandidateExecutor(
   }
   return {
     parserName:DOCLING_LAYOUT_ID,
+    modelSha256:verified.artifactSha256,
     async inspect(request){
       if(closing)return failed("CLOSING");
       const controller=new AbortController();
