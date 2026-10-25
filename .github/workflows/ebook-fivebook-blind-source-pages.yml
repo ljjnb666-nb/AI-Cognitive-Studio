@@ -83,7 +83,7 @@ jobs:
             }
             $manifest='acs-fivebook-source/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
             $tool='acs-fivebook-source/tools/pdf-parser-benchmark/scripts/ebook_fivebook_blind_source_pages.py'
-            $receipt=Join-Path $dir 'fivebook_blind_original_pages_v11\fivebook_blind_source_review.v11.private.json'
+            $receipt=Join-Path $dir 'fivebook_blind_original_pages_v12\fivebook_blind_source_review.v12.private.json'
             $argsList=@('--private-root',$root,'--manifest',$manifest)
             $env:HTTP_PROXY='http://127.0.0.1:1'
             $env:HTTPS_PROXY='http://127.0.0.1:1'
