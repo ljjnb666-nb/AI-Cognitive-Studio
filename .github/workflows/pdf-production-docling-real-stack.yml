@@ -106,14 +106,34 @@ jobs:
               & docker image inspect $image *> $null
               Check-Exit
             }
-            $stage='RESOURCES'
+            # Preserve individual resource evidence without ever exposing
+            # private corpus paths, model filenames or subprocess stderr.
+            $stage='RESOURCE_C_DISK'
             $c=[IO.DriveInfo]::new('C')
-            $d=[IO.DriveInfo]::new('D')
-            $memory=Get-CimInstance Win32_OperatingSystem
-            if (-not $c.IsReady -or -not $d.IsReady -or $c.AvailableFreeSpace -lt 15GB -or
-                $d.AvailableFreeSpace -lt 30GB -or [double]$memory.FreePhysicalMemory -lt 4194304) {
-              throw 'RESOURCE_GATE'
+            if (-not $c.IsReady -or $c.AvailableFreeSpace -lt 15GB) {
+              Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_C=INSUFFICIENT'
+              throw 'RESOURCE_C_DISK'
             }
+            Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_C=PASS'
+            $stage='RESOURCE_D_DISK'
+            $d=[IO.DriveInfo]::new('D')
+            if (-not $d.IsReady -or $d.AvailableFreeSpace -lt 30GB) {
+              Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_D=INSUFFICIENT'
+              throw 'RESOURCE_D_DISK'
+            }
+            Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_D=PASS'
+            $stage='RESOURCE_RAM'
+            $memory=Get-CimInstance Win32_OperatingSystem
+            $freeKB=if ($null -eq $memory) { 0 } else { [double]$memory.FreePhysicalMemory }
+            # FreePhysicalMemory is KiB, not bytes. Don't silently lower the
+            # existing 4-GiB model/containers gate to force a green build.
+            Write-Output ('ACS_DOCLING_REAL_STACK_FREE_RAM_GIB=' +
+              [Math]::Round(($freeKB / 1048576), 2).ToString([Globalization.CultureInfo]::InvariantCulture))
+            if ($freeKB -lt 4194304) {
+              Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_RAM=INSUFFICIENT'
+              throw 'RESOURCE_RAM'
+            }
+            Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_RAM=PASS'
             New-Item -ItemType Directory -Path $scratch | Out-Null
             $stage='ISOLATED_SERVICES'
             # Set BEFORE compose up: even a partial creation must be removed.
