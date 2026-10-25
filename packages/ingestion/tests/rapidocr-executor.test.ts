@@ -56,6 +56,25 @@ describe("RapidOCR startup contract",()=>{
     expect(offline.HTTP_PROXY).toBe("http://127.0.0.1:1");
     expect(offline.OPENBLAS_NUM_THREADS).toBe("2");
   });
+  it("never forwards parent database, auth, provider keys or PYTHONPATH into untrusted PDF subprocess",()=>{
+    const environment=rapidOcrOfflineEnv({
+      PATH:"C:\\synthetic\\python", SystemRoot:"C:\\Windows",
+      DATABASE_URL:"postgresql://secret", BETTER_AUTH_SECRET:"secret",
+      PROVIDER_GATEWAY_KEYRING:"secret", ZHIPU_API_KEY:"secret",
+      PYTHONPATH:"C:\\untrusted", PYTHONHOME:"C:\\untrusted",
+      HTTP_PROXY:"http://unsafe.example",
+    });
+    expect(environment.PATH).toBe("C:\\synthetic\\python");
+    expect(environment.SystemRoot).toBe("C:\\Windows");
+    expect(environment.DATABASE_URL).toBeUndefined();
+    expect(environment.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(environment.PROVIDER_GATEWAY_KEYRING).toBeUndefined();
+    expect(environment.ZHIPU_API_KEY).toBeUndefined();
+    expect(environment.PYTHONPATH).toBeUndefined();
+    expect(environment.PYTHONHOME).toBeUndefined();
+    expect(environment.PYTHONNOUSERSITE).toBe("1");
+    expect(environment.HTTP_PROXY).toBe("http://127.0.0.1:1");
+  });
   it("requires actual runtime-issued pinned versions and model SHA",async()=>{
     const good=vi.fn(async()=>success(JSON.stringify({
       schemaVersion:1,status:"READY",rapidocr:"3.9.2",
