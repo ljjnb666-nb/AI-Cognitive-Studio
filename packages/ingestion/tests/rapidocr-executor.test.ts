@@ -6,7 +6,7 @@ import {
   createRapidOcrPdfOcrExecutor, rapidOcrOfflineEnv, resolveRapidOcrExecutorConfig,
   verifyRapidOcrRuntime, type RapidOcrExecutorConfig,
 } from "../src/rapidocr/rapidocr-executor.js";
-import type { BoundedSpawnResult } from "../src/mineru/mineru-process.js";
+import type { BoundedSpawnOptions, BoundedSpawnResult } from "../src/mineru/mineru-process.js";
 
 const fakeEnv=(overrides: Record<string,unknown> = {}) => ({
   OCR_PROVIDER:"rapidocr",
@@ -154,7 +154,7 @@ describe("RapidOCR executor uses existing durable page seam",()=>{
     let started!: () => void;
     const entered = new Promise<void>((resolve)=>{started=resolve;});
     let abortSignal: AbortSignal | undefined;
-    const runner=vi.fn(async (_python:string,_args:string[],opts: {abortSignal?:AbortSignal})=>{
+    const runner=vi.fn(async (_python:string,_args:string[],opts: BoundedSpawnOptions)=>{
       abortSignal=opts.abortSignal;
       started();
       return await new Promise<BoundedSpawnResult>((resolve)=>{
@@ -163,7 +163,7 @@ describe("RapidOCR executor uses existing durable page seam",()=>{
         },{once:true});
       });
     });
-    const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner as never);
+    const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner);
     const running=executor.extractPage(request);
     await entered;
     await executor.close();
@@ -180,7 +180,7 @@ describe("RapidOCR executor uses existing durable page seam",()=>{
   it("shutdown with unknown subprocess-tree termination is terminal, never safely retried",async()=>{
     let started!:()=>void;
     const entered=new Promise<void>((resolve)=>{started=resolve;});
-    const runner=vi.fn(async (_python:string,_args:string[],opts:{abortSignal?:AbortSignal})=>{
+    const runner=vi.fn(async (_python:string,_args:string[],opts: BoundedSpawnOptions)=>{
       started();
       return await new Promise<BoundedSpawnResult>((resolve)=>{
         opts.abortSignal?.addEventListener("abort",()=>{
@@ -188,7 +188,7 @@ describe("RapidOCR executor uses existing durable page seam",()=>{
         },{once:true});
       });
     });
-    const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner as never);
+    const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner);
     const running=executor.extractPage(request);
     await entered;
     await executor.close();
@@ -200,7 +200,7 @@ describe("RapidOCR executor uses existing durable page seam",()=>{
   it("a successful Python stdout racing with shutdown never gains publication authority",async()=>{
     let started!:()=>void;
     const entered=new Promise<void>((resolve)=>{started=resolve;});
-    const runner=vi.fn(async (_python:string,_args:string[],opts:{abortSignal?:AbortSignal})=>{
+    const runner=vi.fn(async (_python:string,_args:string[],opts: BoundedSpawnOptions)=>{
       started();
       return await new Promise<BoundedSpawnResult>((resolve)=>{
         opts.abortSignal?.addEventListener("abort",()=>{
@@ -208,7 +208,7 @@ describe("RapidOCR executor uses existing durable page seam",()=>{
         },{once:true});
       });
     });
-    const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner as never);
+    const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner);
     const running=executor.extractPage(request);
     await entered;
     await executor.close();
