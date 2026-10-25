@@ -3,6 +3,14 @@ import { prisma } from "@ai-cognitive/db";
 
 export const DOCLING_TASK_MAX_ATTEMPTS = 2;
 export const DOCLING_TASK_LEASE_SECONDS = 300;
+// Global across hosts sharing this PostgreSQL database, not per-process.
+// Deliberately one Docling CPU-heavy candidate at a time until real capacity
+// measurements allow a larger, operator-controlled setting.
+export const DOCLING_GLOBAL_MAX_ACTIVE = 1;
+// Reserved transaction-scoped advisory key for Docling admission in this DB.
+// All Docling task claims MUST pass through the same serialized admission.
+const DOCLING_CAPACITY_LOCK_A = 620031;
+const DOCLING_CAPACITY_LOCK_B = 20261025;
 
 export type DoclingTaskIdentity = {
   ingestionRunId: string;
@@ -37,26 +45,51 @@ export async function ensureDoclingTask(lineage:DoclingTaskLineage) {
   });
 }
 
-/** A single database-clock CAS grants execution ownership and consumes budget. */
+/**
+ * Across all hosts sharing PostgreSQL, at most one unexpired Docling task
+ * lease may be admitted. A transaction-scoped advisory lock serializes
+ * count+claim; Redis worker concurrency alone cannot enforce this bound.
+ *
+ * IMPORTANT: check capacity BEFORE consuming the durable attempt count. A
+ * full pool returns null with the task still PENDING (zero model attempts).
+ * The BullMQ processor must delay that delivery instead of completing it.
+ */
 export async function claimDoclingTask(id:string):Promise<DoclingTaskClaim|null> {
   const token=randomUUID();
-  const claimed=await prisma.$queryRaw<Array<{id:string;attemptCount:number}>>`
-    UPDATE "DoclingLayoutTask"
-    SET "status" = 'RUNNING'::"DoclingLayoutTaskStatus",
-        "claimToken" = ${token},
-        "leaseUntil" = NOW() + INTERVAL '300 seconds',
-        "attemptCount" = "attemptCount" + 1,
-        "updatedAt" = NOW()
-    WHERE "id" = ${id}
-      AND "attemptCount" < ${DOCLING_TASK_MAX_ATTEMPTS}
-      AND (
-        "status" = 'PENDING'::"DoclingLayoutTaskStatus"
-        OR ("status" = 'RUNNING'::"DoclingLayoutTaskStatus"
-            AND "leaseUntil" <= NOW())
-      )
-    RETURNING "id", "attemptCount"
-  `;
-  return claimed.length===1?{id,token,attempt:claimed[0]!.attemptCount}:null;
+  return prisma.$transaction(async tx=>{
+    // Use the transaction's PostgreSQL connection for the entire admission.
+    // Do not project the void-returning lock function directly: Prisma cannot
+    // deserialize PostgreSQL's void type on some supported client versions.
+    await tx.$queryRaw<Array<{locked:number}>>`
+      SELECT 1::integer AS "locked"
+      FROM pg_advisory_xact_lock(${DOCLING_CAPACITY_LOCK_A}::integer, ${DOCLING_CAPACITY_LOCK_B}::integer)
+    `;
+    const occupied=await tx.$queryRaw<Array<{active:number}>>`
+      SELECT COUNT(*)::integer AS "active"
+      FROM "DoclingLayoutTask"
+      WHERE "status" = 'RUNNING'::"DoclingLayoutTaskStatus"
+        AND "leaseUntil" > NOW()
+    `;
+    if((occupied[0]?.active??DOCLING_GLOBAL_MAX_ACTIVE)>=DOCLING_GLOBAL_MAX_ACTIVE)
+      return null;
+    const claimed=await tx.$queryRaw<Array<{id:string;attemptCount:number}>>`
+      UPDATE "DoclingLayoutTask"
+      SET "status" = 'RUNNING'::"DoclingLayoutTaskStatus",
+          "claimToken" = ${token},
+          "leaseUntil" = NOW() + INTERVAL '300 seconds',
+          "attemptCount" = "attemptCount" + 1,
+          "updatedAt" = NOW()
+      WHERE "id" = ${id}
+        AND "attemptCount" < ${DOCLING_TASK_MAX_ATTEMPTS}
+        AND (
+          "status" = 'PENDING'::"DoclingLayoutTaskStatus"
+          OR ("status" = 'RUNNING'::"DoclingLayoutTaskStatus"
+              AND "leaseUntil" <= NOW())
+        )
+      RETURNING "id", "attemptCount"
+    `;
+    return claimed.length===1?{id,token,attempt:claimed[0]!.attemptCount}:null;
+  },{maxWait:10_000,timeout:15_000});
 }
 
 /**
