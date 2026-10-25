@@ -84,6 +84,22 @@ class FivebookBlindSourceTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_OCR_TEXT",content)
             self.assertNotIn("INDEPENDENTLY_APPROVED",content)
 
+    def test_nine_grid_draft_never_promotes_to_full_page_gold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);folder,manifest,native=fixture(root)
+            self.invoke(root,manifest,native,write=True)
+            html=(folder/stage.SUBDIR/stage.INDEX).read_text("utf-8")
+            self.assertIn('REGION_IDS=["R1C1","R1C2","R1C3","R2C1","R2C2","R2C3","R3C1","R3C2","R3C3"]',html)
+            self.assertIn('nine_grid_review_draft:REGION_IDS.map',html)
+            self.assertIn("all_visible_text_and_punctuation_transcribed:false",html)
+            self.assertIn("page_reading_order_reviewed:false",html)
+            self.assertIn("sidebars_and_vertical_text_reviewed:false",html)
+            self.assertIn("reviewer_approval:null",html)
+            self.assertIn("independent_gold_available:false",html)
+            self.assertIn("full_page_coverage_verified:false",html)
+            self.assertIn("cer:null",html)
+            self.assertEqual(self.invoke(root,manifest,native,audit=True)["focus_source_page_count"],5)
+
     def test_any_single_source_image_mutation_invalidates_entire_batch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);folder,manifest,native=fixture(root)
