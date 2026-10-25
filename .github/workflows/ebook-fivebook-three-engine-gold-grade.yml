@@ -31,6 +31,7 @@ jobs:
           python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_three_engine_gold_grade.py
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_three_engine_gold_grade.py' -v
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_reference_gate.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_text_scope.py' -v
           echo 'ACS_GOLD_THREE_ENGINE_SYNTHETIC=PASS'
           echo 'ACS_GOLD_THREE_ENGINE_FULL_PAGE_REFERENCE=REQUIRED'
           echo 'ACS_GOLD_THREE_ENGINE_INDEPENDENT_GOLD=NOT_AUTO_GENERATED'
