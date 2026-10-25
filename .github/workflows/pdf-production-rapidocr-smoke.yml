@@ -180,8 +180,28 @@ jobs:
                 throw 'RAPIDOCR_SYNTHETIC_PDF_CREATION_FAILED'
               }
               $stage='SYNTHETIC_OCR_EXECUTE'
-              $result=@(& $python $worker --pdf $pdf --page 0 2>$null)
-              if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1) {
+              # Native Python may emit innocuous stderr progress warnings on
+              # Windows PowerShell 5.1; only its actual exit/status is authority.
+              $savedPreference=$ErrorActionPreference
+              try {
+                $ErrorActionPreference='Continue'
+                $result=@(& $python $worker --pdf $pdf --page 0 --safe-diagnostic-stage 2>$null)
+                $pythonExit=$LASTEXITCODE
+              } finally {
+                $ErrorActionPreference=$savedPreference
+              }
+              if ($pythonExit -ne 0 -or $result.Count -ne 1) {
+                if ($result.Count -eq 1) {
+                  try {
+                    $failed=$result[0] | ConvertFrom-Json -ErrorAction Stop
+                    $stages=@('START','SOURCE_INPUT','IMPORT_RASTER_AND_OCR','RENDER_PDF_PAGE',
+                              'RAPIDOCR_INFERENCE','RAPIDOCR_RESULT_SCHEMA')
+                    if ($failed.status -eq 'FAILED' -and $failed.safeStage -in $stages) {
+                      Write-Output ('ACS_PRODUCTION_RAPIDOCR_FAILURE_CLASS=' + $failed.safeStage)
+                    }
+                  } catch {}
+                }
+                Write-Output ('ACS_PRODUCTION_RAPIDOCR_SINGLE_JSON=' + [int]($result.Count -eq 1))
                 throw 'RAPIDOCR_SYNTHETIC_OCR_EXECUTION_FAILED'
               }
               $stage='SYNTHETIC_OCR_PROTOCOL'
