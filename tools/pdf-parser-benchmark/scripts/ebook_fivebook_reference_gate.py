@@ -39,7 +39,7 @@ ORIGINS={"PUBLISHER_ORIGINAL_TEXT","INDEPENDENT_PAGE_TRANSCRIPTION"}
 METHODS={"PUBLISHER_SOURCE_VERIFICATION","MANUAL_SOURCE_PAGE_REVIEW"}
 FULL_PAGE_SCOPE="COMPLETE_PHYSICAL_PAGE_TEXT"
 REVIEW_GRID=tuple(f"R{r}C{c}" for r in range(1,4) for c in range(1,4))
-MAX_SNAPSHOT_VERSION=8
+MAX_SNAPSHOT_VERSION=12
 
 
 def snapshot_names(version):
@@ -277,7 +277,7 @@ def main(argv=None):
     group.add_argument("--write",action="store_true")
     group.add_argument("--audit-only",action="store_true")
     parser.add_argument("--snapshot-version",type=int,default=1,
-                        help="Immutable independent-reference revision (1..8); v1 default")
+                        help="Immutable independent-reference revision (1..12); v1 default")
     args=parser.parse_args(argv)
     manifest=json.loads(Path(args.manifest).read_text("utf-8"))
     data=execute(Path(args.private_root),manifest,write=args.write,
