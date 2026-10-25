@@ -77,7 +77,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   // expired host lease, and spawn a SECOND claim-scoped MinerU server while
   // the crashed worker's server was still (possibly) alive. This is a real
   // await barrier, not an earlier entry in Promise.all.
-  if (sourceIngestionOcrRuntime) {
+  if (sourceIngestionOcrRuntime?.kind === "mineru") {
     await reconcileOcrServerInstances({ hostId: sourceIngestionOcrRuntime.config.hostId, executable: sourceIngestionOcrRuntime.config.executable, executableArgs: sourceIngestionOcrRuntime.config.executableArgs, stopTimeoutMs: sourceIngestionOcrRuntime.config.serverStopTimeoutMs, homeRoot: sourceIngestionOcrRuntime.config.homeRoot });
   }
   if (!podcastAdapter && source.PODCAST_GENERATION_PROVIDER?.trim()) {
