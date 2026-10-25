@@ -94,9 +94,18 @@ def main():
             raise RuntimeError("DOCLING_LAYOUT_CANDIDATE_REJECTED")
         STAGE="PAGE_ISOLATION_CHECK"
         text=output.get("markdown")
-        if (not isinstance(text,str)
-                or "SECOND_PAGE_LAYOUT_TEST" not in text
-                or "PAGE_ZERO_DO_NOT_EXPORT" in text):
+        if not isinstance(text,str):
+            raise RuntimeError("DOCLING_MARKDOWN_INVALID")
+        # Markdown can escape underscores or insert separators. Normalize
+        # synthetic sentinels only, without loosening page identity.
+        comparable="".join(char for char in text.upper() if char.isalnum())
+        has_second="SECONDPAGELAYOUTTEST" in comparable
+        has_paragraph="STRUCTUREDPARAGRAPHCONTENT" in comparable
+        leaked_first="PAGEZERODONOTEXPORT" in comparable
+        print("ACS_DOCLING_LAYOUT_SECOND_SENTINEL="+("PRESENT" if has_second else "ABSENT"))
+        print("ACS_DOCLING_LAYOUT_PARAGRAPH_SENTINEL="+("PRESENT" if has_paragraph else "ABSENT"))
+        print("ACS_DOCLING_LAYOUT_FIRST_SENTINEL="+("PRESENT" if leaked_first else "ABSENT"))
+        if not has_second or not has_paragraph or leaked_first:
             raise RuntimeError("DOCLING_PHYSICAL_PAGE_SOURCE_MIXED")
         if any(type(output.get(k)) is not int or output[k]<0 for k in
                ("textItemCount","pictureItemCount","tableItemCount")):
