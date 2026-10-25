@@ -98,8 +98,14 @@ export async function permanentlyFailExhaustedDoclingTask(id:string):Promise<boo
 
 /** Promote legacy immutable snapshot without changing the original extraction. */
 export async function markLegacyDoclingSnapshotSettled(id:string):Promise<void> {
-  await prisma.doclingLayoutTask.updateMany({
-    where:{id,status:"PENDING"},
-    data:{status:"SUCCEEDED",claimToken:null,leaseUntil:null},
-  });
+  await prisma.$queryRaw<Array<{id:string}>>`
+    UPDATE "DoclingLayoutTask"
+    SET "status" = 'SUCCEEDED'::"DoclingLayoutTaskStatus",
+        "claimToken" = NULL, "leaseUntil" = NULL, "updatedAt" = NOW()
+    WHERE "id" = ${id}
+      AND ("status" = 'PENDING'::"DoclingLayoutTaskStatus" OR
+           ("status" = 'RUNNING'::"DoclingLayoutTaskStatus"
+            AND "leaseUntil" <= NOW()))
+    RETURNING "id"
+  `;
 }
