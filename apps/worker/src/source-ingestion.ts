@@ -74,8 +74,9 @@ export async function resolveSourceIngestionOcrExecutor(environment: Environment
     const config = resolveRapidOcrExecutorConfig(environment);
     if (!config) throw new Error("OCR_RAPIDOCR_CONFIG_MISSING");
     const verified = await verifyRapidOcrRuntime(config);
-    return { kind:"rapidocr", pdfOcrExecutor:createRapidOcrPdfOcrExecutor(config,verified),
-             close:async()=>undefined };
+    const executor = createRapidOcrPdfOcrExecutor(config,verified);
+    return { kind:"rapidocr", pdfOcrExecutor:executor,
+             close:() => executor.close() };
   }
   // Orphan RapidOCR variables are invalid, also for unconfigured OCR.
   resolveRapidOcrExecutorConfig(environment);
