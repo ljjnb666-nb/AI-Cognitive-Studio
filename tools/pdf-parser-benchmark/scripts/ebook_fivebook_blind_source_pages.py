@@ -18,10 +18,10 @@ from ebook_private_glm_visual_reference import VisualGateError
 from ebook_private_graph_receipt_audit import no_duplicate_keys, reject_constant
 
 TARGETS=(("B03",67),("B08",64),("B15",109),("B29",72),("B31",126))
-SUBDIR="fivebook_blind_original_pages_v11"
-REPORT="fivebook_blind_source_review.v11.private.json"
+SUBDIR="fivebook_blind_original_pages_v12"
+REPORT="fivebook_blind_source_review.v12.private.json"
 INDEX="五书原图独立核对.private.html"
-SCHEMA=11
+SCHEMA=12
 MAX_REPORT=12000
 MAX_HTML=24000
 NO_GOLD="SOURCE_ONLY_FIVEBOOK_PRIVATE_PACKET_NOT_APPROVED"
@@ -100,7 +100,7 @@ $("pick").addEventListener("change",()=>{
 $("scale").addEventListener("input",show);
 $("export").addEventListener("click",()=>{
  const x=PAGES[Number($("pick").value)];
- const record={schema_version:11,status:"DRAFT_UNVERIFIED",book_id:x.book_id,
+ const record={schema_version:12,status:"DRAFT_UNVERIFIED",book_id:x.book_id,
   physical_page:x.physical_page,scope:"COMPLETE_SOURCE_PAGE_DRAFT",
   source_png_sha256_private:x.source_png_sha256_private,
   visual_transcription_draft:$("text").value,content_type:$("kind").value,
