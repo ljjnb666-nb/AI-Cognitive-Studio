@@ -33,35 +33,29 @@ jobs:
               Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
             if ($py.Count -gt 12) { throw 'PYTHON_ENV_CANDIDATE_LIMIT' }
             $phase='PREPARE_PROBE'
-            $code=@(
-              'import importlib.util'
-              'from importlib import metadata'
-              'def match(n,v):'
-              '    try: return metadata.version(n)==v'
-              '    except metadata.PackageNotFoundError: return False'
-              'def present(n):'
-              '    try: return importlib.util.find_spec(n) is not None'
-              '    except (ImportError,ValueError): return False'
-              'print("M1" if match("rapidocr","3.9.2") and match("onnxruntime","1.22.1") else "M0")'
-              'print("F1" if present("fitz") else "F0")'
-              'print("N1" if present("numpy") else "N0")'
-            ) -join [Environment]::NewLine
             $v=0
             $models=0
             $fitzMissing=0
             $numpyMissing=0
             $pythonErrors=0
-            $phase='PROBE_PYTHON'
+            $phase='PIP_LIST_INVENTORY'
             foreach ($candidate in $py) {
               $v++
-              try { $out=@(& $candidate -c $code 2>$null) } catch { $pythonErrors++; continue }
-              if ($LASTEXITCODE -ne 0 -or $out.Count -ne 3) {
+              try {
+                $raw=@(& $candidate -m pip list --format=json --disable-pip-version-check 2>$null)
+                if ($LASTEXITCODE -ne 0) { $pythonErrors++; continue }
+                $items=($raw -join '') | ConvertFrom-Json -ErrorAction Stop
+                $rapid=@($items | Where-Object { $_.name -eq 'rapidocr' -and $_.version -eq '3.9.2' }).Count
+                $onnx=@($items | Where-Object { $_.name -eq 'onnxruntime' -and $_.version -eq '1.22.1' }).Count
+                $fitz=@($items | Where-Object { $_.name -eq 'PyMuPDF' }).Count
+                $numpy=@($items | Where-Object { $_.name -eq 'numpy' }).Count
+                if ($rapid -eq 1 -and $onnx -eq 1) { $models++ }
+                if ($fitz -eq 0) { $fitzMissing++ }
+                if ($numpy -eq 0) { $numpyMissing++ }
+              } catch {
                 $pythonErrors++
                 continue
               }
-              if ($out[0] -eq 'M1') { $models++ }
-              if ($out[1] -eq 'F0') { $fitzMissing++ }
-              if ($out[2] -eq 'N0') { $numpyMissing++ }
             }
             Write-Output ('ACS_PRODUCTION_RAPIDOCR_INSTALLED_ENVS=' + $v)
             Write-Output ('ACS_PRODUCTION_RAPIDOCR_PINNED_VERSION_PAIRS=' + $models)
