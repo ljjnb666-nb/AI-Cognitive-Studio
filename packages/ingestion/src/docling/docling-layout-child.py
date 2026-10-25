@@ -19,19 +19,24 @@ MAX_MARKDOWN=160_000
 MAX_PIXELS=8_000_000
 MAX_ARTIFACTS=512
 MAX_MODEL_BYTES=2_000_000_000
+PROBE_STAGE="START"
 
 def emit(record):
     sys.stdout.write(json.dumps(record,ensure_ascii=False,separators=(",",":"))+"\n")
 
 def model_identity(folder):
+    global PROBE_STAGE
+    PROBE_STAGE="ARTIFACT_DIRECTORY"
     if folder.is_symlink() or not folder.is_dir():
         raise RuntimeError("DOCLING_MODEL_DIR_INVALID")
+    PROBE_STAGE="ARTIFACT_INVENTORY"
     files=sorted(x for x in folder.rglob("*") if x.is_file())
     if not 0<len(files)<=MAX_ARTIFACTS:
         raise RuntimeError("DOCLING_MODEL_MANIFEST_INVALID")
     digest=hashlib.sha256()
     total=0
     weight_found=False
+    PROBE_STAGE="ARTIFACT_HASH"
     for item in files:
         if item.is_symlink() or any(x.is_symlink() for x in item.parents if x!=folder):
             raise RuntimeError("DOCLING_MODEL_LINK_INVALID")
@@ -50,14 +55,19 @@ def model_identity(folder):
         with item.open("rb") as source:
             for chunk in iter(lambda:source.read(1024*1024),b""):
                 digest.update(chunk)
+    PROBE_STAGE="ARTIFACT_WEIGHT_PRESENCE"
     if not weight_found:
         raise RuntimeError("DOCLING_MODEL_WEIGHTS_MISSING")
     return digest.hexdigest()
 
 def runtime_probe(artifacts):
+    global PROBE_STAGE
+    PROBE_STAGE="DOCLING_VERSION"
     if metadata.version("docling")!=VERSION:
         raise RuntimeError("DOCLING_VERSION_CHANGED")
+    PROBE_STAGE="PYMUPDF_IMPORT"
     import fitz  # noqa: F401
+    PROBE_STAGE="DOCLING_IMPORT"
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter
     return model_identity(artifacts)
@@ -124,6 +134,7 @@ def main():
     parser.add_argument("--pdf")
     parser.add_argument("--page",type=int)
     parser.add_argument("--probe",action="store_true")
+    parser.add_argument("--safe-diagnostic-stage",action="store_true")
     args=parser.parse_args()
     os.environ.update({
         "HF_HUB_OFFLINE":"1","TRANSFORMERS_OFFLINE":"1",
@@ -143,8 +154,10 @@ def main():
             emit(layout(Path(args.pdf),args.page,models))
         return 0
     except Exception:
-        # No source text, local paths or exception stack in CI/worker stdout.
-        emit({"schemaVersion":1,"status":"FAILED"})
+        record={"schemaVersion":1,"status":"FAILED"}
+        if args.probe and args.safe_diagnostic_stage:
+            record["safeStage"]=PROBE_STAGE
+        emit(record)
         return 2
 
 if __name__=="__main__":
