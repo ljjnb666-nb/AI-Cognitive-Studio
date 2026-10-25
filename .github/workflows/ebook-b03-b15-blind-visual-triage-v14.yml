@@ -1,0 +1,77 @@
+name: B03 B15 Blind High-DPI Source Vision v14
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-blind-source-vision:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b03-b15-blind-source-vision-v14-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Synthetic source only, no cloud request
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b03_b15_blind_visual_triage_v14.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b03_b15_blind_visual_triage_v14.py' -v
+          echo 'ACS_V14_SYNTHETIC=PASS'
+          echo 'ACS_V14_PUBLIC_PROVIDER_CALLS=0'
+          echo 'ACS_V14_GOLD=NOT_APPROVED'
+      - name: Validate Windows runner PowerShell source syntax
+        shell: pwsh
+        run: |
+          $tokens=$null
+          $errors=$null
+          $path=(Resolve-Path 'tools/pdf-parser-benchmark/scripts/ebook_b03_b15_blind_visual_triage_windows_v14.ps1').Path
+          [System.Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw 'V14_WINDOWS_POWERSHELL_PARSER_REJECTED' }
+          Write-Output 'ACS_V14_WINDOWS_SYNTAX=PASS'
+
+  owner-only-private-source-vision:
+    needs: synthetic-blind-source-vision
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b03-b15-blind-source-vision-v14-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      # Optional owner-managed Actions secrets; no secret value enters logs.
+      # Reuse the existing repository secret ZHIPU_API_KEY as a fallback.
+      # Values never appear in the workflow file or logs.
+      ACS_GLM_VISION_API_KEY: ${{ secrets.ACS_GLM_VISION_API_KEY || secrets.ZHIPU_API_KEY }}
+      GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-v14-blind
+          persist-credentials: false
+          clean: false
+      - name: Read local key if present, bounded owner-only source image visual candidate
+        shell: powershell
+        timeout-minutes: 19
+        run: |
+          $ErrorActionPreference='Stop'
+          & .\acs-v14-blind\tools\pdf-parser-benchmark\scripts\ebook_b03_b15_blind_visual_triage_windows_v14.ps1
+          if ($LASTEXITCODE -ne 0) { exit 2 }
