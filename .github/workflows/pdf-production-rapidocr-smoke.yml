@@ -128,6 +128,80 @@ jobs:
                 $ready+=,$python
               }
             }
+            $extras=$null
+            if ($ready.Count -eq 0) {
+              $stage='ISOLATED_PYMUPDF_INSTALL'
+              $matched=@()
+              foreach ($candidate in $pythonCandidates) {
+                try {
+                  $raw=@(& $candidate -m pip list --format=json --disable-pip-version-check 2>$null)
+                  if ($LASTEXITCODE -ne 0) { continue }
+                  $items=($raw -join '') | ConvertFrom-Json -ErrorAction Stop
+                  $rapid=@($items | Where-Object { $_.name -eq 'rapidocr' -and $_.version -eq '3.9.2' }).Count
+                  $onnx=@($items | Where-Object { $_.name -eq 'onnxruntime' -and $_.version -eq '1.22.1' }).Count
+                  if ($rapid -eq 1 -and $onnx -eq 1) { $matched+=,$candidate }
+                } catch { continue }
+              }
+              if ($matched.Count -ne 1) { throw 'RAPIDOCR_PINNED_ENV_NOT_UNIQUE' }
+              $python=$matched[0]
+              $extras=Join-Path $privateScratch ('acs-pymupdf-wheel-' + [guid]::NewGuid().ToString('N'))
+              New-Item -ItemType Directory -Path $extras -ErrorAction Stop | Out-Null
+              try {
+                $env:PIP_NO_INPUT='1'
+                $env:PIP_DISABLE_PIP_VERSION_CHECK='1'
+                $env:PYTHONPATH=$extras
+                & $python -m pip install --no-deps --only-binary=:all: --disable-pip-version-check --target $extras PyMuPDF==1.26.5 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'PYMUPDF_PINNED_WHEEL_UNAVAILABLE' }
+                $stage='ISOLATED_PYMUPDF_MODEL_PROBE'
+                $receipt=@(& $python $worker --probe 2>$null)
+                if ($LASTEXITCODE -ne 0 -or $receipt.Count -ne 1) { throw 'PYMUPDF_PROBE_FAILED' }
+                $obj=$receipt[0] | ConvertFrom-Json -ErrorAction Stop
+                if ($obj.status -ne 'READY' -or $obj.rapidocr -ne '3.9.2' -or $obj.onnxruntime -ne '1.22.1' -or $obj.modelSha256 -notmatch '^[a-f0-9]{64}
+            Write-Output 'ACS_PRODUCTION_RAPIDOCR_RUNTIME_PROBE=PASS'
+            $stage='SYNTHETIC_TEMP_DIR'
+            $python=$ready[0]
+            $scratch=Join-Path $privateScratch ('acs-rapidocr-synthetic-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
+            try {
+              $stage='SYNTHETIC_PDF_CREATE'
+              $pdf=Join-Path $scratch 'synthetic-english.pdf'
+              $code="import fitz,sys; d=fitz.open(); p=d.new_page(width=600,height=400); p.insert_text((40,110),'HELLO PDF RAPIDOCR OCR TEST',fontsize=28); d.save(sys.argv[1]); d.close()"
+              & $python -c $code $pdf 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pdf -PathType Leaf)) {
+                throw 'RAPIDOCR_SYNTHETIC_PDF_CREATION_FAILED'
+              }
+              $stage='SYNTHETIC_OCR_EXECUTE'
+              $result=@(& $python $worker --pdf $pdf --page 0 2>$null)
+              if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1) {
+                throw 'RAPIDOCR_SYNTHETIC_OCR_EXECUTION_FAILED'
+              }
+              $stage='SYNTHETIC_OCR_PROTOCOL'
+              $ob=$result[0] | ConvertFrom-Json -ErrorAction Stop
+              if ($ob.status -ne 'SUCCEEDED' -or $ob.schemaVersion -ne 1 -or
+                  [string]::IsNullOrWhiteSpace($ob.text)) {
+                throw 'RAPIDOCR_SYNTHETIC_OCR_EMPTY'
+              }
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_SYNTHETIC_PDF=PASS'
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_MODEL_CALLS=1_OFFLINE'
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_PRIVATE_BOOK_READS=0'
+            } finally {
+              Remove-Item -LiteralPath $scratch -Force -Recurse -ErrorAction SilentlyContinue
+              if ($extras) { Remove-Item -LiteralPath $extras -Force -Recurse -ErrorAction SilentlyContinue }
+            }
+          } catch {
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_STAGE=' + $stage)
+            Write-Output 'ACS_PRODUCTION_RAPIDOCR_WINDOWS=REJECTED'
+            exit 2
+          }
+) { throw 'MODEL_IDENTITY_MISMATCH' }
+                $ready+=,$python
+                Write-Output 'ACS_PRODUCTION_RAPIDOCR_TEST_ONLY_PYMUPDF=ISOLATED_INSTALLED'
+              } catch {
+                Remove-Item -LiteralPath $extras -Recurse -Force -ErrorAction SilentlyContinue
+                $extras=$null
+                throw 'RAPIDOCR_ISOLATED_TEST_DEPENDENCY_REJECTED'
+              }
+            }
             if ($ready.Count -ne 1) { throw 'RAPIDOCR_LOCAL_RUNTIME_NOT_UNIQUE_OR_NOT_READY' }
             Write-Output 'ACS_PRODUCTION_RAPIDOCR_RUNTIME_PROBE=PASS'
             $stage='SYNTHETIC_TEMP_DIR'
