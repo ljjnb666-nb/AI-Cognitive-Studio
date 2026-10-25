@@ -35,6 +35,14 @@ REPORT="fivebook_three_engine_verified_gold_grade"
 MAX_REPORT=24_000
 EVIDENCE="THREE_ENGINE_CER_ONLY_IF_INDEPENDENT_FULL_PAGE_GOLD_AND_SOURCE_PNG_ATTESTED"
 SHA_LENGTH=64
+# Fixed public diagnostic classes only; never print exception payloads,
+# user book text, arbitrary file paths, private hashes or tracebacks.
+SAFE_GOLD_GATE_REJECTIONS=frozenset((
+    "GOLD_GRADE_PARENT_ROW_COVERAGE_INVALID",
+    "GOLD_GRADE_PARENT_CORPUS_CHANGED",
+    "GOLD_GRADE_CROSS_PARENT_SOURCE_CHANGED",
+    "GOLD_GRADE_CROSS_PARENT_IMAGE_CHANGED",
+))
 
 
 def digest(raw):
@@ -280,7 +288,15 @@ def main(argv=None):
         print("ACS_GOLD_THREE_ENGINE_GRADED="+str(receipt["graded_page_count"]))
         print("ACS_GOLD_THREE_ENGINE_UNGRADED="+str(receipt["not_graded_count"]))
         print("ACS_GOLD_THREE_ENGINE_MODEL_CALLS=0")
-    except Exception:
+    except Exception as error:
+        # Opt-in on the owner-controlled offline runner; do not disclose other
+        # errors, including arbitrary exception strings or Python tracebacks.
+        if os.environ.get("ACS_SAFE_GOLD_GATE_DIAGNOSTIC")=="1":
+            kind=(error.code if isinstance(error,VisualGateError) else None)
+            if kind in SAFE_GOLD_GATE_REJECTIONS:
+                print("ACS_GOLD_THREE_ENGINE_GATE="+kind)
+            else:
+                print("ACS_GOLD_THREE_ENGINE_GATE=OTHER_REJECTED")
         print("ACS_GOLD_THREE_ENGINE=REJECTED")
         return 2
     return 0
