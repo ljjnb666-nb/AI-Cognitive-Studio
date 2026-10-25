@@ -110,20 +110,24 @@ export async function withDoclingClaimHeartbeat<T>(
   };
   const timer=setInterval(heartbeat,intervalMs);
   timer.unref?.();
+  let value!:T;
+  let operationError:unknown;
+  let failed=false;
   try{
-    const result=await operation();
-    if(lost)throw new Error("DOCLING_LAYOUT_HEARTBEAT_LOST");
-    return result;
+    value=await operation();
+  }catch(error){
+    failed=true;
+    operationError=error;
   }finally{
     stopped=true;
     clearInterval(timer);
     await inFlight;
-    if(lost){
-      // The caller's post-operation logic always stops before finalization;
-      // this thrown fence prevents treating an unverified run as success.
-      // If operation threw, do not suppress the existing exception.
-    }
   }
+  if(failed)throw operationError;
+  // Check only AFTER an in-flight database renewal has drained.
+  // A rejected renewal must never allow a completed model output through.
+  if(lost)throw new Error("DOCLING_LAYOUT_HEARTBEAT_LOST");
+  return value;
 }
 
 /** Stale owners cannot settle a new owner's execution. */
