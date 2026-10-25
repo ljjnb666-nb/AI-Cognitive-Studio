@@ -34,7 +34,12 @@ export const environmentSchema = z.object({
   // validation (provider=mineru requires local model source + existing model
   // root; tier pinned to flash) lives in the ingestion MinerU config resolver,
   // which fails fast at worker startup.
-  OCR_PROVIDER: z.enum(["mineru"]).optional(),
+  OCR_PROVIDER: z.enum(["mineru", "rapidocr"]).optional(),
+  // Opt-in isolated RapidOCR 3.9.2/ONNXRuntime 1.22.1 (existing offline
+  // models only). Does not change the default PDF.js or MinerU route.
+  RAPIDOCR_PYTHON_PATH: z.string().min(1).optional(),
+  RAPIDOCR_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).optional(),
+  RAPIDOCR_MAX_OUTPUT_BYTES: z.coerce.number().int().min(4096).max(1000000).optional(),
   OCR_HOST_ID: z.string().min(1).optional(),
   MINERU_EXECUTABLE: z.string().min(1).optional(),
   // JSON array of fixed argv prefixed to every MinerU child invocation (e.g.

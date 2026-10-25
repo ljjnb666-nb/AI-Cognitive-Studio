@@ -1,0 +1,224 @@
+name: Production PDF RapidOCR Synthetic Windows Smoke
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+
+jobs:
+  real-offline-rapidocr-smoke:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-rapidocr-production-adapter-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Read-only Python module inventory (before Git checkout)
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference='Stop'
+          $phase='ENUM_ENV'
+          try {
+            $envDir='D:\ai-cognitive-pdf-benchmark-data\tool-env'
+            if (-not (Test-Path -LiteralPath $envDir -PathType Container)) {
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_MODULE_INVENTORY=ENV_ROOT_MISSING'
+              exit 0
+            }
+            $py=@(Get-ChildItem -LiteralPath $envDir -Directory -ErrorAction Stop |
+              ForEach-Object { Join-Path $_.FullName 'Scripts\python.exe' } |
+              Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+            if ($py.Count -gt 12) { throw 'PYTHON_ENV_CANDIDATE_LIMIT' }
+            $phase='PREPARE_PROBE'
+            $v=0
+            $models=0
+            $fitzMissing=0
+            $numpyMissing=0
+            $pythonErrors=0
+            $phase='PIP_LIST_INVENTORY'
+            foreach ($candidate in $py) {
+              $v++
+              try {
+                $raw=@(& $candidate -m pip list --format=json --disable-pip-version-check 2>$null)
+                if ($LASTEXITCODE -ne 0) { $pythonErrors++; continue }
+                $items=($raw -join '') | ConvertFrom-Json -ErrorAction Stop
+                $rapid=@($items | Where-Object { $_.name -eq 'rapidocr' -and $_.version -eq '3.9.2' }).Count
+                $onnx=@($items | Where-Object { $_.name -eq 'onnxruntime' -and $_.version -eq '1.22.1' }).Count
+                $fitz=@($items | Where-Object { $_.name -eq 'PyMuPDF' }).Count
+                $numpy=@($items | Where-Object { $_.name -eq 'numpy' }).Count
+                if ($rapid -eq 1 -and $onnx -eq 1) { $models++ }
+                if ($fitz -eq 0) { $fitzMissing++ }
+                if ($numpy -eq 0) { $numpyMissing++ }
+              } catch {
+                $pythonErrors++
+                continue
+              }
+            }
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_INSTALLED_ENVS=' + $v)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_PINNED_VERSION_PAIRS=' + $models)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_MISSING_FITZ=' + $fitzMissing)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_MISSING_NUMPY=' + $numpyMissing)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_ENV_PROBE_ERRORS=' + $pythonErrors)
+            Write-Output 'ACS_PRODUCTION_RAPIDOCR_MODULE_INVENTORY=READONLY_DONE'
+          } catch {
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_MODULE_STAGE=' + $phase)
+            Write-Output 'ACS_PRODUCTION_RAPIDOCR_MODULE_INVENTORY=REJECTED'
+            exit 2
+          }
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          filter: blob:none
+          clean: false
+          path: acs-prod-rapidocr
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Real local model probe plus synthetic PDF OCR, zero book content
+        shell: powershell
+        timeout-minutes: 16
+        run: |
+          $ErrorActionPreference='Stop'
+          $stage='CHECKOUT_AND_RUNTIME'
+          try {
+            if ((git -C acs-prod-rapidocr rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $envDir=Join-Path $root 'tool-env'
+            # Synthetic test files only. Runner-owned scratch avoids touching
+            # private Benchmark scratch/junctions and existing frozen inputs.
+            $privateScratch=$env:RUNNER_TEMP
+            $worker='acs-prod-rapidocr/packages/ingestion/src/rapidocr/rapidocr-child.py'
+            $stage='PREREQUISITES'
+            if ([string]::IsNullOrWhiteSpace($privateScratch)) { throw 'RUNNER_TEMP_UNAVAILABLE' }
+            $workerOk=Test-Path -LiteralPath $worker -PathType Leaf
+            $venvsOk=Test-Path -LiteralPath $envDir -PathType Container
+            $scratchOk=Test-Path -LiteralPath $privateScratch -PathType Container
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_SCRIPT_PRESENT=' + [int][bool]$workerOk)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_VENVS_PRESENT=' + [int][bool]$venvsOk)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_SCRATCH_PRESENT=' + [int][bool]$scratchOk)
+            if (-not $workerOk -or -not $venvsOk) {
+              throw 'RAPIDOCR_PRIVATE_RUNTIME_PREREQUISITE_MISSING'
+            }
+            if (-not $scratchOk) {
+              New-Item -ItemType Directory -Path $privateScratch -ErrorAction Stop | Out-Null
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_SCRATCH=CREATED'
+            }
+            # RUNNER_TEMP may legitimately be a Windows junction. Only the
+            # uniquely generated synthetic child is created/deleted below.
+            # No private benchmark input is read or modified.
+            $pythonCandidates=@(Get-ChildItem -LiteralPath $envDir -Directory -ErrorAction Stop |
+              ForEach-Object { Join-Path $_.FullName 'Scripts\python.exe' } |
+              Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+            if ($pythonCandidates.Count -gt 12) { throw 'RAPIDOCR_PYTHON_CANDIDATES_TOO_MANY' }
+            $ready=@()
+            $stage='MODEL_PROBE'
+            foreach ($python in $pythonCandidates) {
+              $receipt=@(& $python $worker --probe 2>$null)
+              if ($LASTEXITCODE -ne 0 -or $receipt.Count -ne 1) { continue }
+              try { $obj=$receipt[0] | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+              if ($obj.schemaVersion -eq 1 -and $obj.status -eq 'READY' -and
+                  $obj.rapidocr -eq '3.9.2' -and $obj.onnxruntime -eq '1.22.1' -and
+                  $obj.modelSha256 -match '^[a-f0-9]{64}$') {
+                $ready+=,$python
+              }
+            }
+            $extras=$null
+            if ($ready.Count -eq 0) {
+              $stage='ISOLATED_PYMUPDF_INSTALL'
+              $matched=@()
+              foreach ($candidate in $pythonCandidates) {
+                try {
+                  $raw=@(& $candidate -m pip list --format=json --disable-pip-version-check 2>$null)
+                  if ($LASTEXITCODE -ne 0) { continue }
+                  $items=($raw -join '') | ConvertFrom-Json -ErrorAction Stop
+                  $rapid=@($items | Where-Object { $_.name -eq 'rapidocr' -and $_.version -eq '3.9.2' }).Count
+                  $onnx=@($items | Where-Object { $_.name -eq 'onnxruntime' -and $_.version -eq '1.22.1' }).Count
+                  if ($rapid -eq 1 -and $onnx -eq 1) { $matched+=,$candidate }
+                } catch { continue }
+              }
+              if ($matched.Count -ne 1) { throw 'RAPIDOCR_PINNED_ENV_NOT_UNIQUE' }
+              $python=$matched[0]
+              $extras=Join-Path $privateScratch ('acs-pymupdf-wheel-' + [guid]::NewGuid().ToString('N'))
+              New-Item -ItemType Directory -Path $extras -ErrorAction Stop | Out-Null
+              try {
+                $env:PIP_NO_INPUT='1'
+                $env:PIP_DISABLE_PIP_VERSION_CHECK='1'
+                $env:PYTHONPATH=$extras
+                & $python -m pip install --no-deps --only-binary=:all: --disable-pip-version-check --target $extras PyMuPDF==1.26.5 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'PYMUPDF_PINNED_WHEEL_UNAVAILABLE' }
+                $stage='ISOLATED_PYMUPDF_MODEL_PROBE'
+                $receipt=@(& $python $worker --probe 2>$null)
+                if ($LASTEXITCODE -ne 0 -or $receipt.Count -ne 1) { throw 'PYMUPDF_PROBE_FAILED' }
+                $obj=$receipt[0] | ConvertFrom-Json -ErrorAction Stop
+                if ($obj.status -ne 'READY' -or $obj.rapidocr -ne '3.9.2' -or $obj.onnxruntime -ne '1.22.1' -or $obj.modelSha256 -notmatch '^[a-f0-9]{64}$') { throw 'MODEL_IDENTITY_MISMATCH' }
+                $ready+=,$python
+                Write-Output 'ACS_PRODUCTION_RAPIDOCR_TEST_ONLY_PYMUPDF=ISOLATED_INSTALLED'
+              } catch {
+                Remove-Item -LiteralPath $extras -Recurse -Force -ErrorAction SilentlyContinue
+                $extras=$null
+                throw 'RAPIDOCR_ISOLATED_TEST_DEPENDENCY_REJECTED'
+              }
+            }
+            if ($ready.Count -ne 1) { throw 'RAPIDOCR_LOCAL_RUNTIME_NOT_UNIQUE_OR_NOT_READY' }
+            Write-Output 'ACS_PRODUCTION_RAPIDOCR_RUNTIME_PROBE=PASS'
+            $stage='SYNTHETIC_TEMP_DIR'
+            $python=$ready[0]
+            $scratch=Join-Path $privateScratch ('acs-rapidocr-synthetic-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
+            try {
+              $stage='SYNTHETIC_PDF_CREATE'
+              $pdf=Join-Path $scratch 'synthetic-english.pdf'
+              $code="import fitz,sys; d=fitz.open(); p=d.new_page(width=600,height=400); p.insert_text((40,110),'HELLO PDF RAPIDOCR OCR TEST',fontsize=28); d.save(sys.argv[1]); d.close()"
+              & $python -c $code $pdf 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pdf -PathType Leaf)) {
+                throw 'RAPIDOCR_SYNTHETIC_PDF_CREATION_FAILED'
+              }
+              $stage='SYNTHETIC_OCR_EXECUTE'
+              # Native Python may emit innocuous stderr progress warnings on
+              # Windows PowerShell 5.1; only its actual exit/status is authority.
+              $savedPreference=$ErrorActionPreference
+              try {
+                $ErrorActionPreference='Continue'
+                $result=@(& $python $worker --pdf $pdf --page 0 --safe-diagnostic-stage 2>$null)
+                $pythonExit=$LASTEXITCODE
+              } finally {
+                $ErrorActionPreference=$savedPreference
+              }
+              if ($pythonExit -ne 0 -or $result.Count -ne 1) {
+                if ($result.Count -eq 1) {
+                  try {
+                    $failed=$result[0] | ConvertFrom-Json -ErrorAction Stop
+                    $stages=@('START','SOURCE_INPUT','IMPORT_RASTER_AND_OCR','RENDER_PDF_PAGE',
+                              'RAPIDOCR_INFERENCE','RAPIDOCR_RESULT_SCHEMA')
+                    if ($failed.status -eq 'FAILED' -and $failed.safeStage -in $stages) {
+                      Write-Output ('ACS_PRODUCTION_RAPIDOCR_FAILURE_CLASS=' + $failed.safeStage)
+                    }
+                  } catch {}
+                }
+                Write-Output ('ACS_PRODUCTION_RAPIDOCR_SINGLE_JSON=' + [int]($result.Count -eq 1))
+                throw 'RAPIDOCR_SYNTHETIC_OCR_EXECUTION_FAILED'
+              }
+              $stage='SYNTHETIC_OCR_PROTOCOL'
+              $ob=$result[0] | ConvertFrom-Json -ErrorAction Stop
+              if ($ob.status -ne 'SUCCEEDED' -or $ob.schemaVersion -ne 1 -or
+                  [string]::IsNullOrWhiteSpace($ob.text)) {
+                throw 'RAPIDOCR_SYNTHETIC_OCR_EMPTY'
+              }
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_SYNTHETIC_PDF=PASS'
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_MODEL_CALLS=1_OFFLINE'
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_PRIVATE_BOOK_READS=0'
+            } finally {
+              Remove-Item -LiteralPath $scratch -Force -Recurse -ErrorAction SilentlyContinue
+              if ($extras) { Remove-Item -LiteralPath $extras -Force -Recurse -ErrorAction SilentlyContinue }
+            }
+          } catch {
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_STAGE=' + $stage)
+            Write-Output 'ACS_PRODUCTION_RAPIDOCR_WINDOWS=REJECTED'
+            exit 2
+          }

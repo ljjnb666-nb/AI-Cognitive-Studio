@@ -2,6 +2,7 @@ import { DelayedError, Queue, Worker } from "bullmq";
 import { createIngestionService, createMineruPdfOcrExecutor, dispatchPendingIngestion, INGESTION_JOB, INGESTION_QUEUE, OcrCapacityDeferredError, resolveMineruExecutorConfig, verifyMineruRuntime, type MineruExecutorConfig, type PdfOcrExecutor } from "@ai-cognitive/ingestion";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
+import { createRapidOcrPdfOcrExecutor, resolveRapidOcrExecutorConfig, verifyRapidOcrRuntime } from "@ai-cognitive/ingestion";
 
 export type SourceIngestionQueueOptions = { prefix?: string; concurrency?: number; /** Real OCR fallback executor (04B-3). Resolved once via resolveSourceIngestionOcrExecutor; injected for testability. */ pdfOcrExecutor?: PdfOcrExecutor };
 export function createSourceIngestionWorker(environment: Environment, options: SourceIngestionQueueOptions = {}) {
@@ -39,12 +40,9 @@ export async function deferDeliveryOnPostCommitCapacitySignal(error: unknown, jo
   return true;
 }
 
-export type SourceIngestionOcrRuntime = {
-  pdfOcrExecutor: PdfOcrExecutor;
-  /** Verified runtime configuration for same-host OCR server reconciliation (RF01 P1-06). */
-  config: MineruExecutorConfig;
-  close(): Promise<void>;
-};
+export type SourceIngestionOcrRuntime =
+  | { kind: "mineru"; pdfOcrExecutor: PdfOcrExecutor; config: MineruExecutorConfig; close(): Promise<void> }
+  | { kind: "rapidocr"; pdfOcrExecutor: PdfOcrExecutor; close(): Promise<void> };
 
 /**
  * Production OCR runtime resolution (BOOK-INGESTION-04B-3, RF01 P1-08).
@@ -55,11 +53,38 @@ export type SourceIngestionOcrRuntime = {
  * operator-declared text.
  */
 export async function resolveSourceIngestionOcrExecutor(environment: Environment): Promise<SourceIngestionOcrRuntime | undefined> {
+  // Fail fast on mixed-provider configuration rather than silently ignoring
+  // the inactive provider and recording misleading parser provenance.
+  if (environment.OCR_PROVIDER === "rapidocr") {
+    if (environment.MINERU_EXECUTABLE !== undefined ||
+        environment.MINERU_MODEL_PATH !== undefined ||
+        environment.MINERU_EXECUTABLE_ARGS !== undefined ||
+        environment.MINERU_MODEL_SOURCE !== undefined ||
+        environment.MINERU_TIER !== undefined ||
+        environment.MINERU_TIMEOUT_MS !== undefined ||
+        environment.MINERU_HOME_ROOT !== undefined ||
+        environment.MINERU_VERSION !== undefined ||
+        environment.MINERU_SERVER_START_TIMEOUT_MS !== undefined ||
+        environment.MINERU_SERVER_STOP_TIMEOUT_MS !== undefined ||
+        environment.MINERU_MAX_OUTPUT_BYTES !== undefined ||
+        environment.MINERU_CAPACITY_DEFERRAL_DELAY_MS !== undefined ||
+        environment.OCR_HOST_ID !== undefined) {
+      throw new Error("OCR_MIXED_PROVIDER_CONFIGURATION");
+    }
+    const config = resolveRapidOcrExecutorConfig(environment);
+    if (!config) throw new Error("OCR_RAPIDOCR_CONFIG_MISSING");
+    const verified = await verifyRapidOcrRuntime(config);
+    const executor = createRapidOcrPdfOcrExecutor(config,verified);
+    return { kind:"rapidocr", pdfOcrExecutor:executor,
+             close:() => executor.close() };
+  }
+  // Orphan RapidOCR variables are invalid, also for unconfigured OCR.
+  resolveRapidOcrExecutorConfig(environment);
   const config = resolveMineruExecutorConfig(environment);
   if (!config) return undefined;
   await verifyMineruRuntime(config);
   const runtime = createMineruPdfOcrExecutor(config);
-  return { pdfOcrExecutor: runtime.executor, config, close: () => runtime.close() };
+  return { kind:"mineru",pdfOcrExecutor: runtime.executor, config, close: () => runtime.close() };
 }
 
 export function createSourceIngestionQueue(environment: Environment, options: SourceIngestionQueueOptions = {}) {
