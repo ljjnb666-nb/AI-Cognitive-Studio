@@ -138,5 +138,47 @@ class BlindSourceVisionTests(unittest.TestCase):
         self.assertEqual(stage.parse_response(fake_response(None,None,None,None))["visual_flags"],
                          ["SOURCE_ONLY"])
 
+
+    def test_inventory_zero_calls_partial_unknown_after_transport_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);fixture(root)
+            self.assertEqual(stage.private_inventory(root),
+                             {"completed":0,"unknown":0,"not_started":4})
+            def charged_unknown(*_args):
+                raise VisualGateError("SYNTHETIC_REQUEST_OUTCOME_UNKNOWN")
+            with self.assertRaisesRegex(VisualGateError,"SYNTHETIC_REQUEST_OUTCOME_UNKNOWN"):
+                stage.execute(root,mode="write",vision_call=charged_unknown)
+            self.assertEqual(stage.private_inventory(root),
+                             {"completed":0,"unknown":1,"not_started":3})
+
+    def test_inventory_complete_read_only_and_no_private_text_in_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);fixture(root)
+            stage.execute(root,mode="write",vision_call=fake_response)
+            inv=stage.private_inventory(root)
+            self.assertEqual(inv,{"completed":4,"unknown":0,"not_started":0})
+            self.assertNotIn("ONLY_SYNTHETIC_CHARACTERS",json.dumps(inv))
+
+    def test_inventory_rejects_orphan_and_tampered_unknown_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);fixture(root)
+            dest=root/"semantic_gate"/"multibook_matrix_20261023"/stage.SUBDIR
+            dest.mkdir()
+            (dest/"B03_p0067_R1C2.candidate.private.json").write_text("{}",encoding="utf-8")
+            with self.assertRaisesRegex(VisualGateError,"ORPHANED_CANDIDATE"):
+                stage.private_inventory(root)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);fixture(root)
+            def fail(*_args):
+                raise VisualGateError("SYNTHETIC_TRANSPORT_UNKNOWN")
+            with self.assertRaises(VisualGateError):
+                stage.execute(root,mode="write",vision_call=fail)
+            journal=root/"semantic_gate"/"multibook_matrix_20261023"/stage.SUBDIR/"B03_p0067_R1C2.attempt.private.json"
+            j=json.loads(journal.read_text("utf-8"))
+            j["source_tile_sha256_private"]="f"*64
+            journal.write_text(json.dumps(j),encoding="utf-8")
+            with self.assertRaisesRegex(VisualGateError,"ATTEMPT_FENCE_INVALID"):
+                stage.private_inventory(root)
+
 if __name__=="__main__":
     unittest.main()
