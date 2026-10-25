@@ -31,6 +31,7 @@ jobs:
         timeout-minutes: 16
         run: |
           $ErrorActionPreference='Stop'
+          $stage='CHECKOUT_AND_RUNTIME'
           try {
             if ((git -C acs-prod-rapidocr rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
             $root='D:\ai-cognitive-pdf-benchmark-data'
@@ -47,6 +48,7 @@ jobs:
               Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
             if ($pythonCandidates.Count -gt 12) { throw 'RAPIDOCR_PYTHON_CANDIDATES_TOO_MANY' }
             $ready=@()
+            $stage='MODEL_PROBE'
             foreach ($python in $pythonCandidates) {
               $receipt=@(& $python $worker --probe 2>$null)
               if ($LASTEXITCODE -ne 0 -or $receipt.Count -ne 1) { continue }
@@ -59,20 +61,24 @@ jobs:
             }
             if ($ready.Count -ne 1) { throw 'RAPIDOCR_LOCAL_RUNTIME_NOT_UNIQUE_OR_NOT_READY' }
             Write-Output 'ACS_PRODUCTION_RAPIDOCR_RUNTIME_PROBE=PASS'
+            $stage='SYNTHETIC_TEMP_DIR'
             $python=$ready[0]
             $scratch=Join-Path $privateScratch ('acs-rapidocr-synthetic-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
             try {
+              $stage='SYNTHETIC_PDF_CREATE'
               $pdf=Join-Path $scratch 'synthetic-english.pdf'
               $code="import fitz,sys; d=fitz.open(); p=d.new_page(width=600,height=400); p.insert_text((40,110),'HELLO PDF RAPIDOCR OCR TEST',fontsize=28); d.save(sys.argv[1]); d.close()"
               & $python -c $code $pdf 2>$null | Out-Null
               if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pdf -PathType Leaf)) {
                 throw 'RAPIDOCR_SYNTHETIC_PDF_CREATION_FAILED'
               }
+              $stage='SYNTHETIC_OCR_EXECUTE'
               $result=@(& $python $worker --pdf $pdf --page 0 2>$null)
               if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1) {
                 throw 'RAPIDOCR_SYNTHETIC_OCR_EXECUTION_FAILED'
               }
+              $stage='SYNTHETIC_OCR_PROTOCOL'
               $ob=$result[0] | ConvertFrom-Json -ErrorAction Stop
               if ($ob.status -ne 'SUCCEEDED' -or $ob.schemaVersion -ne 1 -or
                   [string]::IsNullOrWhiteSpace($ob.text)) {
@@ -85,6 +91,7 @@ jobs:
               Remove-Item -LiteralPath $scratch -Force -Recurse -ErrorAction SilentlyContinue
             }
           } catch {
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_STAGE=' + $stage)
             Write-Output 'ACS_PRODUCTION_RAPIDOCR_WINDOWS=REJECTED'
             exit 2
           }
