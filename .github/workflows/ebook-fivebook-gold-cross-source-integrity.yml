@@ -1,0 +1,110 @@
+name: Fivebook Gold Cross-Parent Source Integrity
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-grade-gate:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-gold-cross-source-integrity-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run only synthetic no-gold, source-sha and triple-engine acceptance tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84 pillow==11.3.0
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_three_engine_gold_grade.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_three_engine_gold_grade.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_reference_gate.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_text_scope.py' -v
+          echo 'ACS_GOLD_THREE_ENGINE_SYNTHETIC=PASS'
+          echo 'ACS_GOLD_THREE_ENGINE_FULL_PAGE_REFERENCE=REQUIRED'
+          echo 'ACS_GOLD_THREE_ENGINE_INDEPENDENT_GOLD=NOT_AUTO_GENERATED'
+          echo 'ACS_GOLD_THREE_ENGINE_CLOUD_CALLS=0'
+
+  owner-only-private-no-gold-readiness:
+    needs: synthetic-grade-gate
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-gold-cross-source-integrity-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-gold-3way
+          persist-credentials: false
+          clean: false
+      - name: Read-only private five-source gold-ready check without public source text
+        shell: powershell
+        timeout-minutes: 23
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            if ((git -C acs-gold-3way rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'SHA_MISMATCH' }
+            $root = 'D:\ai-cognitive-pdf-benchmark-data'
+            $dir = Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py = Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'PRIVATE_PYTHON_MISSING' }
+            $tracked = @(
+              'multibook_native_24pages.private.json',
+              'fivebook_three_engine_crossbook_consensus.v8.private.json',
+              'fivebook_independent_reference_admission.private.json',
+              'B03_p0067.private.png','B08_p0064.private.png',
+              'B15_p0109.private.png','B29_p0072.private.png',
+              'B31_p0126.private.png'
+            )
+            $before=@{}
+            foreach($item in $tracked) {
+              $path = Join-Path $dir $item
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'SOURCE_MISSING' }
+              $before[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            }
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            $script='acs-gold-3way/tools/pdf-parser-benchmark/scripts/ebook_fivebook_three_engine_gold_grade.py'
+            $manifest='acs-gold-3way/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+            $result=@(& $py $script --private-root $root --manifest $manifest --snapshot-version 1 --check-only 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw 'SCORE_READONLY_REJECTED' }
+            if (@($result | Where-Object { $_ -eq 'ACS_GOLD_THREE_ENGINE=READONLY_CHECKED' }).Count -ne 1) { throw 'CHECK_RECEIPT_INVALID' }
+            $approved=@($result | Where-Object { $_ -match '^ACS_GOLD_THREE_ENGINE_GRADED=[0-5]$' })
+            $missing=@($result | Where-Object { $_ -match '^ACS_GOLD_THREE_ENGINE_UNGRADED=[0-5]$' })
+            if ($approved.Count -ne 1 -or $missing.Count -ne 1) { throw 'COUNT_INVALID' }
+            $score=[int]($approved[0].Split('=')[1]);$ungraded=[int]($missing[0].Split('=')[1])
+            if (($score+$ungraded) -ne 5) { throw 'COUNT_SUM_INVALID' }
+            foreach($path in $tracked | ForEach-Object { Join-Path $dir $_ }) {
+              if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $before[$path]) { throw 'SOURCE_CHANGED' }
+            }
+            Write-Output ('ACS_GOLD_THREE_ENGINE_GRADED='+$score)
+            Write-Output ('ACS_GOLD_THREE_ENGINE_UNGRADED='+$ungraded)
+            Write-Output 'ACS_GOLD_THREE_ENGINE_WINDOWS=READ_ONLY_VERIFIED'
+            Write-Output 'ACS_GOLD_THREE_ENGINE_FROZEN_SOURCE=UNCHANGED'
+            Write-Output 'ACS_GOLD_THREE_ENGINE_NEW_MODEL_CALLS=0'
+          } catch {
+            # No stdout/stderr raw content, file names, original page text or SHA.
+            Write-Output 'ACS_GOLD_THREE_ENGINE_WINDOWS=REJECTED'
+            exit 2
+          }
