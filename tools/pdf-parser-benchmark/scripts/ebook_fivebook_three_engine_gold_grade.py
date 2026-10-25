@@ -208,14 +208,21 @@ def main(argv=None):
     group=parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--write",action="store_true")
     group.add_argument("--audit-only",action="store_true")
+    group.add_argument("--check-only",action="store_true")
     args=parser.parse_args(argv)
     try:
         raw=Path(args.manifest).read_bytes()
         manifest=json.loads(raw,object_pairs_hook=no_duplicate_keys,parse_constant=reject_constant)
-        receipt=execute(args.private_root,manifest,
-                        snapshot_version=args.snapshot_version,
-                        write=args.write,audit=args.audit_only)
-        print("ACS_GOLD_THREE_ENGINE="+("PRIVATE_CREATED" if args.write else "PRIVATE_AUDIT_PASS"))
+        if args.check_only:
+            receipt=compute(args.private_root,manifest,
+                            snapshot_version=args.snapshot_version)
+        else:
+            receipt=execute(args.private_root,manifest,
+                            snapshot_version=args.snapshot_version,
+                            write=args.write,audit=args.audit_only)
+        status=("READONLY_CHECKED" if args.check_only else
+                "PRIVATE_CREATED" if args.write else "PRIVATE_AUDIT_PASS")
+        print("ACS_GOLD_THREE_ENGINE="+status)
         print("ACS_GOLD_THREE_ENGINE_TOTAL=5")
         print("ACS_GOLD_THREE_ENGINE_GRADED="+str(receipt["graded_page_count"]))
         print("ACS_GOLD_THREE_ENGINE_UNGRADED="+str(receipt["not_graded_count"]))
