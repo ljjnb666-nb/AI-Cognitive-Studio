@@ -17,7 +17,7 @@ def invoke(child,models,*args):
             if k.lower() in {
                 "path","pathext","systemroot","windir","temp","tmp","home",
                 "userprofile","appdata","localappdata","systemdrive","comspec",
-                "ld_library_path","lang","pythonpath",
+                "ld_library_path","lang",
             }
         }|{
             "HF_HUB_OFFLINE":"1","TRANSFORMERS_OFFLINE":"1",
