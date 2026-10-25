@@ -92,10 +92,23 @@ jobs:
             $envDir=Join-Path $root 'tool-env'
             $privateScratch=Join-Path $root 'temp'
             $worker='acs-prod-rapidocr/packages/ingestion/src/rapidocr/rapidocr-child.py'
-            if (-not (Test-Path -LiteralPath $worker -PathType Leaf) -or
-                -not (Test-Path -LiteralPath $envDir -PathType Container) -or
-                -not (Test-Path -LiteralPath $privateScratch -PathType Container)) {
+            $stage='PREREQUISITES'
+            $workerOk=Test-Path -LiteralPath $worker -PathType Leaf
+            $venvsOk=Test-Path -LiteralPath $envDir -PathType Container
+            $scratchOk=Test-Path -LiteralPath $privateScratch -PathType Container
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_SCRIPT_PRESENT=' + [int][bool]$workerOk)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_VENVS_PRESENT=' + [int][bool]$venvsOk)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_SCRATCH_PRESENT=' + [int][bool]$scratchOk)
+            if (-not $workerOk -or -not $venvsOk) {
               throw 'RAPIDOCR_PRIVATE_RUNTIME_PREREQUISITE_MISSING'
+            }
+            if (-not $scratchOk) {
+              New-Item -ItemType Directory -Path $privateScratch -ErrorAction Stop | Out-Null
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_SCRATCH=CREATED'
+            }
+            $scratchAttributes=(Get-Item -LiteralPath $privateScratch -Force -ErrorAction Stop).Attributes
+            if (($scratchAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw 'RAPIDOCR_SCRATCH_REPARSE_BLOCKED'
             }
             $pythonCandidates=@(Get-ChildItem -LiteralPath $envDir -Directory -ErrorAction Stop |
               ForEach-Object { Join-Path $_.FullName 'Scripts\python.exe' } |
