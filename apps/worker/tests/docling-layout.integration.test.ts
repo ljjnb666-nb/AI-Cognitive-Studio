@@ -242,6 +242,46 @@ describe("Docling background dispatch (real PostgreSQL, synthetic source only)",
     }finally{await cleanup(f);}
   },30_000);
 
+  it("serializes cross-host capacity without spending attempts while full",async()=>{
+    const one=await fixture();
+    const two=await fixture();
+    try{
+      const identity=(f:Awaited<ReturnType<typeof fixture>>)=>({
+        ingestionRunId:f.run.id,workspaceId:f.workspace.id,
+        sourceDocumentId:f.document.id,physicalPageIndex:1,
+        routingGeneration:1,modelSha256:modelSha,
+      });
+      const a=await ensureDoclingTask(identity(one));
+      const b=await ensureDoclingTask(identity(two));
+      // Concurrent transactions on separate task rows must still serialize.
+      const [claimA,claimB]=await Promise.all([
+        claimDoclingTask(a.id),claimDoclingTask(b.id),
+      ]);
+      expect([claimA,claimB].filter(Boolean)).toHaveLength(1);
+      const owner=claimA??claimB;
+      const busyId=claimA?b.id:a.id;
+      const ownerId=claimA?a.id:b.id;
+      expect(owner?.attempt).toBe(1);
+      expect(await claimDoclingTask(busyId)).toBeNull();
+      expect(await prisma.doclingLayoutTask.findUniqueOrThrow({where:{id:busyId}}))
+        .toMatchObject({status:"PENDING",attemptCount:0,claimToken:null});
+      // Renewing the live owner's lease cannot free global capacity.
+      expect(await renewDoclingTaskLease(owner!)).toBe(true);
+      expect(await claimDoclingTask(busyId)).toBeNull();
+      expect(await finishDoclingTask(owner!,false)).toBe(true);
+      // Once the first owner releases, the deferred candidate retains its
+      // first attempt, regardless of how many times it was rejected.
+      const next=await claimDoclingTask(busyId);
+      expect(next).toMatchObject({attempt:1});
+      expect(await claimDoclingTask(ownerId)).toBeNull();
+      expect(await finishDoclingTask(next!,true)).toBe(true);
+      expect(await claimDoclingTask(ownerId)).toMatchObject({attempt:2});
+    }finally{
+      await cleanup(two);
+      await cleanup(one);
+    }
+  },30_000);
+
   it("Redis-loss recovery re-enqueues only spent-attempt identity and never resets budget",async()=>{
     const f=await fixture();
     try{

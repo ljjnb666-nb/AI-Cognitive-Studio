@@ -1,4 +1,4 @@
-import { Queue, Worker } from "bullmq";
+import { Queue, Worker, RateLimitError } from "bullmq";
 import { prisma } from "@ai-cognitive/db";
 import { claimDoclingTask, ensureDoclingTask, finishDoclingTask, markLegacyDoclingSnapshotSettled, permanentlyFailExhaustedDoclingTask, withDoclingClaimHeartbeat, DOCLING_TASK_MAX_ATTEMPTS } from "./docling-task-ledger.js";
 import {
@@ -135,7 +135,10 @@ export async function executeDoclingBackgroundJob(
   const claim=await claimDoclingTask(task.id);
   if(!claim){
     const current=await prisma.doclingLayoutTask.findUniqueOrThrow({where:{id:task.id}});
-    if(current.status==="RUNNING")return "SKIPPED_BUSY";
+    // Capacity full leaves a task PENDING without spending an attempt.
+    // Another worker already owning this page is also a temporary busy state.
+    // The BullMQ consumer MUST return this delivery to a delayed queue.
+    if(current.status==="RUNNING"||current.status==="PENDING")return "SKIPPED_BUSY";
     if(current.status!=="SUCCEEDED")throw new Error("DOCLING_LAYOUT_DURABLE_ATTEMPTS_EXHAUSTED");
     // Completed rows only replay existing immutable metadata, never call model.
     const snapshot=await prisma.doclingLayoutSnapshot.findUnique({
@@ -179,16 +182,32 @@ export function createDoclingLayoutWorker(
   environment:Environment,executor:DoclingLayoutHandle,options?:{prefix?:string;storage?:StorageProvider},
 ):Worker<DoclingLayoutQueueData> {
   const storage=options?.storage??storageFor(environment);
-  return new Worker<DoclingLayoutQueueData>(DOCLING_LAYOUT_QUEUE,async(job)=>{
+  const worker=new Worker<DoclingLayoutQueueData>(DOCLING_LAYOUT_QUEUE,async(job)=>{
     // Do not store provider/DB credentials or raw stderr in failed BullMQ
     // jobs. This candidate is never authoritative text publication.
-    try{return await executeDoclingBackgroundJob(job.data,storage,executor);}
-    catch{throw new Error("DOCLING_LAYOUT_BACKGROUND_JOB_REJECTED");}
+    try{
+      const result=await executeDoclingBackgroundJob(job.data,storage,executor);
+      if(result==="SKIPPED_BUSY"){
+        // Manual BullMQ rate limit preserves attemptsMade and keeps this job
+        // queued. Completing it would strand the PENDING PG task under the
+        // deterministic Redis job ID; an ordinary error would waste retries.
+        await worker.rateLimit(30_000);
+        throw Worker.RateLimitError();
+      }
+      return result;
+    }catch(error){
+      if(error instanceof RateLimitError)throw error;
+      throw new Error("DOCLING_LAYOUT_BACKGROUND_JOB_REJECTED");
+    }
   },{
     connection:createRedisConnection(environment.REDIS_URL),
     concurrency:1,
+    // Required for BullMQ's manual rateLimit; this is a small additional
+    // Redis throttle, NOT the cross-host PostgreSQL resource authority.
+    limiter:{max:1,duration:1_000},
     ...(options?.prefix?{prefix:options.prefix}:{}),
   });
+  return worker;
 }
 
 /**
