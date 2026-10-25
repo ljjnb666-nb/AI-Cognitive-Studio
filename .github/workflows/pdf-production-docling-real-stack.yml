@@ -62,6 +62,12 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $stage='CHECKOUT'
+          # Cleanup is authorized only after we attempt to create our random project.
+          # Never call Docker on a host where the daemon is absent.
+          $composeAttempted=$false
+          $cleanupFailed=$false
+          $failedStage=$null
+          $receiptVerified=$false
           $project='acsdocling'+[guid]::NewGuid().ToString('N').Substring(0,12)
           $root=(Resolve-Path '.\acs-docling-real').Path
           $compose=Join-Path $root 'tools\pdf-docling-real-stack\compose.yml'
@@ -110,6 +116,8 @@ jobs:
             }
             New-Item -ItemType Directory -Path $scratch | Out-Null
             $stage='ISOLATED_SERVICES'
+            # Set BEFORE compose up: even a partial creation must be removed.
+            $composeAttempted=$true
             & docker compose -p $project -f $compose up -d --wait --pull never postgres redis minio *> $null
             Check-Exit
             & docker compose -p $project -f $compose run --rm --no-deps minio-init *> $null
@@ -158,15 +166,37 @@ jobs:
                 'ACS_DOCLING_REAL_STACK_GOLD=NOT_APPROVED')) {
                 if (@($lines | Where-Object { $_ -ceq $marker }).Count -ne 1) { throw 'RECEIPT_INVALID' }
               }
-              Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=PASS'
+              $receiptVerified=$true
             } finally { Pop-Location }
           } catch {
-            Write-Output ('ACS_DOCLING_REAL_STACK_FAILURE_STAGE=' + $stage)
-            Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=REJECTED'
-            exit 2
+            # Stage codes only. Exception messages can include private paths.
+            $failedStage=$stage
           } finally {
-            & docker compose -p $project -f $compose down --volumes --remove-orphans *> $null
+            if ($composeAttempted) {
+              try {
+                & docker compose -p $project -f $compose down --volumes --remove-orphans *> $null
+                if ($LASTEXITCODE -ne 0) { $cleanupFailed=$true }
+              } catch {
+                $cleanupFailed=$true
+              }
+            }
             if (Test-Path -LiteralPath $scratch -PathType Container) {
-              Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+              try {
+                Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Stop
+              } catch {
+                $cleanupFailed=$true
+              }
             }
           }
+          if ($null -ne $failedStage) {
+            Write-Output ('ACS_DOCLING_REAL_STACK_FAILURE_STAGE=' + $failedStage)
+            if ($cleanupFailed) { Write-Output 'ACS_DOCLING_REAL_STACK_CLEANUP=FAILED' }
+            Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=REJECTED'
+            exit 2
+          }
+          if ($cleanupFailed -or -not $receiptVerified) {
+            Write-Output 'ACS_DOCLING_REAL_STACK_FAILURE_STAGE=CLEANUP_OR_RECEIPT'
+            Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=REJECTED'
+            exit 2
+          }
+          Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=PASS'
