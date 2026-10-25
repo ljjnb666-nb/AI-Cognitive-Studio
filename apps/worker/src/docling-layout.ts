@@ -175,6 +175,7 @@ export async function dispatchDoclingLayoutSweep(
       status:"SUCCEEDED",
       completedAt:{gte:earliest},
       sourceDocument:{mediaType:"application/pdf"},
+      extraction:{is:{status:"SUCCEEDED"}},
     },
     orderBy:[{completedAt:"asc"},{id:"asc"}],
     take,
