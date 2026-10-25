@@ -12,7 +12,7 @@ import {
   recoverDoclingLayoutTasks,
   type DoclingLayoutQueueData,
 } from "../src/docling-layout.js";
-import { claimDoclingTask, ensureDoclingTask, finishDoclingTask } from "../src/docling-task-ledger.js";
+import { claimDoclingTask, ensureDoclingTask, finishDoclingTask, renewDoclingTaskLease } from "../src/docling-task-ledger.js";
 import { inspectAndPersistDoclingLayoutSidecar } from "@ai-cognitive/ingestion";
 
 const modelSha="b".repeat(64);
@@ -194,11 +194,15 @@ describe("Docling background dispatch (real PostgreSQL, synthetic source only)",
       if(!ownerA)throw Error("EXPECTED_OWNER");
       expect(ownerA.attempt).toBe(1);
       expect(await claimDoclingTask(task.id)).toBeNull();
+      expect(await renewDoclingTaskLease(ownerA)).toBe(true);
       await prisma.doclingLayoutTask.update({
         where:{id:task.id},data:{leaseUntil:new Date("2000-01-01T00:00:00Z")},
       });
+      expect(await renewDoclingTaskLease(ownerA)).toBe(false);
       const ownerB=await claimDoclingTask(task.id);
       expect(ownerB?.attempt).toBe(2);
+      expect(await renewDoclingTaskLease(ownerA)).toBe(false);
+      expect(await renewDoclingTaskLease(ownerB!)).toBe(true);
       expect(ownerB?.token).not.toBe(ownerA.token);
       const storage=new SyntheticStorage();
       const fake:DoclingLayoutHandle={
@@ -230,6 +234,7 @@ describe("Docling background dispatch (real PostgreSQL, synthetic source only)",
         ...common,claim:{id:ownerB!.id,token:ownerB!.token},
       })).resolves.toMatchObject({reused:false,authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE"});
       expect(await finishDoclingTask(ownerB!,true)).toBe(true);
+      expect(await renewDoclingTaskLease(ownerB!)).toBe(false);
       expect(await claimDoclingTask(task.id)).toBeNull();
       expect((await prisma.doclingLayoutTask.findUniqueOrThrow({where:{id:task.id}})))
         .toMatchObject({status:"SUCCEEDED",attemptCount:2,claimToken:null});
