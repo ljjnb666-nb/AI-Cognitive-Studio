@@ -1,0 +1,73 @@
+name: B03 B15 Private Candidate Source Review v16
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-private-review:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b03-b15-private-candidate-review-v16-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Synthetic sources, XSS safety and immutable audit
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b03_b15_private_candidate_review_v16.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b03_b15_private_candidate_review_v16.py' -v
+          echo 'ACS_V16_SYNTHETIC=PASS'
+          echo 'ACS_V16_PUBLIC_PRIVATE_BOOK_DATA=NONE'
+          echo 'ACS_V16_PUBLIC_MODEL_CALLS=0'
+          echo 'ACS_V16_INDEPENDENT_GOLD=NOT_APPROVED'
+      - name: Parse owner-only Windows PowerShell before private execution
+        shell: pwsh
+        run: |
+          $tokens=$null
+          $errors=$null
+          $script=(Resolve-Path 'tools/pdf-parser-benchmark/scripts/ebook_b03_b15_private_candidate_review_windows_v16.ps1').Path
+          [System.Management.Automation.Language.Parser]::ParseFile($script,[ref]$tokens,[ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw 'V16_WINDOWS_POWERSHELL_PARSER_REJECTED' }
+          Write-Output 'ACS_V16_WINDOWS_SYNTAX=PASS'
+
+  owner-only-offline-private-review:
+    needs: synthetic-private-review
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b03-b15-private-candidate-review-v16-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-v16-review
+          persist-credentials: false
+          clean: false
+      - name: Verify v13 source bytes, v14/v15 saved candidates and private review packet
+        shell: powershell
+        timeout-minutes: 24
+        run: |
+          $ErrorActionPreference='Stop'
+          & .\acs-v16-review\tools\pdf-parser-benchmark\scripts\ebook_b03_b15_private_candidate_review_windows_v16.ps1
+          if ($LASTEXITCODE -ne 0) { exit 2 }
