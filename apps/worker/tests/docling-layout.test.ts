@@ -131,4 +131,18 @@ describe("Docling lease heartbeat and safe stop",()=>{
     finish();
     await expect(result).rejects.toThrow("DOCLING_LAYOUT_HEARTBEAT_LOST");
   });
+  it("lease heartbeat loss aborts the model operation and never returns late success",async()=>{
+    const controller=new AbortController();
+    let aborted=false;
+    const work=withDoclingClaimHeartbeat(claim,async()=>{
+      await new Promise<void>(resolve=>{
+        controller.signal.addEventListener("abort",()=>{aborted=true;resolve();},{once:true});
+      });
+      return "FORBIDDEN_LATE_SUCCESS";
+    },{intervalMs:5,renew:async()=>false,onLost:()=>controller.abort()});
+    await expect(work).rejects.toThrow("DOCLING_LAYOUT_HEARTBEAT_LOST");
+    expect(aborted).toBe(true);
+    expect(controller.signal.aborted).toBe(true);
+  });
+
 });

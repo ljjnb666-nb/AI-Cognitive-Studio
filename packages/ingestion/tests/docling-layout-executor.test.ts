@@ -141,4 +141,28 @@ describe("Docling Standard offline layout candidate",()=>{
     await ex.close();
     await expect(operation).resolves.toEqual({status:"FAILED",reason:"REJECTED"});
   });
+  it("a caller AbortSignal stops the subprocess without granting success",async()=>{
+    const external=new AbortController();
+    let begun!:()=>void;
+    const started=new Promise<void>(resolve=>{begun=resolve;});
+    const runner=vi.fn(async(_program:string,_args:string[],options:BoundedSpawnOptions)=>{
+      begun();
+      return new Promise<BoundedSpawnResult>(resolve=>{
+        options.abortSignal?.addEventListener("abort",()=>{
+          resolve(okay("",{code:null,aborted:true,treeTerminationConfirmed:true}));
+        },{once:true});
+      });
+    });
+    const executor=createDoclingLayoutCandidateExecutor(config,{artifactSha256:sha},runner);
+    const work=executor.inspect({pdfBytes:pdf,physicalPageIndex:1,signal:external.signal});
+    await started;
+    external.abort();
+    await expect(work).resolves.toEqual({status:"FAILED",reason:"CLOSING"});
+    expect(runner).toHaveBeenCalledTimes(1);
+    await expect(executor.inspect({pdfBytes:pdf,physicalPageIndex:1,signal:external.signal}))
+      .resolves.toEqual({status:"FAILED",reason:"CLOSING"});
+    expect(runner).toHaveBeenCalledTimes(1);
+    await executor.close();
+  });
+
 });
