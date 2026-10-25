@@ -34,6 +34,8 @@ describe("source ingestion OCR runtime resolution", () => {
   it("resolves a live executor runtime whose provenance is the verified pinned version", async () => {
     const runtime = (await resolveSourceIngestionOcrExecutor(configuredEnvironment()))!;
     expect(runtime.pdfOcrExecutor.descriptor).toMatchObject({ name: "mineru", version: "4.0.3", parserMode: "flash", modelRevision: null });
+    expect(runtime.kind).toBe("mineru");
+    if (runtime.kind !== "mineru") throw new Error("EXPECTED_MINERU_RUNTIME");
     expect(runtime.config.version).toBe("4.0.3");
     expect(typeof runtime.close).toBe("function");
     void runtime.close();
