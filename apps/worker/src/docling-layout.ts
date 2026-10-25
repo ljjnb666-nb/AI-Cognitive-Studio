@@ -1,6 +1,6 @@
 import { Queue, Worker } from "bullmq";
 import { prisma } from "@ai-cognitive/db";
-import { claimDoclingTask, ensureDoclingTask, finishDoclingTask, markLegacyDoclingSnapshotSettled, permanentlyFailExhaustedDoclingTask, DOCLING_TASK_MAX_ATTEMPTS } from "./docling-task-ledger.js";
+import { claimDoclingTask, ensureDoclingTask, finishDoclingTask, markLegacyDoclingSnapshotSettled, permanentlyFailExhaustedDoclingTask, withDoclingClaimHeartbeat, DOCLING_TASK_MAX_ATTEMPTS } from "./docling-task-ledger.js";
 import {
   createDoclingLayoutCandidateExecutor,
   inspectAndPersistDoclingLayoutSidecar,
@@ -149,17 +149,23 @@ export async function executeDoclingBackgroundJob(
   }
 
   try{
-    // Bounded source read occurs after durable claim, before candidate model.
-    const bytes=await readBoundedPdf(storage,run.sourceDocument.storageKey);
-    const receipt=await inspectAndPersistDoclingLayoutSidecar({
-      workspaceId:run.workspaceId,
-      sourceDocumentId:run.sourceDocumentId,
-      ingestionRunId:run.id,
-      physicalPageIndex:data.physicalPageIndex,
-      pdfBytes:bytes,
-      storage,executor,
-      ...(claim?{claim:{id:claim.id,token:claim.token}}:{}),
-    });
+    const work=async()=>{
+      // Heartbeat spans the original source read, Docling conversion,
+      // bounded S3 write and the fenced PostgreSQL snapshot transaction.
+      const bytes=await readBoundedPdf(storage,run.sourceDocument.storageKey);
+      return inspectAndPersistDoclingLayoutSidecar({
+        workspaceId:run.workspaceId,
+        sourceDocumentId:run.sourceDocumentId,
+        ingestionRunId:run.id,
+        physicalPageIndex:data.physicalPageIndex,
+        pdfBytes:bytes,
+        storage,executor,
+        ...(claim?{claim:{id:claim.id,token:claim.token}}:{}),
+      });
+    };
+    const receipt=claim
+      ? await withDoclingClaimHeartbeat(claim,work)
+      : await work();
     if(claim && !(await finishDoclingTask(claim,true)))
       throw new Error("DOCLING_LAYOUT_CLAIM_LOST");
     return receipt.reused?"SNAPSHOT_REUSED":"SNAPSHOT_CREATED";
