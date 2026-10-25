@@ -35,6 +35,12 @@ export const environmentSchema = z.object({
   // root; tier pinned to flash) lives in the ingestion MinerU config resolver,
   // which fails fast at worker startup.
   OCR_PROVIDER: z.enum(["mineru", "rapidocr"]).optional(),
+  // Independent post-publication, non-authoritative Docling layout candidate
+  // queue; disabled unless explicitly enabled. Never changes PDF OCR provider.
+  DOCLING_LAYOUT_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
+  DOCLING_LAYOUT_PYTHON_PATH: z.string().min(1).optional(),
+  DOCLING_LAYOUT_ARTIFACTS_PATH: z.string().min(1).optional(),
+
   // Opt-in isolated RapidOCR 3.9.2/ONNXRuntime 1.22.1 (existing offline
   // models only). Does not change the default PDF.js or MinerU route.
   RAPIDOCR_PYTHON_PATH: z.string().min(1).optional(),
