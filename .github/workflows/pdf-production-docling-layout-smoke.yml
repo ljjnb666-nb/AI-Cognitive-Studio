@@ -97,7 +97,11 @@ jobs:
             $env:ALL_PROXY='http://127.0.0.1:1'
             $env:NO_PROXY='*'
             $out=@(& $python $smoke --child $child --artifacts $allowed[0] 2>$null)
-            if ($LASTEXITCODE -ne 0) { throw 'DOCLING_SYNTHETIC_SMOKE_FAILED' }
+            if ($LASTEXITCODE -ne 0) {
+              $safe = @($out | Where-Object { $_ -match '^ACS_DOCLING_LAYOUT_FAILURE_STAGE=(MODEL_PROBE|SYNTHETIC_PDF_CREATE|SECOND_PAGE_CONVERT|CANDIDATE_PROTOCOL|PAGE_ISOLATION_CHECK)$' })
+              if ($safe.Count -eq 1) { Write-Output $safe[0] }
+              throw 'DOCLING_SYNTHETIC_SMOKE_FAILED'
+            }
             foreach ($marker in @('ACS_DOCLING_LAYOUT_PINNED_ASSETS=PASS',
                 'ACS_DOCLING_LAYOUT_REAL_SECOND_PAGE=PASS',
                 'ACS_DOCLING_LAYOUT_FIRST_PAGE_LEAKAGE=ZERO',
