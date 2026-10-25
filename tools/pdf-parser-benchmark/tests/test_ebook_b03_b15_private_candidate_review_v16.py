@@ -88,7 +88,6 @@ class PrivateCandidateReviewTests(unittest.TestCase):
             self.assertFalse(target.exists())
             unknown=[r for r in report["regions"] if r["region"]=="R2C2"]
             self.assertEqual(unknown[0]["state"],"CHARGE_OUTCOME_UNKNOWN_NEVER_AUTO_RETRY")
-            self.assertIn("NOT_APPROVED",stage.main(["--private-root",str(root),"--write"]).__str__() if False else "NOT_APPROVED")
             self.assertEqual(sum(r["state"]=="MODEL_CANDIDATE_NOT_GOLD" for r in report["regions"]),3)
 
     def test_source_tile_changed_fails_closed_without_writes(self):
