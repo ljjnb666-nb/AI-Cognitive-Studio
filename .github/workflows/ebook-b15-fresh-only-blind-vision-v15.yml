@@ -1,0 +1,74 @@
+name: B15 Fresh-Only Blind Source Vision v15
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-fresh-only:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-fresh-only-vision-v15-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline synthetic exact-state no-duplicate-cloud tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0 pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b15_fresh_only_resume_v15.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b15_fresh_only_resume_v15.py' -v
+          echo 'ACS_V15_FRESH_ONLY_SYNTHETIC=PASS'
+          echo 'ACS_V15_PUBLIC_CLOUD_REQUESTS=0'
+          echo 'ACS_V15_INDEPENDENT_GOLD=NOT_APPROVED'
+      - name: Parse Windows owner-only script before real execution
+        shell: pwsh
+        run: |
+          $tokens=$null
+          $errors=$null
+          $path=(Resolve-Path 'tools/pdf-parser-benchmark/scripts/ebook_b15_fresh_only_resume_windows_v15.ps1').Path
+          [System.Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw 'V15_WINDOWS_POWERSHELL_PARSER_REJECTED' }
+          Write-Output 'ACS_V15_WINDOWS_SYNTAX=PASS'
+
+  owner-only-one-fresh-B15:
+    needs: synthetic-fresh-only
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b15-fresh-only-vision-v15-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 23
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      ACS_GLM_VISION_API_KEY: ${{ secrets.ACS_GLM_VISION_API_KEY || secrets.ZHIPU_API_KEY }}
+      GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-v15-fresh
+          persist-credentials: false
+          clean: false
+      - name: Exactly one NEW B15 private visual call, never retry uncertain B03
+        shell: powershell
+        timeout-minutes: 17
+        run: |
+          $ErrorActionPreference='Stop'
+          & .\acs-v15-fresh\tools\pdf-parser-benchmark\scripts\ebook_b15_fresh_only_resume_windows_v15.ps1
+          if ($LASTEXITCODE -ne 0) { exit 2 }
