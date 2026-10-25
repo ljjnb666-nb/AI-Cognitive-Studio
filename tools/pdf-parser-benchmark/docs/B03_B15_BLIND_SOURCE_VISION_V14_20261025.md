@@ -21,6 +21,8 @@
 
 GitHub CI、仓库和 PR 不接收 PNG、文字、模型回复、完整原书哈希、源图坐标或密钥。含原文的 JSON 候选只保留在私有 D:。
 
+已核验第一轮准确 HEAD eeea907aa1e7157b87ca55280330ce91924599ba：Windows 来源预检 PASS、云端步骤 NOT_EXECUTED（Runner 未见可用环境密钥），不可标记为视觉候选已生成。工作流已追加对 GitHub Actions 同仓库 owner 级可选机密 ACS_GLM_VISION_API_KEY / GLM_API_KEY 的映射；密钥由用户在 GitHub Secrets 自行配置或继续从 Runner 私有环境传入，仓库绝不保存值。后续新 HEAD 必须独立验收，不复用首次成功的离线 preflight 结论。
+
 对于每次云调用，先以 O_EXCL 落地不可重试 journal，再发请求。如果网络超时或进程断开，状态视为「可能已经扣费」，没有人工处置不会再次调用；不会无限重试或意外放大成本。已有候选可以无重复付费进行 audit-only。
 
 目标存储目录：
