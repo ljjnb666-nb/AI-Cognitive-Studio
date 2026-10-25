@@ -32,6 +32,8 @@ export type DoclingSidecarInput = {
   workspaceId:string;sourceDocumentId:string;ingestionRunId:string;
   physicalPageIndex:number;pdfBytes:Uint8Array;
   storage:StorageProvider;executor:DoclingLayoutHandle;
+  /** Optional PostgreSQL owner fence for queue-managed execution. */
+  claim?:{id:string;token:string};
 };
 export type DoclingSidecarReceipt = {
   authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE";
@@ -159,7 +161,29 @@ export async function inspectAndPersistDoclingLayoutSidecar(
     tableItemCount:result.candidate.tableItemCount,
   };
   try{
-    const created=await prisma.doclingLayoutSnapshot.create({data});
+    const created=input.claim
+      ? await prisma.$transaction(async tx=>{
+          // Row lock and snapshot INSERT share one transaction. A reclaimed or
+          // expired previous owner may leave an unreferenced S3 blob, but it
+          // cannot persist a metadata record under a stale claim token.
+          const alive=await tx.$queryRaw<Array<{id:string}>>`
+            SELECT "id" FROM "DoclingLayoutTask"
+            WHERE "id" = ${input.claim!.id}
+              AND "claimToken" = ${input.claim!.token}
+              AND "status" = 'RUNNING'::"DoclingLayoutTaskStatus"
+              AND "leaseUntil" > NOW()
+              AND "ingestionRunId" = ${input.ingestionRunId}
+              AND "workspaceId" = ${input.workspaceId}
+              AND "sourceDocumentId" = ${input.sourceDocumentId}
+              AND "physicalPageIndex" = ${input.physicalPageIndex}
+              AND "routingGeneration" = ${generation}
+              AND "modelSha256" = ${input.executor.modelSha256}
+            FOR UPDATE
+          `;
+          if(alive.length!==1)throw new Error("DOCLING_LAYOUT_STALE_OWNER");
+          return tx.doclingLayoutSnapshot.create({data});
+        })
+      : await prisma.doclingLayoutSnapshot.create({data});
     return {
       authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE",id:created.id,
       physicalPageIndex:created.physicalPageIndex,parserName:DOCLING_LAYOUT_ID,

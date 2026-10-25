@@ -1,5 +1,6 @@
 import { Queue, Worker } from "bullmq";
 import { prisma } from "@ai-cognitive/db";
+import { claimDoclingTask, ensureDoclingTask, finishDoclingTask, markLegacyDoclingSnapshotSettled, permanentlyFailExhaustedDoclingTask, DOCLING_TASK_MAX_ATTEMPTS } from "./docling-task-ledger.js";
 import {
   createDoclingLayoutCandidateExecutor,
   inspectAndPersistDoclingLayoutSidecar,
@@ -33,14 +34,17 @@ export type DoclingLayoutRuntime = {
   cursor: DoclingSweepCursor;
 };
 
-export function doclingLayoutJobId(data: DoclingLayoutQueueData): string {
+export function doclingLayoutJobId(data: DoclingLayoutQueueData, spentAttempts = 0): string {
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(data.ingestionRunId) ||
       !Number.isSafeInteger(data.physicalPageIndex) || data.physicalPageIndex < 0 ||
       !/^[a-f0-9]{64}$/.test(data.modelSha256))
     throw new Error("DOCLING_LAYOUT_JOB_IDENTITY_INVALID");
   // BullMQ job IDs cannot contain colons; the first-party version is part of
   // the queue name so a stable run/page/model identity is sufficient.
-  return data.ingestionRunId + "-" + data.physicalPageIndex + "-" + data.modelSha256;
+  if(!Number.isSafeInteger(spentAttempts)||spentAttempts<0||spentAttempts>=DOCLING_TASK_MAX_ATTEMPTS)
+    throw new Error("DOCLING_LAYOUT_JOB_ATTEMPT_INVALID");
+  return data.ingestionRunId + "-" + data.physicalPageIndex + "-" + data.modelSha256 +
+    (spentAttempts?"-retry-"+spentAttempts:"");
 }
 
 function storageFor(environment: Environment): StorageProvider {
@@ -107,7 +111,7 @@ export async function executeDoclingBackgroundJob(
   data:DoclingLayoutQueueData,
   storage:StorageProvider,
   executor:DoclingLayoutHandle,
-):Promise<"SNAPSHOT_CREATED"|"SNAPSHOT_REUSED"> {
+):Promise<"SNAPSHOT_CREATED"|"SNAPSHOT_REUSED"|"SKIPPED_BUSY"> {
   doclingLayoutJobId(data);
   if(data.modelSha256!==executor.modelSha256)
     throw new Error("DOCLING_LAYOUT_MODEL_CHANGED");
@@ -122,18 +126,47 @@ export async function executeDoclingBackgroundJob(
   const pages=selectDoclingLayoutPages(parseRoutingPlan(run.routingPlan));
   if(!pages.includes(data.physicalPageIndex))
     throw new Error("DOCLING_LAYOUT_PAGE_NOT_ELIGIBLE");
-  // The sidecar service rechecks the source digest, tenant lineage and
-  // immutable page/model identity before any snapshot can be committed.
-  const bytes=await readBoundedPdf(storage,run.sourceDocument.storageKey);
-  const receipt=await inspectAndPersistDoclingLayoutSidecar({
-    workspaceId:run.workspaceId,
-    sourceDocumentId:run.sourceDocumentId,
-    ingestionRunId:run.id,
-    physicalPageIndex:data.physicalPageIndex,
-    pdfBytes:bytes,
-    storage,executor,
+
+  const task=await ensureDoclingTask({
+    ingestionRunId:run.id,physicalPageIndex:data.physicalPageIndex,
+    routingGeneration:run.routingGeneration,modelSha256:data.modelSha256,
+    workspaceId:run.workspaceId,sourceDocumentId:run.sourceDocumentId,
   });
-  return receipt.reused?"SNAPSHOT_REUSED":"SNAPSHOT_CREATED";
+  const claim=await claimDoclingTask(task.id);
+  if(!claim){
+    const current=await prisma.doclingLayoutTask.findUniqueOrThrow({where:{id:task.id}});
+    if(current.status==="RUNNING")return "SKIPPED_BUSY";
+    if(current.status!=="SUCCEEDED")throw new Error("DOCLING_LAYOUT_DURABLE_ATTEMPTS_EXHAUSTED");
+    // Completed rows only replay existing immutable metadata, never call model.
+    const snapshot=await prisma.doclingLayoutSnapshot.findUnique({
+      where:{byPageAndModel:{
+        ingestionRunId:run.id,physicalPageIndex:data.physicalPageIndex,
+        routingGeneration:run.routingGeneration,parserName:"docling-standard-layout",
+        parserVersion:"2.141.0",modelSha256:data.modelSha256,
+      }},
+    });
+    if(!snapshot)throw new Error("DOCLING_LAYOUT_TASK_SNAPSHOT_MISSING");
+  }
+
+  try{
+    // Bounded source read occurs after durable claim, before candidate model.
+    const bytes=await readBoundedPdf(storage,run.sourceDocument.storageKey);
+    const receipt=await inspectAndPersistDoclingLayoutSidecar({
+      workspaceId:run.workspaceId,
+      sourceDocumentId:run.sourceDocumentId,
+      ingestionRunId:run.id,
+      physicalPageIndex:data.physicalPageIndex,
+      pdfBytes:bytes,
+      storage,executor,
+      ...(claim?{claim:{id:claim.id,token:claim.token}}:{}),
+    });
+    if(claim && !(await finishDoclingTask(claim,true)))
+      throw new Error("DOCLING_LAYOUT_CLAIM_LOST");
+    return receipt.reused?"SNAPSHOT_REUSED":"SNAPSHOT_CREATED";
+  }catch(error){
+    if(claim)await finishDoclingTask(claim,false);
+    throw error;
+  }
 }
 
 export function createDoclingLayoutWorker(
@@ -202,10 +235,26 @@ export async function dispatchDoclingLayoutSweep(
           }},
           select:{id:true},
         });
-        if(existing)continue;
+        const task=await ensureDoclingTask({
+          ingestionRunId:run.id,physicalPageIndex,
+          routingGeneration:run.routingGeneration,modelSha256,
+          workspaceId:run.workspaceId,sourceDocumentId:run.sourceDocumentId,
+        });
+        if(existing){
+          await markLegacyDoclingSnapshotSettled(task.id);
+          continue;
+        }
+        if(task.status==="SUCCEEDED"||task.status==="FAILED")continue;
+        if(task.attemptCount>=DOCLING_TASK_MAX_ATTEMPTS){
+          await permanentlyFailExhaustedDoclingTask(task.id);
+          continue;
+        }
+        if(task.status==="RUNNING"&&task.leaseUntil&&task.leaseUntil>new Date())continue;
         const payload={ingestionRunId:run.id,physicalPageIndex,modelSha256};
         await queue.add(DOCLING_LAYOUT_JOB,payload,{
-          jobId:doclingLayoutJobId(payload),
+          // A retry gets a NEW Redis delivery ID while sharing the same
+          // DB claim and total-attempt budget, surviving total Redis loss.
+          jobId:doclingLayoutJobId(payload,task.attemptCount),
         });
         enqueued++;
       }
@@ -213,6 +262,84 @@ export async function dispatchDoclingLayoutSweep(
     // Advancing once per fully scanned run is safe under partial queue
     // errors; a retry repeats only this run, with deduped IDs.
     cursor.afterRunId=run.id;
+  }
+  return enqueued;
+}
+
+
+/**
+ * Independent Redis-loss / crash-recovery scan. Not limited to the 7-day
+ * discovery window: already accepted durable tasks remain recoverable even
+ * when the originating PDF is old. Only expired leases or stale PENDING
+ * delivery rows are considered; terminal states are never re-enqueued.
+ */
+export async function recoverDoclingLayoutTasks(
+  queue:Pick<Queue<DoclingLayoutQueueData>,"add">,
+  modelSha256:string,
+  options:{now?:Date;take?:number}={},
+):Promise<number> {
+  if(!/^[a-f0-9]{64}$/.test(modelSha256))
+    throw new Error("DOCLING_LAYOUT_MODEL_INVALID");
+  const take=options.take??MAX_RUNS_PER_SWEEP;
+  if(!Number.isSafeInteger(take)||take<1||take>MAX_RUNS_PER_SWEEP)
+    throw new Error("DOCLING_LAYOUT_SWEEP_BUDGET_INVALID");
+  const now=options.now??new Date();
+  const pendingBefore=new Date(now.getTime()-120_000);
+  const tasks=await prisma.doclingLayoutTask.findMany({
+    where:{
+      modelSha256,
+      OR:[
+        {status:"PENDING",updatedAt:{lte:pendingBefore}},
+        {status:"RUNNING",leaseUntil:{lte:now}},
+      ],
+    },
+    orderBy:[{updatedAt:"asc"},{id:"asc"}],
+    take,
+  });
+  let enqueued=0;
+  for(const task of tasks){
+    if(task.attemptCount>=DOCLING_TASK_MAX_ATTEMPTS){
+      await permanentlyFailExhaustedDoclingTask(task.id);
+      continue;
+    }
+    const snapshot=await prisma.doclingLayoutSnapshot.findUnique({
+      where:{byPageAndModel:{
+        ingestionRunId:task.ingestionRunId,
+        physicalPageIndex:task.physicalPageIndex,
+        routingGeneration:task.routingGeneration,
+        parserName:"docling-standard-layout",parserVersion:"2.141.0",
+        modelSha256,
+      }},
+      select:{id:true},
+    });
+    if(snapshot){
+      await markLegacyDoclingSnapshotSettled(task.id);
+      continue;
+    }
+    const run=await prisma.ingestionRun.findUnique({
+      where:{id:task.ingestionRunId},
+      select:{status:true,routingGeneration:true,routingPlan:true,
+        extraction:{select:{status:true}}},
+    });
+    if(!run||run.status!=="SUCCEEDED"||run.extraction?.status!=="SUCCEEDED"||
+       run.routingGeneration!==task.routingGeneration||run.routingPlan===null){
+      continue;
+    }
+    let eligible=false;
+    try{
+      eligible=selectDoclingLayoutPages(parseRoutingPlan(run.routingPlan))
+        .includes(task.physicalPageIndex);
+    }catch{eligible=false;}
+    if(!eligible)continue;
+    const payload={
+      ingestionRunId:task.ingestionRunId,
+      physicalPageIndex:task.physicalPageIndex,
+      modelSha256,
+    };
+    await queue.add(DOCLING_LAYOUT_JOB,payload,{
+      jobId:doclingLayoutJobId(payload,task.attemptCount),
+    });
+    enqueued++;
   }
   return enqueued;
 }
