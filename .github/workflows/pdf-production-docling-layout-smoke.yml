@@ -60,11 +60,13 @@ jobs:
         timeout-minutes: 16
         run: |
           $ErrorActionPreference='Stop'
+          $stage='CHECKOUT'
           try {
             $checkout=(Resolve-Path -LiteralPath '.\acs-prod-docling').Path
             if ((git -C $checkout rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) {
               throw 'EXACT_COMMIT_MISMATCH'
             }
+            $stage='PREPARE_RUNTIME'
             $root='D:\ai-cognitive-pdf-benchmark-data'
             $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
             $child=Join-Path $checkout 'packages\ingestion\src\docling\docling-layout-child.py'
@@ -80,6 +82,7 @@ jobs:
               (Join-Path $root 'models\docling-standard'),
               (Join-Path $root 'models\docling')
             )
+            $stage='MODEL_ASSET_DISCOVERY'
             $allowed=@()
             foreach ($candidate in $candidates) {
               if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { continue }
@@ -96,8 +99,23 @@ jobs:
             $env:HTTPS_PROXY='http://127.0.0.1:1'
             $env:ALL_PROXY='http://127.0.0.1:1'
             $env:NO_PROXY='*'
-            $out=@(& $python $smoke --child $child --artifacts $allowed[0] 2>$null)
-            if ($LASTEXITCODE -ne 0) {
+            $stage='SYNTHETIC_PDF_PROCESS'
+            # PowerShell 5.1 can throw on native stderr before exposing the
+            # child's structured stdout. Capture in unique runner-only files.
+            $scratch=Join-Path $env:RUNNER_TEMP ('acs-docling-smoke-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
+            try {
+              $stdoutFile=Join-Path $scratch 'stdout.txt'
+              $stderrFile=Join-Path $scratch 'stderr.txt'
+              $argsList=@($smoke,'--child',$child,'--artifacts',$allowed[0])
+              $childProc=Start-Process -FilePath $python -ArgumentList $argsList -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile -ErrorAction Stop
+              $childExit=$childProc.ExitCode
+              $out=@(Get-Content -LiteralPath $stdoutFile -ErrorAction Stop | Select-Object -First 64)
+            } finally {
+              # stderr never leaves the runner, and no original PDF is read.
+              Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if ($childExit -ne 0) {
               $safe = @($out | Where-Object { $_ -match '^ACS_DOCLING_LAYOUT_FAILURE_STAGE=(MODEL_PROBE|SYNTHETIC_PDF_CREATE|SECOND_PAGE_CONVERT|CANDIDATE_PROTOCOL|PAGE_ISOLATION_CHECK)$' })
               if ($safe.Count -eq 1) { Write-Output $safe[0] }
               $reasons = @($out | Where-Object { $_ -match '^ACS_DOCLING_LAYOUT_FAILURE_REASON=(START|DOCLING_VERSION|PYMUPDF_IMPORT|DOCLING_IMPORT|ARTIFACT_DIRECTORY|ARTIFACT_INVENTORY|ARTIFACT_HASH|ARTIFACT_WEIGHT_PRESENCE)$' })
@@ -108,6 +126,7 @@ jobs:
               }
               throw 'DOCLING_SYNTHETIC_SMOKE_FAILED'
             }
+            $stage='RECEIPT_VALIDATION'
             foreach ($marker in @('ACS_DOCLING_LAYOUT_PINNED_ASSETS=PASS',
                 'ACS_DOCLING_LAYOUT_REAL_SECOND_PAGE=PASS',
                 'ACS_DOCLING_LAYOUT_FIRST_PAGE_LEAKAGE=ZERO',
@@ -123,6 +142,7 @@ jobs:
             Write-Output 'ACS_DOCLING_LAYOUT_CLOUD_CALLS=ZERO'
             Write-Output 'ACS_DOCLING_LAYOUT_GOLD=NOT_APPROVED'
           } catch {
+            Write-Output ('ACS_DOCLING_LAYOUT_WINDOWS_STAGE=' + $stage)
             Write-Output 'ACS_DOCLING_LAYOUT_WINDOWS=REJECTED'
             exit 2
           }
