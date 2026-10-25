@@ -1,0 +1,90 @@
+name: Production PDF RapidOCR Synthetic Windows Smoke
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+
+jobs:
+  real-offline-rapidocr-smoke:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-rapidocr-production-adapter-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          persist-credentials: false
+          clean: false
+          path: acs-prod-rapidocr
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Real local model probe plus synthetic PDF OCR, zero book content
+        shell: powershell
+        timeout-minutes: 16
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-prod-rapidocr rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $envDir=Join-Path $root 'tool-env'
+            $privateScratch=Join-Path $root 'temp'
+            $worker='acs-prod-rapidocr/packages/ingestion/src/rapidocr/rapidocr-child.py'
+            if (-not (Test-Path -LiteralPath $worker -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $envDir -PathType Container) -or
+                -not (Test-Path -LiteralPath $privateScratch -PathType Container)) {
+              throw 'RAPIDOCR_PRIVATE_RUNTIME_PREREQUISITE_MISSING'
+            }
+            $pythonCandidates=@(Get-ChildItem -LiteralPath $envDir -Directory -ErrorAction Stop |
+              ForEach-Object { Join-Path $_.FullName 'Scripts\python.exe' } |
+              Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+            if ($pythonCandidates.Count -gt 12) { throw 'RAPIDOCR_PYTHON_CANDIDATES_TOO_MANY' }
+            $ready=@()
+            foreach ($python in $pythonCandidates) {
+              $receipt=@(& $python $worker --probe 2>$null)
+              if ($LASTEXITCODE -ne 0 -or $receipt.Count -ne 1) { continue }
+              try { $obj=$receipt[0] | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+              if ($obj.schemaVersion -eq 1 -and $obj.status -eq 'READY' -and
+                  $obj.rapidocr -eq '3.9.2' -and $obj.onnxruntime -eq '1.22.1' -and
+                  $obj.modelSha256 -match '^[a-f0-9]{64}$') {
+                $ready+=,$python
+              }
+            }
+            if ($ready.Count -ne 1) { throw 'RAPIDOCR_LOCAL_RUNTIME_NOT_UNIQUE_OR_NOT_READY' }
+            Write-Output 'ACS_PRODUCTION_RAPIDOCR_RUNTIME_PROBE=PASS'
+            $python=$ready[0]
+            $scratch=Join-Path $privateScratch ('acs-rapidocr-synthetic-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
+            try {
+              $pdf=Join-Path $scratch 'synthetic-english.pdf'
+              $code="import fitz,sys; d=fitz.open(); p=d.new_page(width=600,height=400); p.insert_text((40,110),'HELLO PDF RAPIDOCR OCR TEST',fontsize=28); d.save(sys.argv[1]); d.close()"
+              & $python -c $code $pdf 2>$null | Out-Null
+              if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pdf -PathType Leaf)) {
+                throw 'RAPIDOCR_SYNTHETIC_PDF_CREATION_FAILED'
+              }
+              $result=@(& $python $worker --pdf $pdf --page 0 2>$null)
+              if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1) {
+                throw 'RAPIDOCR_SYNTHETIC_OCR_EXECUTION_FAILED'
+              }
+              $ob=$result[0] | ConvertFrom-Json -ErrorAction Stop
+              if ($ob.status -ne 'SUCCEEDED' -or $ob.schemaVersion -ne 1 -or
+                  [string]::IsNullOrWhiteSpace($ob.text)) {
+                throw 'RAPIDOCR_SYNTHETIC_OCR_EMPTY'
+              }
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_SYNTHETIC_PDF=PASS'
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_MODEL_CALLS=1_OFFLINE'
+              Write-Output 'ACS_PRODUCTION_RAPIDOCR_PRIVATE_BOOK_READS=0'
+            } finally {
+              Remove-Item -LiteralPath $scratch -Force -Recurse -ErrorAction SilentlyContinue
+            }
+          } catch {
+            Write-Output 'ACS_PRODUCTION_RAPIDOCR_WINDOWS=REJECTED'
+            exit 2
+          }
