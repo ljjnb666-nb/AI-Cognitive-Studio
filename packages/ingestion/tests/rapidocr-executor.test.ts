@@ -149,6 +149,72 @@ describe("RapidOCR executor uses existing durable page seam",()=>{
       status:"FAILED",errorCode:"SOURCE_OCR_TIMEOUT",kind:"transient",
     });
   });
+
+  it("worker shutdown aborts its owned Python OCR child, waits for disposition and rejects new work",async()=>{
+    let started!: () => void;
+    const entered = new Promise<void>((resolve)=>{started=resolve;});
+    let abortSignal: AbortSignal | undefined;
+    const runner=vi.fn(async (_python:string,_args:string[],opts: {abortSignal?:AbortSignal})=>{
+      abortSignal=opts.abortSignal;
+      started();
+      return await new Promise<BoundedSpawnResult>((resolve)=>{
+        opts.abortSignal?.addEventListener("abort",()=>{
+          resolve(success("",{code:null,aborted:true,treeTerminationConfirmed:true}));
+        },{once:true});
+      });
+    });
+    const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner as never);
+    const running=executor.extractPage(request);
+    await entered;
+    await executor.close();
+    expect(abortSignal?.aborted).toBe(true);
+    await expect(running).resolves.toEqual({
+      status:"FAILED",errorCode:"SOURCE_OCR_PROCESS_FAILED",kind:"transient",
+    });
+    await expect(executor.extractPage(request)).resolves.toEqual({
+      status:"FAILED",errorCode:"SOURCE_OCR_PROCESS_FAILED",kind:"transient",
+    });
+    expect(runner).toHaveBeenCalledTimes(1);
+    await executor.close(); // idempotent: no fresh tasks
+  });
+  it("shutdown with unknown subprocess-tree termination is terminal, never safely retried",async()=>{
+    let started!:()=>void;
+    const entered=new Promise<void>((resolve)=>{started=resolve;});
+    const runner=vi.fn(async (_python:string,_args:string[],opts:{abortSignal?:AbortSignal})=>{
+      started();
+      return await new Promise<BoundedSpawnResult>((resolve)=>{
+        opts.abortSignal?.addEventListener("abort",()=>{
+          resolve(success("",{code:null,aborted:true,treeTerminationConfirmed:false}));
+        },{once:true});
+      });
+    });
+    const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner as never);
+    const running=executor.extractPage(request);
+    await entered;
+    await executor.close();
+    await expect(running).resolves.toEqual({
+      status:"FAILED",errorCode:"SOURCE_OCR_PROCESS_FAILED",kind:"terminal",
+    });
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+  it("a successful Python stdout racing with shutdown never gains publication authority",async()=>{
+    let started!:()=>void;
+    const entered=new Promise<void>((resolve)=>{started=resolve;});
+    const runner=vi.fn(async (_python:string,_args:string[],opts:{abortSignal?:AbortSignal})=>{
+      started();
+      return await new Promise<BoundedSpawnResult>((resolve)=>{
+        opts.abortSignal?.addEventListener("abort",()=>{
+          resolve(success(JSON.stringify({schemaVersion:1,status:"SUCCEEDED",text:"late success"})));
+        },{once:true});
+      });
+    });
+    const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner as never);
+    const running=executor.extractPage(request);
+    await entered;
+    await executor.close();
+    await expect(running).resolves.toMatchObject({status:"FAILED",kind:"terminal"});
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
   it("rejects invalid requested page before launching any child",async()=>{
     const runner=vi.fn(async()=>success("{}"));
     const executor=createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner);
