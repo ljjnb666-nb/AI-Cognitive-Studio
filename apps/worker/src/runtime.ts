@@ -8,7 +8,7 @@ import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPo
 import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudioGenerationWithQueue } from "./audio-generation.js";
 import { createShortVideoGenerationWorker, createShortVideoGenerationQueue, dispatchShortVideoGenerationWithQueue, type ShortVideoRuntimeAdapter } from "./short-video-generation.js";
 import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue, resolveSourceIngestionOcrExecutor, INGESTION_JOB } from "./source-ingestion.js";
-import { createDoclingLayoutQueue, createDoclingLayoutWorker, dispatchDoclingLayoutSweep, resolveDoclingBackgroundExecutor, type DoclingSweepCursor } from "./docling-layout.js";
+import { createDoclingLayoutQueue, createDoclingLayoutWorker, dispatchDoclingLayoutSweep, recoverDoclingLayoutTasks, resolveDoclingBackgroundExecutor, type DoclingSweepCursor } from "./docling-layout.js";
 import { reconcileIngestionDeliveries, reconcileOcrServerInstances, type IngestionReconciliationQueuePort } from "@ai-cognitive/ingestion";
 import { createBookAnalysisBootstrapWorker, createBookAnalysisBootstrapQueue, dispatchBookAnalysisBootstrapWithQueue, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "./book-analysis-bootstrap.js";
 import { createHealthCheckWorker } from "./worker.js";
@@ -153,7 +153,10 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const reconcileDoclingSidecars = doclingLayoutQueue && doclingLayoutExecutor
     ? (() => {
         const layout = doclingLayoutExecutor;
-        return dispatch("docling-layout-candidates", () => dispatchDoclingLayoutSweep(doclingLayoutQueue, layout.modelSha256, doclingSweepCursor), 60_000);
+        return dispatch("docling-layout-candidates", async () => {
+          await dispatchDoclingLayoutSweep(doclingLayoutQueue, layout.modelSha256, doclingSweepCursor);
+          await recoverDoclingLayoutTasks(doclingLayoutQueue, layout.modelSha256);
+        }, 60_000);
       })()
     : undefined;
   // Same-host OCR server reconciliation (RF01 P1-06): converges OcrServerInstance
