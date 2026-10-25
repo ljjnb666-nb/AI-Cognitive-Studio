@@ -17,12 +17,12 @@ import sys
 
 from ebook_fivebook_reference_gate import (
     compute as reference_compute, admit_reference, edit_distance, private_load,
-    snapshot_names, MAX_NORMALIZED,
+    snapshot_names, MAX_NORMALIZED, SHA,
 )
 from ebook_fivebook_three_engine_crossbook import (
     execute as threeway_execute, ENGINES, STANDARD_WORKER, MAX_MD, MAX_WORKER,
 )
-from ebook_multibook_native_matrix import audit_existing as native_audit, _private_folder, MAX_PNG
+from ebook_multibook_native_matrix import audit_existing as native_audit, _private_folder, MAX_PNG, TARGETS as NATIVE_BOOKS
 from ebook_multibook_rapidocr_matrix import audit_existing as rapid_audit
 from ebook_fivebook_mineru_basic_matrix import ALL_BOOKS, file_names
 from ebook_fivebook_text_consensus import lexical, mineru_lexical_source
@@ -69,6 +69,63 @@ def score_alnum_only(ref, predictions):
             for engine in ENGINES}
 
 
+def validated_parent_receipts(gold, three, native, rapid):
+    """Require one exact, mutually source-bound record per physical focus page.
+
+    Parent auditors protect their own receipts; this closes the *cross-parent*
+    join so extra/duplicate rows cannot vanish in a dictionary comprehension,
+    and a matching book/page with a different original PDF is never scored.
+    Applies even while all independent references are missing.
+    """
+    expected=set(ALL_BOOKS)
+
+    def index(rows, allowed):
+        if not isinstance(rows,list) or len(rows)!=len(allowed):
+            raise VisualGateError("GOLD_GRADE_PARENT_ROW_COVERAGE_INVALID")
+        out={}
+        for row in rows:
+            if not isinstance(row,dict):
+                raise VisualGateError("GOLD_GRADE_PARENT_ROW_COVERAGE_INVALID")
+            key=row.get("book_id")
+            if key not in allowed or key in out:
+                raise VisualGateError("GOLD_GRADE_PARENT_ROW_COVERAGE_INVALID")
+            out[key]=row
+        if set(out)!=allowed:
+            raise VisualGateError("GOLD_GRADE_PARENT_ROW_COVERAGE_INVALID")
+        return out
+
+    if (not isinstance(gold.get("corpus_id"),str) or
+            not gold["corpus_id"] or
+            rapid.get("corpus_id")!=gold["corpus_id"]):
+        raise VisualGateError("GOLD_GRADE_PARENT_CORPUS_CHANGED")
+    refs=index(gold.get("rows"),expected)
+    models=index(three.get("rows"),expected)
+    rapids=index(rapid.get("pages"),expected)
+    natives=index(native.get("rows"),set(NATIVE_BOOKS))
+    for book in ALL_BOOKS:
+        ref,model,rapidrow,nativebook=(refs[book],models[book],
+                                       rapids[book],natives[book])
+        page=ref.get("physical_page")
+        original=nativebook.get("source_document_sha256")
+        if (type(page) is not int or page<1 or
+                not isinstance(original,str) or SHA.fullmatch(original) is None or
+                ref.get("original_pdf_source_sha256_private")!=original or
+                model.get("same_original_single_page_sha256_private")!=original or
+                rapidrow.get("source_document_sha256")!=original or
+                model.get("physical_page")!=page or
+                rapidrow.get("physical_page")!=page or
+                model.get("rapidocr_rows_sha256_private")!=rapidrow.get("private_rows_sha256")):
+            raise VisualGateError("GOLD_GRADE_CROSS_PARENT_SOURCE_CHANGED")
+        pages=nativebook.get("pages")
+        matches=([p for p in pages if isinstance(p,dict) and
+                  p.get("physical_page")==page]
+                 if isinstance(pages,list) else [])
+        if (len(matches)!=1 or
+                rapidrow.get("render_png_sha256")!=matches[0].get("ocr_focus_png_sha256")):
+            raise VisualGateError("GOLD_GRADE_CROSS_PARENT_IMAGE_CHANGED")
+    return refs,models,rapids
+
+
 def compute(root,manifest,*,snapshot_version=1,
             reference_fn=reference_compute,three_fn=threeway_execute,
             native_fn=native_audit,rapid_fn=rapid_audit):
@@ -85,11 +142,7 @@ def compute(root,manifest,*,snapshot_version=1,
             three.get("corpus_id")!=gold.get("corpus_id") or
             native.get("corpus_id")!=gold.get("corpus_id")):
         raise VisualGateError("GOLD_GRADE_FIVEBOOK_PARENT_RECEIPTS_INVALID")
-    refs={x["book_id"]:x for x in gold["rows"]}
-    three_rows={x["book_id"]:x for x in three["rows"]}
-    rapids={x["book_id"]:x for x in rapid["pages"]}
-    if any(set(x)!=set(ALL_BOOKS) for x in (refs,three_rows,rapids)):
-        raise VisualGateError("GOLD_GRADE_FIVEBOOK_SET_CHANGED")
+    refs,three_rows,rapids=validated_parent_receipts(gold,three,native,rapid)
     _,reference_dir=snapshot_names(snapshot_version)
     rows=[]
     for book in ALL_BOOKS:
