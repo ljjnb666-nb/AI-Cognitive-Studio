@@ -1,4 +1,4 @@
-import { Queue, Worker } from "bullmq";
+import { Queue, Worker, RateLimitError } from "bullmq";
 import { prisma } from "@ai-cognitive/db";
 import { claimDoclingTask, ensureDoclingTask, finishDoclingTask, markLegacyDoclingSnapshotSettled, permanentlyFailExhaustedDoclingTask, withDoclingClaimHeartbeat, DOCLING_TASK_MAX_ATTEMPTS } from "./docling-task-ledger.js";
 import {
@@ -182,8 +182,7 @@ export function createDoclingLayoutWorker(
   environment:Environment,executor:DoclingLayoutHandle,options?:{prefix?:string;storage?:StorageProvider},
 ):Worker<DoclingLayoutQueueData> {
   const storage=options?.storage??storageFor(environment);
-  let worker!:Worker<DoclingLayoutQueueData>;
-  worker=new Worker<DoclingLayoutQueueData>(DOCLING_LAYOUT_QUEUE,async(job)=>{
+  const worker=new Worker<DoclingLayoutQueueData>(DOCLING_LAYOUT_QUEUE,async(job)=>{
     // Do not store provider/DB credentials or raw stderr in failed BullMQ
     // jobs. This candidate is never authoritative text publication.
     try{
@@ -197,7 +196,7 @@ export function createDoclingLayoutWorker(
       }
       return result;
     }catch(error){
-      if(error instanceof Error&&error.name==="RateLimitError")throw error;
+      if(error instanceof RateLimitError)throw error;
       throw new Error("DOCLING_LAYOUT_BACKGROUND_JOB_REJECTED");
     }
   },{
