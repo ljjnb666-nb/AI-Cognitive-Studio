@@ -62,9 +62,28 @@ export function resolveRapidOcrExecutorConfig(
   };
 }
 
-export function rapidOcrOfflineEnv(): NodeJS.ProcessEnv {
+/**
+ * Minimal child environment: untrusted PDFs are rendered in this Python
+ * process, so provider keys, database credentials and application secrets
+ * must not cross the OS process boundary. Windows Python/ONNX require a
+ * small set of system paths; user-defined PYTHONPATH/PYTHONHOME are excluded.
+ * Network proxies are explicitly pointed at the offline refusal endpoint.
+ */
+export function rapidOcrOfflineEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const system: NodeJS.ProcessEnv = {};
+  const passThrough = [
+    "PATH", "Path", "PATHEXT", "SystemRoot", "SYSTEMROOT", "WINDIR",
+    "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "LOCALAPPDATA",
+    "APPDATA", "SystemDrive", "COMSPEC", "LD_LIBRARY_PATH", "LANG",
+    "LC_ALL", "LC_CTYPE",
+  ] as const;
+  for (const key of passThrough) if (source[key] !== undefined) system[key] = source[key];
   return {
-    ...process.env,
+    ...system,
+    PYTHONNOUSERSITE: "1",
+    PYTHONDONTWRITEBYTECODE: "1",
+    PYTHONUNBUFFERED: "1",
+    PYTHONUTF8: "1",
     HF_HUB_OFFLINE: "1",
     TRANSFORMERS_OFFLINE: "1",
     OMP_NUM_THREADS: "2",
