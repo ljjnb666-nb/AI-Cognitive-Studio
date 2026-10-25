@@ -21,6 +21,7 @@ jobs:
         timeout-minutes: 5
         run: |
           $ErrorActionPreference='Stop'
+          $phase='ENUM_ENV'
           try {
             $envDir='D:\ai-cognitive-pdf-benchmark-data\tool-env'
             if (-not (Test-Path -LiteralPath $envDir -PathType Container)) {
@@ -31,6 +32,7 @@ jobs:
               ForEach-Object { Join-Path $_.FullName 'Scripts\python.exe' } |
               Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
             if ($py.Count -gt 12) { throw 'PYTHON_ENV_CANDIDATE_LIMIT' }
+            $phase='PREPARE_PROBE'
             $code=@(
               'import importlib.util'
               'from importlib import metadata'
@@ -49,9 +51,10 @@ jobs:
             $fitzMissing=0
             $numpyMissing=0
             $pythonErrors=0
+            $phase='PROBE_PYTHON'
             foreach ($candidate in $py) {
               $v++
-              $out=@(& $candidate -c $code 2>$null)
+              try { $out=@(& $candidate -c $code 2>$null) } catch { $pythonErrors++; continue }
               if ($LASTEXITCODE -ne 0 -or $out.Count -ne 3) {
                 $pythonErrors++
                 continue
@@ -67,6 +70,7 @@ jobs:
             Write-Output ('ACS_PRODUCTION_RAPIDOCR_ENV_PROBE_ERRORS=' + $pythonErrors)
             Write-Output 'ACS_PRODUCTION_RAPIDOCR_MODULE_INVENTORY=READONLY_DONE'
           } catch {
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_MODULE_STAGE=' + $phase)
             Write-Output 'ACS_PRODUCTION_RAPIDOCR_MODULE_INVENTORY=REJECTED'
             exit 2
           }
