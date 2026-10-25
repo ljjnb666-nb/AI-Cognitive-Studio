@@ -108,8 +108,9 @@ export async function withDoclingClaimHeartbeat<T>(
       }catch{lost=true;}
     });
   };
+  // Keep a live scheduling handle until the owned task is fully settled.
+  // A hanging I/O promise must never silently stop all lease renewals.
   const timer=setInterval(heartbeat,intervalMs);
-  timer.unref?.();
   let value!:T;
   let operationError:unknown;
   let failed=false;
