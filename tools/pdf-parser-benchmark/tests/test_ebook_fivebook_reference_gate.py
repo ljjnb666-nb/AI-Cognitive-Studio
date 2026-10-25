@@ -328,13 +328,16 @@ class GoldProtocolTests(unittest.TestCase):
                     gate.execute(root,{},audit=True,snapshot_version=2)
 
     def test_snapshot_versions_are_bounded_not_paths(self):
-        for value in (0,9,-1,True,"2",1.0):
+        for value in (0,13,-1,True,"2",1.0):
             with self.assertRaisesRegex(VisualGateError,"VERSION_INVALID"):
                 gate.snapshot_names(value)
         self.assertEqual(gate.snapshot_names(1),(gate.REPORT,gate.REFERENCES))
         self.assertEqual(gate.snapshot_names(2)[1],"independent_reference_v2")
         self.assertEqual(gate.snapshot_names(8)[0],
                          "fivebook_independent_reference_admission.v8.private.json")
+        self.assertEqual(gate.snapshot_names(9)[1],"independent_reference_v9")
+        self.assertEqual(gate.snapshot_names(12)[0],
+                         "fivebook_independent_reference_admission.v12.private.json")
 
 
 if __name__=="__main__":
