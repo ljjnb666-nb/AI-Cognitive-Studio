@@ -9,8 +9,11 @@ import {
   dispatchDoclingLayoutSweep,
   doclingLayoutJobId,
   executeDoclingBackgroundJob,
+  recoverDoclingLayoutTasks,
   type DoclingLayoutQueueData,
 } from "../src/docling-layout.js";
+import { claimDoclingTask, ensureDoclingTask, finishDoclingTask } from "../src/docling-task-ledger.js";
+import { inspectAndPersistDoclingLayoutSidecar } from "@ai-cognitive/ingestion";
 
 const modelSha="b".repeat(64);
 const future=new Date("2099-01-02T00:00:00.000Z");
@@ -178,4 +181,89 @@ describe("Docling background dispatch (real PostgreSQL, synthetic source only)",
       expect(inspect).toHaveBeenCalledTimes(1);
     }finally{await cleanup(f);}
   },30_000);
+  it("two worker hosts obtain one DB claim; stale token cannot commit layout metadata",async()=>{
+    const f=await fixture();
+    try{
+      const task=await ensureDoclingTask({
+        ingestionRunId:f.run.id,workspaceId:f.workspace.id,
+        sourceDocumentId:f.document.id,physicalPageIndex:1,
+        routingGeneration:1,modelSha256:modelSha,
+      });
+      const ownerA=await claimDoclingTask(task.id);
+      expect(ownerA).not.toBeNull();
+      if(!ownerA)throw Error("EXPECTED_OWNER");
+      expect(ownerA.attempt).toBe(1);
+      expect(await claimDoclingTask(task.id)).toBeNull();
+      await prisma.doclingLayoutTask.update({
+        where:{id:task.id},data:{leaseUntil:new Date("2000-01-01T00:00:00Z")},
+      });
+      const ownerB=await claimDoclingTask(task.id);
+      expect(ownerB?.attempt).toBe(2);
+      expect(ownerB?.token).not.toBe(ownerA.token);
+      const storage=new SyntheticStorage();
+      const fake:DoclingLayoutHandle={
+        parserName:"docling-standard-layout",modelSha256:modelSha,
+        inspect:async({physicalPageIndex})=>({
+          status:"SUCCEEDED",
+          candidate:{
+            authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE",
+            sourceMethod:"DOCLING_LAYOUT_CANDIDATE_ONLY",
+            physicalPageIndex,ocrUsed:false,fullPageReference:false,
+            parserName:"docling-standard-layout",parserVersion:"2.141.0",
+            artifactSha256:modelSha,markdown:"# Fenced candidate",
+            textItemCount:1,pictureItemCount:0,tableItemCount:0,
+          },
+        }),
+        close:async()=>undefined,
+      };
+      const common={
+        workspaceId:f.workspace.id,sourceDocumentId:f.document.id,
+        ingestionRunId:f.run.id,physicalPageIndex:1,
+        pdfBytes:bytes,storage:storage as unknown as StorageProvider,executor:fake,
+      };
+      await expect(inspectAndPersistDoclingLayoutSidecar({
+        ...common,claim:{id:ownerA.id,token:ownerA.token},
+      })).rejects.toThrow("DOCLING_LAYOUT_STALE_OWNER");
+      expect(await prisma.doclingLayoutSnapshot.count({where:{ingestionRunId:f.run.id}})).toBe(0);
+      expect(await finishDoclingTask(ownerA,true)).toBe(false);
+      await expect(inspectAndPersistDoclingLayoutSidecar({
+        ...common,claim:{id:ownerB!.id,token:ownerB!.token},
+      })).resolves.toMatchObject({reused:false,authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE"});
+      expect(await finishDoclingTask(ownerB!,true)).toBe(true);
+      expect(await claimDoclingTask(task.id)).toBeNull();
+      expect((await prisma.doclingLayoutTask.findUniqueOrThrow({where:{id:task.id}})))
+        .toMatchObject({status:"SUCCEEDED",attemptCount:2,claimToken:null});
+      expect(await prisma.doclingLayoutSnapshot.count({where:{ingestionRunId:f.run.id}})).toBe(1);
+    }finally{await cleanup(f);}
+  },30_000);
+
+  it("Redis-loss recovery re-enqueues only spent-attempt identity and never resets budget",async()=>{
+    const f=await fixture();
+    try{
+      const task=await ensureDoclingTask({
+        ingestionRunId:f.run.id,workspaceId:f.workspace.id,
+        sourceDocumentId:f.document.id,physicalPageIndex:1,
+        routingGeneration:1,modelSha256:modelSha,
+      });
+      const a=await claimDoclingTask(task.id);
+      expect(a?.attempt).toBe(1);
+      expect(await finishDoclingTask(a!,false)).toBe(true);
+      const queueCalls:string[]=[];
+      const queue={add:vi.fn(async(_name:string,_payload:DoclingLayoutQueueData,options:{jobId?:string})=>{
+        queueCalls.push(options.jobId??"");
+      })} as unknown as Pick<Queue<DoclingLayoutQueueData>,"add">;
+      expect(await recoverDoclingLayoutTasks(queue,modelSha,{now:future,take:20})).toBe(1);
+      expect(queueCalls).toEqual([
+        doclingLayoutJobId({ingestionRunId:f.run.id,physicalPageIndex:1,modelSha256:modelSha},1),
+      ]);
+      const second=await claimDoclingTask(task.id);
+      expect(second?.attempt).toBe(2);
+      expect(await finishDoclingTask(second!,false)).toBe(true);
+      expect(await recoverDoclingLayoutTasks(queue,modelSha,{now:future,take:20})).toBe(0);
+      expect(await claimDoclingTask(task.id)).toBeNull();
+      expect((await prisma.doclingLayoutTask.findUniqueOrThrow({where:{id:task.id}})))
+        .toMatchObject({status:"FAILED",attemptCount:2,claimToken:null});
+    }finally{await cleanup(f);}
+  },30_000);
+
 });
