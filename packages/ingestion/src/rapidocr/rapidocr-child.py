@@ -25,6 +25,10 @@ def output(obj):
                                 separators=(",",":"))+"\n")
 
 def check_runtime():
+    # A valid OCR wheel alone cannot process a PDF. Probe the actual rasterizer
+    # and ndarray modules before worker startup instead of failing per page.
+    import fitz  # noqa: F401
+    import numpy  # noqa: F401
     if metadata.version("rapidocr")!=RAPIDOCR or metadata.version("onnxruntime")!=ONNX:
         raise RuntimeError("OCR_VERSION_MISMATCH")
     spec=util.find_spec("rapidocr")
