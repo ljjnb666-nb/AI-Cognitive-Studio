@@ -100,6 +100,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               $safe = @($out | Where-Object { $_ -match '^ACS_DOCLING_LAYOUT_FAILURE_STAGE=(MODEL_PROBE|SYNTHETIC_PDF_CREATE|SECOND_PAGE_CONVERT|CANDIDATE_PROTOCOL|PAGE_ISOLATION_CHECK)$' })
               if ($safe.Count -eq 1) { Write-Output $safe[0] }
+              $reasons = @($out | Where-Object { $_ -match '^ACS_DOCLING_LAYOUT_FAILURE_REASON=(START|DOCLING_VERSION|PYMUPDF_IMPORT|DOCLING_IMPORT|ARTIFACT_DIRECTORY|ARTIFACT_INVENTORY|ARTIFACT_HASH|ARTIFACT_WEIGHT_PRESENCE)$' })
+              if ($reasons.Count -eq 1) { Write-Output $reasons[0] }
               throw 'DOCLING_SYNTHETIC_SMOKE_FAILED'
             }
             foreach ($marker in @('ACS_DOCLING_LAYOUT_PINNED_ASSETS=PASS',
