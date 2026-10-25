@@ -16,7 +16,6 @@ export const DOCLING_LAYOUT_QUEUE = "source.docling-layout-candidate.v1";
 export const DOCLING_LAYOUT_JOB = "docling-layout-candidate";
 const MAX_SOURCE_BYTES = 110_000_000;
 const MAX_RUNS_PER_SWEEP = 20;
-const MAX_PAGES_PER_RUN = 2;
 // An operator enabling this feature should not launch an unbounded historical
 // reprocessing workload. Older content must be explicitly migrated later.
 const MAX_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
