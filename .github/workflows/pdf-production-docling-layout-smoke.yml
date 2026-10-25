@@ -102,6 +102,10 @@ jobs:
               if ($safe.Count -eq 1) { Write-Output $safe[0] }
               $reasons = @($out | Where-Object { $_ -match '^ACS_DOCLING_LAYOUT_FAILURE_REASON=(START|DOCLING_VERSION|PYMUPDF_IMPORT|DOCLING_IMPORT|ARTIFACT_DIRECTORY|ARTIFACT_INVENTORY|ARTIFACT_HASH|ARTIFACT_WEIGHT_PRESENCE)$' })
               if ($reasons.Count -eq 1) { Write-Output $reasons[0] }
+              foreach ($label in @('ACS_DOCLING_LAYOUT_PROBE_EXIT=','ACS_DOCLING_LAYOUT_PROBE_LINE_COUNT=')) {
+                $safeReceipt=@($out | Where-Object { $_ -eq ($label + 'ZERO') -or $_ -eq ($label + 'NONZERO') -or $_ -eq ($label + 'ONE') -or $_ -eq ($label + 'OTHER') })
+                if ($safeReceipt.Count -eq 1) { Write-Output $safeReceipt[0] }
+              }
               throw 'DOCLING_SYNTHETIC_SMOKE_FAILED'
             }
             foreach ($marker in @('ACS_DOCLING_LAYOUT_PINNED_ASSETS=PASS',
