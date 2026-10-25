@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Environment } from "@ai-cognitive/shared/server";
-import type { PdfOcrExecutor, PdfOcrPageResult } from "../pdf-routing.js";
+import type { PdfOcrExecutor, PdfOcrPageRequest, PdfOcrPageResult } from "../pdf-routing.js";
 import { SourceError } from "../source-errors.js";
 import { spawnBounded, type BoundedSpawnResult } from "../mineru/mineru-process.js";
 
@@ -132,56 +132,90 @@ function failure(code: string, kind: "transient" | "terminal"): PdfOcrPageResult
   return {status:"FAILED",errorCode:code,kind};
 }
 
+export type RapidOcrExecutorHandle = PdfOcrExecutor & { close(): Promise<void> };
+
 export function createRapidOcrPdfOcrExecutor(
   config: RapidOcrExecutorConfig,
   verified: {modelSha256:string},
   run: Runner = spawnBounded,
-): PdfOcrExecutor {
+): RapidOcrExecutorHandle {
   if (!/^[a-f0-9]{64}$/.test(verified.modelSha256)) {
     throw new Error("OCR_RAPIDOCR_PROVENANCE_INVALID");
   }
+  // The worker's shutdown ordering first prevents new BullMQ claims, then
+  // closes this handle, then awaits job completion. Every owned Python process
+  // receives an abort; no temp tree is removed before a bounded subprocess
+  // disposition. An UNCONFIRMED kill is never labelled safely retryable.
+  let closing = false;
+  const active = new Set<{controller:AbortController; done:Promise<void>}>();
+
+  const runPage = async (request: PdfOcrPageRequest, abortSignal: AbortSignal): Promise<PdfOcrPageResult> => {
+    if (abortSignal.aborted) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
+    if (!Number.isSafeInteger(request.physicalPageIndex) ||
+        request.physicalPageIndex<0 || request.pdfBytes.length>MAX_SOURCE_BYTES ||
+        request.pdfBytes.length<5) {
+      return failure(SourceError.OCR_OUTPUT_INVALID,"terminal");
+    }
+    let dir: string | null = null;
+    try {
+      dir=await mkdtemp(join(tmpdir(),"acs-rapidocr-"));
+      const input=join(dir,"source.pdf");
+      if (abortSignal.aborted) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
+      await writeFile(input,request.pdfBytes,{flag:"wx"});
+      if (abortSignal.aborted) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
+      const result: BoundedSpawnResult=await run(config.python,[
+        config.script,"--pdf",input,"--page",String(request.physicalPageIndex),
+      ],{
+        cwd:dir,env:rapidOcrOfflineEnv(),timeoutMs:config.timeoutMs,
+        maxOutputBytes:config.maxOutputBytes,abortSignal,
+      });
+      if (result.timedOut) return failure(SourceError.OCR_TIMEOUT,
+        result.treeTerminationConfirmed ? "transient" : "terminal");
+      if (result.aborted) return failure(SourceError.OCR_PROCESS_FAILED,
+        result.treeTerminationConfirmed ? "transient" : "terminal");
+      if (result.signal || result.spawnErrorCode) return failure(SourceError.OCR_PROCESS_FAILED,"terminal");
+      if (result.outputOverflow) return failure(SourceError.OCR_OUTPUT_INVALID,"terminal");
+      if (result.code!==0) return failure(SourceError.OCR_PROCESS_FAILED,"terminal");
+      if (abortSignal.aborted) {
+        // A raced shutdown cannot publish a successful response whose worker
+        // execution owner is already closing.
+        return failure(SourceError.OCR_PROCESS_FAILED,"terminal");
+      }
+      const parsed=safeParseJson(result.stdout) as Record<string,unknown> | null;
+      if (!parsed || Object.keys(parsed).sort().join(",")!==["schemaVersion","status","text"].sort().join(",") ||
+          parsed.schemaVersion!==1 || parsed.status!=="SUCCEEDED" ||
+          typeof parsed.text!=="string" || parsed.text.length>180_000 ||
+          parsed.text.includes("\0")) {
+        return failure(SourceError.OCR_OUTPUT_INVALID,"terminal");
+      }
+      return {status:"SUCCEEDED",text:parsed.text};
+    } catch {
+      return failure(abortSignal.aborted ? SourceError.OCR_PROCESS_FAILED : SourceError.OCR_TEMP_IO_ERROR,
+        abortSignal.aborted ? "terminal" : "transient");
+    } finally {
+      if (dir!==null) await rm(dir,{recursive:true,force:true}).catch(()=>undefined);
+    }
+  };
+
   return {
     descriptor: {
       name:RAPIDOCR_EXECUTOR_NAME,version:RAPIDOCR_PINNED_VERSION,
       parserMode:"offline-pdf-1.6x",modelRevision:verified.modelSha256,
     },
-    async extractPage(request): Promise<PdfOcrPageResult> {
-      if (!Number.isSafeInteger(request.physicalPageIndex) ||
-          request.physicalPageIndex<0 || request.pdfBytes.length>MAX_SOURCE_BYTES ||
-          request.pdfBytes.length<5) {
-        return failure(SourceError.OCR_OUTPUT_INVALID,"terminal");
-      }
-      let dir: string | null = null;
-      try {
-        dir=await mkdtemp(join(tmpdir(),"acs-rapidocr-"));
-        const input=join(dir,"source.pdf");
-        await writeFile(input,request.pdfBytes,{flag:"wx"});
-        const result: BoundedSpawnResult=await run(config.python,[
-          config.script,"--pdf",input,"--page",String(request.physicalPageIndex),
-        ],{
-          cwd:dir,env:rapidOcrOfflineEnv(),timeoutMs:config.timeoutMs,
-          maxOutputBytes:config.maxOutputBytes,
-        });
-        if (result.timedOut) return failure(SourceError.OCR_TIMEOUT,
-          result.treeTerminationConfirmed ? "transient" : "terminal");
-        if (result.aborted || result.signal || result.spawnErrorCode) {
-          return failure(SourceError.OCR_PROCESS_FAILED,"terminal");
-        }
-        if (result.outputOverflow) return failure(SourceError.OCR_OUTPUT_INVALID,"terminal");
-        if (result.code!==0) return failure(SourceError.OCR_PROCESS_FAILED,"terminal");
-        const parsed=safeParseJson(result.stdout) as Record<string,unknown> | null;
-        if (!parsed || Object.keys(parsed).sort().join(",")!==["schemaVersion","status","text"].sort().join(",") ||
-            parsed.schemaVersion!==1 || parsed.status!=="SUCCEEDED" ||
-            typeof parsed.text!=="string" || parsed.text.length>180_000 ||
-            parsed.text.includes("\0")) {
-          return failure(SourceError.OCR_OUTPUT_INVALID,"terminal");
-        }
-        return {status:"SUCCEEDED",text:parsed.text};
-      } catch {
-        return failure(SourceError.OCR_TEMP_IO_ERROR,"transient");
-      } finally {
-        if (dir!==null) await rm(dir,{recursive:true,force:true}).catch(()=>undefined);
-      }
+    async extractPage(request: PdfOcrPageRequest): Promise<PdfOcrPageResult> {
+      if (closing) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
+      const controller = new AbortController();
+      const operation = runPage(request,controller.signal);
+      const entry = {controller,done:operation.then(()=>undefined,()=>undefined)};
+      active.add(entry);
+      try { return await operation; }
+      finally { active.delete(entry); }
+    },
+    async close(): Promise<void> {
+      closing=true;
+      const pending=[...active];
+      for (const task of pending) task.controller.abort();
+      await Promise.all(pending.map((task)=>task.done));
     },
   };
 }
