@@ -1,11 +1,15 @@
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
-import type { StorageProvider } from "@ai-cognitive/storage";
+import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
 import type { DoclingLayoutHandle } from "@ai-cognitive/ingestion";
-import type { Queue } from "bullmq";
+import { QueueEvents, type Queue } from "bullmq";
+import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
 import {
   DOCLING_LAYOUT_JOB,
+  DOCLING_LAYOUT_QUEUE,
+  createDoclingLayoutQueue,
+  createDoclingLayoutWorker,
   dispatchDoclingLayoutSweep,
   doclingLayoutJobId,
   executeDoclingBackgroundJob,
@@ -311,4 +315,156 @@ describe("Docling background dispatch (real PostgreSQL, synthetic source only)",
     }finally{await cleanup(f);}
   },30_000);
 
+});
+
+
+/**
+ * Real PostgreSQL + real Redis/BullMQ + real MinIO round-trip.
+ * Deliberately uses an injected deterministic layout executor, not a real
+ * Docling model. This proves delivery, ownership, storage and replay ONLY.
+ */
+describe("Docling infrastructure full-stack candidate acceptance (synthetic model)",()=>{
+  function realStorage() {
+    for(const name of ["S3_ENDPOINT","S3_REGION","S3_BUCKET","S3_ACCESS_KEY","S3_SECRET_KEY"]){
+      if(!process.env[name])throw new Error("DOCLING_E2E_S3_CONFIG_MISSING");
+    }
+    return new S3CompatibleStorageProvider({
+      endpoint:process.env.S3_ENDPOINT!,
+      region:process.env.S3_REGION!,
+      bucket:process.env.S3_BUCKET!,
+      accessKey:process.env.S3_ACCESS_KEY!,
+      secretKey:process.env.S3_SECRET_KEY!,
+      forcePathStyle:process.env.S3_FORCE_PATH_STYLE!=="false",
+    });
+  }
+  function stack(executor:DoclingLayoutHandle,storage:StorageProvider){
+    const redis=process.env.REDIS_URL;
+    if(!redis)throw new Error("DOCLING_E2E_REDIS_CONFIG_MISSING");
+    const environment={REDIS_URL:redis} as Environment;
+    const prefix="acs-docling-real-stack-"+randomUUID().replace(/-/g,"");
+    const queue=createDoclingLayoutQueue(environment,prefix);
+    const worker=createDoclingLayoutWorker(environment,executor,{prefix,storage});
+    const events=new QueueEvents(DOCLING_LAYOUT_QUEUE,{prefix,connection:createRedisConnection(redis)});
+    return {queue,worker,events};
+  }
+  async function teardown(
+    f:Awaited<ReturnType<typeof fixture>>,
+    storage:S3CompatibleStorageProvider,
+    s:ReturnType<typeof stack>,
+  ) {
+    // No global Redis FLUSHDB: delete only the random queue namespace.
+    await s.worker.close();
+    await s.events.close();
+    await s.queue.obliterate({force:true});
+    await s.queue.close();
+    const snapshots=await prisma.doclingLayoutSnapshot.findMany({
+      where:{ingestionRunId:f.run.id},select:{markdownStorageKey:true},
+    });
+    for(const snapshot of snapshots)await storage.deleteObject(snapshot.markdownStorageKey);
+    await storage.deleteObject(f.storageKey);
+    await cleanup(f);
+  }
+  it("delivers one eligible physical page through real Redis, MinIO and PostgreSQL without publishing text",async()=>{
+    const f=await fixture(),storage=realStorage();
+    const markdown="# Synthetic only: layout is not authoritative";
+    const inspect=vi.fn(async({pdfBytes,physicalPageIndex}:{
+      pdfBytes:Uint8Array;physicalPageIndex:number;
+    })=>{
+      expect(Buffer.from(pdfBytes)).toEqual(bytes);
+      expect(physicalPageIndex).toBe(1);
+      return {
+        status:"SUCCEEDED" as const,
+        candidate:{
+          authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE" as const,
+          sourceMethod:"DOCLING_LAYOUT_CANDIDATE_ONLY" as const,
+          physicalPageIndex,ocrUsed:false as const,fullPageReference:false as const,
+          parserName:"docling-standard-layout" as const,parserVersion:"2.141.0" as const,
+          artifactSha256:modelSha,markdown,
+          textItemCount:1,pictureItemCount:0,tableItemCount:0,
+        },
+      };
+    });
+    const executor:DoclingLayoutHandle={
+      parserName:"docling-standard-layout",modelSha256:modelSha,
+      inspect,close:async()=>undefined,
+    };
+    const s=stack(executor,storage);
+    try{
+      await storage.putObject({key:f.storageKey,body:bytes,contentType:"application/pdf"});
+      await Promise.all([s.worker.waitUntilReady(),s.events.waitUntilReady()]);
+      const cursor:{afterRunId?:string}={};
+      expect(await dispatchDoclingLayoutSweep(s.queue,modelSha,cursor,{now:future,take:20})).toBe(1);
+      const payload={ingestionRunId:f.run.id,physicalPageIndex:1,modelSha256:modelSha};
+      const id=doclingLayoutJobId(payload);
+      const job=await s.queue.getJob(id);
+      expect(job).not.toBeNull();
+      expect(await job!.waitUntilFinished(s.events,25_000)).toBe("SNAPSHOT_CREATED");
+      const task=await prisma.doclingLayoutTask.findFirstOrThrow({
+        where:{ingestionRunId:f.run.id,physicalPageIndex:1},
+      });
+      expect(task).toMatchObject({status:"SUCCEEDED",attemptCount:1,claimToken:null});
+      const snapshot=await prisma.doclingLayoutSnapshot.findFirstOrThrow({
+        where:{ingestionRunId:f.run.id,physicalPageIndex:1},
+      });
+      expect(snapshot).toMatchObject({
+        workspaceId:f.workspace.id,sourceDocumentId:f.document.id,
+        sourceSha256:digest(bytes),markdownSha256:digest(Buffer.from(markdown)),
+        textItemCount:1,pictureItemCount:0,tableItemCount:0,
+      });
+      expect(Buffer.from(await storage.getObjectBytes(snapshot.markdownStorageKey)).toString("utf8"))
+        .toBe(markdown);
+      expect(await dispatchDoclingLayoutSweep(s.queue,modelSha,{}, {now:future,take:20})).toBe(0);
+      expect(await executeDoclingBackgroundJob(payload,storage,executor)).toBe("SNAPSHOT_REUSED");
+      expect(inspect).toHaveBeenCalledTimes(1);
+      // Candidate is not allowed to replace the authoritative extraction.
+      expect((await prisma.documentExtraction.findUniqueOrThrow({
+        where:{ingestionRunId:f.run.id},
+      })).parserName).toBe("pdfjs-isolated");
+    }finally{await teardown(f,storage,s);}
+  },45_000);
+
+  it("retries one failed model delivery with the same durable budget and one S3 snapshot",async()=>{
+    const f=await fixture(),storage=realStorage();
+    let calls=0;
+    const executor:DoclingLayoutHandle={
+      parserName:"docling-standard-layout",modelSha256:modelSha,
+      close:async()=>undefined,
+      inspect:async({physicalPageIndex})=>{
+        calls++;
+        if(calls===1)return {status:"FAILED",reason:"REJECTED"};
+        return {status:"SUCCEEDED",candidate:{
+          authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE",
+          sourceMethod:"DOCLING_LAYOUT_CANDIDATE_ONLY",
+          physicalPageIndex,ocrUsed:false,fullPageReference:false,
+          parserName:"docling-standard-layout",parserVersion:"2.141.0",
+          artifactSha256:modelSha,markdown:"# Retry success",
+          textItemCount:1,pictureItemCount:0,tableItemCount:0,
+        }};
+      },
+    };
+    const s=stack(executor,storage);
+    try{
+      await storage.putObject({key:f.storageKey,body:bytes,contentType:"application/pdf"});
+      await Promise.all([s.worker.waitUntilReady(),s.events.waitUntilReady()]);
+      const payload={ingestionRunId:f.run.id,physicalPageIndex:1,modelSha256:modelSha};
+      const job=await s.queue.add(DOCLING_LAYOUT_JOB,payload,{
+        jobId:doclingLayoutJobId(payload),attempts:2,
+        backoff:{type:"fixed",delay:250},
+      });
+      expect(await job.waitUntilFinished(s.events,25_000)).toBe("SNAPSHOT_CREATED");
+      expect(calls).toBe(2);
+      expect((await prisma.doclingLayoutTask.findFirstOrThrow({
+        where:{ingestionRunId:f.run.id,physicalPageIndex:1},
+      }))).toMatchObject({status:"SUCCEEDED",attemptCount:2,claimToken:null});
+      const records=await prisma.doclingLayoutSnapshot.findMany({
+        where:{ingestionRunId:f.run.id},
+      });
+      expect(records).toHaveLength(1);
+      expect(Buffer.from(await storage.getObjectBytes(records[0]!.markdownStorageKey)).toString("utf8"))
+        .toBe("# Retry success");
+      expect((await prisma.documentExtraction.findUniqueOrThrow({
+        where:{ingestionRunId:f.run.id},
+      })).parserName).toBe("pdfjs-isolated");
+    }finally{await teardown(f,storage,s);}
+  },45_000);
 });
