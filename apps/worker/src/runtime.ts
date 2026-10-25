@@ -65,7 +65,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const bookEnabled = Boolean(options.bookDependencies || bookConfigured || gatewayConfigured);
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
   let sourceIngestionOcrRuntime: Awaited<ReturnType<typeof resolveSourceIngestionOcrExecutor>>;
-  let doclingLayoutExecutor: Awaited<ReturnType<typeof resolveDoclingBackgroundExecutor>>;
+  let doclingLayoutExecutor: Awaited<ReturnType<typeof resolveDoclingBackgroundExecutor>> = null;
   try {
   // Real OCR runtime (04B-3/RF01): resolved + version-verified FIRST, before
   // any worker or connection is constructed — malformed explicit MinerU
@@ -151,7 +151,10 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const reconcileIngestionDeliveriesSweep = dispatch("source-ingestion-reconciliation", () => reconcileIngestionDeliveries({ queue: ingestionReconciliationQueue, maxAttempts: environment.SOURCE_INGESTION_PROCESS_MAX_ATTEMPTS }), 60_000);
   const doclingSweepCursor:DoclingSweepCursor={};
   const reconcileDoclingSidecars = doclingLayoutQueue && doclingLayoutExecutor
-    ? dispatch("docling-layout-candidates", () => dispatchDoclingLayoutSweep(doclingLayoutQueue, doclingLayoutExecutor.modelSha256, doclingSweepCursor), 60_000)
+    ? (() => {
+        const layout = doclingLayoutExecutor;
+        return dispatch("docling-layout-candidates", () => dispatchDoclingLayoutSweep(doclingLayoutQueue, layout.modelSha256, doclingSweepCursor), 60_000);
+      })()
     : undefined;
   // Same-host OCR server reconciliation (RF01 P1-06): converges OcrServerInstance
   // rows left by hard crashes, cleaning ONLY this configured host's rows and
