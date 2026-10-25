@@ -46,6 +46,7 @@ jobs:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
+      ACS_SAFE_GOLD_GATE_DIAGNOSTIC: '1'
     steps:
       - uses: actions/checkout@v4
         env:
@@ -88,7 +89,34 @@ jobs:
             $script='acs-gold-3way/tools/pdf-parser-benchmark/scripts/ebook_fivebook_three_engine_gold_grade.py'
             $manifest='acs-gold-3way/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
             $result=@(& $py $script --private-root $root --manifest $manifest --snapshot-version 1 --check-only 2>$null)
-            if ($LASTEXITCODE -ne 0) { throw 'SCORE_READONLY_REJECTED' }
+            if ($LASTEXITCODE -ne 0) {
+              # Only allow fixed internal categories, never arbitrary output.
+              $safe = @($result | Where-Object {
+                $_ -match '^ACS_GOLD_THREE_ENGINE_GATE=(GOLD_GRADE_PARENT_ROW_COVERAGE_INVALID|GOLD_GRADE_PARENT_CORPUS_CHANGED|GOLD_GRADE_CROSS_PARENT_SOURCE_CHANGED|GOLD_GRADE_CROSS_PARENT_IMAGE_CHANGED|OTHER_REJECTED)
+            if (@($result | Where-Object { $_ -eq 'ACS_GOLD_THREE_ENGINE=READONLY_CHECKED' }).Count -ne 1) { throw 'CHECK_RECEIPT_INVALID' }
+            $approved=@($result | Where-Object { $_ -match '^ACS_GOLD_THREE_ENGINE_GRADED=[0-5]$' })
+            $missing=@($result | Where-Object { $_ -match '^ACS_GOLD_THREE_ENGINE_UNGRADED=[0-5]$' })
+            if ($approved.Count -ne 1 -or $missing.Count -ne 1) { throw 'COUNT_INVALID' }
+            $score=[int]($approved[0].Split('=')[1]);$ungraded=[int]($missing[0].Split('=')[1])
+            if (($score+$ungraded) -ne 5) { throw 'COUNT_SUM_INVALID' }
+            foreach($path in $tracked | ForEach-Object { Join-Path $dir $_ }) {
+              if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $before[$path]) { throw 'SOURCE_CHANGED' }
+            }
+            Write-Output ('ACS_GOLD_THREE_ENGINE_GRADED='+$score)
+            Write-Output ('ACS_GOLD_THREE_ENGINE_UNGRADED='+$ungraded)
+            Write-Output 'ACS_GOLD_THREE_ENGINE_WINDOWS=READ_ONLY_VERIFIED'
+            Write-Output 'ACS_GOLD_THREE_ENGINE_FROZEN_SOURCE=UNCHANGED'
+            Write-Output 'ACS_GOLD_THREE_ENGINE_NEW_MODEL_CALLS=0'
+          } catch {
+            # No stdout/stderr raw content, file names, original page text or SHA.
+            Write-Output 'ACS_GOLD_THREE_ENGINE_WINDOWS=REJECTED'
+            exit 2
+          }
+
+              })
+              if ($safe.Count -eq 1) { Write-Output $safe[0] }
+              throw 'SCORE_READONLY_REJECTED'
+            }
             if (@($result | Where-Object { $_ -eq 'ACS_GOLD_THREE_ENGINE=READONLY_CHECKED' }).Count -ne 1) { throw 'CHECK_RECEIPT_INVALID' }
             $approved=@($result | Where-Object { $_ -match '^ACS_GOLD_THREE_ENGINE_GRADED=[0-5]$' })
             $missing=@($result | Where-Object { $_ -match '^ACS_GOLD_THREE_ENGINE_UNGRADED=[0-5]$' })
