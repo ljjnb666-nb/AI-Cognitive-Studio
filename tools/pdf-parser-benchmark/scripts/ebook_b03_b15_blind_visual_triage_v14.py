@@ -235,7 +235,7 @@ def main(argv=None):
                  or os.environ.get("GLM_API_KEY")
                  or os.environ.get("ZHIPUAI_API_KEY")
                  or os.environ.get("ZAI_API_KEY"))
-            if not key:
+            if not isinstance(key,str) or len(key)<12:
                 print("ACS_V14_VISUAL=PROVIDER_NOT_CONFIGURED")
                 return 3
             import requests
