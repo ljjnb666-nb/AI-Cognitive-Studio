@@ -53,19 +53,19 @@ jobs:
             $missingNumPy=0
             $rapidMatched=0
             $otherRuntime=0
-            $diagnoseCode=@'
-import importlib.util
-from importlib import metadata
-def version_matches(name,expected):
-    try: return metadata.version(name)==expected
-    except metadata.PackageNotFoundError: return False
-def present(name):
-    try: return importlib.util.find_spec(name) is not None
-    except (ImportError,ValueError): return False
-print("M1" if version_matches("rapidocr","3.9.2") and version_matches("onnxruntime","1.22.1") else "M0")
-print("F1" if present("fitz") else "F0")
-print("N1" if present("numpy") else "N0")
-'@
+            $diagnoseCode=@(
+              'import importlib.util'
+              'from importlib import metadata'
+              'def version_matches(name,expected):'
+              '    try: return metadata.version(name)==expected'
+              '    except metadata.PackageNotFoundError: return False'
+              'def present(name):'
+              '    try: return importlib.util.find_spec(name) is not None'
+              '    except (ImportError,ValueError): return False'
+              'print("M1" if version_matches("rapidocr","3.9.2") and version_matches("onnxruntime","1.22.1") else "M0")'
+              'print("F1" if present("fitz") else "F0")'
+              'print("N1" if present("numpy") else "N0")'
+            ) -join [Environment]::NewLine
             foreach ($candidate in $pythonCandidates) {
               $checks=@(& $candidate -c $diagnoseCode 2>$null)
               if ($LASTEXITCODE -ne 0 -or $checks.Count -ne 3) { $otherRuntime++; continue }
