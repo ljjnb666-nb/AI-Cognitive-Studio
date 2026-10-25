@@ -207,6 +207,7 @@ export function createDoclingLayoutWorker(
     limiter:{max:1,duration:1_000},
     ...(options?.prefix?{prefix:options.prefix}:{}),
   });
+  return worker;
 }
 
 /**
