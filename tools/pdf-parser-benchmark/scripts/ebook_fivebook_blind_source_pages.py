@@ -59,7 +59,9 @@ label{display:block;margin:9px 0}
 <option value="FIGURE">图表</option><option value="FORMULA">公式</option>
 <option value="MIXED">混合</option><option value="UNREADABLE">无法辨认</option>
 </select></label>
-<label>仅根据图像独立转录<textarea id="text" placeholder="视觉转录草稿，不是 OCR"></textarea></label>
+<p class="small">完整页九宫格核对状态（仅为草稿记录，不代表独立审批）。请逐格放大检查，不能看清时选择“未辨认”，不能标记“已核对”。</p>
+<div id="coveragegrid"></div>
+<label>仅根据原图独立转录整页文字<textarea id="text" placeholder="视觉转录草稿，不是 OCR"></textarea></label>
 <label>未决文字、完整页覆盖和阅读顺序<textarea id="uncertain" placeholder="记录模糊字、未看过的区域、图表不确定性"></textarea></label>
 <button id="export" type="button">导出私有未审核草稿 JSON</button>
 <p class="small" id="feedback">无自动保存、无服务器上传、无批准按钮；草稿只能供另一次独立来源审核。</p>
@@ -71,6 +73,20 @@ for(let i=0;i<PAGES.length;i++){
  const x=PAGES[i],o=document.createElement("option");
  o.value=String(i);o.textContent=x.book_id+" · 第 "+x.physical_page+" 物理页";$("pick").append(o);
 }
+const REGION_IDS=["R1C1","R1C2","R1C3","R2C1","R2C2","R2C3","R3C1","R3C2","R3C3"];
+for(const code of REGION_IDS){
+ const label=document.createElement("label");label.textContent=code+" ";
+ label.style.display="inline-block";label.style.margin="3px";
+ const sel=document.createElement("select");sel.dataset.region=code;
+ for(const [value,name] of [["UNREVIEWED","未核对"],["VISUAL_DRAFT_REVIEWED","仅目视草稿"],["UNRESOLVED","字迹未辨"]]){
+  const opt=document.createElement("option");opt.value=value;opt.textContent=name;sel.append(opt);
+ }
+ label.append(sel);$("coveragegrid").append(label);
+}
+function resetDraft(){
+ $("text").value="";$("uncertain").value="";$("kind").value="BODY";
+ for(const sel of $("coveragegrid").querySelectorAll("select"))sel.value="UNREVIEWED";
+}
 function show(){
  const x=PAGES[Number($("pick").value)],scale=Number($("scale").value);
  $("page").src=x.private_png_name;
@@ -79,7 +95,7 @@ function show(){
  $("sourceinfo").textContent=x.book_id+" · PDF 物理页 "+x.physical_page+" · 仅原始渲染 PNG，不含 OCR 候选";
 }
 $("pick").addEventListener("change",()=>{
- $("text").value="";$("uncertain").value="";$("kind").value="BODY";show();
+ resetDraft();show();
 });
 $("scale").addEventListener("input",show);
 $("export").addEventListener("click",()=>{
@@ -89,6 +105,13 @@ $("export").addEventListener("click",()=>{
   source_png_sha256_private:x.source_png_sha256_private,
   visual_transcription_draft:$("text").value,content_type:$("kind").value,
   unresolved_regions:$("uncertain").value,
+  nine_grid_review_draft:REGION_IDS.map(region=>{
+   const input=Array.from($("coveragegrid").querySelectorAll("select")).find(e=>e.dataset.region===region);
+   return {region_id:region,review_draft_state:input.value};
+  }),
+  sidebars_and_vertical_text_reviewed:false,
+  all_visible_text_and_punctuation_transcribed:false,
+  page_reading_order_reviewed:false,
   reviewer_approval:null,independent_gold_available:false,
   full_page_coverage_verified:false,cer:null};
  const u=URL.createObjectURL(new Blob([JSON.stringify(record,null,2)+"\n"],{type:"application/json"}));
