@@ -1,0 +1,107 @@
+name: B03 B15 SHA-Bound Private High-DPI Source Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-source-raster:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b03-b15-source-hidpi-review-v13-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: No-source synthetic PDF raster and immutable snapshots
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 pillow==11.3.0 numpy==1.26.4 opencv-python-headless==4.10.0.84
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b03_b15_source_hidpi_v13.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b03_b15_source_hidpi_v13.py' -v
+          echo 'ACS_HIDPI_SOURCE_SYNTHETIC=PASS'
+          echo 'ACS_HIDPI_SOURCE_REAL_BOOKS=NOT_IN_PUBLIC_CI'
+          echo 'ACS_HIDPI_SOURCE_GOLD=NOT_APPROVED'
+          echo 'ACS_HIDPI_SOURCE_CLOUD_CALLS=0'
+
+  owner-only-private-source-render:
+    needs: synthetic-source-raster
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b03-b15-source-hidpi-review-v13-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 35
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-hidpi-v13
+          persist-credentials: false
+          clean: false
+      - name: Privately render and replay two true-source pages, no output upload
+        shell: powershell
+        timeout-minutes: 29
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            if ((git -C acs-hidpi-v13 rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'SHA_MISMATCH' }
+            $root = 'D:\ai-cognitive-pdf-benchmark-data'
+            $dir = Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py = Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'PRIVATE_PYTHON_MISSING' }
+            $tracked = @('multibook_native_24pages.private.json',
+              'B03_p0067.private.png','B15_p0109.private.png')
+            $before = @{}
+            foreach ($item in $tracked) {
+              $path = Join-Path $dir $item
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'FROZEN_INPUT_MISSING' }
+              $before[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            }
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            $script = 'acs-hidpi-v13/tools/pdf-parser-benchmark/scripts/ebook_b03_b15_source_hidpi_v13.py'
+            $manifest = 'acs-hidpi-v13/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+            $subdir = Join-Path $dir 'b03_b15_source_hidpi_v13'
+            $mode = if (Test-Path -LiteralPath $subdir) { '--audit-only' } else { '--write' }
+            $out = @(& $py $script --private-root $root --manifest $manifest $mode 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw 'RENDER_OR_AUDIT_REJECTED' }
+            if (@($out | Where-Object { $_ -match '^ACS_HIDPI_SOURCE=(PRIVATE_CREATED|PRIVATE_AUDIT_PASS)$' }).Count -ne 1) { throw 'RECEIPT_INVALID' }
+            $audit = @(& $py $script --private-root $root --manifest $manifest --audit-only 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw 'REPLAY_REJECTED' }
+            foreach ($value in @('ACS_HIDPI_SOURCE=PRIVATE_AUDIT_PASS','ACS_HIDPI_SOURCE_PAGES=2',
+              'ACS_HIDPI_SOURCE_TILES=18','ACS_HIDPI_SOURCE_GOLD=NOT_APPROVED',
+              'ACS_HIDPI_SOURCE_MODEL_CALLS=0')) {
+              if (@($audit | Where-Object { $_ -eq $value }).Count -ne 1) { throw 'AUDIT_RECEIPT_INVALID' }
+            }
+            foreach ($item in $tracked) {
+              $path = Join-Path $dir $item
+              if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $before[$path]) { throw 'ORIGINAL_CHANGED' }
+            }
+            Write-Output 'ACS_HIDPI_SOURCE_WINDOWS=PRIVATE_AUDIT_PASS'
+            Write-Output 'ACS_HIDPI_SOURCE_PAGES=2'
+            Write-Output 'ACS_HIDPI_SOURCE_TILES=18'
+            Write-Output 'ACS_HIDPI_SOURCE_FROZEN_INPUTS=UNCHANGED'
+            Write-Output 'ACS_HIDPI_SOURCE_GOLD=NOT_APPROVED'
+            Write-Output 'ACS_HIDPI_SOURCE_MODEL_CALLS=0'
+          } catch {
+            Write-Output 'ACS_HIDPI_SOURCE_WINDOWS=REJECTED'
+            exit 2
+          }
