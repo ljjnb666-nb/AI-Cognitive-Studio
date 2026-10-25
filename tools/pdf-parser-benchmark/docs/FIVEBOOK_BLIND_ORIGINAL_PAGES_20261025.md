@@ -1,4 +1,4 @@
-# 第一阶段｜五本 PDF 同源原页离线盲审包（v11）
+# 第一阶段｜五本 PDF 同源原页离线盲审包（v12）
 
 ## 解决现存的具体缺口
 
@@ -16,7 +16,7 @@
 
 ## 真正的私有交付
 
-私有目录为 `D:\ai-cognitive-pdf-benchmark-data\semantic_gate\multibook_matrix_20261023\fivebook_blind_original_pages_v11`。
+私有目录为 `D:\ai-cognitive-pdf-benchmark-data\semantic_gate\multibook_matrix_20261023\fivebook_blind_original_pages_v12`。
 
 包含 5 个源 PNG、5 个带原 PDF/页 PNG SHA 且保持未批准的空白审核 JSON、一个离线中文 HTML、一个来源核对总回执，合计 **12 个文件**。本地 Edge 打开 `五书原图独立核对.private.html` 可以切换书/物理页、放大原图、填写不同来源区域的独立视觉转录及未决字符，导出 **DRAFT_UNVERIFIED** JSON 草稿。
 
@@ -26,14 +26,14 @@
 
 - `audit_existing` 先检查上游六本 PDF 文档的总来源与 24 页证据、5 个 OCR-focus 图片回执，并逐张核验 PNG SHA、实际像素格式/尺寸、PDF ID 和物理页。
 - 五页来源 SHA 必须与 `ebook-20261022.manifest.json` 及真实 native receipt 所标的书籍来源一致。任何一本发生变化，全部拒绝。
-- v11 名称固定，O_EXCL 首次写入，后续只能 audit-only 逐字节对照。既存半套输出拒绝覆盖；不修改 v1–v10 或上游五页。
+- v12 名称固定，O_EXCL 首次写入，后续只能 audit-only 逐字节对照。既存半套输出拒绝覆盖；不修改 v1–v10 或上游五页。
 - GitHub 只提交脚本、八项纯合成单测、中文方案及 owner-only Windows 精确 SHA 工作流。原始五页图片/转录文字/图内位置/完整私有哈希不得进入 PR、日志和 Artifact。
 - 工作流只允许输出固定匿名消息和数字 5、0，并在运行前后比较全部 5 张原图以及原 native 回执 SHA。
 - 没有任何接口可以自动批准审核。空白表中的 `reviewer_approval=null`、`independent_gold_available=false`、`cer=null` 永久不由脚本改为已完成。
 
 ## 与三阶段架构选型的关系
 
-Stage 1 的剩余实质工作是**实际按图校对全部可见文本**、解决未决字词、独立记录完整覆盖与审核人/来源证据、核对相同范围的 OCR。v11 把五书图片统一送进可访问的私有离线核对入口；**CI 通过不代表人工/视觉核对发生**。
+Stage 1 的剩余实质工作是**实际按图校对全部可见文本**、解决未决字词、独立记录完整覆盖与审核人/来源证据、核对相同范围的 OCR。v12 把五书图片统一送进可访问的私有离线核对入口；**CI 通过不代表人工/视觉核对发生**。
 
 Stage 2 在独立原图参考真正批准后，才能比较原生解析、RapidOCR、MinerU、Docling、图表结构、时间与成本；Stage 3 冻结 v1 OCR 架构。
 
