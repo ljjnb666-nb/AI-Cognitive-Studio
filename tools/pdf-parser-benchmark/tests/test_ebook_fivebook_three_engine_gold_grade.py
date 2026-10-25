@@ -21,29 +21,32 @@ def fixture(root,approved=False,source_sha_override=None):
     folder=root/"semantic_gate"/"multibook_matrix_20261023"
     folder.mkdir(parents=True)
     sourcepdf="a"*64
+    staged_single_page_pdf="c"*64
     corpus="ONLY_SYNTHETIC_CORPUS"
     gold={"page_count":5,"corpus_id":corpus,
           "reference_provenance_truth_requires_external_audit":True,"rows":[]}
     three={"same_original_page_count":5,"corpus_id":corpus,"rows":[]}
     native={"ocr_focus_image_count":5,"corpus_id":corpus,"rows":[]}
-    rapid={"pages":[]}
+    rapid={"corpus_id":corpus,"pages":[]}
     pages=dict(zip(stage.ALL_BOOKS,(67,64,109,72,126)))
     for book,page in pages.items():
         png=(b"ONLY_SYNTHETIC_BYTE_PATTERN_"+book.encode())
         file=folder/f"{book}_p{page:04d}.private.png"
         file.write_bytes(png)
-        native["rows"].append({"book_id":book,"pages":[{
+        native["rows"].append({"book_id":book,"source_document_sha256":sourcepdf,"pages":[{
             "physical_page":page,"ocr_focus_png":file.name,
             "ocr_focus_png_sha256":sha(png),
         }]})
         gold["rows"].append({
             "book_id":book,"physical_page":page,
-            "original_pdf_source_sha256_private":sourcepdf,
+            "original_pdf_source_sha256_private":staged_single_page_pdf,
             "reference_state":("ATTESTED_REFERENCE_CER_COMPUTED" if book=="B03" and approved
                                else "INDEPENDENT_REFERENCE_NOT_PROVIDED"),
             "reference_normalized_chars":5 if book=="B03" and approved else None,
         })
-        model={"book_id":book,"physical_page":page}
+        model={"book_id":book,"physical_page":page,
+               "same_original_single_page_sha256_private":staged_single_page_pdf,
+               "rapidocr_rows_sha256_private":"e"*64}
         if book=="B03" and approved:
             md=b"HELXO"
             worker=b"SYNTHETIC_WORKER_BYTES"
@@ -58,22 +61,25 @@ def fixture(root,approved=False,source_sha_override=None):
         three["rows"].append(model)
         rapid["pages"].append({
             "book_id":book,"physical_page":page,
+            "source_document_sha256":sourcepdf,"render_png_sha256":sha(png),
             "private_rows_sha256":"e"*64,
             "rapidocr_private_rows":[{"text":"HELLO"}],
         })
+    native["rows"].append({"book_id":"B16","source_document_sha256":"b"*64,
+                           "pages":[]})
     if approved:
         refdir=folder/"independent_reference_v1"
         refdir.mkdir()
         page_file=refdir/"B03_p0067.verified.private.json"
         candidate={
             "schema_version":1,"corpus_id":corpus,"book_id":"B03","physical_page":67,
-            "original_page_pdf_sha256":sourcepdf,
+            "original_page_pdf_sha256":staged_single_page_pdf,
             "reference_origin":"INDEPENDENT_PAGE_TRANSCRIPTION",
             "verification_method":"MANUAL_SOURCE_PAGE_REVIEW",
             "reviewed_source_page":True,
             "not_derived_from_rapidocr_or_mineru":True,
             "reviewer_approval":"INDEPENDENTLY_APPROVED",
-            "independent_source_sha256":sourcepdf,
+            "independent_source_sha256":staged_single_page_pdf,
             "reference_text":"HELLO",
             "reference_text_sha256":sha(b"HELLO"),
             "reviewer_record_id":"independentA01",
@@ -192,6 +198,74 @@ class ThreeEngineGoldGradeTests(unittest.TestCase):
             self.assertNotIn("ONLY_SYNTHETIC_BYTE",wire)
             self.assertNotIn("a"*64,wire)
 
+
+    def test_duplicate_or_phantom_parent_rows_rejected_without_gold(self):
+        for collection in ("gold","three","rapid","native"):
+            with self.subTest(collection=collection),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                data=fixture(root)
+                target={"gold":data[1]["rows"],"three":data[2]["rows"],
+                        "rapid":data[4]["pages"],"native":data[3]["rows"]}[collection]
+                target.append(dict(target[0]))
+                with self.assertRaisesRegex(VisualGateError,"PARENT_ROW_COVERAGE_INVALID"):
+                    injected(root,data)
+
+    def test_missing_sixth_native_book_rejected_without_gold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            data=fixture(root)
+            data[3]["rows"]=[row for row in data[3]["rows"] if row["book_id"]!="B16"]
+            with self.assertRaisesRegex(VisualGateError,"PARENT_ROW_COVERAGE_INVALID"):
+                injected(root,data)
+
+    def test_mismatched_corpus_rejected_before_any_score(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            data=fixture(root)
+            data[4]["corpus_id"]="WRONG_CORPUS"
+            with self.assertRaisesRegex(VisualGateError,"PARENT_CORPUS_CHANGED"):
+                injected(root,data)
+
+    def test_two_distinct_pdf_sha_domains_match_only_correct_peers_without_gold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            data=fixture(root)
+            self.assertNotEqual(data[1]["rows"][0]["original_pdf_source_sha256_private"],
+                                data[3]["rows"][0]["source_document_sha256"])
+            self.assertEqual(injected(root,data)["graded_page_count"],0)
+        for collection,field in (
+            (1,"original_pdf_source_sha256_private"),
+            (2,"same_original_single_page_sha256_private"),
+            (3,"source_document_sha256"),
+            (4,"source_document_sha256"),
+        ):
+            with self.subTest(collection=collection),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                data=fixture(root)
+                records=data[collection]["pages" if collection==4 else "rows"]
+                records[0][field]="f"*64
+                with self.assertRaisesRegex(VisualGateError,"CROSS_PARENT_SOURCE_CHANGED"):
+                    injected(root,data)
+
+    def test_bad_rapid_png_or_frozen_ocr_rows_sha_never_reach_gold_grade(self):
+        for field,error in (
+            ("render_png_sha256","CROSS_PARENT_IMAGE_CHANGED"),
+            ("private_rows_sha256","CROSS_PARENT_SOURCE_CHANGED"),
+        ):
+            with self.subTest(field=field),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                data=fixture(root)
+                data[4]["pages"][0][field]="f"*64
+                with self.assertRaisesRegex(VisualGateError,error):
+                    injected(root,data)
+
+    def test_out_of_scope_page_number_refused_without_gold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            data=fixture(root)
+            data[2]["rows"][0]["physical_page"]=999
+            with self.assertRaisesRegex(VisualGateError,"CROSS_PARENT_SOURCE_CHANGED"):
+                injected(root,data)
 
 if __name__=="__main__":
     unittest.main()

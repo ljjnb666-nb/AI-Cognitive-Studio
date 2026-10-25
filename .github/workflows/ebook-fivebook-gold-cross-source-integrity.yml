@@ -1,0 +1,79 @@
+name: Fivebook Gold Cross-Parent Source Integrity
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-grade-gate:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-gold-cross-source-integrity-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run only synthetic no-gold, source-sha and triple-engine acceptance tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 numpy==1.26.4 opencv-python-headless==4.10.0.84 pillow==11.3.0
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_three_engine_gold_grade.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_three_engine_gold_grade.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_reference_gate.py' -v
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_text_scope.py' -v
+          echo 'ACS_GOLD_THREE_ENGINE_SYNTHETIC=PASS'
+          echo 'ACS_GOLD_THREE_ENGINE_FULL_PAGE_REFERENCE=REQUIRED'
+          echo 'ACS_GOLD_THREE_ENGINE_INDEPENDENT_GOLD=NOT_AUTO_GENERATED'
+          echo 'ACS_GOLD_THREE_ENGINE_CLOUD_CALLS=0'
+
+      - name: Parse owner-only Windows PowerShell source without touching private data
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          $path = (Resolve-Path 'tools/pdf-parser-benchmark/scripts/ebook_fivebook_gold_cross_parent_windows.ps1').Path
+          [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw 'WINDOWS_SCRIPT_PARSER_REJECTED' }
+          Write-Output 'ACS_GOLD_THREE_ENGINE_WINDOWS_SYNTAX=PASS'
+
+  owner-only-private-no-gold-readiness:
+    needs: synthetic-grade-gate
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-gold-cross-source-integrity-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      ACS_SAFE_GOLD_GATE_DIAGNOSTIC: '1'
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-gold-3way
+          persist-credentials: false
+          clean: false
+      - name: Read-only private five-source gold-ready check without public source text
+        shell: powershell
+        timeout-minutes: 23
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checkout = (Resolve-Path -LiteralPath 'acs-gold-3way').Path
+          if ((git -C $checkout rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'SHA_MISMATCH' }
+          & (Join-Path $checkout 'tools\pdf-parser-benchmark\scripts\ebook_fivebook_gold_cross_parent_windows.ps1') -PrivateRoot 'D:\ai-cognitive-pdf-benchmark-data' -Checkout $checkout
+          if ($LASTEXITCODE -ne 0) { exit 2 }
