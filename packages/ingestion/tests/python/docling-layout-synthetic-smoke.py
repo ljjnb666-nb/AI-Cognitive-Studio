@@ -9,8 +9,9 @@ import sys
 import tempfile
 
 def invoke(child,models,*args):
+    opt=["--safe-diagnostic-stage"] if "--probe" in args else []
     result=subprocess.run(
-        [sys.executable,str(child),"--artifacts",str(models),*args],
+        [sys.executable,str(child),"--artifacts",str(models),*args,*opt],
         capture_output=True,text=True,timeout=175,check=False,
         env={
             k:v for k,v in os.environ.items()
@@ -29,9 +30,23 @@ def invoke(child,models,*args):
             "OMP_NUM_THREADS":"2",
         },
     )
-    if len(result.stdout)>1_000_000 or result.returncode!=0:
+    if len(result.stdout)>1_000_000:
         raise RuntimeError("DOCLING_CHILD_REJECTED")
     rows=result.stdout.strip().splitlines()
+    if result.returncode!=0:
+        if "--probe" in args and len(rows)==1:
+            try:
+                diagnostic=json.loads(rows[0])
+                permitted={
+                    "START","DOCLING_VERSION","PYMUPDF_IMPORT","DOCLING_IMPORT",
+                    "ARTIFACT_DIRECTORY","ARTIFACT_INVENTORY","ARTIFACT_HASH",
+                    "ARTIFACT_WEIGHT_PRESENCE",
+                }
+                if diagnostic.get("safeStage") in permitted:
+                    print("ACS_DOCLING_LAYOUT_FAILURE_REASON="+diagnostic["safeStage"])
+            except (ValueError,TypeError,AttributeError,KeyError):
+                pass
+        raise RuntimeError("DOCLING_CHILD_REJECTED")
     if len(rows)!=1:
         raise RuntimeError("DOCLING_CHILD_PROTOCOL_INVALID")
     return json.loads(rows[0])
