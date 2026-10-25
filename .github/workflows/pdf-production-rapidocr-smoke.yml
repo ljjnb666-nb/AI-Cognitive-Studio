@@ -116,6 +116,37 @@ jobs:
               ForEach-Object { Join-Path $_.FullName 'Scripts\python.exe' } |
               Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
             if ($pythonCandidates.Count -gt 12) { throw 'RAPIDOCR_PYTHON_CANDIDATES_TOO_MANY' }
+            # Read-only capability inventory; report package capabilities only.
+            # No paths, source files, OCR text or version strings are emitted.
+            $missingFitz=0
+            $missingNumPy=0
+            $rapidMatched=0
+            $otherRuntime=0
+            $diagnoseCode=@(
+              'import importlib.util'
+              'from importlib import metadata'
+              'def version_matches(name,expected):'
+              '    try: return metadata.version(name)==expected'
+              '    except metadata.PackageNotFoundError: return False'
+              'def present(name):'
+              '    try: return importlib.util.find_spec(name) is not None'
+              '    except (ImportError,ValueError): return False'
+              'print("M1" if version_matches("rapidocr","3.9.2") and version_matches("onnxruntime","1.22.1") else "M0")'
+              'print("F1" if present("fitz") else "F0")'
+              'print("N1" if present("numpy") else "N0")'
+            ) -join [Environment]::NewLine
+            foreach ($candidate in $pythonCandidates) {
+              $checks=@(& $candidate -c $diagnoseCode 2>$null)
+              if ($LASTEXITCODE -ne 0 -or $checks.Count -ne 3) { $otherRuntime++; continue }
+              if ($checks[0] -eq 'M1') { $rapidMatched++ }
+              if ($checks[1] -eq 'F0') { $missingFitz++ }
+              if ($checks[2] -eq 'N0') { $missingNumPy++ }
+            }
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_DISCOVERED_VENVS=' + $pythonCandidates.Count)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_VERSION_MATCHES=' + $rapidMatched)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_FITZ_ABSENT=' + $missingFitz)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_NUMPY_ABSENT=' + $missingNumPy)
+            Write-Output ('ACS_PRODUCTION_RAPIDOCR_UNKNOWN_VENVS=' + $otherRuntime)
             $ready=@()
             $stage='MODEL_PROBE'
             foreach ($python in $pythonCandidates) {
@@ -156,44 +187,7 @@ jobs:
                 $receipt=@(& $python $worker --probe 2>$null)
                 if ($LASTEXITCODE -ne 0 -or $receipt.Count -ne 1) { throw 'PYMUPDF_PROBE_FAILED' }
                 $obj=$receipt[0] | ConvertFrom-Json -ErrorAction Stop
-                if ($obj.status -ne 'READY' -or $obj.rapidocr -ne '3.9.2' -or $obj.onnxruntime -ne '1.22.1' -or $obj.modelSha256 -notmatch '^[a-f0-9]{64}
-            Write-Output 'ACS_PRODUCTION_RAPIDOCR_RUNTIME_PROBE=PASS'
-            $stage='SYNTHETIC_TEMP_DIR'
-            $python=$ready[0]
-            $scratch=Join-Path $privateScratch ('acs-rapidocr-synthetic-' + [guid]::NewGuid().ToString('N'))
-            New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
-            try {
-              $stage='SYNTHETIC_PDF_CREATE'
-              $pdf=Join-Path $scratch 'synthetic-english.pdf'
-              $code="import fitz,sys; d=fitz.open(); p=d.new_page(width=600,height=400); p.insert_text((40,110),'HELLO PDF RAPIDOCR OCR TEST',fontsize=28); d.save(sys.argv[1]); d.close()"
-              & $python -c $code $pdf 2>$null | Out-Null
-              if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pdf -PathType Leaf)) {
-                throw 'RAPIDOCR_SYNTHETIC_PDF_CREATION_FAILED'
-              }
-              $stage='SYNTHETIC_OCR_EXECUTE'
-              $result=@(& $python $worker --pdf $pdf --page 0 2>$null)
-              if ($LASTEXITCODE -ne 0 -or $result.Count -ne 1) {
-                throw 'RAPIDOCR_SYNTHETIC_OCR_EXECUTION_FAILED'
-              }
-              $stage='SYNTHETIC_OCR_PROTOCOL'
-              $ob=$result[0] | ConvertFrom-Json -ErrorAction Stop
-              if ($ob.status -ne 'SUCCEEDED' -or $ob.schemaVersion -ne 1 -or
-                  [string]::IsNullOrWhiteSpace($ob.text)) {
-                throw 'RAPIDOCR_SYNTHETIC_OCR_EMPTY'
-              }
-              Write-Output 'ACS_PRODUCTION_RAPIDOCR_SYNTHETIC_PDF=PASS'
-              Write-Output 'ACS_PRODUCTION_RAPIDOCR_MODEL_CALLS=1_OFFLINE'
-              Write-Output 'ACS_PRODUCTION_RAPIDOCR_PRIVATE_BOOK_READS=0'
-            } finally {
-              Remove-Item -LiteralPath $scratch -Force -Recurse -ErrorAction SilentlyContinue
-              if ($extras) { Remove-Item -LiteralPath $extras -Force -Recurse -ErrorAction SilentlyContinue }
-            }
-          } catch {
-            Write-Output ('ACS_PRODUCTION_RAPIDOCR_STAGE=' + $stage)
-            Write-Output 'ACS_PRODUCTION_RAPIDOCR_WINDOWS=REJECTED'
-            exit 2
-          }
-) { throw 'MODEL_IDENTITY_MISMATCH' }
+                if ($obj.status -ne 'READY' -or $obj.rapidocr -ne '3.9.2' -or $obj.onnxruntime -ne '1.22.1' -or $obj.modelSha256 -notmatch '^[a-f0-9]{64}$') { throw 'MODEL_IDENTITY_MISMATCH' }
                 $ready+=,$python
                 Write-Output 'ACS_PRODUCTION_RAPIDOCR_TEST_ONLY_PYMUPDF=ISOLATED_INSTALLED'
               } catch {
@@ -232,6 +226,7 @@ jobs:
               Write-Output 'ACS_PRODUCTION_RAPIDOCR_PRIVATE_BOOK_READS=0'
             } finally {
               Remove-Item -LiteralPath $scratch -Force -Recurse -ErrorAction SilentlyContinue
+              if ($extras) { Remove-Item -LiteralPath $extras -Force -Recurse -ErrorAction SilentlyContinue }
             }
           } catch {
             Write-Output ('ACS_PRODUCTION_RAPIDOCR_STAGE=' + $stage)
