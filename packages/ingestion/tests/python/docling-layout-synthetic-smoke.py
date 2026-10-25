@@ -33,6 +33,9 @@ def invoke(child,models,*args):
     if len(result.stdout)>1_000_000:
         raise RuntimeError("DOCLING_CHILD_REJECTED")
     rows=result.stdout.strip().splitlines()
+    if "--probe" in args:
+        print("ACS_DOCLING_LAYOUT_PROBE_EXIT="+("ZERO" if result.returncode==0 else "NONZERO"))
+        print("ACS_DOCLING_LAYOUT_PROBE_LINE_COUNT="+("ONE" if len(rows)==1 else "OTHER"))
     if result.returncode!=0:
         if "--probe" in args and len(rows)==1:
             try:
