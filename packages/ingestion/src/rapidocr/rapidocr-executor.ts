@@ -70,7 +70,7 @@ export function resolveRapidOcrExecutorConfig(
  * Network proxies are explicitly pointed at the offline refusal endpoint.
  */
 export function rapidOcrOfflineEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const system: NodeJS.ProcessEnv = {};
+  const system: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV ?? "production" };
   const passThrough = [
     "PATH", "Path", "PATHEXT", "SystemRoot", "SYSTEMROOT", "WINDIR",
     "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "LOCALAPPDATA",
