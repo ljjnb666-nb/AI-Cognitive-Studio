@@ -59,6 +59,73 @@ export async function claimDoclingTask(id:string):Promise<DoclingTaskClaim|null>
   return claimed.length===1?{id,token,attempt:claimed[0]!.attemptCount}:null;
 }
 
+/**
+ * Only the same live owner can extend its lease, using the database clock.
+ * A timed-out token is never revived, and no attempt budget is changed.
+ */
+export async function renewDoclingTaskLease(claim:DoclingTaskClaim):Promise<boolean> {
+  const rows=await prisma.$queryRaw<Array<{id:string}>>`
+    UPDATE "DoclingLayoutTask"
+    SET "leaseUntil" = NOW() + INTERVAL '300 seconds',
+        "updatedAt" = NOW()
+    WHERE "id" = ${claim.id}
+      AND "claimToken" = ${claim.token}
+      AND "attemptCount" = ${claim.attempt}
+      AND "status" = 'RUNNING'::"DoclingLayoutTaskStatus"
+      AND "leaseUntil" > NOW()
+    RETURNING "id"
+  `;
+  return rows.length===1;
+}
+
+/**
+ * Heartbeat transport errors are treated like a lost lease, not as a reason
+ * to blindly retry a model or silently publish an overdue page.
+ *
+ * Stop + drain is mandatory before the caller settles task status. This
+ * keeps an in-flight heartbeat from resurrecting a settled task.
+ */
+export async function withDoclingClaimHeartbeat<T>(
+  claim:DoclingTaskClaim,
+  operation:()=>Promise<T>,
+  options:{intervalMs?:number;renew?:(claim:DoclingTaskClaim)=>Promise<boolean>}={},
+):Promise<T> {
+  const intervalMs=options.intervalMs??60_000;
+  if(!Number.isSafeInteger(intervalMs)||intervalMs<1||intervalMs>120_000)
+    throw new Error("DOCLING_LAYOUT_HEARTBEAT_INTERVAL_INVALID");
+  const renew=options.renew??renewDoclingTaskLease;
+  let stopped=false;
+  let lost=false;
+  let inFlight:Promise<void>=Promise.resolve();
+  const heartbeat=()=>{
+    if(stopped||lost)return;
+    // Serial renewals only: callbacks cannot overlap and extend a lease
+    // after the worker already settled or exited.
+    inFlight=inFlight.then(async()=>{
+      if(stopped||lost)return;
+      try{
+        if(!(await renew(claim)))lost=true;
+      }catch{lost=true;}
+    });
+  };
+  const timer=setInterval(heartbeat,intervalMs);
+  timer.unref?.();
+  try{
+    const result=await operation();
+    if(lost)throw new Error("DOCLING_LAYOUT_HEARTBEAT_LOST");
+    return result;
+  }finally{
+    stopped=true;
+    clearInterval(timer);
+    await inFlight;
+    if(lost){
+      // The caller's post-operation logic always stops before finalization;
+      // this thrown fence prevents treating an unverified run as success.
+      // If operation threw, do not suppress the existing exception.
+    }
+  }
+}
+
 /** Stale owners cannot settle a new owner's execution. */
 export async function finishDoclingTask(
   claim:DoclingTaskClaim,success:boolean,
