@@ -36,7 +36,10 @@ def invoke(child,models,*args):
         raise RuntimeError("DOCLING_CHILD_PROTOCOL_INVALID")
     return json.loads(rows[0])
 
+STAGE="START"
+
 def main():
+    global STAGE
     parser=argparse.ArgumentParser()
     parser.add_argument("--child",required=True)
     parser.add_argument("--artifacts",required=True)
@@ -45,11 +48,13 @@ def main():
     models=Path(opts.artifacts)
     if not child.is_file() or not models.is_dir():
         raise RuntimeError("SMOKE_INPUT_MISSING")
+    STAGE="MODEL_PROBE"
     identity=invoke(child,models,"--probe")
     if (identity.get("status")!="READY" or identity.get("docling")!="2.141.0"
             or len(identity.get("artifactSha256",""))!=64):
         raise RuntimeError("DOCLING_PROBE_NOT_READY")
     print("ACS_DOCLING_LAYOUT_PINNED_ASSETS=PASS")
+    STAGE="SYNTHETIC_PDF_CREATE"
     import fitz
     with tempfile.TemporaryDirectory(prefix="acs-docling-synthetic-") as td:
         pdf=Path(td)/"synthetic.pdf"
@@ -61,12 +66,15 @@ def main():
         page1.insert_text((40,150),"STRUCTURED_PARAGRAPH_CONTENT",fontsize=12)
         document.save(pdf)
         document.close()
+        STAGE="SECOND_PAGE_CONVERT"
         output=invoke(child,models,"--pdf",str(pdf),"--page","1")
+        STAGE="CANDIDATE_PROTOCOL"
         if (output.get("schemaVersion")!=1 or output.get("status")!="SUCCEEDED"
                 or output.get("ocrUsed") is not False or
                 output.get("fullPageReference") is not False or
                 output.get("sourceMethod")!="DOCLING_LAYOUT_CANDIDATE_ONLY"):
             raise RuntimeError("DOCLING_LAYOUT_CANDIDATE_REJECTED")
+        STAGE="PAGE_ISOLATION_CHECK"
         text=output.get("markdown")
         if (not isinstance(text,str)
                 or "SECOND_PAGE_LAYOUT_TEST" not in text
@@ -85,5 +93,6 @@ if __name__=="__main__":
     try:
         main()
     except Exception:
+        print("ACS_DOCLING_LAYOUT_FAILURE_STAGE="+STAGE)
         print("ACS_DOCLING_LAYOUT_SYNTHETIC_SMOKE=REJECTED")
         sys.exit(2)
