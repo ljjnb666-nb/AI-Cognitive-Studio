@@ -52,6 +52,9 @@ jobs:
       EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
+      # Optional owner-managed Actions secrets; no secret value enters logs.
+      ACS_GLM_VISION_API_KEY: ${{ secrets.ACS_GLM_VISION_API_KEY }}
+      GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
     steps:
       - uses: actions/checkout@v4
         env:
