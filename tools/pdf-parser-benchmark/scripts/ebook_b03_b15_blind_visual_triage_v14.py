@@ -152,6 +152,68 @@ def exclusive(path,raw):
         f.write(raw)
 
 
+
+def private_inventory(root):
+    """Read-only inventory of idempotency fences, with counts only.
+
+    No cloud provider, no source text, private paths, SHA strings or per-page
+    identifiers are output to Actions. UNKNOWN may already have been charged.
+    """
+    folder,tiles=source_contract(root)
+    dest=folder/SUBDIR
+    if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+        raise VisualGateError("V14_PRIVATE_OUTPUT_UNSAFE")
+    if not dest.exists():
+        return {"completed":0,"unknown":0,"not_started":len(TARGETS)}
+    allowed=set()
+    completed=unknown=not_started=0
+    for book,page,region in TARGETS:
+        img_sha=tiles[(book,page,region)][1]
+        ident=f"{book}_p{page:04d}_{region}"
+        j=dest/(ident+".attempt.private.json")
+        out=dest/(ident+".candidate.private.json")
+        allowed.update((j.name,out.name))
+        if j.is_symlink() or out.is_symlink():
+            raise VisualGateError("V14_PRIVATE_INVENTORY_SYMLINK")
+        journal_exists=j.exists()
+        output_exists=out.exists()
+        if output_exists and not journal_exists:
+            raise VisualGateError("V14_ORPHANED_CANDIDATE")
+        if not journal_exists:
+            not_started+=1
+            continue
+        jr=read_json(j,MAX_RECORD)
+        if (jr.get("schema_version")!=14 or
+                jr.get("state")!="REQUEST_INITIATED_NO_RETRY" or
+                jr.get("source_tile_sha256_private")!=img_sha or
+                jr.get("book_id")!=book or
+                jr.get("physical_page")!=page or
+                jr.get("region")!=region or jr.get("model")!=MODEL):
+            raise VisualGateError("V14_ATTEMPT_FENCE_INVALID")
+        if not output_exists:
+            unknown+=1
+            continue
+        data=read_json(out,MAX_RECORD)
+        if (data.get("schema_version")!=14 or
+                data.get("status")!=AUTHORITY or
+                data.get("source_tile_sha256_private")!=img_sha or
+                data.get("book_id")!=book or
+                data.get("physical_page")!=page or
+                data.get("region")!=region or data.get("model")!=MODEL or
+                data.get("independent_gold_approved") is not False or
+                data.get("full_page_reference") is not False or
+                data.get("curve_correspondence_verified") is not False or
+                data.get("cer",object()) is not None or
+                not isinstance(data.get("candidate"),dict)):
+            raise VisualGateError("V14_CANDIDATE_FENCE_INVALID")
+        parse_response(json.dumps(data["candidate"],ensure_ascii=False))
+        completed+=1
+    if set(x.name for x in dest.iterdir())!=set(x for x in allowed if (dest/x).exists()):
+        raise VisualGateError("V14_UNEXPECTED_PRIVATE_FILE")
+    if completed+unknown+not_started!=len(TARGETS):
+        raise VisualGateError("V14_INVENTORY_INVARIANT_INVALID")
+    return {"completed":completed,"unknown":unknown,"not_started":not_started}
+
 def execute(root,*,mode,vision_call=None):
     folder,tiles=source_contract(root)
     dest=folder/SUBDIR
@@ -221,12 +283,22 @@ def main(argv=None):
     parser.add_argument("--private-root",required=True)
     group=parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check-only",action="store_true")
+    group.add_argument("--inventory-only",action="store_true")
     group.add_argument("--write",action="store_true")
     group.add_argument("--audit-only",action="store_true")
     parser.add_argument("--allow-cloud-vision",action="store_true")
     args=parser.parse_args(argv)
     try:
         root=Path(args.private_root)
+        if args.inventory_only:
+            counts=private_inventory(root)
+            print("ACS_V14_INVENTORY=PRIVATE_READONLY")
+            print("ACS_V14_INVENTORY_COMPLETED="+str(counts["completed"]))
+            print("ACS_V14_INVENTORY_UNKNOWN="+str(counts["unknown"]))
+            print("ACS_V14_INVENTORY_NOT_STARTED="+str(counts["not_started"]))
+            print("ACS_V14_INVENTORY_NEW_MODEL_CALLS=0")
+            print("ACS_V14_VISUAL_GOLD=NOT_APPROVED")
+            return 0
         mode="check" if args.check_only else "audit" if args.audit_only else "write"
         if mode=="write":
             if not args.allow_cloud_vision:
