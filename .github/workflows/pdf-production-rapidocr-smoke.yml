@@ -90,9 +90,12 @@ jobs:
             if ((git -C acs-prod-rapidocr rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
             $root='D:\ai-cognitive-pdf-benchmark-data'
             $envDir=Join-Path $root 'tool-env'
-            $privateScratch=Join-Path $root 'temp'
+            # Synthetic test files only. Runner-owned scratch avoids touching
+            # private Benchmark scratch/junctions and existing frozen inputs.
+            $privateScratch=$env:RUNNER_TEMP
             $worker='acs-prod-rapidocr/packages/ingestion/src/rapidocr/rapidocr-child.py'
             $stage='PREREQUISITES'
+            if ([string]::IsNullOrWhiteSpace($privateScratch)) { throw 'RUNNER_TEMP_UNAVAILABLE' }
             $workerOk=Test-Path -LiteralPath $worker -PathType Leaf
             $venvsOk=Test-Path -LiteralPath $envDir -PathType Container
             $scratchOk=Test-Path -LiteralPath $privateScratch -PathType Container
