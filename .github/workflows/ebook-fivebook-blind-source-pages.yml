@@ -1,0 +1,112 @@
+name: Fivebook Blind Original Source Pages
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-blind-five-pages:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-blind-source-pages-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify synthetic private provenance and no automated reference approval
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pillow==11.3.0
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_blind_source_pages.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_blind_source_pages.py' -v
+          echo 'ACS_FIVEBOOK_BLIND_V11_SYNTHETIC=PASS'
+          echo 'ACS_FIVEBOOK_BLIND_V11_GOLD=UNVERIFIED'
+
+  owner-only-private-original-pages:
+    needs: synthetic-blind-five-pages
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-blind-source-pages-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout exact authorized owner HEAD without credentials
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-fivebook-source
+          persist-credentials: false
+          clean: false
+      - name: Create once or audit existing five-book private source-only packet
+        shell: powershell
+        timeout-minutes: 16
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            if ((git -C acs-fivebook-source rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'EXACT_HEAD_MISMATCH' }
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $dir=Join-Path $root 'semantic_gate\multibook_matrix_20261023'
+            $py=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { throw 'LOCAL_PYTHON_NOT_READY' }
+            & $py -c 'import PIL'
+            if ($LASTEXITCODE -ne 0) { throw 'LOCAL_PIL_NOT_READY' }
+            $source=@(
+              'B03_p0067.private.png',
+              'B08_p0064.private.png',
+              'B15_p0109.private.png',
+              'B29_p0072.private.png',
+              'B31_p0126.private.png',
+              'multibook_native_24pages.private.json'
+            )
+            $before=@{}
+            foreach ($name in $source) {
+              $item=Join-Path $dir $name
+              if (-not (Test-Path -LiteralPath $item -PathType Leaf)) { throw 'FROZEN_SOURCE_MISSING' }
+              $before[$item]=(Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash
+            }
+            $manifest='acs-fivebook-source/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+            $tool='acs-fivebook-source/tools/pdf-parser-benchmark/scripts/ebook_fivebook_blind_source_pages.py'
+            $receipt=Join-Path $dir 'fivebook_blind_original_pages_v11\fivebook_blind_source_review.v11.private.json'
+            $argsList=@('--private-root',$root,'--manifest',$manifest)
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            # Suppress any non-whitelisted child output; emit fixed messages only.
+            if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) {
+              $child=@(& $py $tool @argsList --write 2>$null)
+              if ($LASTEXITCODE -ne 0) { throw 'FIVE_SOURCE_PACKET_CREATION_REJECTED' }
+            }
+            $audit=@(& $py $tool @argsList --audit-only 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw 'FIVE_SOURCE_PACKET_AUDIT_REJECTED' }
+            if (@($audit | Where-Object { $_ -eq 'ACS_FIVEBOOK_BLIND_V11=PRIVATE_VERIFIED' }).Count -ne 1) { throw 'SOURCE_PACKET_ANONYMOUS_RECEIPT_INVALID' }
+            if (@($audit | Where-Object { $_ -eq 'ACS_FIVEBOOK_BLIND_V11_SOURCE_IMAGES=5' }).Count -ne 1) { throw 'SOURCE_PACKET_COUNT_INVALID' }
+            foreach ($item in $before.Keys) {
+              if ((Get-FileHash -LiteralPath $item -Algorithm SHA256).Hash -ne $before[$item]) { throw 'UPSTREAM_SOURCE_SHA_CHANGED' }
+            }
+            Write-Output 'ACS_FIVEBOOK_BLIND_V11_PRIVATE_PACKET=VERIFIED'
+            Write-Output 'ACS_FIVEBOOK_BLIND_V11_IMAGES=5'
+            Write-Output 'ACS_FIVEBOOK_BLIND_V11_SOURCE_SHA=UNCHANGED'
+            Write-Output 'ACS_FIVEBOOK_BLIND_V11_CER=UNVERIFIED'
+            Write-Output 'ACS_FIVEBOOK_BLIND_V11_REVIEW_APPROVED=0'
+          } catch {
+            # Never print private exception, book text, SHA, paths or pixels.
+            Write-Output 'ACS_FIVEBOOK_BLIND_V11_WINDOWS=REJECTED'
+            exit 2
+          }
