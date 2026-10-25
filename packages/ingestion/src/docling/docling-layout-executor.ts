@@ -23,6 +23,8 @@ export type DoclingLayoutConfig = {
 export type DoclingLayoutRequest = {
   pdfBytes: Uint8Array;
   physicalPageIndex: number;
+  /** Optional parent lease cancellation: abort the bounded Python process. */
+  signal?: AbortSignal;
 };
 
 /** Never an authoritative transcription, canonical block or independently approved gold. */
@@ -198,12 +200,19 @@ export function createDoclingLayoutCandidateExecutor(
     parserName:DOCLING_LAYOUT_ID,
     modelSha256:verified.artifactSha256,
     async inspect(request){
-      if(closing)return failed("CLOSING");
+      if(closing||request.signal?.aborted)return failed("CLOSING");
       const controller=new AbortController();
+      const onAbort=()=>controller.abort();
+      request.signal?.addEventListener("abort",onAbort,{once:true});
+      // A race with the initial aborted check must not start a live model.
+      if(request.signal?.aborted)controller.abort();
       const result=inspectInternal(request,controller.signal);
       const active={controller,done:result.then(()=>undefined,()=>undefined)};
       live.add(active);
-      try{return await result;}finally{live.delete(active);}
+      try{return await result;}finally{
+        request.signal?.removeEventListener("abort",onAbort);
+        live.delete(active);
+      }
     },
     async close(){
       closing=true;

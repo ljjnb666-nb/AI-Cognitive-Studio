@@ -32,6 +32,8 @@ export type DoclingSidecarInput = {
   workspaceId:string;sourceDocumentId:string;ingestionRunId:string;
   physicalPageIndex:number;pdfBytes:Uint8Array;
   storage:StorageProvider;executor:DoclingLayoutHandle;
+  /** Aborts model execution if the durable PostgreSQL owner lease is lost. */
+  signal?:AbortSignal;
   /** Optional PostgreSQL owner fence for queue-managed execution. */
   claim?:{id:string;token:string};
 };
@@ -138,9 +140,12 @@ export async function inspectAndPersistDoclingLayoutSidecar(
   const previous=await prisma.doclingLayoutSnapshot.findUnique({where});
   if(previous)return validatedStoredSnapshot(previous,input,generation,sourceSha);
 
+  if(input.signal?.aborted)throw new Error("DOCLING_LAYOUT_EXECUTION_ABORTED");
   const result=await input.executor.inspect({
     pdfBytes:input.pdfBytes,physicalPageIndex:input.physicalPageIndex,
+    ...(input.signal?{signal:input.signal}:{}),
   });
+  if(input.signal?.aborted)throw new Error("DOCLING_LAYOUT_EXECUTION_ABORTED");
   if(result.status!=="SUCCEEDED"||!candidateIsValid(result.candidate,input))
     throw new Error("DOCLING_LAYOUT_CANDIDATE_REJECTED");
 
@@ -149,7 +154,11 @@ export async function inspectAndPersistDoclingLayoutSidecar(
     throw new Error("DOCLING_LAYOUT_ARTIFACT_BUDGET_EXCEEDED");
   const markdownSha256=sha256(markdownBytes);
   const markdownStorageKey=storageKey(input,generation,input.executor.modelSha256,markdownSha256);
+  if(input.signal?.aborted)throw new Error("DOCLING_LAYOUT_EXECUTION_ABORTED");
   await input.storage.putObject({key:markdownStorageKey,body:markdownBytes,contentType:"text/markdown; charset=utf-8"});
+  // This guard complements the DB owner fence: cancellation may arrive while
+  // S3 is writing. Any orphan object is unreferenced, never authoritative.
+  if(input.signal?.aborted)throw new Error("DOCLING_LAYOUT_EXECUTION_ABORTED");
   const data={
     workspaceId:input.workspaceId,sourceDocumentId:input.sourceDocumentId,
     ingestionRunId:input.ingestionRunId,physicalPageIndex:input.physicalPageIndex,

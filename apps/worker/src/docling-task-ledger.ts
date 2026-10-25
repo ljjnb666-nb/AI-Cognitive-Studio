@@ -121,7 +121,7 @@ export async function renewDoclingTaskLease(claim:DoclingTaskClaim):Promise<bool
 export async function withDoclingClaimHeartbeat<T>(
   claim:DoclingTaskClaim,
   operation:()=>Promise<T>,
-  options:{intervalMs?:number;renew?:(claim:DoclingTaskClaim)=>Promise<boolean>}={},
+  options:{intervalMs?:number;renew?:(claim:DoclingTaskClaim)=>Promise<boolean>;onLost?:()=>void}={},
 ):Promise<T> {
   const intervalMs=options.intervalMs??60_000;
   if(!Number.isSafeInteger(intervalMs)||intervalMs<1||intervalMs>120_000)
@@ -130,6 +130,12 @@ export async function withDoclingClaimHeartbeat<T>(
   let stopped=false;
   let lost=false;
   let inFlight:Promise<void>=Promise.resolve();
+  const markLost=()=>{
+    if(lost)return;
+    lost=true;
+    // A cancellation callback must never create an unhandled timer rejection.
+    try{options.onLost?.();}catch{ /* the DB fence still rejects this owner */ }
+  };
   const heartbeat=()=>{
     if(stopped||lost)return;
     // Serial renewals only: callbacks cannot overlap and extend a lease
@@ -137,8 +143,8 @@ export async function withDoclingClaimHeartbeat<T>(
     inFlight=inFlight.then(async()=>{
       if(stopped||lost)return;
       try{
-        if(!(await renew(claim)))lost=true;
-      }catch{lost=true;}
+        if(!(await renew(claim)))markLost();
+      }catch{markLost();}
     });
   };
   // Keep a live scheduling handle until the owned task is fully settled.
@@ -157,10 +163,9 @@ export async function withDoclingClaimHeartbeat<T>(
     clearInterval(timer);
     await inFlight;
   }
-  if(failed)throw operationError;
-  // Check only AFTER an in-flight database renewal has drained.
-  // A rejected renewal must never allow a completed model output through.
+  // Lease loss outranks a model's cancellation error. Neither can publish.
   if(lost)throw new Error("DOCLING_LAYOUT_HEARTBEAT_LOST");
+  if(failed)throw operationError;
   return value;
 }
 

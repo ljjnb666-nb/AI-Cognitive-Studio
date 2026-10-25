@@ -151,6 +151,7 @@ export async function executeDoclingBackgroundJob(
     if(!snapshot)throw new Error("DOCLING_LAYOUT_TASK_SNAPSHOT_MISSING");
   }
 
+  const abortOnLost=new AbortController();
   try{
     const work=async()=>{
       // Heartbeat spans the original source read, Docling conversion,
@@ -162,12 +163,14 @@ export async function executeDoclingBackgroundJob(
         ingestionRunId:run.id,
         physicalPageIndex:data.physicalPageIndex,
         pdfBytes:bytes,
-        storage,executor,
+        storage,executor,signal:abortOnLost.signal,
         ...(claim?{claim:{id:claim.id,token:claim.token}}:{}),
       });
     };
     const receipt=claim
-      ? await withDoclingClaimHeartbeat(claim,work)
+      ? await withDoclingClaimHeartbeat(claim,work,{
+          onLost:()=>abortOnLost.abort(),
+        })
       : await work();
     if(claim && !(await finishDoclingTask(claim,true)))
       throw new Error("DOCLING_LAYOUT_CLAIM_LOST");

@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   synthetic-docling-source-isolation:
-    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-docling-layout-candidate-20261025' }}
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.pull_request.head.ref == 'feat/pdf-docling-layout-candidate-20261025' || github.event.pull_request.head.ref == 'feat/pdf-docling-lease-loss-abort-20261025') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -35,7 +35,7 @@ jobs:
 
   owner-only-real-docling-layout:
     needs: synthetic-docling-source-isolation
-    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-docling-layout-candidate-20261025' }}
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.pull_request.head.ref == 'feat/pdf-docling-layout-candidate-20261025' || github.event.pull_request.head.ref == 'feat/pdf-docling-lease-loss-abort-20261025') }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 19
     env:
