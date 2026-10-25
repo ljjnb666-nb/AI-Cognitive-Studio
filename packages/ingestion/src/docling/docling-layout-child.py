@@ -5,6 +5,7 @@ One source PDF, exactly one original physical page, one bounded JSON reply.
 This file is shipped with the production ingestion package, not benchmark data.
 """
 import argparse
+from contextlib import redirect_stdout
 from importlib import metadata
 import hashlib
 import json
@@ -146,12 +147,16 @@ def main():
         if args.probe and (args.pdf is not None or args.page is not None):
             raise RuntimeError("DOCLING_PROBE_INPUT_CONFLICT")
         models=Path(args.artifacts)
-        fingerprint=runtime_probe(models)
+        # Imports, model startup and Docling conversion may write progress
+        # messages to stdout. Keep IPC stdout strictly a single JSON line.
+        with redirect_stdout(sys.stderr):
+            fingerprint=runtime_probe(models)
+            converted=None if args.probe else layout(Path(args.pdf),args.page,models)
         if args.probe:
             emit({"schemaVersion":1,"status":"READY",
                   "docling":VERSION,"artifactSha256":fingerprint})
         else:
-            emit(layout(Path(args.pdf),args.page,models))
+            emit(converted)
         return 0
     except Exception:
         record={"schemaVersion":1,"status":"FAILED"}
