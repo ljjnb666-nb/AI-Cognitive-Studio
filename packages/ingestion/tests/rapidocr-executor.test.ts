@@ -5,8 +5,8 @@ import {
   RAPIDOCR_EXECUTOR_NAME, RAPIDOCR_PINNED_VERSION,
   createRapidOcrPdfOcrExecutor, rapidOcrOfflineEnv, resolveRapidOcrExecutorConfig,
   verifyRapidOcrRuntime, type RapidOcrExecutorConfig,
-} from "../../src/rapidocr/rapidocr-executor.js";
-import type { BoundedSpawnResult } from "../../src/mineru/mineru-process.js";
+} from "../src/rapidocr/rapidocr-executor.js";
+import type { BoundedSpawnResult } from "../src/mineru/mineru-process.js";
 
 const fakeEnv=(overrides: Record<string,unknown> = {}) => ({
   OCR_PROVIDER:"rapidocr",
