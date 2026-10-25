@@ -19,6 +19,8 @@ ONNX="1.22.1"
 MAX_BYTES=110_000_000
 MAX_PIXELS=8_000_000
 MAX_TEXT_CHARS=180_000
+# Private runtime diagnostic reports only this allowlisted stage, never source text.
+TRACE_STAGE="START"
 
 def output(obj):
     sys.stdout.write(json.dumps(obj,ensure_ascii=False,
@@ -53,11 +55,15 @@ def check_runtime():
     return h.hexdigest()
 
 def extract(path,page):
+    global TRACE_STAGE
+    TRACE_STAGE="SOURCE_INPUT"
     if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=MAX_BYTES:
         raise RuntimeError("OCR_INPUT_INVALID")
+    TRACE_STAGE="IMPORT_RASTER_AND_OCR"
     import fitz
     import numpy as np
     from rapidocr import RapidOCR
+    TRACE_STAGE="RENDER_PDF_PAGE"
     with fitz.open(path) as pdf:
         if pdf.needs_pass or page<0 or page>=pdf.page_count:
             raise RuntimeError("OCR_PAGE_INVALID")
@@ -75,7 +81,9 @@ def extract(path,page):
             pix.height,pix.width,3)
         # The benchmark RapidOCR 3.9.2 accepts BGR ndarray.
         bgr=rgb[:,:,::-1].copy()
+    TRACE_STAGE="RAPIDOCR_INFERENCE"
     result=RapidOCR()(bgr)
+    TRACE_STAGE="RAPIDOCR_RESULT_SCHEMA"
     if result is None:
         raise RuntimeError("OCR_RESULT_MISSING")
     txts=getattr(result,"txts",None)
@@ -103,6 +111,7 @@ def main():
     mode.add_argument("--probe",action="store_true")
     mode.add_argument("--pdf")
     arg.add_argument("--page",type=int)
+    arg.add_argument("--safe-diagnostic-stage",action="store_true")
     opts=arg.parse_args()
     os.environ["HF_HUB_OFFLINE"]="1"
     os.environ["TRANSFORMERS_OFFLINE"]="1"
@@ -118,8 +127,12 @@ def main():
         output({"schemaVersion":1,"status":"SUCCEEDED","text":result})
         return 0
     except Exception:
-        # No original text/paths/exception strings are printed or propagated.
-        output({"schemaVersion":1,"status":"FAILED"})
+        # Do not reveal original text/paths/exception details, even for private
+        # synthetic smoke. Normal production protocol remains unchanged.
+        record={"schemaVersion":1,"status":"FAILED"}
+        if opts.safe_diagnostic_stage:
+            record["safeStage"]=TRACE_STAGE
+        output(record)
         return 2
 
 if __name__=="__main__":
