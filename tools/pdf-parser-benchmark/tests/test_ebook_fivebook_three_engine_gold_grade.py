@@ -21,6 +21,7 @@ def fixture(root,approved=False,source_sha_override=None):
     folder=root/"semantic_gate"/"multibook_matrix_20261023"
     folder.mkdir(parents=True)
     sourcepdf="a"*64
+    staged_single_page_pdf="c"*64
     corpus="ONLY_SYNTHETIC_CORPUS"
     gold={"page_count":5,"corpus_id":corpus,
           "reference_provenance_truth_requires_external_audit":True,"rows":[]}
@@ -38,13 +39,13 @@ def fixture(root,approved=False,source_sha_override=None):
         }]})
         gold["rows"].append({
             "book_id":book,"physical_page":page,
-            "original_pdf_source_sha256_private":sourcepdf,
+            "original_pdf_source_sha256_private":staged_single_page_pdf,
             "reference_state":("ATTESTED_REFERENCE_CER_COMPUTED" if book=="B03" and approved
                                else "INDEPENDENT_REFERENCE_NOT_PROVIDED"),
             "reference_normalized_chars":5 if book=="B03" and approved else None,
         })
         model={"book_id":book,"physical_page":page,
-               "same_original_single_page_sha256_private":sourcepdf,
+               "same_original_single_page_sha256_private":staged_single_page_pdf,
                "rapidocr_rows_sha256_private":"e"*64}
         if book=="B03" and approved:
             md=b"HELXO"
@@ -72,13 +73,13 @@ def fixture(root,approved=False,source_sha_override=None):
         page_file=refdir/"B03_p0067.verified.private.json"
         candidate={
             "schema_version":1,"corpus_id":corpus,"book_id":"B03","physical_page":67,
-            "original_page_pdf_sha256":sourcepdf,
+            "original_page_pdf_sha256":staged_single_page_pdf,
             "reference_origin":"INDEPENDENT_PAGE_TRANSCRIPTION",
             "verification_method":"MANUAL_SOURCE_PAGE_REVIEW",
             "reviewed_source_page":True,
             "not_derived_from_rapidocr_or_mineru":True,
             "reviewer_approval":"INDEPENDENTLY_APPROVED",
-            "independent_source_sha256":sourcepdf,
+            "independent_source_sha256":staged_single_page_pdf,
             "reference_text":"HELLO",
             "reference_text_sha256":sha(b"HELLO"),
             "reviewer_record_id":"independentA01",
@@ -225,7 +226,13 @@ class ThreeEngineGoldGradeTests(unittest.TestCase):
             with self.assertRaisesRegex(VisualGateError,"PARENT_CORPUS_CHANGED"):
                 injected(root,data)
 
-    def test_all_four_parent_pdf_hashes_must_match_even_without_gold(self):
+    def test_two_distinct_pdf_sha_domains_match_only_correct_peers_without_gold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            data=fixture(root)
+            self.assertNotEqual(data[1]["rows"][0]["original_pdf_source_sha256_private"],
+                                data[3]["rows"][0]["source_document_sha256"])
+            self.assertEqual(injected(root,data)["graded_page_count"],0)
         for collection,field in (
             (1,"original_pdf_source_sha256_private"),
             (2,"same_original_single_page_sha256_private"),
