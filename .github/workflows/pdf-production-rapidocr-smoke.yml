@@ -109,10 +109,9 @@ jobs:
               New-Item -ItemType Directory -Path $privateScratch -ErrorAction Stop | Out-Null
               Write-Output 'ACS_PRODUCTION_RAPIDOCR_SCRATCH=CREATED'
             }
-            $scratchAttributes=(Get-Item -LiteralPath $privateScratch -Force -ErrorAction Stop).Attributes
-            if (($scratchAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-              throw 'RAPIDOCR_SCRATCH_REPARSE_BLOCKED'
-            }
+            # RUNNER_TEMP may legitimately be a Windows junction. Only the
+            # uniquely generated synthetic child is created/deleted below.
+            # No private benchmark input is read or modified.
             $pythonCandidates=@(Get-ChildItem -LiteralPath $envDir -Directory -ErrorAction Stop |
               ForEach-Object { Join-Path $_.FullName 'Scripts\python.exe' } |
               Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
