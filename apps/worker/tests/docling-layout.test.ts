@@ -5,6 +5,7 @@ import {
   doclingLayoutJobId,
   resolveDoclingBackgroundExecutor,
 } from "../src/docling-layout.js";
+import { withDoclingClaimHeartbeat, type DoclingTaskClaim } from "../src/docling-task-ledger.js";
 
 describe("isolated Docling layout background admission",()=>{
   it("is off by default and does not require a Docling installation",async()=>{
@@ -49,5 +50,85 @@ describe("isolated Docling layout background admission",()=>{
       .toThrow("DOCLING_LAYOUT_JOB_IDENTITY_INVALID");
     expect(()=>doclingLayoutJobId({...input,modelSha256:"spoofed"}))
       .toThrow("DOCLING_LAYOUT_JOB_IDENTITY_INVALID");
+  });
+});
+
+
+describe("Docling lease heartbeat and safe stop",()=>{
+  const claim:DoclingTaskClaim={id:"synthetic-task",token:"synthetic-owner",attempt:1};
+  it("rejects invalid tick intervals without touching a task",async()=>{
+    await expect(withDoclingClaimHeartbeat(claim,async()=>42,{intervalMs:0}))
+      .rejects.toThrow("DOCLING_LAYOUT_HEARTBEAT_INTERVAL_INVALID");
+  });
+
+  it("extends while running, then drains and permits a successful result",async()=>{
+    let renewed!:()=>void;
+    const signal=new Promise<void>(resolve=>{renewed=resolve;});
+    let renewals=0;
+    const renew=async()=>{
+      renewals++;
+      renewed();
+      return true;
+    };
+    const result=await withDoclingClaimHeartbeat(claim,async()=>{
+      await signal;
+      return "CANDIDATE_ONLY";
+    },{intervalMs:5,renew});
+    expect(result).toBe("CANDIDATE_ONLY");
+    const completed=renewals;
+    await new Promise(resolve=>setTimeout(resolve,20));
+    expect(renewals).toBe(completed);
+  });
+
+  it("an explicit lost lease fences returned work even if the model already completed",async()=>{
+    let tick!:()=>void;
+    const attempted=new Promise<void>(resolve=>{tick=resolve;});
+    let renewed=0;
+    const renew=async()=>{
+      renewed++;
+      tick();
+      return false;
+    };
+    await expect(withDoclingClaimHeartbeat(claim,async()=>{
+      await attempted;
+      return "MUST_NEVER_BE_SUCCESS";
+    },{intervalMs:5,renew})).rejects.toThrow("DOCLING_LAYOUT_HEARTBEAT_LOST");
+    expect(renewed).toBe(1);
+  });
+
+  it("a transport error during renew also fences successful model output",async()=>{
+    let invoked!:()=>void;
+    const attempted=new Promise<void>(resolve=>{invoked=resolve;});
+    await expect(withDoclingClaimHeartbeat(claim,async()=>{
+      await attempted;
+      return "UNVERIFIED";
+    },{intervalMs:5,renew:async()=>{
+      invoked();
+      throw new Error("SYNTHETIC_DATABASE_OUTAGE");
+    }})).rejects.toThrow("DOCLING_LAYOUT_HEARTBEAT_LOST");
+  });
+
+  it("operation failure survives heartbeat cleanup and is not replaced",async()=>{
+    await expect(withDoclingClaimHeartbeat(claim,async()=>{
+      throw new Error("MODEL_FAILED");
+    },{intervalMs:5,renew:async()=>true})).rejects.toThrow("MODEL_FAILED");
+  });
+
+  it("waits for an already running renewal before accepting output",async()=>{
+    let began!:()=>void;
+    let finish!:()=>void;
+    const started=new Promise<void>(resolve=>{began=resolve;});
+    const resumed=new Promise<void>(resolve=>{finish=resolve;});
+    const result=withDoclingClaimHeartbeat(claim,async()=>{
+      await started;
+      return "LATE_RESULT";
+    },{intervalMs:5,renew:async()=>{
+      began();
+      await resumed;
+      return false;
+    }});
+    await started;
+    finish();
+    await expect(result).rejects.toThrow("DOCLING_LAYOUT_HEARTBEAT_LOST");
   });
 });
