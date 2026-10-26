@@ -94,6 +94,17 @@ async function main():Promise<void>{
   // factories. Closing BullMQ objects alone does not close those clients.
   // Capture ownership in this isolated proof before cleanup.
   const ownedRedisClients:Array<{disconnect:()=>void}> = [];
+  let cleanupRejected=false;
+  async function cleanupStep(label:string,operation:()=>Promise<unknown>):Promise<void>{
+    try{
+      await operation();
+      console.log("ACS_DOCLING_REAL_STACK_TEARDOWN_"+label+"=PASS");
+    }catch{
+      cleanupRejected=true;
+      // Never print exception messages, connection URLs or local paths.
+      console.log("ACS_DOCLING_REAL_STACK_TEARDOWN_"+label+"=REJECTED");
+    }
+  }
   try{
     markStage("INFRASTRUCTURE");
     await Promise.all([worker.waitUntilReady(),events.waitUntilReady()]);
@@ -217,15 +228,15 @@ async function main():Promise<void>{
   }finally{
     // Namespace-local cleanup only. Do not flush Redis or touch unrelated S3.
     markStage("CLEANUP_WORKER");
-    await worker.close().catch(()=>undefined);
+    await cleanupStep("WORKER",()=>worker.close());
     markStage("CLEANUP_EVENTS");
-    await events.close().catch(()=>undefined);
+    await cleanupStep("EVENTS",()=>events.close());
     markStage("CLEANUP_QUEUE_OBLITERATE");
-    await queue.obliterate({force:true}).catch(()=>undefined);
+    await cleanupStep("QUEUE_OBLITERATE",()=>queue.obliterate({force:true}));
     markStage("CLEANUP_QUEUE_CLOSE");
-    await queue.close().catch(()=>undefined);
+    await cleanupStep("QUEUE_CLOSE",()=>queue.close());
     markStage("CLEANUP_EXECUTOR");
-    await executor.close().catch(()=>undefined);
+    await cleanupStep("EXECUTOR",()=>executor.close());
     // Delete child rows before parents, using synthetic workspace/run IDs only.
     markStage("CLEANUP_DATABASE");
     if(runId){
@@ -250,16 +261,46 @@ async function main():Promise<void>{
     if(artifactKey)await storage.deleteObject(artifactKey).catch(()=>undefined);
     await storage.deleteObject(sourceKey).catch(()=>undefined);
     markStage("CLEANUP_DISCONNECT");
-    await prisma.$disconnect().catch(()=>undefined);
+    await cleanupStep("DB_DISCONNECT",()=>prisma.$disconnect());
     // Once all BullMQ objects have drained/closed, explicitly disconnect
     // only this proof's three privately-created Redis clients. Never flush
     // Redis or disconnect shared/production connections.
     markStage("CLEANUP_REDIS_CLIENTS");
-    for(const client of ownedRedisClients)client.disconnect();
+    for(const client of ownedRedisClients){
+      try{client.disconnect();}
+      catch{cleanupRejected=true;console.log("ACS_DOCLING_REAL_STACK_TEARDOWN_REDIS=REJECTED");}
+    }
     markStage("CLEANUP_DONE");
+    if(cleanupRejected)throw new Error("REAL_DOCLING_E2E_TEARDOWN_REJECTED");
   }
 }
-main().catch(()=>{
+// A completed proof must exit naturally; no process.exit(0) shortcuts.
+// If event-loop handles survive every explicit teardown, print only
+// fixed handle categories and counts for safe Windows diagnostics.
+main().then(()=>{
+  console.log("ACS_DOCLING_REAL_STACK_MAIN_RESOLVED=PASS");
+  const census=setTimeout(()=>{
+    type InternalProcess=typeof process & {
+      _getActiveHandles?:()=>unknown[];
+      _getActiveRequests?:()=>unknown[];
+    };
+    const internal=process as InternalProcess;
+    const handles=internal._getActiveHandles?.()??[];
+    const requests=internal._getActiveRequests?.()??[];
+    const counts={SOCKET:0,CHILD_PROCESS:0,MESSAGE_PORT:0,FS_WATCHER:0,OTHER:0};
+    for(const handle of handles){
+      const ctor=(handle as {constructor?:{name?:string}} | null)?.constructor?.name;
+      const name=ctor==="Socket"?"SOCKET":ctor==="ChildProcess"?"CHILD_PROCESS":
+        ctor==="MessagePort"?"MESSAGE_PORT":ctor==="FSWatcher"?"FS_WATCHER":"OTHER";
+      counts[name]++;
+    }
+    for(const [label,count] of Object.entries(counts)){
+      console.log("ACS_DOCLING_REAL_STACK_LINGER_"+label+"="+Math.min(count,999));
+    }
+    console.log("ACS_DOCLING_REAL_STACK_LINGER_REQUESTS="+Math.min(requests.length,999));
+  },2000);
+  census.unref();
+}).catch(()=>{
   console.error("ACS_DOCLING_REAL_STACK=REJECTED");
   process.exitCode=2;
 });

@@ -28,6 +28,21 @@ function emitLastStage() {
     if (last && STAGES.has(last)) {
       console.log("ACS_DOCLING_REAL_STACK_PROOF_LAST_STAGE=" + last);
     }
+    if (data.includes("ACS_DOCLING_REAL_STACK_MAIN_RESOLVED=PASS")) {
+      console.log("ACS_DOCLING_REAL_STACK_PROOF_MAIN_RESOLVED=PASS");
+    }
+    for (const name of ["SOCKET","CHILD_PROCESS","MESSAGE_PORT","FS_WATCHER","OTHER","REQUESTS"]) {
+      const matches = [...data.matchAll(new RegExp(
+        "ACS_DOCLING_REAL_STACK_LINGER_" + name + "=([0-9]{1,3})","g"
+      ))];
+      if (matches.length) console.log("ACS_DOCLING_REAL_STACK_PROOF_LINGER_" +
+        name + "=" + matches.at(-1)[1]);
+    }
+    for (const name of ["WORKER","EVENTS","QUEUE_OBLITERATE","QUEUE_CLOSE","EXECUTOR","DB_DISCONNECT","REDIS"]) {
+      if (data.includes("ACS_DOCLING_REAL_STACK_TEARDOWN_" + name + "=REJECTED")) {
+        console.log("ACS_DOCLING_REAL_STACK_PROOF_TEARDOWN_" + name + "=REJECTED");
+      }
+    }
   } catch {
     console.log("ACS_DOCLING_REAL_STACK_PROOF_STAGE_LOG=UNAVAILABLE");
   }
