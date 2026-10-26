@@ -90,9 +90,17 @@ async function main():Promise<void>{
     sourceId:string|undefined,blobId:string|undefined,docId:string|undefined,
     jobId:string|undefined,runId:string|undefined;
   let artifactKey:string|undefined;
+  // BullMQ receives externally-created ioredis clients from our queue/worker
+  // factories. Closing BullMQ objects alone does not close those clients.
+  // Capture ownership in this isolated proof before cleanup.
+  const ownedRedisClients:Array<{disconnect:()=>void}> = [];
   try{
     markStage("INFRASTRUCTURE");
     await Promise.all([worker.waitUntilReady(),events.waitUntilReady()]);
+    const [queueRedis,eventsRedis,workerRedis]=await Promise.all([
+      queue.client,events.client,worker.client,
+    ]);
+    ownedRedisClients.push(queueRedis,eventsRedis,workerRedis);
     ensure(await storage.bucketExists(),"REAL_DOCLING_E2E_BUCKET_MISSING");
     await storage.putObject({key:sourceKey,body:pdf,contentType:"application/pdf"});
     const h=await storage.headObject(sourceKey);
@@ -243,6 +251,11 @@ async function main():Promise<void>{
     await storage.deleteObject(sourceKey).catch(()=>undefined);
     markStage("CLEANUP_DISCONNECT");
     await prisma.$disconnect().catch(()=>undefined);
+    // Once all BullMQ objects have drained/closed, explicitly disconnect
+    // only this proof's three privately-created Redis clients. Never flush
+    // Redis or disconnect shared/production connections.
+    markStage("CLEANUP_REDIS_CLIENTS");
+    for(const client of ownedRedisClients)client.disconnect();
     markStage("CLEANUP_DONE");
   }
 }
