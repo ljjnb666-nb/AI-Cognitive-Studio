@@ -94,10 +94,61 @@ jobs:
               if ($weights.Count -gt 0) { $matches+=,$p }
             }
             if ($matches.Count -ne 1) { throw 'MODEL_NOT_UNIQUE' }
+            # Verify headroom BEFORE starting Docker Desktop, which may
+            # allocate more memory. Fail closed rather than kill user apps.
+            $stage='AUTO_DOCKER_MEMORY_PREFLIGHT'
+            $preflight=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            $preflightKB=[double]$preflight.FreePhysicalMemory
+            Write-Output ('ACS_DOCLING_REAL_STACK_PRE_DOCKER_RAM_GIB=' +
+              [Math]::Round($preflightKB / 1048576, 2).ToString([Globalization.CultureInfo]::InvariantCulture))
+            if ($preflightKB -lt 4194304) {
+              Write-Output 'ACS_DOCLING_REAL_STACK_AUTOSTART=BLOCKED_LOW_RAM'
+              throw 'AUTO_DOCKER_MEMORY_PREFLIGHT'
+            }
+
             $stage='DOCKER'
             if (-not (Get-Command 'docker.exe' -ErrorAction SilentlyContinue)) { throw 'DOCKER_ABSENT' }
-            $os=@(& docker info --format '{{.OSType}}' 2>$null)
-            if ($LASTEXITCODE -ne 0 -or $os.Count -ne 1 -or $os[0] -ne 'linux') { throw 'LINUX_ENGINE_ABSENT' }
+            function Test-LinuxEngine {
+              # Docker may emit a connection error to stderr when not running.
+              # Never promote that untrusted diagnostic into Actions logs.
+              try {
+                $kind=@(& docker info --format '{{.OSType}}' 2>$null)
+                return ($LASTEXITCODE -eq 0 -and $kind.Count -eq 1 -and $kind[0] -eq 'linux')
+              } catch {
+                return $false
+              }
+            }
+            if (-not (Test-LinuxEngine)) {
+              $stage='AUTO_DOCKER_START'
+              # Supported Docker Desktop CLI; no install, config change,
+              # credential prompt, download, or privilege escalation.
+              try {
+                & docker desktop start --detach *> $null
+              } catch {
+                # CLI may be unavailable on older Docker Desktop installations.
+              }
+              if ($LASTEXITCODE -ne 0) {
+                # Fallback only to a known local Docker Desktop installation.
+                $candidates=@(
+                  (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'),
+                  (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\Docker Desktop.exe')
+                )
+                $app=@($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+                if ($app.Count -ne 1) { throw 'DOCKER_DESKTOP_LAUNCHER_MISSING' }
+                try { Start-Process -FilePath $app[0] -ErrorAction Stop | Out-Null }
+                catch { throw 'DOCKER_DESKTOP_LAUNCH_FAILED' }
+              }
+              $stage='AUTO_DOCKER_READY'
+              $ready=$false
+              for ($attempt=0;$attempt -lt 30;$attempt++) {
+                if (Test-LinuxEngine) { $ready=$true; break }
+                Start-Sleep -Seconds 5
+              }
+              if (-not $ready) { throw 'DOCKER_DESKTOP_NOT_READY' }
+              Write-Output 'ACS_DOCLING_REAL_STACK_AUTOSTART=READY'
+            } else {
+              Write-Output 'ACS_DOCLING_REAL_STACK_AUTOSTART=ALREADY_RUNNING'
+            }
             & docker compose version *> $null
             Check-Exit
             foreach ($image in @('postgres:17-alpine','redis:7-alpine',
@@ -122,6 +173,8 @@ jobs:
               throw 'RESOURCE_D_DISK'
             }
             Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_D=PASS'
+            # Docker Desktop itself consumes memory. Check again after it
+            # becomes available before starting the three test containers.
             $stage='RESOURCE_RAM'
             $memory=Get-CimInstance Win32_OperatingSystem
             $freeKB=if ($null -eq $memory) { 0 } else { [double]$memory.FreePhysicalMemory }
