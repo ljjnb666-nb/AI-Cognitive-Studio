@@ -240,8 +240,14 @@ jobs:
             # Docker Desktop itself consumes memory. Check again after it
             # becomes available before starting the three test containers.
             $stage='RESOURCE_RAM'
-            $memory=Get-CimInstance Win32_OperatingSystem
-            $freeKB=if ($null -eq $memory) { 0 } else { [double]$memory.FreePhysicalMemory }
+            # Give transient RAM pressure a bounded chance to subside.
+            # Still require the unchanged 4 GiB safety gate.
+            for ($sample=0; $sample -lt 7; $sample++) {
+              $memory=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+              $freeKB=if ($null -eq $memory) { 0 } else { [double]$memory.FreePhysicalMemory }
+              if ($freeKB -ge 4194304) { break }
+              if ($sample -lt 6) { Start-Sleep -Seconds 10 }
+            }
             # FreePhysicalMemory is KiB, not bytes. Don't silently lower the
             # existing 4-GiB model/containers gate to force a green build.
             Write-Output ('ACS_DOCLING_REAL_STACK_FREE_RAM_GIB=' +
