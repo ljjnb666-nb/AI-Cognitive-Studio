@@ -370,7 +370,10 @@ jobs:
               $stage='REAL_MODEL_QUEUE_STORAGE'
               $out=Join-Path $scratch 'proof.out'
               $err=Join-Path $scratch 'proof.err'
-              & pnpm --filter '@ai-cognitive/worker' exec tsx tests/docling-real-stack.proof.ts 1> $out 2> $err
+              # Run the real proof with a bounded Windows child-process tree.
+              # A hung Redis/model/network cleanup must not consume the full
+              # 30-minute Actions timeout or leave descendants behind.
+              & node tools/pdf-docling-real-stack/bounded-proof-runner.mjs $out $err
               Check-Exit
               $lines=@(Get-Content -LiteralPath $out | Select-Object -First 40)
               foreach ($marker in @('ACS_DOCLING_REAL_STACK_ORIGINAL_PDF=PASS',

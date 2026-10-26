@@ -37,6 +37,12 @@ function localUrl(value:string,proto:string):void{
 }
 async function main():Promise<void>{
   let stage="ADMISSION";
+  const markStage=(value:string):void=>{
+    stage=value;
+    // Bounded, fixed vocabulary: no user files, model stderr or credentials.
+    console.log("ACS_DOCLING_REAL_STACK_PROOF_STAGE="+value);
+  };
+  markStage("ADMISSION");
   // A dedicated sandbox is mandatory: this must never mutate a non-test DB.
   ensure(process.env.ACS_DOCLING_REAL_STACK_E2E==="1","REAL_DOCLING_E2E_OPT_IN_REQUIRED");
   ensure(process.platform==="win32","REAL_DOCLING_E2E_WINDOWS_REQUIRED");
@@ -51,7 +57,7 @@ async function main():Promise<void>{
   ensure(pdf.length>10 && pdf.subarray(0,5).toString()==="%PDF-",
     "REAL_DOCLING_E2E_SOURCE_INVALID");
   const sourceHash=hash(pdf);
-  stage="OFFLINE_MODEL_PROBE";
+  markStage("OFFLINE_MODEL_PROBE");
   const config=resolveDoclingLayoutConfig({
     enabled:true,
     python:required("DOCLING_LAYOUT_PYTHON_PATH"),
@@ -85,13 +91,13 @@ async function main():Promise<void>{
     jobId:string|undefined,runId:string|undefined;
   let artifactKey:string|undefined;
   try{
-    stage="INFRASTRUCTURE";
+    markStage("INFRASTRUCTURE");
     await Promise.all([worker.waitUntilReady(),events.waitUntilReady()]);
     ensure(await storage.bucketExists(),"REAL_DOCLING_E2E_BUCKET_MISSING");
     await storage.putObject({key:sourceKey,body:pdf,contentType:"application/pdf"});
     const h=await storage.headObject(sourceKey);
     ensure(h?.size===pdf.length,"REAL_DOCLING_E2E_SOURCE_S3_MISMATCH");
-    stage="LINEAGE_SEED";
+    markStage("LINEAGE_SEED");
     const user=await prisma.user.create({data:{email:suffix+"@acs-docling-e2e.invalid"}});
     userId=user.id;
     const workspace=await prisma.workspace.create({data:{name:workspaceName}});
@@ -143,7 +149,7 @@ async function main():Promise<void>{
         parserVersion:"pdf-router-v1",
         normalizationVersion:"canonical-text-v1"},
     });
-    stage="REAL_QUEUE_MODEL";
+    markStage("REAL_QUEUE_MODEL");
     const data={ingestionRunId:runId,physicalPageIndex:1,
       modelSha256:verified.artifactSha256};
     const scan=await dispatchDoclingLayoutSweep(queue,verified.artifactSha256,{},{take:20});
@@ -152,7 +158,7 @@ async function main():Promise<void>{
     ensure(queued,"REAL_DOCLING_E2E_JOB_MISSING");
     const result=await queued.waitUntilFinished(events,240_000);
     ensure(result==="SNAPSHOT_CREATED","REAL_DOCLING_E2E_WORKER_FAILED");
-    stage="EVIDENCE";
+    markStage("EVIDENCE");
     const task=await prisma.doclingLayoutTask.findFirst({
       where:{ingestionRunId:runId,physicalPageIndex:1},
     });
@@ -183,7 +189,7 @@ async function main():Promise<void>{
     ensure((await prisma.sourceBlock.count({
       where:{extractionId:extraction.id},
     }))===0,"REAL_DOCLING_E2E_CANONICAL_BLOCK_MUST_REMAIN_UNCHANGED");
-    stage="REPLAY";
+    markStage("REPLAY");
     ensure(await executeDoclingBackgroundJob(data,storage,executor)==="SNAPSHOT_REUSED",
       "REAL_DOCLING_E2E_REPLAY_FAILED");
     ensure((await prisma.doclingLayoutSnapshot.count({
