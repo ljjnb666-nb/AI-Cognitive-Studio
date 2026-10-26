@@ -326,6 +326,8 @@ main().then(()=>{
     type LocalPipeSocket={
       remotePort?:number;localPort?:number;remoteAddress?:string;localAddress?:string;
       destroyed?:boolean;connecting?:boolean;pending?:boolean;
+      readable?:boolean;readableEnded?:boolean;writable?:boolean;writableEnded?:boolean;
+      server?:unknown;
       _handle?:{constructor?:{name?:string};fd?:number};
       unref?:()=>void;
     };
@@ -366,6 +368,17 @@ main().then(()=>{
       REMOTE_ADDRESS:typeof candidate?.remoteAddress==="string",
       LOCAL_ADDRESS:typeof candidate?.localAddress==="string",
       UNREF_AVAILABLE:typeof candidate?.unref==="function",
+      LOCAL_LOOPBACK:typeof candidate?.localAddress==="string" &&
+        /^(127\.|::1$|::ffff:127\.)/.test(candidate.localAddress),
+      REMOTE_LOOPBACK:typeof candidate?.remoteAddress==="string" &&
+        /^(127\.|::1$|::ffff:127\.)/.test(candidate.remoteAddress),
+      LOCAL_IS_TEST_PORT:typeof candidate?.localPort==="number" &&
+        servicePorts.has(candidate.localPort),
+      READABLE:candidate?.readable===true,
+      READABLE_ENDED:candidate?.readableEnded===true,
+      WRITABLE:candidate?.writable===true,
+      WRITABLE_ENDED:candidate?.writableEnded===true,
+      SERVER_ATTACHED:candidate?.server!=null,
     };
     for(const [label,active] of Object.entries(diagnostics)){
       console.log("ACS_DOCLING_REAL_STACK_HANDLE_CHECK_"+label+"="+(active?"YES":"NO"));

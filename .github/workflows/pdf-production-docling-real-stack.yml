@@ -441,6 +441,24 @@ jobs:
                         [IO.Directory]::Delete($candidate,$true)
                       }
                     } catch { }
+                    # Windows PowerShell 5.1 recursive removal can race with
+                    # pnpm junction disappearance: its ENOENT does not mean
+                    # the owned root has been completely deleted. Use Node
+                    # 24's bounded, force-aware rm ONLY on the already
+                    # verified RUNNER_TEMP child and never on a reparse root.
+                    try {
+                      if (Test-Path -LiteralPath $candidate -PathType Container) {
+                        $nodeRoot=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+                        if (($nodeRoot.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                          $previous=$ErrorActionPreference
+                          try {
+                            $ErrorActionPreference='Continue'
+                            & node.exe -e "require('node:fs').rmSync(process.argv[1],{recursive:true,force:true,maxRetries:4,retryDelay:500})" $candidate *> $null
+                          } finally { $ErrorActionPreference=$previous }
+                        }
+                      }
+                    } catch { }
+                    # An actual surviving root is always a hard failure.
                     if (-not (Test-Path -LiteralPath $candidate)) { break }
                     # Categorize only; never print the exception or private path.
                     $exception=$_.Exception
