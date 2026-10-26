@@ -58,6 +58,16 @@ function emitLastStage() {
         break;
       }
     }
+    for (const name of ["ONE_HANDLE","NO_REQUESTS","DESTROYED_FALSE","DESTROYED_TRUE",
+      "CONNECTING_TRUE","ENDPOINT_PORT","ENDPOINT_ADDRESS","STDIO",
+      "FD_RESERVED","UNREF_AVAILABLE"]) {
+      for (const state of ["YES","NO"]) {
+        if (data.includes("ACS_DOCLING_REAL_STACK_HANDLE_CHECK_" + name + "=" + state)) {
+          console.log("ACS_DOCLING_REAL_STACK_PROOF_HANDLE_CHECK_" + name + "=" + state);
+          break;
+        }
+      }
+    }
     for (const name of ["WORKER","EVENTS","QUEUE_OBLITERATE","QUEUE_CLOSE","EXECUTOR","STORAGE","DB_DISCONNECT","REDIS"]) {
       if (data.includes("ACS_DOCLING_REAL_STACK_TEARDOWN_" + name + "=REJECTED")) {
         console.log("ACS_DOCLING_REAL_STACK_PROOF_TEARDOWN_" + name + "=REJECTED");
@@ -91,9 +101,41 @@ const child = spawn(process.execPath, [
 closeSync(out);
 closeSync(err);
 let complete = false;
+let proofMainResolvedAt = 0;
+// A fully completed proof should have no live dependencies. Do not spend
+// ten more minutes holding the Windows runner just to confirm a process leak.
+// This is strictly an early rejection, never a success shortcut.
+const completionWatch = setInterval(() => {
+  if (complete) return;
+  try {
+    const output = readFileSync(stdoutPath, "utf8").slice(-100_000);
+    if (!proofMainResolvedAt &&
+        output.includes("ACS_DOCLING_REAL_STACK_MAIN_RESOLVED=PASS")) {
+      proofMainResolvedAt = Date.now();
+    }
+  } catch {
+    // A missing/incomplete diagnostic is not a passing receipt.
+  }
+  if (proofMainResolvedAt && Date.now() - proofMainResolvedAt > 30_000) {
+    complete = true;
+    clearTimeout(timer);
+    clearInterval(completionWatch);
+    const killed = Number.isSafeInteger(child.pid) && child.pid > 0
+      ? spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+          windowsHide: true, timeout: 15_000, stdio: "ignore",
+        })
+      : null;
+    emitLastStage();
+    console.log("ACS_DOCLING_REAL_STACK_PROOF_POST_COMPLETE_LINGER=REJECTED");
+    console.log("ACS_DOCLING_REAL_STACK_PROOF_TREE_TERMINATION=" +
+      (killed?.status === 0 ? "CONFIRMED" : "UNVERIFIED"));
+    process.exit(2);
+  }
+}, 2_000);
 const timer = setTimeout(() => {
   if (complete) return;
   complete = true;
+  clearInterval(completionWatch);
   // Terminate only the wrapper's child command tree, never other processes.
   const killed = Number.isSafeInteger(child.pid) && child.pid > 0
     ? spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
@@ -110,6 +152,7 @@ child.once("error", () => {
   if (complete) return;
   complete = true;
   clearTimeout(timer);
+  clearInterval(completionWatch);
   emitLastStage();
   console.log("ACS_DOCLING_REAL_STACK_PROOF_SPAWN=REJECTED");
   process.exitCode = 2;
@@ -118,6 +161,7 @@ child.once("close", (code, signal) => {
   if (complete) return;
   complete = true;
   clearTimeout(timer);
+  clearInterval(completionWatch);
   emitLastStage();
   if (code !== 0 || signal) {
     console.log("ACS_DOCLING_REAL_STACK_PROOF_EXIT=REJECTED");

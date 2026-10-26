@@ -347,6 +347,23 @@ main().then(()=>{
     const safeLocalPipe=onlyIsolatedHandle&&handleKind==="Pipe";
     const safeUnboundTcp=onlyIsolatedHandle&&handleKind==="TCP"&&
       candidate?.connecting!==true;
+    // Fixed boolean reasons only. Never emit socket URLs, addresses, fd values,
+    // filesystem paths, or object properties into GitHub Actions logs.
+    const diagnostics={
+      ONE_HANDLE:handles.length===1,
+      NO_REQUESTS:requests.length===0,
+      DESTROYED_FALSE:candidate?.destroyed===false,
+      DESTROYED_TRUE:candidate?.destroyed===true,
+      CONNECTING_TRUE:candidate?.connecting===true,
+      ENDPOINT_PORT: candidate?.localPort!==undefined||candidate?.remotePort!==undefined,
+      ENDPOINT_ADDRESS: candidate?.localAddress!==undefined||candidate?.remoteAddress!==undefined,
+      STDIO: candidate===process.stdout||candidate===process.stderr||candidate===process.stdin,
+      FD_RESERVED: typeof candidate?._handle?.fd==="number"&&candidate._handle.fd<=2,
+      UNREF_AVAILABLE:typeof candidate?.unref==="function",
+    };
+    for(const [label,active] of Object.entries(diagnostics)){
+      console.log("ACS_DOCLING_REAL_STACK_HANDLE_CHECK_"+label+"="+(active?"YES":"NO"));
+    }
     if(safeLocalPipe||safeUnboundTcp){
       console.log("ACS_DOCLING_REAL_STACK_ISOLATED_LOCAL_HANDLE_UNREF="+
         (safeLocalPipe?"PIPE":"UNBOUND_TCP"));

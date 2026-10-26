@@ -432,7 +432,24 @@ jobs:
                   try { Remove-Item -LiteralPath $candidate -Recurse -Force -ErrorAction Stop }
                   catch {
                     # Categorize only; never print the exception or private path.
-                    $message=$_.Exception.ToString()
+                    $exception=$_.Exception
+                    $message=$exception.ToString()
+                    # Numeric HRESULT low-word is a Windows error category only.
+                    # Never echo the exception (which can contain private paths).
+                    $win32Code=([uint32]$exception.HResult -band 0xffff)
+                    $kind=if ($exception -is [System.UnauthorizedAccessException]) {
+                      'ACCESS'
+                    } elseif ($exception -is [System.IO.PathTooLongException]) {
+                      'PATH_LENGTH'
+                    } elseif ($exception -is [System.IO.DirectoryNotFoundException]) {
+                      'DIRECTORY_MISSING'
+                    } elseif ($exception -is [System.IO.IOException]) {
+                      'IO'
+                    } else {
+                      'OTHER'
+                    }
+                    Write-Output ('ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP_EXCEPTION_KIND='+$kind)
+                    Write-Output ('ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP_WIN32_CODE='+$win32Code)
                     if ($message -match '(?i)used by another process|being used|sharing violation') {
                       $deletionCategory='FILE_LOCK'
                     } elseif ($message -match '(?i)access is denied|unauthorizedaccess') {
