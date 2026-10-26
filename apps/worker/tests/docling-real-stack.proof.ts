@@ -271,8 +271,10 @@ async function main():Promise<void>{
       catch{cleanupRejected=true;console.log("ACS_DOCLING_REAL_STACK_TEARDOWN_REDIS=REJECTED");}
     }
     markStage("CLEANUP_DONE");
-    if(cleanupRejected)throw new Error("REAL_DOCLING_E2E_TEARDOWN_REJECTED");
   }
+  // Do not throw from finally: a failure in the primary proof must retain its
+  // original causal status, while cleanup failures still fail a successful run.
+  if(cleanupRejected)throw new Error("REAL_DOCLING_E2E_TEARDOWN_REJECTED");
 }
 // A completed proof must exit naturally; no process.exit(0) shortcuts.
 // If event-loop handles survive every explicit teardown, print only
