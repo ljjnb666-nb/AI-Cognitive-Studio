@@ -46,6 +46,18 @@ function emitLastStage() {
       if (matches.length) console.log("ACS_DOCLING_REAL_STACK_PROOF_SOCKET_ORIGIN_" +
         name + "=" + matches.at(-1)[1]);
     }
+    for (const kind of ["PIPE","TCP","OTHER"]) {
+      if (data.includes("ACS_DOCLING_REAL_STACK_SOLE_HANDLE_KIND=" + kind)) {
+        console.log("ACS_DOCLING_REAL_STACK_PROOF_SOLE_HANDLE_KIND=" + kind);
+        break;
+      }
+    }
+    for (const state of ["PASS","NOT_APPLICABLE"]) {
+      if (data.includes("ACS_DOCLING_REAL_STACK_ISOLATED_LOCAL_PIPE_UNREF=" + state)) {
+        console.log("ACS_DOCLING_REAL_STACK_PROOF_LOCAL_PIPE_UNREF=" + state);
+        break;
+      }
+    }
     for (const name of ["WORKER","EVENTS","QUEUE_OBLITERATE","QUEUE_CLOSE","EXECUTOR","STORAGE","DB_DISCONNECT","REDIS"]) {
       if (data.includes("ACS_DOCLING_REAL_STACK_TEARDOWN_" + name + "=REJECTED")) {
         console.log("ACS_DOCLING_REAL_STACK_PROOF_TEARDOWN_" + name + "=REJECTED");
