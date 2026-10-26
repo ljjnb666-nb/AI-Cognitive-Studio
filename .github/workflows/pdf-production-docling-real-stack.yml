@@ -27,57 +27,73 @@ jobs:
           test -f tools/pdf-docling-real-stack/compose.yml
           test -f apps/worker/tests/docling-real-stack.proof.ts
           echo 'ACS_REAL_STACK_SOURCE=PASS'
+      - name: Package tracked exact-head source without corpus
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p acs-source-handoff
+          git archive --format=tar HEAD | gzip -n > acs-source-handoff/source.tar.gz
+          sha256sum acs-source-handoff/source.tar.gz | cut -d ' ' -f1 > acs-source-handoff/source.sha256
+          printf '%s\n' "$EXPECTED_SHA" > acs-source-handoff/commit.sha
+          test "$(wc -c < acs-source-handoff/source.tar.gz)" -gt 1000
+          echo 'ACS_REAL_STACK_EXACT_SHA_ARCHIVE=PASS'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acs-docling-real-stack-exact-source
+          path: acs-source-handoff
+          if-no-files-found: error
+          retention-days: 1
   real-windows:
     needs: source
     if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-docling-real-stack-windows-20261025' }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 35
     steps:
-      - name: Select live GitHub route before checkout
+      # The Windows machine cannot reliably reach github.com directly or
+      # its user-session SOCKS proxy. Transfer only tracked Git source via
+      # the same private Actions run, with exact head and SHA256 verified.
+      - uses: actions/download-artifact@v4
+        with:
+          name: acs-docling-real-stack-exact-source
+          path: acs-source-handoff
+      - name: Verify and unpack trusted source handoff
         shell: powershell
-        timeout-minutes: 2
+        timeout-minutes: 3
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           $ErrorActionPreference='Stop'
-          if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_RUNNER_REQUIRED' }
-          if (-not (Get-Command 'curl.exe' -ErrorAction SilentlyContinue)) {
-            throw 'NETWORK_PROBE_CURL_MISSING'
+          $bundle=(Resolve-Path '.\acs-source-handoff').Path
+          $archive=Join-Path $bundle 'source.tar.gz'
+          $expectedHashFile=Join-Path $bundle 'source.sha256'
+          $expectedHeadFile=Join-Path $bundle 'commit.sha'
+          foreach ($file in @($archive,$expectedHashFile,$expectedHeadFile)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'EXACT_SOURCE_BUNDLE_MISSING' }
           }
-          function Check-GitHubConnection([string[]]$CurlArgs) {
-            # Probe only the GitHub HTTPS front door. Never use PR data,
-            # credentials, private files or curl diagnostic output.
-            try {
-              & curl.exe @CurlArgs --connect-timeout 5 --max-time 10 --silent --head --output NUL 'https://github.com/' 2>$null
-              return ($LASTEXITCODE -eq 0)
-            } catch { return $false }
+          $head=(Get-Content -LiteralPath $expectedHeadFile -Raw).Trim()
+          $digest=(Get-Content -LiteralPath $expectedHashFile -Raw).Trim()
+          if ($head -cne $env:EXPECTED_SHA -or $head -notmatch '^[a-f0-9]{40}$' -or
+              $digest -notmatch '^[a-f0-9]{64}$' -or
+              (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest) {
+            throw 'EXACT_SOURCE_BUNDLE_INTEGRITY_REJECTED'
           }
-          $direct=Check-GitHubConnection @('--noproxy','*')
-          $proxyReady=$false
-          if (-not $direct) {
-            $proxyReady=Check-GitHubConnection @('--proxy','socks5h://127.0.0.1:10808')
+          $destination=Join-Path (Get-Location).Path 'acs-docling-real'
+          if (Test-Path -LiteralPath $destination) { throw 'SOURCE_DESTINATION_NOT_EMPTY' }
+          New-Item -ItemType Directory -Path $destination -ErrorAction Stop | Out-Null
+          & tar.exe -xzf $archive -C $destination
+          if ($LASTEXITCODE -ne 0) { throw 'EXACT_SOURCE_UNPACK_REJECTED' }
+          foreach ($relative in @('tools\pdf-docling-real-stack\compose.yml',
+            'apps\worker\tests\docling-real-stack.proof.ts',
+            'packages\ingestion\src\docling\docling-layout-child.py')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $destination $relative) -PathType Leaf)) {
+              throw 'EXACT_SOURCE_UNPACK_INCOMPLETE'
+            }
           }
-          if (-not $direct -and -not $proxyReady) {
-            Write-Output 'ACS_DOCLING_REAL_STACK_GITHUB_ROUTE=UNAVAILABLE'
-            throw 'GITHUB_CHECKOUT_ROUTE_UNAVAILABLE'
-          }
-          # The git config environment overrides any stale user global proxy.
-          # GITHUB_ENV is only updated for later workflow steps; never expose
-          # the checked-out repository contents or an authentication token.
-          @('GIT_CONFIG_COUNT=1','GIT_CONFIG_KEY_0=http.proxy') |
-            ForEach-Object { Add-Content -LiteralPath $env:GITHUB_ENV -Value $_ }
-          if ($direct) {
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'GIT_CONFIG_VALUE_0='
-            Write-Output 'ACS_DOCLING_REAL_STACK_GITHUB_ROUTE=DIRECT'
-          } else {
-            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'GIT_CONFIG_VALUE_0=socks5h://127.0.0.1:10808'
-            Write-Output 'ACS_DOCLING_REAL_STACK_GITHUB_ROUTE=LOCAL_PROXY'
-          }
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-          clean: false
-          path: acs-docling-real
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ('ACS_DOCLING_VERIFIED_SOURCE_SHA=' + $head)
+          Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_HANDOFF=PASS'
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -113,7 +129,7 @@ jobs:
             return $Matches[1]
           }
           try {
-            if ((git -C $root rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            if ($env:ACS_DOCLING_VERIFIED_SOURCE_SHA -cne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
             $stage='MODEL'
             $data='D:\ai-cognitive-pdf-benchmark-data'
             $python=Join-Path $data 'tool-env\docling-2.141.0\Scripts\python.exe'
