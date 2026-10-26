@@ -258,16 +258,50 @@ jobs:
             }
             Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_RAM=PASS'
             New-Item -ItemType Directory -Path $scratch | Out-Null
-            $stage='ISOLATED_SERVICES'
+            # A native docker command can emit stderr even when successful.
+            # Capture locally (never print arbitrary daemon output or secrets),
+            # check its actual exit code, then publish allowlisted status only.
+            function Invoke-IsolatedCompose([string]$phase,[string[]]$arguments) {
+              $output=Join-Path $scratch ($phase+'.out')
+              $errors=Join-Path $scratch ($phase+'.err')
+              $previous=$ErrorActionPreference
+              $code=-1
+              try {
+                $ErrorActionPreference='Continue'
+                & docker @arguments 1> $output 2> $errors
+                $code=$LASTEXITCODE
+              } catch { $code=-1 }
+              finally { $ErrorActionPreference=$previous }
+              if ($code -ne 0) {
+                $diagnostic=if (Test-Path -LiteralPath $errors) {
+                  Get-Content -LiteralPath $errors -Raw -ErrorAction SilentlyContinue
+                } else { '' }
+                $category='UNKNOWN'
+                if ($diagnostic -match '(?i)no space left|disk full') { $category='STORAGE' }
+                elseif ($diagnostic -match '(?i)out of memory|insufficient memory|oom') { $category='MEMORY' }
+                elseif ($diagnostic -match '(?i)unhealthy|health.?check') { $category='HEALTHCHECK' }
+                elseif ($diagnostic -match '(?i)port is already allocated|address already in use|bind.*failed') { $category='PORT_BIND' }
+                elseif ($diagnostic -match '(?i)no such image|manifest unknown|pull access denied') { $category='IMAGE' }
+                elseif ($diagnostic -match '(?i)daemon|dockerdesktoplinuxengine|connection refused') { $category='ENGINE' }
+                elseif ($diagnostic -match '(?i)access is denied|permission denied') { $category='PERMISSION' }
+                Write-Output ('ACS_DOCLING_REAL_STACK_COMPOSE_ERROR_CATEGORY='+$category)
+                throw 'ISOLATED_COMPOSE_REJECTED'
+              }
+              Write-Output ('ACS_DOCLING_REAL_STACK_'+$phase+'=PASS')
+            }
+            $stage='ISOLATED_COMPOSE_UP'
             # Set BEFORE compose up: even a partial creation must be removed.
             $composeAttempted=$true
-            & docker compose -p $project -f $compose up -d --wait --pull never postgres redis minio *> $null
-            Check-Exit
-            & docker compose -p $project -f $compose run --rm --no-deps minio-init *> $null
-            Check-Exit
+            Invoke-IsolatedCompose 'COMPOSE_UP' @('compose','-p',$project,'-f',$compose,
+              'up','-d','--wait','--pull','never','postgres','redis','minio')
+            $stage='ISOLATED_MINIO_INIT'
+            Invoke-IsolatedCompose 'MINIO_INIT' @('compose','-p',$project,'-f',$compose,
+              'run','--rm','--no-deps','minio-init')
+            $stage='ISOLATED_SERVICE_PORTS'
             $pgPort=Get-Port 'postgres' '5432'
             $redisPort=Get-Port 'redis' '6379'
             $s3Port=Get-Port 'minio' '9000'
+            Write-Output 'ACS_DOCLING_REAL_STACK_SERVICE_PORTS=PASS'
             $env:DATABASE_URL='postgresql://app:app@127.0.0.1:'+$pgPort+'/acs_docling_e2e_test?schema=public'
             $env:DATABASE_URL_TEST=$env:DATABASE_URL
             $env:REDIS_URL='redis://127.0.0.1:'+$redisPort
@@ -317,10 +351,17 @@ jobs:
           } finally {
             if ($composeAttempted) {
               try {
-                & docker compose -p $project -f $compose down --volumes --remove-orphans *> $null
-                if ($LASTEXITCODE -ne 0) { $cleanupFailed=$true }
-              } catch {
-                $cleanupFailed=$true
+                $previous=$ErrorActionPreference
+                try {
+                  $ErrorActionPreference='Continue'
+                  & docker compose -p $project -f $compose down --volumes --remove-orphans *> $null
+                  if ($LASTEXITCODE -ne 0) { $cleanupFailed=$true }
+                } finally { $ErrorActionPreference=$previous }
+              } catch { $cleanupFailed=$true }
+              if ($cleanupFailed) {
+                Write-Output 'ACS_DOCLING_REAL_STACK_COMPOSE_CLEANUP=FAILED'
+              } else {
+                Write-Output 'ACS_DOCLING_REAL_STACK_COMPOSE_CLEANUP=PASS'
               }
             }
             if (Test-Path -LiteralPath $scratch -PathType Container) {
