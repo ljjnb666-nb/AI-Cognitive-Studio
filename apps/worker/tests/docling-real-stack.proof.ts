@@ -260,6 +260,8 @@ async function main():Promise<void>{
     markStage("CLEANUP_S3");
     if(artifactKey)await storage.deleteObject(artifactKey).catch(()=>undefined);
     await storage.deleteObject(sourceKey).catch(()=>undefined);
+    markStage("CLEANUP_STORAGE");
+    await cleanupStep("STORAGE",async()=>{storage.close();});
     markStage("CLEANUP_DISCONNECT");
     await cleanupStep("DB_DISCONNECT",()=>prisma.$disconnect());
     // Once all BullMQ objects have drained/closed, explicitly disconnect
@@ -290,11 +292,27 @@ main().then(()=>{
     const handles=internal._getActiveHandles?.()??[];
     const requests=internal._getActiveRequests?.()??[];
     const counts={SOCKET:0,CHILD_PROCESS:0,MESSAGE_PORT:0,FS_WATCHER:0,OTHER:0};
+    const socketOrigins={STDIO:0,TEST_SERVICE:0,OTHER_TCP:0,UNKNOWN:0};
+    const servicePorts=new Set([process.env.REDIS_URL,process.env.DATABASE_URL,
+      process.env.S3_ENDPOINT].filter((value):value is string=>!!value)
+      .map(value=>Number(new URL(value).port)).filter(port=>port>0));
     for(const handle of handles){
       const ctor=(handle as {constructor?:{name?:string}} | null)?.constructor?.name;
       const name=ctor==="Socket"?"SOCKET":ctor==="ChildProcess"?"CHILD_PROCESS":
         ctor==="MessagePort"?"MESSAGE_PORT":ctor==="FSWatcher"?"FS_WATCHER":"OTHER";
       counts[name]++;
+      if(name==="SOCKET"){
+        const socket=handle as {remotePort?:number};
+        if(handle===process.stdout||handle===process.stderr||handle===process.stdin)
+          socketOrigins.STDIO++;
+        else if(socket.remotePort&&servicePorts.has(socket.remotePort))
+          socketOrigins.TEST_SERVICE++;
+        else if(socket.remotePort)socketOrigins.OTHER_TCP++;
+        else socketOrigins.UNKNOWN++;
+      }
+    }
+    for(const [label,count] of Object.entries(socketOrigins)){
+      console.log("ACS_DOCLING_REAL_STACK_SOCKET_ORIGIN_"+label+"="+Math.min(count,999));
     }
     for(const [label,count] of Object.entries(counts)){
       console.log("ACS_DOCLING_REAL_STACK_LINGER_"+label+"="+Math.min(count,999));

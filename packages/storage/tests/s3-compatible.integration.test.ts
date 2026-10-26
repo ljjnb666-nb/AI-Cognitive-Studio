@@ -27,7 +27,11 @@ function key(name: string): string {
 }
 
 afterAll(async () => {
-  await Promise.all([...createdKeys].map((objectKey) => provider.deleteObject(objectKey).catch(() => undefined)));
+  try {
+    await Promise.all([...createdKeys].map((objectKey) => provider.deleteObject(objectKey).catch(() => undefined)));
+  } finally {
+    provider.close();
+  }
 });
 
 describe("S3CompatibleStorageProvider against MinIO", () => {

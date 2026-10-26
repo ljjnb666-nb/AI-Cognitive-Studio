@@ -19,7 +19,7 @@ const STAGES = new Set(["ADMISSION", "OFFLINE_MODEL_PROBE", "INFRASTRUCTURE",
   "REPLAY_VERIFIED", "CLEANUP_WORKER", "CLEANUP_EVENTS",
   "CLEANUP_QUEUE_OBLITERATE", "CLEANUP_QUEUE_CLOSE",
   "CLEANUP_EXECUTOR", "CLEANUP_DATABASE", "CLEANUP_S3",
-  "CLEANUP_DISCONNECT", "CLEANUP_REDIS_CLIENTS", "CLEANUP_DONE"]);
+  "CLEANUP_STORAGE", "CLEANUP_DISCONNECT", "CLEANUP_REDIS_CLIENTS", "CLEANUP_DONE"]);
 function emitLastStage() {
   try {
     // Only emit allowlisted labels. Do not emit arbitrary child stdout.
@@ -39,7 +39,14 @@ function emitLastStage() {
       if (matches.length) console.log("ACS_DOCLING_REAL_STACK_PROOF_LINGER_" +
         name + "=" + matches.at(-1)[1]);
     }
-    for (const name of ["WORKER","EVENTS","QUEUE_OBLITERATE","QUEUE_CLOSE","EXECUTOR","DB_DISCONNECT","REDIS"]) {
+    for (const name of ["STDIO","TEST_SERVICE","OTHER_TCP","UNKNOWN"]) {
+      const matches = [...data.matchAll(new RegExp(
+        "ACS_DOCLING_REAL_STACK_SOCKET_ORIGIN_" + name + "=([0-9]{1,3})","g"
+      ))];
+      if (matches.length) console.log("ACS_DOCLING_REAL_STACK_PROOF_SOCKET_ORIGIN_" +
+        name + "=" + matches.at(-1)[1]);
+    }
+    for (const name of ["WORKER","EVENTS","QUEUE_OBLITERATE","QUEUE_CLOSE","EXECUTOR","STORAGE","DB_DISCONNECT","REDIS"]) {
       if (data.includes("ACS_DOCLING_REAL_STACK_TEARDOWN_" + name + "=REJECTED")) {
         console.log("ACS_DOCLING_REAL_STACK_PROOF_TEARDOWN_" + name + "=REJECTED");
       }
