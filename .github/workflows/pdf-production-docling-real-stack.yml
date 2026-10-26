@@ -80,8 +80,9 @@ jobs:
               (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest) {
             throw 'EXACT_SOURCE_BUNDLE_INTEGRITY_REJECTED'
           }
-          $destination=Join-Path (Get-Location).Path 'acs-docling-real'
-          if (Test-Path -LiteralPath $destination) { throw 'SOURCE_DESTINATION_NOT_EMPTY' }
+          # Never overwrite a previous checkout or any user-managed worktree.
+          # A unique runner-temporary source root is safe to remove afterward.
+          $destination=Join-Path $env:RUNNER_TEMP ('acs-verified-source-' + [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $destination -ErrorAction Stop | Out-Null
           & tar.exe -xzf $archive -C $destination
           if ($LASTEXITCODE -ne 0) { throw 'EXACT_SOURCE_UNPACK_REJECTED' }
@@ -93,6 +94,7 @@ jobs:
             }
           }
           Add-Content -LiteralPath $env:GITHUB_ENV -Value ('ACS_DOCLING_VERIFIED_SOURCE_SHA=' + $head)
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ('ACS_DOCLING_SOURCE_ROOT=' + $destination)
           Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_HANDOFF=PASS'
       - uses: actions/setup-node@v4
         with:
@@ -119,7 +121,8 @@ jobs:
           $failedStage=$null
           $receiptVerified=$false
           $project='acsdocling'+[guid]::NewGuid().ToString('N').Substring(0,12)
-          $root=(Resolve-Path '.\acs-docling-real').Path
+          if (-not $env:ACS_DOCLING_SOURCE_ROOT) { throw 'VERIFIED_SOURCE_ROOT_MISSING' }
+          $root=(Resolve-Path -LiteralPath $env:ACS_DOCLING_SOURCE_ROOT).Path
           $compose=Join-Path $root 'tools\pdf-docling-real-stack\compose.yml'
           $scratch=Join-Path $env:RUNNER_TEMP ('acs-docling-'+[guid]::NewGuid().ToString('N'))
           function Check-Exit { if ($LASTEXITCODE -ne 0) { throw 'SUBPROCESS_FAILED' } }
@@ -309,6 +312,13 @@ jobs:
               } catch {
                 $cleanupFailed=$true
               }
+            }
+            # This job owns only the unique runner-temporary archive root.
+            if ($env:ACS_DOCLING_SOURCE_ROOT -and
+                (Test-Path -LiteralPath $env:ACS_DOCLING_SOURCE_ROOT -PathType Container)) {
+              try {
+                Remove-Item -LiteralPath $env:ACS_DOCLING_SOURCE_ROOT -Recurse -Force -ErrorAction Stop
+              } catch { $cleanupFailed=$true }
             }
           }
           if ($null -ne $failedStage) {
