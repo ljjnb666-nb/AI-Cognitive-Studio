@@ -431,12 +431,23 @@ jobs:
                 for ($removeAttempt=0;$removeAttempt -lt 4;$removeAttempt++) {
                   try { Remove-Item -LiteralPath $candidate -Recurse -Force -ErrorAction Stop }
                   catch {
+                    # The source root is a verified random RUNNER_TEMP directory,
+                    # never a user worktree. Directory.Delete is a fallback for
+                    # PowerShell 5.1 recursion over pnpm's nested node_modules.
+                    # Do not follow an untrusted reparse-point root.
+                    try {
+                      $meta=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+                      if (($meta.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                        [IO.Directory]::Delete($candidate,$true)
+                      }
+                    } catch { }
+                    if (-not (Test-Path -LiteralPath $candidate)) { break }
                     # Categorize only; never print the exception or private path.
                     $exception=$_.Exception
                     $message=$exception.ToString()
                     # Numeric HRESULT low-word is a Windows error category only.
                     # Never echo the exception (which can contain private paths).
-                    $win32Code=([uint32]$exception.HResult -band 0xffff)
+                    $win32Code=([int64]$exception.HResult -band 65535)
                     $kind=if ($exception -is [System.UnauthorizedAccessException]) {
                       'ACCESS'
                     } elseif ($exception -is [System.IO.PathTooLongException]) {

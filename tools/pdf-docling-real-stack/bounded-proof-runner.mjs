@@ -60,13 +60,23 @@ function emitLastStage() {
     }
     for (const name of ["ONE_HANDLE","NO_REQUESTS","DESTROYED_FALSE","DESTROYED_TRUE",
       "CONNECTING_TRUE","ENDPOINT_PORT","ENDPOINT_ADDRESS","STDIO",
-      "FD_RESERVED","UNREF_AVAILABLE"]) {
+      "FD_RESERVED","FD_NEGATIVE","REMOTE_PORT","LOCAL_PORT",
+      "REMOTE_ADDRESS","LOCAL_ADDRESS","UNREF_AVAILABLE"]) {
       for (const state of ["YES","NO"]) {
         if (data.includes("ACS_DOCLING_REAL_STACK_HANDLE_CHECK_" + name + "=" + state)) {
           console.log("ACS_DOCLING_REAL_STACK_PROOF_HANDLE_CHECK_" + name + "=" + state);
           break;
         }
       }
+    }
+    for (const name of ["TCPWRAP","TCPSERVERWRAP","PIPEWRAP","TTYWRAP",
+      "FSEVENTWRAP","FSREQCALLBACK","DNSCHANNEL","TIMEOUT","IMMEDIATE",
+      "MESSAGEPORT","OTHER"]) {
+      const matches=[...data.matchAll(new RegExp(
+        "ACS_DOCLING_REAL_STACK_ACTIVE_RESOURCE_"+name+"=([0-9]{1,3})","g"
+      ))];
+      if(matches.length) console.log("ACS_DOCLING_REAL_STACK_PROOF_ACTIVE_RESOURCE_"+
+        name+"="+matches.at(-1)[1]);
     }
     for (const name of ["WORKER","EVENTS","QUEUE_OBLITERATE","QUEUE_CLOSE","EXECUTOR","STORAGE","DB_DISCONNECT","REDIS"]) {
       if (data.includes("ACS_DOCLING_REAL_STACK_TEARDOWN_" + name + "=REJECTED")) {

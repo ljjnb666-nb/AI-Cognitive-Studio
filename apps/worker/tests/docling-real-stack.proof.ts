@@ -358,11 +358,38 @@ main().then(()=>{
       ENDPOINT_PORT: candidate?.localPort!==undefined||candidate?.remotePort!==undefined,
       ENDPOINT_ADDRESS: candidate?.localAddress!==undefined||candidate?.remoteAddress!==undefined,
       STDIO: candidate===process.stdout||candidate===process.stderr||candidate===process.stdin,
-      FD_RESERVED: typeof candidate?._handle?.fd==="number"&&candidate._handle.fd<=2,
+      FD_RESERVED: typeof candidate?._handle?.fd==="number"&&
+        candidate._handle.fd>=0&&candidate._handle.fd<=2,
+      FD_NEGATIVE:typeof candidate?._handle?.fd==="number"&&candidate._handle.fd<0,
+      REMOTE_PORT:typeof candidate?.remotePort==="number",
+      LOCAL_PORT:typeof candidate?.localPort==="number",
+      REMOTE_ADDRESS:typeof candidate?.remoteAddress==="string",
+      LOCAL_ADDRESS:typeof candidate?.localAddress==="string",
       UNREF_AVAILABLE:typeof candidate?.unref==="function",
     };
     for(const [label,active] of Object.entries(diagnostics)){
       console.log("ACS_DOCLING_REAL_STACK_HANDLE_CHECK_"+label+"="+(active?"YES":"NO"));
+    }
+    // Public Node API reports what is actually keeping the event loop alive,
+    // not merely the list of observed handles. Only fixed resource categories.
+    const resourceTypes=typeof process.getActiveResourcesInfo==="function"
+      ?process.getActiveResourcesInfo():[];
+    const resourceCounts={TCPWRAP:0,TCPSERVERWRAP:0,PIPEWRAP:0,TTYWRAP:0,
+      FSEVENTWRAP:0,FSREQCALLBACK:0,DNSCHANNEL:0,TIMEOUT:0,IMMEDIATE:0,
+      MESSAGEPORT:0,OTHER:0};
+    const resourceMap:Record<string,keyof typeof resourceCounts>={
+      TCPWRAP:"TCPWRAP",TCPSERVERWRAP:"TCPSERVERWRAP",
+      PIPEWRAP:"PIPEWRAP",TTYWRAP:"TTYWRAP",
+      FSEVENTWRAP:"FSEVENTWRAP",FSREQCALLBACK:"FSREQCALLBACK",
+      DNSCHANNEL:"DNSCHANNEL",Timeout:"TIMEOUT",Immediate:"IMMEDIATE",
+      MessagePort:"MESSAGEPORT",
+    };
+    for(const resource of resourceTypes){
+      resourceCounts[resourceMap[resource]??"OTHER"]++;
+    }
+    for(const [label,count] of Object.entries(resourceCounts)){
+      console.log("ACS_DOCLING_REAL_STACK_ACTIVE_RESOURCE_"+label+"="+
+        Math.min(count,999));
     }
     if(safeLocalPipe||safeUnboundTcp){
       console.log("ACS_DOCLING_REAL_STACK_ISOLATED_LOCAL_HANDLE_UNREF="+
