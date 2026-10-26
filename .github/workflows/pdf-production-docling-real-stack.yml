@@ -416,11 +416,43 @@ jobs:
             # This job owns only the unique runner-temporary archive root.
             if ($env:ACS_DOCLING_SOURCE_ROOT -and
                 (Test-Path -LiteralPath $env:ACS_DOCLING_SOURCE_ROOT -PathType Container)) {
-              try {
-                Remove-Item -LiteralPath $env:ACS_DOCLING_SOURCE_ROOT -Recurse -Force -ErrorAction Stop
-              } catch {
+              # Only remove this run's unique directory under RUNNER_TEMP.
+              # Bounded retry for Windows file-handle release after taskkill.
+              $rootToDelete=$env:ACS_DOCLING_SOURCE_ROOT
+              $tempRoot=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')+'\'
+              $candidate=[IO.Path]::GetFullPath($rootToDelete)
+              $owned=$candidate.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase) -and
+                ([IO.Path]::GetFileName($candidate) -match '^acs-verified-source-[a-f0-9]{32}
+          }
+          if ($null -ne $failedStage) {
+            Write-Output ('ACS_DOCLING_REAL_STACK_FAILURE_STAGE=' + $failedStage)
+            if ($cleanupFailed) { Write-Output 'ACS_DOCLING_REAL_STACK_CLEANUP=FAILED' }
+            Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=REJECTED'
+            exit 2
+          }
+          if ($cleanupFailed -or -not $receiptVerified) {
+            Write-Output 'ACS_DOCLING_REAL_STACK_FAILURE_STAGE=CLEANUP_OR_RECEIPT'
+            Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=REJECTED'
+            exit 2
+          }
+          Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=PASS'
+)
+              if (-not $owned) {
                 $cleanupFailed=$true
-                Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=FAILED'
+                Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=UNSAFE_PATH_REJECTED'
+              } else {
+                for ($removeAttempt=0;$removeAttempt -lt 4;$removeAttempt++) {
+                  try { Remove-Item -LiteralPath $candidate -Recurse -Force -ErrorAction Stop }
+                  catch { }
+                  if (-not (Test-Path -LiteralPath $candidate)) { break }
+                  if ($removeAttempt -lt 3) { Start-Sleep -Seconds 2 }
+                }
+                if (Test-Path -LiteralPath $candidate) {
+                  $cleanupFailed=$true
+                  Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=FAILED'
+                } else {
+                  Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=PASS'
+                }
               }
             }
           }

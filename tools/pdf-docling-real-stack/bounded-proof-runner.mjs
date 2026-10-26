@@ -14,7 +14,11 @@ if (process.platform !== "win32" ||
   process.exit(2);
 }
 const STAGES = new Set(["ADMISSION", "OFFLINE_MODEL_PROBE", "INFRASTRUCTURE",
-  "LINEAGE_SEED", "REAL_QUEUE_MODEL", "EVIDENCE", "REPLAY"]);
+  "LINEAGE_SEED", "REAL_QUEUE_MODEL", "EVIDENCE", "REPLAY",
+  "REPLAY_VERIFIED", "CLEANUP_WORKER", "CLEANUP_EVENTS",
+  "CLEANUP_QUEUE_OBLITERATE", "CLEANUP_QUEUE_CLOSE",
+  "CLEANUP_EXECUTOR", "CLEANUP_DATABASE", "CLEANUP_S3",
+  "CLEANUP_DISCONNECT", "CLEANUP_DONE"]);
 function emitLastStage() {
   try {
     // Only emit allowlisted labels. Do not emit arbitrary child stdout.

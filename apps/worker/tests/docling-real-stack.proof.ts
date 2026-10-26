@@ -195,6 +195,7 @@ async function main():Promise<void>{
     ensure((await prisma.doclingLayoutSnapshot.count({
       where:{ingestionRunId:runId},
     }))===1,"REAL_DOCLING_E2E_REPLAY_DUPLICATE");
+    markStage("REPLAY_VERIFIED");
     console.log("ACS_DOCLING_REAL_STACK_ORIGINAL_PDF=PASS");
     console.log("ACS_DOCLING_REAL_STACK_WINDOWS_MODEL=PASS");
     console.log("ACS_DOCLING_REAL_STACK_REDIS_PG_MINIO=PASS");
@@ -207,12 +208,18 @@ async function main():Promise<void>{
     throw new Error("REAL_DOCLING_E2E_REJECTED");
   }finally{
     // Namespace-local cleanup only. Do not flush Redis or touch unrelated S3.
+    markStage("CLEANUP_WORKER");
     await worker.close().catch(()=>undefined);
+    markStage("CLEANUP_EVENTS");
     await events.close().catch(()=>undefined);
+    markStage("CLEANUP_QUEUE_OBLITERATE");
     await queue.obliterate({force:true}).catch(()=>undefined);
+    markStage("CLEANUP_QUEUE_CLOSE");
     await queue.close().catch(()=>undefined);
+    markStage("CLEANUP_EXECUTOR");
     await executor.close().catch(()=>undefined);
     // Delete child rows before parents, using synthetic workspace/run IDs only.
+    markStage("CLEANUP_DATABASE");
     if(runId){
       await prisma.doclingLayoutSnapshot.deleteMany({where:{ingestionRunId:runId}})
         .catch(()=>undefined);
@@ -231,9 +238,12 @@ async function main():Promise<void>{
       await prisma.workspace.deleteMany({where:{id:workspaceId}}).catch(()=>undefined);
     }
     if(userId)await prisma.user.deleteMany({where:{id:userId}}).catch(()=>undefined);
+    markStage("CLEANUP_S3");
     if(artifactKey)await storage.deleteObject(artifactKey).catch(()=>undefined);
     await storage.deleteObject(sourceKey).catch(()=>undefined);
+    markStage("CLEANUP_DISCONNECT");
     await prisma.$disconnect().catch(()=>undefined);
+    markStage("CLEANUP_DONE");
   }
 }
 main().catch(()=>{
