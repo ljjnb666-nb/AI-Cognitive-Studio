@@ -427,14 +427,30 @@ jobs:
                 $cleanupFailed=$true
                 Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=UNSAFE_PATH_REJECTED'
               } else {
+                $deletionCategory='UNKNOWN'
                 for ($removeAttempt=0;$removeAttempt -lt 4;$removeAttempt++) {
                   try { Remove-Item -LiteralPath $candidate -Recurse -Force -ErrorAction Stop }
-                  catch { }
+                  catch {
+                    # Categorize only; never print the exception or private path.
+                    $message=$_.Exception.ToString()
+                    if ($message -match '(?i)used by another process|being used|sharing violation') {
+                      $deletionCategory='FILE_LOCK'
+                    } elseif ($message -match '(?i)access is denied|unauthorizedaccess') {
+                      $deletionCategory='PERMISSION'
+                    } elseif ($message -match '(?i)path too long|pathtoolong') {
+                      $deletionCategory='PATH_LENGTH'
+                    } elseif ($message -match '(?i)directory is not empty') {
+                      $deletionCategory='NOT_EMPTY'
+                    } else {
+                      $deletionCategory='OTHER'
+                    }
+                  }
                   if (-not (Test-Path -LiteralPath $candidate)) { break }
                   if ($removeAttempt -lt 3) { Start-Sleep -Seconds 2 }
                 }
                 if (Test-Path -LiteralPath $candidate) {
                   $cleanupFailed=$true
+                  Write-Output ('ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP_ERROR_CATEGORY='+$deletionCategory)
                   Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=FAILED'
                 } else {
                   Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=PASS'

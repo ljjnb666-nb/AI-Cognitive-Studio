@@ -52,9 +52,9 @@ function emitLastStage() {
         break;
       }
     }
-    for (const state of ["PASS","NOT_APPLICABLE"]) {
-      if (data.includes("ACS_DOCLING_REAL_STACK_ISOLATED_LOCAL_PIPE_UNREF=" + state)) {
-        console.log("ACS_DOCLING_REAL_STACK_PROOF_LOCAL_PIPE_UNREF=" + state);
+    for (const state of ["PIPE","UNBOUND_TCP","NOT_APPLICABLE"]) {
+      if (data.includes("ACS_DOCLING_REAL_STACK_ISOLATED_LOCAL_HANDLE_UNREF=" + state)) {
+        console.log("ACS_DOCLING_REAL_STACK_PROOF_LOCAL_HANDLE_UNREF=" + state);
         break;
       }
     }

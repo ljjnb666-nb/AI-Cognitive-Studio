@@ -324,7 +324,8 @@ main().then(()=>{
     // non-network, non-stdio pipe; do not force process.exit(0), close arbitrary
     // network clients, or forgive a proof/teardown failure.
     type LocalPipeSocket={
-      remotePort?:number;localPort?:number;destroyed?:boolean;
+      remotePort?:number;localPort?:number;remoteAddress?:string;localAddress?:string;
+      destroyed?:boolean;connecting?:boolean;pending?:boolean;
       _handle?:{constructor?:{name?:string};fd?:number};
       unref?:()=>void;
     };
@@ -332,18 +333,26 @@ main().then(()=>{
     const handleKind=candidate?._handle?.constructor?.name;
     console.log("ACS_DOCLING_REAL_STACK_SOLE_HANDLE_KIND="+(
       handleKind==="Pipe"?"PIPE":handleKind==="TCP"?"TCP":"OTHER"));
-    const safePipe=process.env.ACS_DOCLING_REAL_STACK_E2E==="1" &&
+    const onlyIsolatedHandle=process.env.ACS_DOCLING_REAL_STACK_E2E==="1" &&
       handles.length===1&&requests.length===0&&
       candidate!==process.stdout&&candidate!==process.stderr&&candidate!==process.stdin&&
-      handleKind==="Pipe"&&candidate?.destroyed===false&&
+      candidate?.destroyed===false&&
       candidate?.remotePort===undefined&&candidate?.localPort===undefined&&
+      candidate?.remoteAddress===undefined&&candidate?.localAddress===undefined&&
       (candidate._handle?.fd===undefined||candidate._handle.fd>2)&&
       typeof candidate.unref==="function";
-    if(safePipe){
-      console.log("ACS_DOCLING_REAL_STACK_ISOLATED_LOCAL_PIPE_UNREF=PASS");
+    // Windows libuv can present a dormant, unbound local loader handle as
+    // TCP instead of Pipe. It MUST have no bound or remote endpoint and no
+    // pending connection; otherwise it remains referenced and fails the gate.
+    const safeLocalPipe=onlyIsolatedHandle&&handleKind==="Pipe";
+    const safeUnboundTcp=onlyIsolatedHandle&&handleKind==="TCP"&&
+      candidate?.connecting!==true;
+    if(safeLocalPipe||safeUnboundTcp){
+      console.log("ACS_DOCLING_REAL_STACK_ISOLATED_LOCAL_HANDLE_UNREF="+
+        (safeLocalPipe?"PIPE":"UNBOUND_TCP"));
       candidate.unref?.();
     }else{
-      console.log("ACS_DOCLING_REAL_STACK_ISOLATED_LOCAL_PIPE_UNREF=NOT_APPLICABLE");
+      console.log("ACS_DOCLING_REAL_STACK_ISOLATED_LOCAL_HANDLE_UNREF=NOT_APPLICABLE");
     }
   },2000);
   census.unref();
