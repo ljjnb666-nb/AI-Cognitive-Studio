@@ -422,21 +422,7 @@ jobs:
               $tempRoot=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')+'\'
               $candidate=[IO.Path]::GetFullPath($rootToDelete)
               $owned=$candidate.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase) -and
-                ([IO.Path]::GetFileName($candidate) -match '^acs-verified-source-[a-f0-9]{32}
-          }
-          if ($null -ne $failedStage) {
-            Write-Output ('ACS_DOCLING_REAL_STACK_FAILURE_STAGE=' + $failedStage)
-            if ($cleanupFailed) { Write-Output 'ACS_DOCLING_REAL_STACK_CLEANUP=FAILED' }
-            Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=REJECTED'
-            exit 2
-          }
-          if ($cleanupFailed -or -not $receiptVerified) {
-            Write-Output 'ACS_DOCLING_REAL_STACK_FAILURE_STAGE=CLEANUP_OR_RECEIPT'
-            Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=REJECTED'
-            exit 2
-          }
-          Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=PASS'
-)
+                ([IO.Path]::GetFileName($candidate) -match '^acs-verified-source-[a-f0-9]{32}$')
               if (-not $owned) {
                 $cleanupFailed=$true
                 Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=UNSAFE_PATH_REJECTED'
