@@ -1,0 +1,1 @@
+PDF 新识别框架：Windows 真实离线 Docling、Redis/BullMQ、PostgreSQL 租约与 MinIO 的同链路验收。新增独立合成三页 PDF、真实任务分派、快照 SHA256 和重放幂等校验。严格限制自有 PR HEAD，Docker 离线缓存镜像、随机 project 和随机 localhost 端口，不接触私有书籍与现有服务。先决条件缺失会 REJECTED，不作成功报告。Docling 只做非权威 sidecar，OCR Gold 未冻结，生产默认关闭，所有相关 PR 继续 Draft / Unmerged。

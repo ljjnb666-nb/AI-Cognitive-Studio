@@ -1,0 +1,49 @@
+# Disposable Windows owner-runner proof; never attach production volumes.
+# Images must already be cached locally: workflow uses --pull never.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: acs_docling_e2e_test
+    ports:
+      - "127.0.0.1::5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d acs_docling_e2e_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1::6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  minio:
+    image: ghcr.io/ljjnb666-nb/acs-ci-minio:RELEASE.2025-04-22T22-12-26Z@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: synthetic-only-local
+      MINIO_ROOT_PASSWORD: synthetic-only-local
+    ports:
+      - "127.0.0.1::9000"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  minio-init:
+    image: ghcr.io/ljjnb666-nb/acs-ci-minio-mc:RELEASE.2025-05-21T01-59-54Z@sha256:415aa133ebbe1ca750a6eb7cfcef9c70700febaf10963a31f3d56659eebe3b4a
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh","-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 synthetic-only-local synthetic-only-local &&
+        mc mb --ignore-existing local/acs-docling-e2e &&
+        mc anonymous set none local/acs-docling-e2e

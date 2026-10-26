@@ -1,0 +1,518 @@
+name: Production PDF Docling Real Windows Full Stack
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+concurrency:
+  group: acs-pdf-docling-real-stack-owner
+  cancel-in-progress: false
+jobs:
+  source:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-docling-real-stack-windows-20261025' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Exact-head synthetic source
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          python -m py_compile packages/ingestion/tests/python/docling-real-stack-synthetic-pdf.py
+          test -f tools/pdf-docling-real-stack/compose.yml
+          test -f apps/worker/tests/docling-real-stack.proof.ts
+          echo 'ACS_REAL_STACK_SOURCE=PASS'
+      - name: Package tracked exact-head source without corpus
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p acs-source-handoff
+          git archive --format=tar HEAD | gzip -n > acs-source-handoff/source.tar.gz
+          sha256sum acs-source-handoff/source.tar.gz | cut -d ' ' -f1 > acs-source-handoff/source.sha256
+          printf '%s\n' "$EXPECTED_SHA" > acs-source-handoff/commit.sha
+          test "$(wc -c < acs-source-handoff/source.tar.gz)" -gt 1000
+          echo 'ACS_REAL_STACK_EXACT_SHA_ARCHIVE=PASS'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acs-docling-real-stack-exact-source
+          path: acs-source-handoff
+          if-no-files-found: error
+          retention-days: 1
+  real-windows:
+    needs: source
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-docling-real-stack-windows-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 35
+    steps:
+      # The Windows machine cannot reliably reach github.com directly or
+      # its user-session SOCKS proxy. Transfer only tracked Git source via
+      # the same private Actions run, with exact head and SHA256 verified.
+      - uses: actions/download-artifact@v4
+        with:
+          name: acs-docling-real-stack-exact-source
+          path: acs-source-handoff
+      - name: Verify and unpack trusted source handoff
+        shell: powershell
+        timeout-minutes: 3
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $bundle=(Resolve-Path '.\acs-source-handoff').Path
+          $archive=Join-Path $bundle 'source.tar.gz'
+          $expectedHashFile=Join-Path $bundle 'source.sha256'
+          $expectedHeadFile=Join-Path $bundle 'commit.sha'
+          foreach ($file in @($archive,$expectedHashFile,$expectedHeadFile)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'EXACT_SOURCE_BUNDLE_MISSING' }
+          }
+          $head=(Get-Content -LiteralPath $expectedHeadFile -Raw).Trim()
+          $digest=(Get-Content -LiteralPath $expectedHashFile -Raw).Trim()
+          if ($head -cne $env:EXPECTED_SHA -or $head -notmatch '^[a-f0-9]{40}$' -or
+              $digest -notmatch '^[a-f0-9]{64}$' -or
+              (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest) {
+            throw 'EXACT_SOURCE_BUNDLE_INTEGRITY_REJECTED'
+          }
+          # Never overwrite a previous checkout or any user-managed worktree.
+          # A unique runner-temporary source root is safe to remove afterward.
+          $destination=Join-Path $env:RUNNER_TEMP ('acs-verified-source-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $destination -ErrorAction Stop | Out-Null
+          & tar.exe -xzf $archive -C $destination
+          if ($LASTEXITCODE -ne 0) { throw 'EXACT_SOURCE_UNPACK_REJECTED' }
+          foreach ($relative in @('tools\pdf-docling-real-stack\compose.yml',
+            'apps\worker\tests\docling-real-stack.proof.ts',
+            'packages\ingestion\src\docling\docling-layout-child.py')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $destination $relative) -PathType Leaf)) {
+              throw 'EXACT_SOURCE_UNPACK_INCOMPLETE'
+            }
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ('ACS_DOCLING_VERIFIED_SOURCE_SHA=' + $head)
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ('ACS_DOCLING_SOURCE_ROOT=' + $destination)
+          Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_HANDOFF=PASS'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - name: Isolated PG Redis MinIO plus real offline Docling
+        shell: powershell
+        timeout-minutes: 30
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          HF_DATASETS_OFFLINE: '1'
+          MODELSCOPE_OFFLINE: '1'
+        run: |
+          $ErrorActionPreference='Stop'
+          $stage='CHECKOUT'
+          # Cleanup is authorized only after we attempt to create our random project.
+          # Never call Docker on a host where the daemon is absent.
+          $composeAttempted=$false
+          $cleanupFailed=$false
+          $failedStage=$null
+          $receiptVerified=$false
+          $project='acsdocling'+[guid]::NewGuid().ToString('N').Substring(0,12)
+          if (-not $env:ACS_DOCLING_SOURCE_ROOT) { throw 'VERIFIED_SOURCE_ROOT_MISSING' }
+          $root=(Resolve-Path -LiteralPath $env:ACS_DOCLING_SOURCE_ROOT).Path
+          $compose=Join-Path $root 'tools\pdf-docling-real-stack\compose.yml'
+          $scratch=Join-Path $env:RUNNER_TEMP ('acs-docling-'+[guid]::NewGuid().ToString('N'))
+          function Check-Exit { if ($LASTEXITCODE -ne 0) { throw 'SUBPROCESS_FAILED' } }
+          function Get-Port($service,$containerPort) {
+            $value=@(& docker compose -p $project -f $compose port $service $containerPort 2>$null)
+            if ($LASTEXITCODE -ne 0 -or $value.Count -ne 1 -or $value[0] -notmatch ':(\d+)$') { throw 'PORT_INVALID' }
+            return $Matches[1]
+          }
+          try {
+            if ($env:ACS_DOCLING_VERIFIED_SOURCE_SHA -cne $env:EXPECTED_SHA) { throw 'HEAD_MISMATCH' }
+            $stage='MODEL'
+            $data='D:\ai-cognitive-pdf-benchmark-data'
+            $python=Join-Path $data 'tool-env\docling-2.141.0\Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PYTHON_ABSENT' }
+            $matches=@()
+            foreach ($relative in @('tool-env\docling-standard-artifacts','tool-env\docling-models','models\docling-standard','models\docling')) {
+              $p=Join-Path $data $relative
+              if (-not (Test-Path -LiteralPath $p -PathType Container)) { continue }
+              $meta=Get-Item -LiteralPath $p -Force
+              if (($meta.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'MODEL_LINK' }
+              $weights=@(Get-ChildItem -LiteralPath $p -File -Recurse | Where-Object { $_.Extension -in @('.bin','.onnx','.pt','.pth','.safetensors') })
+              if ($weights.Count -gt 0) { $matches+=,$p }
+            }
+            if ($matches.Count -ne 1) { throw 'MODEL_NOT_UNIQUE' }
+            # Verify headroom BEFORE starting Docker Desktop, which may
+            # allocate more memory. Fail closed rather than kill user apps.
+            $stage='AUTO_DOCKER_MEMORY_PREFLIGHT'
+            $preflight=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            $preflightKB=[double]$preflight.FreePhysicalMemory
+            Write-Output ('ACS_DOCLING_REAL_STACK_PRE_DOCKER_RAM_GIB=' +
+              [Math]::Round($preflightKB / 1048576, 2).ToString([Globalization.CultureInfo]::InvariantCulture))
+            if ($preflightKB -lt 4194304) {
+              Write-Output 'ACS_DOCLING_REAL_STACK_AUTOSTART=BLOCKED_LOW_RAM'
+              throw 'AUTO_DOCKER_MEMORY_PREFLIGHT'
+            }
+
+            $stage='DOCKER'
+            if (-not (Get-Command 'docker.exe' -ErrorAction SilentlyContinue)) { throw 'DOCKER_ABSENT' }
+            function Test-LinuxEngine {
+              # Docker may emit a connection error to stderr when not running.
+              # Never promote that untrusted diagnostic into Actions logs.
+              try {
+                $kind=@(& docker info --format '{{.OSType}}' 2>$null)
+                return ($LASTEXITCODE -eq 0 -and $kind.Count -eq 1 -and $kind[0] -eq 'linux')
+              } catch {
+                return $false
+              }
+            }
+            if (-not (Test-LinuxEngine)) {
+              # This dedicated runner has been measured at 6.41 GiB free
+              # before Docker Desktop and 2.63 GiB afterwards (3.78 GiB
+              # transient/steady delta). Leave at least 4 GiB AFTER startup;
+              # 8 GiB pre-start is a conservative safety budget for this host.
+              # A running Linux engine is governed by the actual post-start
+              # 4-GiB check instead, so no needless extra headroom is required.
+              $stage='AUTO_DOCKER_START_MEMORY_BUDGET'
+              if ($preflightKB -lt 8388608) {
+                Write-Output 'ACS_DOCLING_REAL_STACK_AUTOSTART=BLOCKED_HEADROOM'
+                throw 'AUTO_DOCKER_START_MEMORY_BUDGET'
+              }
+              $stage='AUTO_DOCKER_START'
+              # Supported Docker Desktop CLI; no install, config change,
+              # credential prompt, download, or privilege escalation.
+              try {
+                & docker desktop start --detach *> $null
+              } catch {
+                # CLI may be unavailable on older Docker Desktop installations.
+              }
+              if ($LASTEXITCODE -ne 0) {
+                # Fallback only to a known local Docker Desktop installation.
+                $candidates=@(
+                  (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'),
+                  (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\Docker Desktop.exe')
+                )
+                $app=@($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+                if ($app.Count -ne 1) { throw 'DOCKER_DESKTOP_LAUNCHER_MISSING' }
+                try { Start-Process -FilePath $app[0] -ErrorAction Stop | Out-Null }
+                catch { throw 'DOCKER_DESKTOP_LAUNCH_FAILED' }
+              }
+              $stage='AUTO_DOCKER_READY'
+              $ready=$false
+              for ($attempt=0;$attempt -lt 30;$attempt++) {
+                if (Test-LinuxEngine) { $ready=$true; break }
+                Start-Sleep -Seconds 5
+              }
+              if (-not $ready) { throw 'DOCKER_DESKTOP_NOT_READY' }
+              Write-Output 'ACS_DOCLING_REAL_STACK_AUTOSTART=READY'
+            } else {
+              Write-Output 'ACS_DOCLING_REAL_STACK_AUTOSTART=ALREADY_RUNNING'
+            }
+            & docker compose version *> $null
+            Check-Exit
+            foreach ($image in @('postgres:17-alpine','redis:7-alpine',
+              'ghcr.io/ljjnb666-nb/acs-ci-minio:RELEASE.2025-04-22T22-12-26Z@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb',
+              'ghcr.io/ljjnb666-nb/acs-ci-minio-mc:RELEASE.2025-05-21T01-59-54Z@sha256:415aa133ebbe1ca750a6eb7cfcef9c70700febaf10963a31f3d56659eebe3b4a')) {
+              & docker image inspect $image *> $null
+              Check-Exit
+            }
+            # Preserve individual resource evidence without ever exposing
+            # private corpus paths, model filenames or subprocess stderr.
+            $stage='RESOURCE_C_DISK'
+            $c=[IO.DriveInfo]::new('C')
+            if (-not $c.IsReady -or $c.AvailableFreeSpace -lt 15GB) {
+              Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_C=INSUFFICIENT'
+              throw 'RESOURCE_C_DISK'
+            }
+            Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_C=PASS'
+            $stage='RESOURCE_D_DISK'
+            $d=[IO.DriveInfo]::new('D')
+            if (-not $d.IsReady -or $d.AvailableFreeSpace -lt 30GB) {
+              Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_D=INSUFFICIENT'
+              throw 'RESOURCE_D_DISK'
+            }
+            Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_D=PASS'
+            # Docker Desktop itself consumes memory. Check again after it
+            # becomes available before starting the three test containers.
+            $stage='RESOURCE_RAM'
+            # Give transient RAM pressure a bounded chance to subside.
+            # Still require the unchanged 4 GiB safety gate.
+            for ($sample=0; $sample -lt 7; $sample++) {
+              $memory=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+              $freeKB=if ($null -eq $memory) { 0 } else { [double]$memory.FreePhysicalMemory }
+              if ($freeKB -ge 4194304) { break }
+              if ($sample -lt 6) { Start-Sleep -Seconds 10 }
+            }
+            # FreePhysicalMemory is KiB, not bytes. Don't silently lower the
+            # existing 4-GiB model/containers gate to force a green build.
+            Write-Output ('ACS_DOCLING_REAL_STACK_FREE_RAM_GIB=' +
+              [Math]::Round(($freeKB / 1048576), 2).ToString([Globalization.CultureInfo]::InvariantCulture))
+            if ($freeKB -lt 4194304) {
+              Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_RAM=INSUFFICIENT'
+              throw 'RESOURCE_RAM'
+            }
+            Write-Output 'ACS_DOCLING_REAL_STACK_RESOURCE_RAM=PASS'
+            New-Item -ItemType Directory -Path $scratch | Out-Null
+            # A native docker command can emit stderr even when successful.
+            # Capture locally (never print arbitrary daemon output or secrets),
+            # check its actual exit code, then publish allowlisted status only.
+            function Invoke-IsolatedCompose([string]$phase,[string[]]$arguments) {
+              $output=Join-Path $scratch ($phase+'.out')
+              $errors=Join-Path $scratch ($phase+'.err')
+              $previous=$ErrorActionPreference
+              $code=-1
+              try {
+                $ErrorActionPreference='Continue'
+                & docker @arguments 1> $output 2> $errors
+                $code=$LASTEXITCODE
+              } catch { $code=-1 }
+              finally { $ErrorActionPreference=$previous }
+              if ($code -ne 0) {
+                $diagnostic=if (Test-Path -LiteralPath $errors) {
+                  Get-Content -LiteralPath $errors -Raw -ErrorAction SilentlyContinue
+                } else { '' }
+                $category='UNKNOWN'
+                if ($diagnostic -match '(?i)no space left|disk full') { $category='STORAGE' }
+                elseif ($diagnostic -match '(?i)out of memory|insufficient memory|oom') { $category='MEMORY' }
+                elseif ($diagnostic -match '(?i)unhealthy|health.?check') { $category='HEALTHCHECK' }
+                elseif ($diagnostic -match '(?i)port is already allocated|address already in use|bind.*failed') { $category='PORT_BIND' }
+                elseif ($diagnostic -match '(?i)no such image|manifest unknown|pull access denied') { $category='IMAGE' }
+                elseif ($diagnostic -match '(?i)daemon|dockerdesktoplinuxengine|connection refused') { $category='ENGINE' }
+                elseif ($diagnostic -match '(?i)access is denied|permission denied') { $category='PERMISSION' }
+                Write-Output ('ACS_DOCLING_REAL_STACK_COMPOSE_ERROR_CATEGORY='+$category)
+                throw 'ISOLATED_COMPOSE_REJECTED'
+              }
+              Write-Output ('ACS_DOCLING_REAL_STACK_'+$phase+'=PASS')
+            }
+            $stage='ISOLATED_COMPOSE_UP'
+            # Set BEFORE compose up: even a partial creation must be removed.
+            $composeAttempted=$true
+            Invoke-IsolatedCompose 'COMPOSE_UP' @('compose','-p',$project,'-f',$compose,
+              'up','-d','--wait','--pull','never','postgres','redis','minio')
+            $stage='ISOLATED_MINIO_INIT'
+            Invoke-IsolatedCompose 'MINIO_INIT' @('compose','-p',$project,'-f',$compose,
+              'run','--rm','--no-deps','minio-init')
+            $stage='ISOLATED_SERVICE_PORTS'
+            $pgPort=Get-Port 'postgres' '5432'
+            $redisPort=Get-Port 'redis' '6379'
+            $s3Port=Get-Port 'minio' '9000'
+            Write-Output 'ACS_DOCLING_REAL_STACK_SERVICE_PORTS=PASS'
+            $env:DATABASE_URL='postgresql://app:app@127.0.0.1:'+$pgPort+'/acs_docling_e2e_test?schema=public'
+            $env:DATABASE_URL_TEST=$env:DATABASE_URL
+            $env:REDIS_URL='redis://127.0.0.1:'+$redisPort
+            $env:S3_ENDPOINT='http://127.0.0.1:'+$s3Port
+            $env:S3_REGION='us-east-1'
+            $env:S3_BUCKET='acs-docling-e2e'
+            $env:S3_ACCESS_KEY='synthetic-only-local'
+            $env:S3_SECRET_KEY='synthetic-only-local'
+            $env:S3_FORCE_PATH_STYLE='true'
+            $env:DOCLING_LAYOUT_PYTHON_PATH=$python
+            $env:DOCLING_LAYOUT_ARTIFACTS_PATH=$matches[0]
+            $env:ACS_DOCLING_REAL_STACK_E2E='1'
+            $stage='SYNTHETIC_PDF'
+            $pdf=Join-Path $scratch 'synthetic.pdf'
+            & $python (Join-Path $root 'packages\ingestion\tests\python\docling-real-stack-synthetic-pdf.py') --output $pdf *> $null
+            Check-Exit
+            $env:ACS_DOCLING_REAL_SYNTHETIC_PDF=$pdf
+            Push-Location $root
+            try {
+              $stage='NODE_DEPENDENCIES'
+              & pnpm install --frozen-lockfile *> $null
+              Check-Exit
+              # Windows PowerShell can throw on harmless native stderr,
+              # even when a command exits zero. Keep diagnostic bytes local;
+              # print only bounded, allowlisted failure categories.
+              function Invoke-IsolatedWorkspace([string]$phase,[string[]]$cmdArgs) {
+                $stdout=Join-Path $scratch ($phase+'.out')
+                $stderr=Join-Path $scratch ($phase+'.err')
+                $previous=$ErrorActionPreference
+                $exit=-1
+                try {
+                  $ErrorActionPreference='Continue'
+                  & pnpm @cmdArgs 1> $stdout 2> $stderr
+                  $exit=$LASTEXITCODE
+                } catch { $exit=-1 }
+                finally { $ErrorActionPreference=$previous }
+                if ($exit -ne 0) {
+                  $diagnostic=''
+                  foreach ($file in @($stdout,$stderr)) {
+                    if (Test-Path -LiteralPath $file -PathType Leaf) {
+                      $diagnostic+=(Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue)
+                    }
+                  }
+                  $code='OTHER'
+                  if ($diagnostic -match '(?i)P(1001|1000|1012|3005|3009|3014|3018|3015)') {
+                    $code='PRISMA_P'+$Matches[1]
+                  } elseif ($diagnostic -match '(?i)EPERM|EACCES|access is denied') {
+                    $code='PERMISSION'
+                  } elseif ($diagnostic -match '(?i)ENOMEM|out of memory|heap out of memory') {
+                    $code='MEMORY'
+                  } elseif ($diagnostic -match '(?i)ETIMEDOUT|ECONNREFUSED|connection refused') {
+                    $code='CONNECTIVITY'
+                  } elseif ($diagnostic -match '(?i)not recognized|not found|cannot find module') {
+                    $code='TOOL_MISSING'
+                  }
+                  Write-Output ('ACS_DOCLING_REAL_STACK_'+$phase+'_ERROR_CATEGORY='+$code)
+                  throw 'WORKSPACE_COMMAND_REJECTED'
+                }
+                Write-Output ('ACS_DOCLING_REAL_STACK_'+$phase+'=PASS')
+              }
+              $stage='DB_GENERATE'
+              Invoke-IsolatedWorkspace 'DB_GENERATE' @('db:generate')
+              $stage='DB_MIGRATE_DEPLOY'
+              Invoke-IsolatedWorkspace 'DB_MIGRATE_DEPLOY' @('--filter','@ai-cognitive/db',
+                'prisma','migrate','deploy')
+              $stage='REAL_MODEL_QUEUE_STORAGE'
+              $out=Join-Path $scratch 'proof.out'
+              $err=Join-Path $scratch 'proof.err'
+              # Run the real proof with a bounded Windows child-process tree.
+              # A hung Redis/model/network cleanup must not consume the full
+              # 30-minute Actions timeout or leave descendants behind.
+              & node tools/pdf-docling-real-stack/bounded-proof-runner.mjs $out $err
+              Check-Exit
+              $lines=@(Get-Content -LiteralPath $out | Select-Object -First 40)
+              foreach ($marker in @('ACS_DOCLING_REAL_STACK_ORIGINAL_PDF=PASS',
+                'ACS_DOCLING_REAL_STACK_WINDOWS_MODEL=PASS',
+                'ACS_DOCLING_REAL_STACK_REDIS_PG_MINIO=PASS',
+                'ACS_DOCLING_REAL_STACK_SINGLE_PAGE=PASS',
+                'ACS_DOCLING_REAL_STACK_REPLAY=PASS',
+                'ACS_DOCLING_REAL_STACK_GOLD=NOT_APPROVED')) {
+                if (@($lines | Where-Object { $_ -ceq $marker }).Count -ne 1) { throw 'RECEIPT_INVALID' }
+              }
+              $receiptVerified=$true
+            } finally { Pop-Location }
+          } catch {
+            # Stage codes only. Exception messages can include private paths.
+            $failedStage=$stage
+          } finally {
+            if ($composeAttempted) {
+              try {
+                $previous=$ErrorActionPreference
+                try {
+                  $ErrorActionPreference='Continue'
+                  & docker compose -p $project -f $compose down --volumes --remove-orphans *> $null
+                  if ($LASTEXITCODE -ne 0) { $cleanupFailed=$true }
+                } finally { $ErrorActionPreference=$previous }
+              } catch { $cleanupFailed=$true }
+              if ($cleanupFailed) {
+                Write-Output 'ACS_DOCLING_REAL_STACK_COMPOSE_CLEANUP=FAILED'
+              } else {
+                Write-Output 'ACS_DOCLING_REAL_STACK_COMPOSE_CLEANUP=PASS'
+              }
+            }
+            if (Test-Path -LiteralPath $scratch -PathType Container) {
+              try {
+                Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Stop
+              } catch {
+                $cleanupFailed=$true
+                Write-Output 'ACS_DOCLING_REAL_STACK_SCRATCH_CLEANUP=FAILED'
+              }
+            }
+            # This job owns only the unique runner-temporary archive root.
+            if ($env:ACS_DOCLING_SOURCE_ROOT -and
+                (Test-Path -LiteralPath $env:ACS_DOCLING_SOURCE_ROOT -PathType Container)) {
+              # Only remove this run's unique directory under RUNNER_TEMP.
+              # Bounded retry for Windows file-handle release after taskkill.
+              $rootToDelete=$env:ACS_DOCLING_SOURCE_ROOT
+              $tempRoot=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')+'\'
+              $candidate=[IO.Path]::GetFullPath($rootToDelete)
+              $owned=$candidate.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase) -and
+                ([IO.Path]::GetFileName($candidate) -match '^acs-verified-source-[a-f0-9]{32}$')
+              if (-not $owned) {
+                $cleanupFailed=$true
+                Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=UNSAFE_PATH_REJECTED'
+              } else {
+                $deletionCategory='UNKNOWN'
+                for ($removeAttempt=0;$removeAttempt -lt 4;$removeAttempt++) {
+                  try { Remove-Item -LiteralPath $candidate -Recurse -Force -ErrorAction Stop }
+                  catch {
+                    # The source root is a verified random RUNNER_TEMP directory,
+                    # never a user worktree. Directory.Delete is a fallback for
+                    # PowerShell 5.1 recursion over pnpm's nested node_modules.
+                    # Do not follow an untrusted reparse-point root.
+                    try {
+                      $meta=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+                      if (($meta.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                        [IO.Directory]::Delete($candidate,$true)
+                      }
+                    } catch { }
+                    # Windows PowerShell 5.1 recursive removal can race with
+                    # pnpm junction disappearance: its ENOENT does not mean
+                    # the owned root has been completely deleted. Use Node
+                    # 24's bounded, force-aware rm ONLY on the already
+                    # verified RUNNER_TEMP child and never on a reparse root.
+                    try {
+                      if (Test-Path -LiteralPath $candidate -PathType Container) {
+                        $nodeRoot=Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+                        if (($nodeRoot.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                          $previous=$ErrorActionPreference
+                          try {
+                            $ErrorActionPreference='Continue'
+                            & node.exe -e "require('node:fs').rmSync(process.argv[1],{recursive:true,force:true,maxRetries:4,retryDelay:500})" $candidate *> $null
+                          } finally { $ErrorActionPreference=$previous }
+                        }
+                      }
+                    } catch { }
+                    # An actual surviving root is always a hard failure.
+                    if (-not (Test-Path -LiteralPath $candidate)) { break }
+                    # Categorize only; never print the exception or private path.
+                    $exception=$_.Exception
+                    $message=$exception.ToString()
+                    # Numeric HRESULT low-word is a Windows error category only.
+                    # Never echo the exception (which can contain private paths).
+                    $win32Code=([int64]$exception.HResult -band 65535)
+                    $kind=if ($exception -is [System.UnauthorizedAccessException]) {
+                      'ACCESS'
+                    } elseif ($exception -is [System.IO.PathTooLongException]) {
+                      'PATH_LENGTH'
+                    } elseif ($exception -is [System.IO.DirectoryNotFoundException]) {
+                      'DIRECTORY_MISSING'
+                    } elseif ($exception -is [System.IO.IOException]) {
+                      'IO'
+                    } else {
+                      'OTHER'
+                    }
+                    Write-Output ('ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP_EXCEPTION_KIND='+$kind)
+                    Write-Output ('ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP_WIN32_CODE='+$win32Code)
+                    if ($message -match '(?i)used by another process|being used|sharing violation') {
+                      $deletionCategory='FILE_LOCK'
+                    } elseif ($message -match '(?i)access is denied|unauthorizedaccess') {
+                      $deletionCategory='PERMISSION'
+                    } elseif ($message -match '(?i)path too long|pathtoolong') {
+                      $deletionCategory='PATH_LENGTH'
+                    } elseif ($message -match '(?i)directory is not empty') {
+                      $deletionCategory='NOT_EMPTY'
+                    } else {
+                      $deletionCategory='OTHER'
+                    }
+                  }
+                  if (-not (Test-Path -LiteralPath $candidate)) { break }
+                  if ($removeAttempt -lt 3) { Start-Sleep -Seconds 2 }
+                }
+                if (Test-Path -LiteralPath $candidate) {
+                  $cleanupFailed=$true
+                  Write-Output ('ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP_ERROR_CATEGORY='+$deletionCategory)
+                  Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=FAILED'
+                } else {
+                  Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=PASS'
+                }
+              }
+            }
+          }
+          if ($null -ne $failedStage) {
+            Write-Output ('ACS_DOCLING_REAL_STACK_FAILURE_STAGE=' + $failedStage)
+            if ($cleanupFailed) { Write-Output 'ACS_DOCLING_REAL_STACK_CLEANUP=FAILED' }
+            Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=REJECTED'
+            exit 2
+          }
+          if ($cleanupFailed -or -not $receiptVerified) {
+            Write-Output 'ACS_DOCLING_REAL_STACK_FAILURE_STAGE=CLEANUP_OR_RECEIPT'
+            Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=REJECTED'
+            exit 2
+          }
+          Write-Output 'ACS_DOCLING_REAL_STACK_WINDOWS_ALL_COMPONENTS=PASS'

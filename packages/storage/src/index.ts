@@ -91,6 +91,15 @@ export class S3CompatibleStorageProvider implements StorageProvider {
   async deleteObject(key: string): Promise<void> { assertKey(key); await this.serverClient.send(new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key })); }
   async objectExists(key: string): Promise<boolean> { return (await this.headObject(key)) !== null; }
   async bucketExists(): Promise<boolean> { try { await this.serverClient.send(new HeadBucketCommand({ Bucket: this.config.bucket })); return true; } catch (error) { if (isNotFound(error)) return false; throw error; } }
+
+  /** Release private SDK HTTP agents on worker shutdown or isolated E2E teardown.
+   * Call only when this storage instance is no longer used; never dispose of a
+   * shared application storage provider on a per-request basis.
+   */
+  close(): void {
+    this.serverClient.destroy();
+    this.presignClient.destroy();
+  }
 }
 
 export function createS3CompatibleStorageProvider(config: S3Config): StorageProvider { return new S3CompatibleStorageProvider(config); }
