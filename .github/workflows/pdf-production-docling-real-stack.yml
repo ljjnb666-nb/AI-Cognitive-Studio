@@ -324,11 +324,49 @@ jobs:
               $stage='NODE_DEPENDENCIES'
               & pnpm install --frozen-lockfile *> $null
               Check-Exit
-              $stage='MIGRATIONS'
-              & pnpm db:generate *> $null
-              Check-Exit
-              & pnpm db:migrate:deploy *> $null
-              Check-Exit
+              # Windows PowerShell can throw on harmless native stderr,
+              # even when a command exits zero. Keep diagnostic bytes local;
+              # print only bounded, allowlisted failure categories.
+              function Invoke-IsolatedWorkspace([string]$phase,[string[]]$cmdArgs) {
+                $stdout=Join-Path $scratch ($phase+'.out')
+                $stderr=Join-Path $scratch ($phase+'.err')
+                $previous=$ErrorActionPreference
+                $exit=-1
+                try {
+                  $ErrorActionPreference='Continue'
+                  & pnpm @cmdArgs 1> $stdout 2> $stderr
+                  $exit=$LASTEXITCODE
+                } catch { $exit=-1 }
+                finally { $ErrorActionPreference=$previous }
+                if ($exit -ne 0) {
+                  $diagnostic=''
+                  foreach ($file in @($stdout,$stderr)) {
+                    if (Test-Path -LiteralPath $file -PathType Leaf) {
+                      $diagnostic+=(Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue)
+                    }
+                  }
+                  $code='OTHER'
+                  if ($diagnostic -match '(?i)P(1001|1000|1012|3005|3009|3014|3018|3015)') {
+                    $code='PRISMA_P'+$Matches[1]
+                  } elseif ($diagnostic -match '(?i)EPERM|EACCES|access is denied') {
+                    $code='PERMISSION'
+                  } elseif ($diagnostic -match '(?i)ENOMEM|out of memory|heap out of memory') {
+                    $code='MEMORY'
+                  } elseif ($diagnostic -match '(?i)ETIMEDOUT|ECONNREFUSED|connection refused') {
+                    $code='CONNECTIVITY'
+                  } elseif ($diagnostic -match '(?i)not recognized|not found|cannot find module') {
+                    $code='TOOL_MISSING'
+                  }
+                  Write-Output ('ACS_DOCLING_REAL_STACK_'+$phase+'_ERROR_CATEGORY='+$code)
+                  throw 'WORKSPACE_COMMAND_REJECTED'
+                }
+                Write-Output ('ACS_DOCLING_REAL_STACK_'+$phase+'=PASS')
+              }
+              $stage='DB_GENERATE'
+              Invoke-IsolatedWorkspace 'DB_GENERATE' @('db:generate')
+              $stage='DB_MIGRATE_DEPLOY'
+              Invoke-IsolatedWorkspace 'DB_MIGRATE_DEPLOY' @('--filter','@ai-cognitive/db',
+                'prisma','migrate','deploy')
               $stage='REAL_MODEL_QUEUE_STORAGE'
               $out=Join-Path $scratch 'proof.out'
               $err=Join-Path $scratch 'proof.err'
@@ -369,6 +407,7 @@ jobs:
                 Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Stop
               } catch {
                 $cleanupFailed=$true
+                Write-Output 'ACS_DOCLING_REAL_STACK_SCRATCH_CLEANUP=FAILED'
               }
             }
             # This job owns only the unique runner-temporary archive root.
@@ -376,7 +415,10 @@ jobs:
                 (Test-Path -LiteralPath $env:ACS_DOCLING_SOURCE_ROOT -PathType Container)) {
               try {
                 Remove-Item -LiteralPath $env:ACS_DOCLING_SOURCE_ROOT -Recurse -Force -ErrorAction Stop
-              } catch { $cleanupFailed=$true }
+              } catch {
+                $cleanupFailed=$true
+                Write-Output 'ACS_DOCLING_REAL_STACK_SOURCE_CLEANUP=FAILED'
+              }
             }
           }
           if ($null -ne $failedStage) {
