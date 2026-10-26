@@ -4,6 +4,7 @@
  */
 import { openSync, closeSync, readFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 
 const [stdoutPath, stderrPath] = process.argv.slice(2);
 if (process.platform !== "win32" ||
@@ -56,11 +57,14 @@ try {
   console.log("ACS_DOCLING_REAL_STACK_PROOF_OUTPUT=REJECTED");
   process.exit(2);
 }
-const child = spawn("cmd.exe", [
-  "/d", "/s", "/c",
-  "pnpm --filter @ai-cognitive/worker exec tsx tests/docling-real-stack.proof.ts",
+// Launch one Node child directly. The old cmd -> pnpm -> tsx process chain
+// could outlive a successfully-resolved proof and retain a source-tree handle.
+// The package-local tsx import handles TypeScript/ESM without an intermediary
+// shell or pnpm process. The child tree remains bounded by the watchdog.
+const child = spawn(process.execPath, [
+  "--import", "tsx", "tests/docling-real-stack.proof.ts",
 ], {
-  cwd: process.cwd(),
+  cwd: resolve(process.cwd(), "apps", "worker"),
   windowsHide: true,
   stdio: ["ignore", out, err],
   env: process.env,
