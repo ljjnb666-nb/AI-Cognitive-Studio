@@ -81,8 +81,12 @@ async function main():Promise<void>{
   const env={REDIS_URL:redisUrl} as Environment;
   // Created only after both local endpoint and unique DB-name guards.
   const queue=createDoclingLayoutQueue(env,prefix);
+  // QueueEvents duplicates blocking Redis connections. Its .client can refer
+  // to the duplicate rather than the original caller-supplied client; keep
+  // ownership of BOTH for the isolated proof's bounded teardown.
+  const queueEventsSourceRedis=createRedisConnection(redisUrl);
   const events=new QueueEvents(DOCLING_LAYOUT_QUEUE,{
-    connection:createRedisConnection(redisUrl),prefix,
+    connection:queueEventsSourceRedis,prefix,
   });
   const worker=createDoclingLayoutWorker(env,executor,{prefix,storage});
   const sourceKey="synthetic/e2e/"+suffix+"/source.pdf";
@@ -93,7 +97,9 @@ async function main():Promise<void>{
   // BullMQ receives externally-created ioredis clients from our queue/worker
   // factories. Closing BullMQ objects alone does not close those clients.
   // Capture ownership in this isolated proof before cleanup.
-  const ownedRedisClients:Array<{disconnect:()=>void}> = [];
+  const ownedRedisClients:Array<{disconnect:()=>void}> = [
+    queueEventsSourceRedis,
+  ];
   let cleanupRejected=false;
   async function cleanupStep(label:string,operation:()=>Promise<unknown>):Promise<void>{
     try{
@@ -268,7 +274,10 @@ async function main():Promise<void>{
     // only this proof's three privately-created Redis clients. Never flush
     // Redis or disconnect shared/production connections.
     markStage("CLEANUP_REDIS_CLIENTS");
-    for(const client of ownedRedisClients){
+    // A BullMQ version may expose the original client or its duplicate via
+    // .client; dedupe by object identity to avoid closing the same reference
+    // twice. Only clients made for this synthetic prefix are owned here.
+    for(const client of new Set(ownedRedisClients)){
       try{client.disconnect();}
       catch{cleanupRejected=true;console.log("ACS_DOCLING_REAL_STACK_TEARDOWN_REDIS=REJECTED");}
     }
