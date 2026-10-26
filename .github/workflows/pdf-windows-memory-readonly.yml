@@ -1,0 +1,33 @@
+name: PDF Windows Memory Read Only
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+concurrency:
+  group: acs-pdf-windows-memory-readonly-owner
+  cancel-in-progress: true
+jobs:
+  memory-snapshot:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-docling-real-stack-windows-20261025' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 3
+    steps:
+      - name: Read available and total Windows RAM without Docker or checkout
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ($null -eq $os) { throw 'MEMORY_CIM_UNAVAILABLE' }
+          $freeKB=[double]$os.FreePhysicalMemory
+          $totalKB=[double]$os.TotalVisibleMemorySize
+          if ($freeKB -lt 0 -or $totalKB -le 0 -or $freeKB -gt $totalKB) {
+            throw 'MEMORY_COUNTER_INVALID'
+          }
+          $fmt=[Globalization.CultureInfo]::InvariantCulture
+          Write-Output ('ACS_WINDOWS_MEMORY_TIME_UTC=' + [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ',$fmt))
+          Write-Output ('ACS_WINDOWS_MEMORY_TOTAL_GIB=' + [Math]::Round($totalKB/1048576,2).ToString($fmt))
+          Write-Output ('ACS_WINDOWS_MEMORY_FREE_GIB=' + [Math]::Round($freeKB/1048576,2).ToString($fmt))
+          Write-Output ('ACS_WINDOWS_MEMORY_FOUR_GIB_GATE=' + $(if ($freeKB -ge 4194304) {'PASS'} else {'BLOCKED'}))
+          Write-Output ('ACS_WINDOWS_MEMORY_EIGHT_GIB_AUTOSTART_GATE=' + $(if ($freeKB -ge 8388608) {'PASS'} else {'BLOCKED'}))
+          Write-Output 'ACS_WINDOWS_MEMORY_READ_ONLY=PASS'
