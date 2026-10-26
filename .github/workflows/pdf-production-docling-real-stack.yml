@@ -172,6 +172,17 @@ jobs:
               }
             }
             if (-not (Test-LinuxEngine)) {
+              # This dedicated runner has been measured at 6.41 GiB free
+              # before Docker Desktop and 2.63 GiB afterwards (3.78 GiB
+              # transient/steady delta). Leave at least 4 GiB AFTER startup;
+              # 8 GiB pre-start is a conservative safety budget for this host.
+              # A running Linux engine is governed by the actual post-start
+              # 4-GiB check instead, so no needless extra headroom is required.
+              $stage='AUTO_DOCKER_START_MEMORY_BUDGET'
+              if ($preflightKB -lt 8388608) {
+                Write-Output 'ACS_DOCLING_REAL_STACK_AUTOSTART=BLOCKED_HEADROOM'
+                throw 'AUTO_DOCKER_START_MEMORY_BUDGET'
+              }
               $stage='AUTO_DOCKER_START'
               # Supported Docker Desktop CLI; no install, config change,
               # credential prompt, download, or privilege escalation.
