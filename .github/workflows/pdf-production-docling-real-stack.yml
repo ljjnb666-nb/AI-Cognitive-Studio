@@ -33,6 +33,44 @@ jobs:
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 35
     steps:
+      - name: Select live GitHub route before checkout
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          $ErrorActionPreference='Stop'
+          if ($env:RUNNER_OS -ne 'Windows') { throw 'WINDOWS_RUNNER_REQUIRED' }
+          if (-not (Get-Command 'curl.exe' -ErrorAction SilentlyContinue)) {
+            throw 'NETWORK_PROBE_CURL_MISSING'
+          }
+          function Check-GitHubConnection([string[]]$CurlArgs) {
+            # Probe only the GitHub HTTPS front door. Never use PR data,
+            # credentials, private files or curl diagnostic output.
+            try {
+              & curl.exe @CurlArgs --connect-timeout 5 --max-time 10 --silent --head --output NUL 'https://github.com/' 2>$null
+              return ($LASTEXITCODE -eq 0)
+            } catch { return $false }
+          }
+          $direct=Check-GitHubConnection @('--noproxy','*')
+          $proxyReady=$false
+          if (-not $direct) {
+            $proxyReady=Check-GitHubConnection @('--proxy','socks5h://127.0.0.1:10808')
+          }
+          if (-not $direct -and -not $proxyReady) {
+            Write-Output 'ACS_DOCLING_REAL_STACK_GITHUB_ROUTE=UNAVAILABLE'
+            throw 'GITHUB_CHECKOUT_ROUTE_UNAVAILABLE'
+          }
+          # The git config environment overrides any stale user global proxy.
+          # GITHUB_ENV is only updated for later workflow steps; never expose
+          # the checked-out repository contents or an authentication token.
+          @('GIT_CONFIG_COUNT=1','GIT_CONFIG_KEY_0=http.proxy') |
+            ForEach-Object { Add-Content -LiteralPath $env:GITHUB_ENV -Value $_ }
+          if ($direct) {
+            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'GIT_CONFIG_VALUE_0='
+            Write-Output 'ACS_DOCLING_REAL_STACK_GITHUB_ROUTE=DIRECT'
+          } else {
+            Add-Content -LiteralPath $env:GITHUB_ENV -Value 'GIT_CONFIG_VALUE_0=socks5h://127.0.0.1:10808'
+            Write-Output 'ACS_DOCLING_REAL_STACK_GITHUB_ROUTE=LOCAL_PROXY'
+          }
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -40,10 +78,6 @@ jobs:
           persist-credentials: false
           clean: false
           path: acs-docling-real
-        env:
-          GIT_CONFIG_COUNT: '1'
-          GIT_CONFIG_KEY_0: http.proxy
-          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
       - uses: actions/setup-node@v4
         with:
           node-version: 24
