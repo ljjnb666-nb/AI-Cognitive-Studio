@@ -81,6 +81,13 @@ function emitLastStage() {
       if(matches.length) console.log("ACS_DOCLING_REAL_STACK_PROOF_ACTIVE_RESOURCE_"+
         name+"="+matches.at(-1)[1]);
     }
+    for (const name of ["REDIS_BULLMQ","S3_SDK","POSTGRES","DOC_MODEL",
+      "TSX_LOADER","NODE_CORE","THIRD_PARTY","UNKNOWN","UNTRACED"]) {
+      if (data.includes("ACS_DOCLING_REAL_STACK_SOCKET_OWNER=" + name)) {
+        console.log("ACS_DOCLING_REAL_STACK_PROOF_SOCKET_OWNER=" + name);
+        break;
+      }
+    }
     for (const name of ["WORKER","EVENTS","QUEUE_OBLITERATE","QUEUE_CLOSE","EXECUTOR","STORAGE","DB_DISCONNECT","REDIS"]) {
       if (data.includes("ACS_DOCLING_REAL_STACK_TEARDOWN_" + name + "=REJECTED")) {
         console.log("ACS_DOCLING_REAL_STACK_PROOF_TEARDOWN_" + name + "=REJECTED");
@@ -104,6 +111,9 @@ try {
 // The package-local tsx import handles TypeScript/ESM without an intermediary
 // shell or pnpm process. The child tree remains bounded by the watchdog.
 const child = spawn(process.execPath, [
+  // Before tsx loads application modules, classify each newly-created
+  // native TCP resource without exposing destinations or stack traces.
+  "--import", new URL("./socket-owner-probe.mjs", import.meta.url).href,
   "--import", "tsx", "tests/docling-real-stack.proof.ts",
 ], {
   cwd: resolve(process.cwd(), "apps", "worker"),

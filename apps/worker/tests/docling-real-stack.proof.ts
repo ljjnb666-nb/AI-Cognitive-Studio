@@ -335,6 +335,15 @@ main().then(()=>{
     const handleKind=candidate?._handle?.constructor?.name;
     console.log("ACS_DOCLING_REAL_STACK_SOLE_HANDLE_KIND="+(
       handleKind==="Pipe"?"PIPE":handleKind==="TCP"?"TCP":"OTHER"));
+    // This isolated preload records only categorical provenance on native
+    // TCP resources; never print the stack, paths, credentials or endpoints.
+    const origin=(globalThis as typeof globalThis & {
+      __acsSocketOwner?:(socket:unknown)=>string;
+    }).__acsSocketOwner?.(candidate);
+    console.log("ACS_DOCLING_REAL_STACK_SOCKET_OWNER="+(
+      ["REDIS_BULLMQ","S3_SDK","POSTGRES","DOC_MODEL","TSX_LOADER",
+       "NODE_CORE","THIRD_PARTY","UNKNOWN","UNTRACED"].includes(origin??"")
+       ?origin:"UNTRACED"));
     const onlyIsolatedHandle=process.env.ACS_DOCLING_REAL_STACK_E2E==="1" &&
       handles.length===1&&requests.length===0&&
       candidate!==process.stdout&&candidate!==process.stderr&&candidate!==process.stdin&&
