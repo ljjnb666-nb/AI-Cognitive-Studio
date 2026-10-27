@@ -53,7 +53,7 @@ try {
   await document.destroy();
 } catch {
   // Only a static stage marker crosses the boundary. No source contents.
-  process.stdout.write(JSON.stringify({schemaVersion:1,status:"REJECTED",stage})+"\\n");
+  process.stdout.write(JSON.stringify({schemaVersion:1,status:"REJECTED",stage})+"\n");
   process.exitCode = 2;
 } finally {
   if (task) {
