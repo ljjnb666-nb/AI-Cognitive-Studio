@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
-import { DEFAULT_PARSER_LIMITS, extractNativePdf, assertRoutingPlanReplay, inspectPdfMixedPageVisualStructure, parseRoutingPlan, type ParserLimits } from "@ai-cognitive/ingestion";
+import { DEFAULT_PARSER_LIMITS, extractNativePdf, assertRoutingPlanReplay, inspectPdfMixedPageVisualStructure, parseRoutingPlan } from "@ai-cognitive/ingestion";
+type ParserLimits = Parameters<typeof extractNativePdf>[1];
 import { createGatewayPdfVisualExecutor, WorkspaceMembershipExecutionAuthorizer, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
 import type { Environment } from "@ai-cognitive/shared/server";
