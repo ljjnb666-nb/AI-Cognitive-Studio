@@ -1,0 +1,57 @@
+name: PDF Visual v1 real pipeline proof
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-image-to-graph:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-vision-structure-v1-20261027' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ai-cognitive-studio-dev
+      S3_ACCESS_KEY: local-development-only
+      S3_SECRET_KEY: local-development-only
+      S3_FORCE_PATH_STYLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Assert exact HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install pinned dependencies without media apt
+        run: pnpm install --frozen-lockfile
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Actual PDF.js image path and mock GLM image transport
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-mixed-content-shadow.test.ts tests/pdf-mixed-page-preview.test.ts tests/pdf-visual-structure.test.ts --reporter=verbose
+      - name: Typecheck ingestion
+        run: pnpm --filter @ai-cognitive/ingestion typecheck
+      - name: Report precise scope
+        run: |
+          echo "PDF_V1_SYNTHETIC_SOURCE_TO_GRAPH=PASS"
+          echo "PDF_V1_LIVE_PAID_MODEL=NOT_CALLED"
+          echo "PDF_V1_PRIVATE_BOOK_SOURCE=NOT_USED"
+          echo "PDF_V1_GOLD=0_OF_5"
+          echo "PDF_V1_PRODUCTION=OFF"
