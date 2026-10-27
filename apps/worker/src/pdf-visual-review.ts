@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
-import { DEFAULT_PARSER_LIMITS, inspectPdfMixedPageVisualStructure, parseRoutingPlan, type ParserLimits } from "@ai-cognitive/ingestion";
+import { DEFAULT_PARSER_LIMITS, extractNativePdf, assertRoutingPlanReplay, inspectPdfMixedPageVisualStructure, parseRoutingPlan, type ParserLimits } from "@ai-cognitive/ingestion";
 import { createGatewayPdfVisualExecutor, WorkspaceMembershipExecutionAuthorizer, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
 import type { Environment } from "@ai-cognitive/shared/server";
@@ -87,6 +87,10 @@ export async function executeOnDemandPdfVisualReview(
   for(const part of parts){bytes.set(part,offset);offset+=part.length;}
   if(sha256(bytes)!==run.sourceDocument.sha256)
     throw new Error("PDF_VISUAL_WORKER_SOURCE_SHA_MISMATCH");
+  // A stored route must be an exact replay for THESE private PDF bytes.
+  // Do this BEFORE any images can reach a paid remote provider.
+  const native=await extractNativePdf(bytes,deps.parserLimits??DEFAULT_PARSER_LIMITS);
+  assertRoutingPlanReplay(plan,native.routingPlan);
   const executor=createGatewayPdfVisualExecutor({
     gateway:deps.gateway,
     workspaceId:task.workspaceId,
