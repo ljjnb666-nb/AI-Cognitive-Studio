@@ -5,7 +5,7 @@ describe("on-demand visual Worker resource lifecycle",()=>{
   it("drains an admitted operation before releasing storage / gateway",async()=>{
     let resolveTask!: (value:string)=>void;
     const taskGate=new Promise<string>(resolve=>{resolveTask=resolve;});
-    const run=vi.fn(async(_task:string)=>taskGate);
+    const run=vi.fn(async(task:string)=>{expect(task).toBe("first");return taskGate;});
     const release=vi.fn(async()=>undefined);
     const runtime=createManagedPdfVisualReviewRuntime(run,release);
 
