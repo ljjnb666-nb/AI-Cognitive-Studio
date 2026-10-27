@@ -117,9 +117,48 @@ export async function executeOnDemandPdfVisualReview(
   };
 }
 
+/**
+ * Single-flight, fail-closed lifecycle for explicit visual review runs.
+ * A close fences admission immediately, then drains all already admitted
+ * attempts before releasing the shared Gateway and private S3 clients.
+ * Kept injectable so lifecycle concurrency can be tested without paid APIs.
+ */
+export function createManagedPdfVisualReviewRuntime<TTask, TResult>(
+  run:(task:TTask)=>Promise<TResult>,
+  release:()=>Promise<void>|void,
+){
+  let accepting=true;
+  let closePromise:Promise<void>|undefined;
+  const pending=new Set<Promise<TResult>>();
+  return {
+    execute(task:TTask):Promise<TResult>{
+      if(!accepting)return Promise.reject(new Error("PDF_VISUAL_WORKER_CLOSING"));
+      if(pending.size!==0)return Promise.reject(new Error("PDF_VISUAL_WORKER_BUSY"));
+      // Defer the runner while synchronously registering the accepted task.
+      const operation=Promise.resolve().then(()=>run(task));
+      pending.add(operation);
+      void operation.then(
+        ()=>{pending.delete(operation);},
+        ()=>{pending.delete(operation);},
+      );
+      return operation;
+    },
+    close():Promise<void>{
+      if(closePromise)return closePromise;
+      accepting=false;
+      closePromise=(async()=>{
+        await Promise.allSettled([...pending]);
+        await release();
+      })();
+      return closePromise;
+    },
+  };
+}
+
 /** Resource-complete composition, deliberately not wired to startWorkerRuntime. */
 export function createOnDemandPdfVisualWorkerRuntime(environment:Environment,source:NodeJS.ProcessEnv){
-  const gatewayRuntime=createBookProductionGatewayRuntime(source);
+  // Create local SDK clients first; a gateway/keyring construction error must
+  // not leave an already-created Redis connection or S3 HTTP agent behind.
   const storage=new S3CompatibleStorageProvider({
     endpoint:environment.S3_ENDPOINT,
     region:environment.S3_REGION,
@@ -128,6 +167,13 @@ export function createOnDemandPdfVisualWorkerRuntime(environment:Environment,sou
     secretKey:environment.S3_SECRET_KEY,
     forcePathStyle:environment.S3_FORCE_PATH_STYLE,
   });
+  let gatewayRuntime:ReturnType<typeof createBookProductionGatewayRuntime>;
+  try{
+    gatewayRuntime=createBookProductionGatewayRuntime(source);
+  }catch(error){
+    storage.close();
+    throw error;
+  }
   const authorizer=new WorkspaceMembershipExecutionAuthorizer();
   const deps:PdfVisualReviewWorkerDeps={
     authorize:(userId,workspaceId)=>authorizer.authorizeExecution({userId},workspaceId),
@@ -140,14 +186,12 @@ export function createOnDemandPdfVisualWorkerRuntime(environment:Environment,sou
     },
     storage,gateway:gatewayRuntime.gateway,
   };
-  let closed=false;
-  return {
-    execute:(task:PdfVisualReviewWorkerTask)=>executeOnDemandPdfVisualReview(task,deps),
-    async close(){
-      if(closed)return;
-      closed=true;
-      storage.close();
-      await gatewayRuntime.close();
+  return createManagedPdfVisualReviewRuntime(
+    (task:PdfVisualReviewWorkerTask)=>executeOnDemandPdfVisualReview(task,deps),
+    async()=>{
+      // Always attempt gateway/Redis cleanup even when S3 disposal fails.
+      try{storage.close();}
+      finally{await gatewayRuntime.close();}
     },
-  };
+  );
 }
