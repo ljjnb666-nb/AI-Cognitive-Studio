@@ -3,6 +3,7 @@
  * Reads local one-shot PDF bytes, never writes source text or contacts services.
  */
 import { readFile, writeFile } from "node:fs/promises";
+import process from "node:process";
 import { createHash } from "node:crypto";
 import { createCanvas } from "@napi-rs/canvas";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
