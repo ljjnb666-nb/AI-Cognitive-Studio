@@ -48,6 +48,8 @@ export function doclingLayoutJobId(data: DoclingLayoutQueueData, spentAttempts =
     (spentAttempts?"-retry-"+spentAttempts:"");
 }
 
+// Registry releases private S3 (when created) AND the caller-owned ioredis
+// connection after the worker has drained. Never destroy shared storage.
 const ownedDoclingStorage=new DoclingOwnedStorageRegistry();
 export function closeDoclingLayoutWorkerOwnedStorage(worker:Worker<DoclingLayoutQueueData>):boolean {
   return ownedDoclingStorage.close(worker);
@@ -191,6 +193,9 @@ export function createDoclingLayoutWorker(
 ):Worker<DoclingLayoutQueueData> {
   const privateStorage=options?.storage ? undefined : storageFor(environment);
   const storage=options?.storage??privateStorage!;
+  // Keep ownership of the original ioredis client supplied to BullMQ.
+  // Worker.close() may only close a duplicated blocking connection.
+  const privateRedis=createRedisConnection(environment.REDIS_URL);
   let worker:Worker<DoclingLayoutQueueData>;
   try {
   worker=new Worker<DoclingLayoutQueueData>(DOCLING_LAYOUT_QUEUE,async(job)=>{
@@ -211,7 +216,7 @@ export function createDoclingLayoutWorker(
       throw new Error("DOCLING_LAYOUT_BACKGROUND_JOB_REJECTED");
     }
   },{
-    connection:createRedisConnection(environment.REDIS_URL),
+    connection:privateRedis,
     concurrency:1,
     // Required for BullMQ's manual rateLimit; this is a small additional
     // Redis throttle, NOT the cross-host PostgreSQL resource authority.
@@ -219,12 +224,19 @@ export function createDoclingLayoutWorker(
     ...(options?.prefix?{prefix:options.prefix}:{}),
   });
   } catch(error) {
-    // Failure before worker construction finishes must release private
-    // S3 HTTP agents, without touching injected shared storage.
-    privateStorage?.close();
+    // No leaked caller-owned Redis, even if S3 dispose itself throws.
+    try { privateStorage?.close(); }
+    finally { privateRedis.disconnect(); }
     throw error;
   }
-  if(privateStorage) ownedDoclingStorage.attach(worker,privateStorage);
+  ownedDoclingStorage.attach(worker,{
+    close:()=>{
+      // Call only after worker.close() drains. Shared injected storage stays
+      // with its own caller; original private ioredis is always ours.
+      try { privateStorage?.close(); }
+      finally { privateRedis.disconnect(); }
+    },
+  });
   return worker;
 }
 
