@@ -1,0 +1,47 @@
+name: PDF vision gateway admission proof
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-vision-gateway:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-vision-gateway-admission-v1-20261027' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify exact checked out SHA
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+      - name: Gateway admission, image accounting, simulated GLM transport
+        run: pnpm --filter @ai-cognitive/provider-gateway exec vitest run tests/pdf-vision-gateway.test.ts tests/phase9-model-manifest.test.ts --reporter=verbose
+      - name: Gateway TypeScript type check
+        run: pnpm --filter @ai-cognitive/provider-gateway typecheck
+      - name: Gateway ESLint
+        run: pnpm --filter @ai-cognitive/provider-gateway lint
+      - name: Declaration of proof scope
+        run: |
+          echo "PDF_VISION_GATEWAY_AUTHORIZATION=TESTED"
+          echo "PDF_VISION_GATEWAY_LIVE_PROVIDER=NOT_CALLED"
+          echo "PDF_VISION_GATEWAY_PRODUCTION=OFF"
+          echo "PDF_VISION_GATEWAY_DURABLE_DATABASE_TEST=NOT_RUN"

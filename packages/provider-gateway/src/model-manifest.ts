@@ -16,6 +16,7 @@ export const routeSlotCapabilities: Readonly<Record<RouteSlot, CapabilityFamily>
   SHORT_VIDEO_TTS: "SPEECH",
   THINKING_SESSION: "TEXT_GENERATION",
   TEACH_BACK_ASSESSMENT: "TEXT_GENERATION",
+  PDF_VISUAL_STRUCTURE: "TEXT_GENERATION",
 };
 
 export function parseProviderModelManifest(source: string | undefined): ProviderModelManifest {
@@ -49,6 +50,7 @@ export function validateRouteManifestSelection(manifest: ProviderModelManifest, 
   // Custom OpenAI-compatible endpoints accept a user-provided model id, while retaining the catalog's declared capability limits.
   const model: ModelCapability | undefined = catalogModel ?? (provider.providerKey === "openai-compatible" && input.modelId.trim() && provider.models[0] ? { ...provider.models[0], modelId: input.modelId } as ModelCapability : undefined);
   if (!model || !model.families.includes(family)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Model is not compatible with route capability");
+  if (input.routeSlot === "PDF_VISUAL_STRUCTURE" && (provider.providerKey !== "zhipu" || model.visionInput !== true || model.structuredOutput !== "JSON_MODE")) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Explicit approved PDF vision model required");
   if (input.routeSlot === "TEACH_BACK_ASSESSMENT" && model.structuredOutput !== "STRICT_JSON_SCHEMA") throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Teach Back requires strict JSON schema support");
   if (family === "TEXT_GENERATION" && input.routeSlot.startsWith("BOOK_") && model.structuredOutput !== "STRICT_JSON_SCHEMA" && model.structuredOutput !== "JSON_MODE") throw new ProviderGatewayError("CAPABILITY_MISMATCH", "This route requires JSON structured output support");
   if (family === "SPEECH") {
