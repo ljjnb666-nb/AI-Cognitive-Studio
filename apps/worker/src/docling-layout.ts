@@ -12,6 +12,7 @@ import {
 } from "@ai-cognitive/ingestion";
 import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
+import { DoclingOwnedStorageRegistry } from "./docling-owned-storage.js";
 
 export const DOCLING_LAYOUT_QUEUE = "source.docling-layout-candidate.v1";
 export const DOCLING_LAYOUT_JOB = "docling-layout-candidate";
@@ -47,7 +48,11 @@ export function doclingLayoutJobId(data: DoclingLayoutQueueData, spentAttempts =
     (spentAttempts?"-retry-"+spentAttempts:"");
 }
 
-function storageFor(environment: Environment): StorageProvider {
+const ownedDoclingStorage=new DoclingOwnedStorageRegistry();
+export function closeDoclingLayoutWorkerOwnedStorage(worker:Worker<DoclingLayoutQueueData>):boolean {
+  return ownedDoclingStorage.close(worker);
+}
+function storageFor(environment: Environment): S3CompatibleStorageProvider {
   return new S3CompatibleStorageProvider({
     endpoint:environment.S3_ENDPOINT,region:environment.S3_REGION,
     bucket:environment.S3_BUCKET,accessKey:environment.S3_ACCESS_KEY,
@@ -184,8 +189,11 @@ export async function executeDoclingBackgroundJob(
 export function createDoclingLayoutWorker(
   environment:Environment,executor:DoclingLayoutHandle,options?:{prefix?:string;storage?:StorageProvider},
 ):Worker<DoclingLayoutQueueData> {
-  const storage=options?.storage??storageFor(environment);
-  const worker=new Worker<DoclingLayoutQueueData>(DOCLING_LAYOUT_QUEUE,async(job)=>{
+  const privateStorage=options?.storage ? undefined : storageFor(environment);
+  const storage=options?.storage??privateStorage!;
+  let worker:Worker<DoclingLayoutQueueData>;
+  try {
+  worker=new Worker<DoclingLayoutQueueData>(DOCLING_LAYOUT_QUEUE,async(job)=>{
     // Do not store provider/DB credentials or raw stderr in failed BullMQ
     // jobs. This candidate is never authoritative text publication.
     try{
@@ -210,6 +218,13 @@ export function createDoclingLayoutWorker(
     limiter:{max:1,duration:1_000},
     ...(options?.prefix?{prefix:options.prefix}:{}),
   });
+  } catch(error) {
+    // Failure before worker construction finishes must release private
+    // S3 HTTP agents, without touching injected shared storage.
+    privateStorage?.close();
+    throw error;
+  }
+  if(privateStorage) ownedDoclingStorage.attach(worker,privateStorage);
   return worker;
 }
 
