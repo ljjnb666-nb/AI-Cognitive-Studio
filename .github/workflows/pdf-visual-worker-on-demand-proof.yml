@@ -1,0 +1,56 @@
+name: PDF Visual Worker on-demand E2E proof
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-worker-source-to-graph:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-visual-worker-on-demand-v1-20261027' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ai-cognitive-studio-dev
+      S3_ACCESS_KEY: local-development-only
+      S3_SECRET_KEY: local-development-only
+      S3_FORCE_PATH_STYLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Ensure exact HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+      - name: Run actual PDF.js Worker source-to-gateway review tests
+        run: pnpm --filter @ai-cognitive/worker exec vitest run tests/pdf-visual-review.test.ts --reporter=verbose
+      - name: Worker TypeScript check
+        run: pnpm --filter @ai-cognitive/worker typecheck
+      - name: Worker ESLint
+        run: pnpm --filter @ai-cognitive/worker lint
+      - name: Explicit output scope
+        run: |
+          echo "PDF_VISUAL_WORKER_SYNTHETIC_PDF_SOURCE=PASS"
+          echo "PDF_VISUAL_WORKER_PROVIDER=MOCKED"
+          echo "PDF_VISUAL_WORKER_PRIVATE_BOOK=NOT_RUN"
+          echo "PDF_VISUAL_WORKER_PRODUCTION_QUEUE=OFF"
+          echo "PDF_VISUAL_WORKER_DURABLE_DB_TEST=NOT_RUN"
