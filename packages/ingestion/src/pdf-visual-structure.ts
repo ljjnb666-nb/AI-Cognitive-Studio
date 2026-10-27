@@ -53,7 +53,7 @@ const isRecord=(v:unknown):v is Record<string,unknown> =>
 const keys=(v:Record<string,unknown>,allowed:readonly string[]) =>
   Object.keys(v).length===allowed.length && allowed.every(k=>Object.hasOwn(v,k));
 const clean=(v:unknown,max:number):v is string =>
-  typeof v==="string" && v.length<=max && !/[\u0000-\u001f\u007f]/u.test(v);
+  typeof v==="string" && v.length<=max && !Array.from(v).some(c=>c.charCodeAt(0)<32 || c.charCodeAt(0)===127);
 const name=(v:unknown):v is string => clean(v,48) && /^[A-Za-z0-9_-]{1,48}$/.test(v);
 function parseGraph(value:unknown):VisualFigureCandidate[] {
   if (!isRecord(value) || !keys(value,["schemaVersion","figures"]) ||
