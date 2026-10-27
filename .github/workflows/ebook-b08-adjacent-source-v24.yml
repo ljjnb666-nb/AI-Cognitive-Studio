@@ -1,0 +1,73 @@
+name: B08 Private Neighbor Page Source Verification v24
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-source-review:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b08-adjacent-source-review-v24-20261027' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Isolated synthetic original-PDF adjacent-source integrity tests
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 pillow==11.3.0
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_b08_adjacent_source_review_v24.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_b08_adjacent_source_review_v24.py' -v
+          echo 'ACS_B08_V24_SYNTHETIC=PASS'
+          echo 'ACS_B08_V24_REAL_SOURCE=OWNER_ONLY_WINDOWS'
+          echo 'ACS_B08_V24_GOLD=UNVERIFIED'
+          echo 'ACS_B08_V24_MODEL_CALLS=0'
+      - name: Parse Windows PowerShell syntax
+        shell: pwsh
+        run: |
+          $tokens=$null
+          $errors=$null
+          $p=(Resolve-Path 'tools/pdf-parser-benchmark/scripts/ebook_b08_adjacent_source_windows_v24.ps1').Path
+          [System.Management.Automation.Language.Parser]::ParseFile($p,[ref]$tokens,[ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw 'ACS_B08_V24_WINDOWS_PARSE_REJECTED' }
+          Write-Output 'ACS_B08_V24_WINDOWS_SYNTAX=PASS'
+
+  owner-only-private-original-neighbors:
+    needs: synthetic-source-review
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/b08-adjacent-source-review-v24-20261027' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 35
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-b08-adjacent-v24
+          persist-credentials: false
+          clean: false
+      - name: Recheck frozen v17 and original B08 PDF, render neighbors privately
+        shell: powershell
+        timeout-minutes: 29
+        run: |
+          $ErrorActionPreference='Stop'
+          & .\acs-b08-adjacent-v24\tools\pdf-parser-benchmark\scripts\ebook_b08_adjacent_source_windows_v24.ps1
+          if ($LASTEXITCODE -ne 0) { exit 2 }
