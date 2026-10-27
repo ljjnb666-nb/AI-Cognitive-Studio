@@ -20,6 +20,9 @@ try {
   }
   const bytes = new Uint8Array(await readFile(source));
   if (bytes.length < 5 || bytes.length > 110_000_000) throw new Error("PDF_SIZE_INVALID");
+  // PDF.js may transfer/detach the source Uint8Array during document loading.
+  // Capture immutable provenance BEFORE handing the buffer to the renderer.
+  const sourceSha256 = sha(bytes);
   stage = "LOAD_PDF";
   task = getDocument({ data: bytes, disableWorker: true, isEvalSupported: false,
     useSystemFonts: false, stopAtErrors: true });
@@ -51,7 +54,7 @@ try {
   process.stdout.write(JSON.stringify({
     schemaVersion: 1, status: "PREVIEW_ONLY", physicalPageIndex: index,
     width, height, pngBytes: png.length, pngSha256: sha(png),
-    sourceSha256: sha(bytes),
+    sourceSha256,
   })+"\n");
 
 } catch {
