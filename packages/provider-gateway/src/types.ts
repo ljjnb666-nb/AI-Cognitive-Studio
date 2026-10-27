@@ -1,4 +1,4 @@
-export const routeSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"] as const;
+export const routeSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT", "PDF_VISUAL_STRUCTURE"] as const;
 export type RouteSlot = (typeof routeSlots)[number];
 export type CapabilityFamily = "TEXT_GENERATION" | "EMBEDDING" | "SPEECH";
 export type ProtocolFamily = "OPENAI_RESPONSES" | "OPENAI_COMPATIBLE" | "ANTHROPIC_COMPATIBLE" | "GEMINI_NATIVE" | "OPENAI_EMBEDDINGS" | "GEMINI_EMBEDDINGS" | "COHERE_EMBEDDINGS_V2" | "VOYAGE_EMBEDDINGS" | "CUSTOM_SPEECH" | "TEST";
@@ -15,6 +15,8 @@ export type ModelCapability = {
   maxOutputTokens?: number;
   structuredOutput?: StructuredOutputMode;
   streaming?: boolean;
+  /** Explicit support for bounded PNG input in the PDF visual route. */
+  visionInput?: boolean;
   embeddingDimensions?: number;
   configurableEmbeddingDimensions?: boolean;
   embeddingDimensionOptions?: readonly number[];
@@ -27,11 +29,12 @@ export type ModelCapability = {
 };
 
 export type ProviderDefinition = { providerKey: string; displayName: string; protocol: ProtocolFamily; capabilityProtocols?: Partial<Record<CapabilityFamily, ProtocolFamily>>; adapterVersion: string; models: readonly ModelCapability[] };
-export type CapabilityRequest = { family: CapabilityFamily; structuredOutput?: StructuredOutputMode; minimumInputTokens?: number; minimumOutputTokens?: number; outputFormat?: string };
+export type CapabilityRequest = { visionInput?: boolean; family: CapabilityFamily; structuredOutput?: StructuredOutputMode; minimumInputTokens?: number; minimumOutputTokens?: number; outputFormat?: string };
 export type UntrustedDataPolicy = { toolsEnabled: false; webBrowsingEnabled: false; externalActionsEnabled: false };
 export const sourceDataPolicy: UntrustedDataPolicy = { toolsEnabled: false, webBrowsingEnabled: false, externalActionsEnabled: false };
 export type JsonSchema = Readonly<Record<string, unknown>>;
-export type TextMessage = { role: "user" | "assistant"; content: string };
+export type PdfVisualImage = { mediaType: "image/png"; dataBase64: string; sha256: string; sourceSha256: string; physicalPageIndex: number };
+export type TextMessage = { role: "user" | "assistant"; content: string; image?: PdfVisualImage };
 export type TextGenerationInput = { system?: string; messages: readonly TextMessage[]; generation?: { maxOutputTokens?: number; temperature?: number; topP?: number }; structuredOutput?: { mode: Exclude<StructuredOutputMode, "UNSUPPORTED">; schemaName?: string; schema?: JsonSchema } };
 export type TextGenerationResponse = { type: "TEXT" | "STRUCTURED"; text?: string; structured?: unknown; finishReason?: "STOP" | "LENGTH" | "CONTENT_FILTER" | "OTHER"; providerModel?: string };
 export type EmbeddingPurpose = "DOCUMENT" | "QUERY" | "SEMANTIC_SIMILARITY" | "CLASSIFICATION" | "CLUSTERING";
@@ -40,8 +43,8 @@ export type EmbeddingResponse = { vectors: readonly number[][]; dimensions: numb
 export type SpeechInput = { text: string; language: string; voice: { providerVoiceId: string; voiceVersion: string; speakingRate: number; pitch: number; style?: string | null }; outputFormat: string; ssml?: boolean };
 export type SpeechResponse = { bytes: Uint8Array; mediaType: string; format: string; sampleRate: number; channels: number; durationMs?: number; providerModel?: string };
 export type GatewayRequest = { workspaceId: string; routeSlot: RouteSlot; correlationId: string; idempotencyKey: string; inputHash: string; capability: CapabilityRequest; text?: TextGenerationInput; embedding?: EmbeddingInput; speech?: SpeechInput; budget?: ResourceBudget; estimates?: ResourceEstimates; signal?: AbortSignal; promptVersion?: string; schemaVersion?: string; pipelineVersion?: string; untrustedDataPolicy?: UntrustedDataPolicy; pinnedRoute?: ResolvedRoute };
-export type ResourceBudget = { maxInputTokens?: number; maxOutputTokens?: number; maxEmbeddingInputTokens?: number; maxSpeechCharacters?: number; maxAttempts?: number };
-export type ResourceEstimates = { inputTokens?: number; outputTokens?: number; embeddingInputTokens?: number; speechCharacters?: number };
+export type ResourceBudget = { maxInputTokens?: number; maxOutputTokens?: number; maxEmbeddingInputTokens?: number; maxSpeechCharacters?: number; maxImageBytes?: number; maxAttempts?: number };
+export type ResourceEstimates = { inputTokens?: number; outputTokens?: number; embeddingInputTokens?: number; speechCharacters?: number; imageBytes?: number };
 export type ResolvedRoute = { source: "WORKSPACE" | "PLATFORM"; providerKey: string; protocol: ProtocolFamily; modelId: string; adapterVersion: string; connectionId?: string; credentialVersionId?: string; endpoint?: string; region?: string; capability: ModelCapability; configuration: Readonly<Record<string, unknown>> };
 export type ExecutionSnapshot = ResolvedRoute & { id: string; workspaceId: string; routeSlot: RouteSlot; configurationHash: string; correlationId: string; promptVersion?: string; schemaVersion?: string; pipelineVersion?: string; /** Legacy test/manual snapshots default fail-safe at persistence. */ outcomeRecoveryCapability?: ProviderOutcomeRecoveryCapability; createdAt: Date };
 export type PlatformDefaultResolver = { resolve(input: Pick<GatewayRequest, "workspaceId" | "routeSlot" | "capability">): Promise<ResolvedRoute | undefined> };
