@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  builtInProviderCatalog, canonicalGatewayRequestFingerprint, canonicalTextInputHash,
+  builtInProviderCatalog, canonicalTextInputHash,
   createGatewayPdfVisualExecutor, createProviderAdapterResolver, createTestProviderGateway,
-  DeterministicProviderHttpTransport, ProviderRegistry, sourceDataPolicy, stableHash,
+  DeterministicProviderHttpTransport, ProviderRegistry,
   validatePdfVisionImage, validateRouteManifestSelection,
 } from "../src/index.js";
 import type { GatewayRequest, ResolvedRoute } from "../src/index.js";
