@@ -43,14 +43,15 @@ try {
   if (png.length < 40 || png.length > 8_000_000) throw new Error("PNG_BUDGET_EXCEEDED");
   stage = "WRITE_PNG";
   await writeFile(output, png, { flag: "wx", mode: 0o600 });
+  stage = "CLEANUP";
+  page.cleanup();
+  await document.destroy();
   process.stdout.write(JSON.stringify({
     schemaVersion: 1, status: "PREVIEW_ONLY", physicalPageIndex: index,
     width, height, pngBytes: png.length, pngSha256: sha(png),
     sourceSha256: sha(bytes),
   })+"\n");
-  stage = "CLEANUP";
-  page.cleanup();
-  await document.destroy();
+
 } catch {
   // Only a static stage marker crosses the boundary. No source contents.
   process.stdout.write(JSON.stringify({schemaVersion:1,status:"REJECTED",stage})+"\n");
