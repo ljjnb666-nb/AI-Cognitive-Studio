@@ -125,7 +125,22 @@ export async function renderPdfMixedPageSourcePreviews(
       });
       if (result.code !== 0 || result.signal || result.timedOut || result.aborted ||
           result.outputOverflow || result.spawnErrorCode) {
-        throw new Error("PDF_MIXED_PREVIEW_CHILD_REJECTED");
+        // Child diagnostics are a fixed stage enum only, never raw parser error
+        // strings, stderr, source text or PDF-extracted content.
+        let stage = "UNKNOWN";
+        try {
+          const reported: unknown = JSON.parse(result.stdout.trim());
+          if (reported && typeof reported === "object" && !Array.isArray(reported)) {
+            const record = reported as Record<string, unknown>;
+            if (record.status === "REJECTED" &&
+                typeof record.stage === "string" &&
+                ["INPUT","LOAD_PDF","SELECT_PAGE","CREATE_CANVAS",
+                 "RENDER_PAGE","ENCODE_PNG","WRITE_PNG","CLEANUP"].includes(record.stage)) {
+              stage = record.stage;
+            }
+          }
+        } catch { /* do not expose source-derived errors */ }
+        throw new Error("PDF_MIXED_PREVIEW_CHILD_REJECTED:"+stage);
       }
       const bytes = await readFile(pngPath);
       const {width,height} = validatedReply(result.stdout,page.physicalPageIndex,
