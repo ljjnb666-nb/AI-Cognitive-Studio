@@ -1,0 +1,73 @@
+name: Threebook Source-Only High-DPI Visual Packet v17
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-threebook-render:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/threebook-source-hidpi-v17-20261027' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Synthetic SHA-bound immutable source-only packet
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m pip install --disable-pip-version-check --only-binary=:all: pymupdf==1.26.5 pillow==11.3.0 numpy==1.26.4 opencv-python-headless==4.10.0.84
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_threebook_source_hidpi_v17.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_threebook_source_hidpi_v17.py' -v
+          echo 'ACS_THREEBOOK_HIDPI_V17_SYNTHETIC=PASS'
+          echo 'ACS_THREEBOOK_HIDPI_V17_REAL_BOOKS=PRIVATE_WINDOWS_ONLY'
+          echo 'ACS_THREEBOOK_HIDPI_V17_GOLD=UNVERIFIED'
+          echo 'ACS_THREEBOOK_HIDPI_V17_MODEL_CALLS=0'
+      - name: Validate Windows PowerShell syntax before private execution
+        shell: pwsh
+        run: |
+          $tokens=$null
+          $errors=$null
+          $script=(Resolve-Path 'tools/pdf-parser-benchmark/scripts/ebook_threebook_source_hidpi_windows_v17.ps1').Path
+          [System.Management.Automation.Language.Parser]::ParseFile($script,[ref]$tokens,[ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw 'THREEBOOK_WINDOWS_SCRIPT_PARSE_FAILED' }
+          Write-Output 'ACS_THREEBOOK_HIDPI_V17_WINDOWS_SYNTAX=PASS'
+
+  owner-only-real-source-render:
+    needs: synthetic-threebook-render
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/threebook-source-hidpi-v17-20261027' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-threebook-v17
+          persist-credentials: false
+          clean: false
+      - name: Verify three SHA-pinned real pages and freeze private high-DPI grids
+        shell: powershell
+        timeout-minutes: 23
+        run: |
+          $ErrorActionPreference='Stop'
+          & .\acs-threebook-v17\tools\pdf-parser-benchmark\scripts\ebook_threebook_source_hidpi_windows_v17.ps1
+          if ($LASTEXITCODE -ne 0) { exit 2 }
