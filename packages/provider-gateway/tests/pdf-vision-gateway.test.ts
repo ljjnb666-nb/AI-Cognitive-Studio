@@ -20,7 +20,7 @@ function fixture(options:{authorized?:boolean;selected?:ResolvedRoute;reply?:str
   registry.register(def);
   const authorize=vi.fn(async()=>{if(options.authorized===false)throw Error("DENIED");});
   const beforeAttempt=vi.fn(async()=>({credential:"test-secret"}));
-  const transport=new DeterministicProviderHttpTransport(async request=>({
+  const transport=new DeterministicProviderHttpTransport(async ()=>({
     status:200,headers:{"x-request-id":"fixture"},
     body:JSON.stringify({model:"glm-4.6v",choices:[{message:{content:options.reply??JSON.stringify(graph)},finish_reason:"stop"}]})
   }));
