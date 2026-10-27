@@ -150,8 +150,18 @@ jobs:
             # Verify headroom BEFORE starting Docker Desktop, which may
             # allocate more memory. Fail closed rather than kill user apps.
             $stage='AUTO_DOCKER_MEMORY_PREFLIGHT'
-            $preflight=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-            $preflightKB=[double]$preflight.FreePhysicalMemory
+            # One bounded 4-GiB preflight only. Background Windows memory
+            # pressure can subside without interrupting user applications.
+            # Never lower the threshold or free memory by killing programs.
+            $preflightKB=0
+            for ($preSample=0; $preSample -lt 7; $preSample++) {
+              $preflight=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+              $preflightKB=if ($null -eq $preflight) { 0 } else {
+                [double]$preflight.FreePhysicalMemory
+              }
+              if ($preflightKB -ge 4194304) { break }
+              if ($preSample -lt 6) { Start-Sleep -Seconds 10 }
+            }
             Write-Output ('ACS_DOCLING_REAL_STACK_PRE_DOCKER_RAM_GIB=' +
               [Math]::Round($preflightKB / 1048576, 2).ToString([Globalization.CultureInfo]::InvariantCulture))
             if ($preflightKB -lt 4194304) {
