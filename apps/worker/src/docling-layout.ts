@@ -12,6 +12,7 @@ import {
 } from "@ai-cognitive/ingestion";
 import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
+import { DoclingOwnedStorageRegistry } from "./docling-owned-storage.js";
 
 export const DOCLING_LAYOUT_QUEUE = "source.docling-layout-candidate.v1";
 export const DOCLING_LAYOUT_JOB = "docling-layout-candidate";
@@ -47,7 +48,13 @@ export function doclingLayoutJobId(data: DoclingLayoutQueueData, spentAttempts =
     (spentAttempts?"-retry-"+spentAttempts:"");
 }
 
-function storageFor(environment: Environment): StorageProvider {
+// Registry releases private S3 (when created) AND the caller-owned ioredis
+// connection after the worker has drained. Never destroy shared storage.
+const ownedDoclingStorage=new DoclingOwnedStorageRegistry();
+export function closeDoclingLayoutWorkerOwnedStorage(worker:Worker<DoclingLayoutQueueData>):boolean {
+  return ownedDoclingStorage.close(worker);
+}
+function storageFor(environment: Environment): S3CompatibleStorageProvider {
   return new S3CompatibleStorageProvider({
     endpoint:environment.S3_ENDPOINT,region:environment.S3_REGION,
     bucket:environment.S3_BUCKET,accessKey:environment.S3_ACCESS_KEY,
@@ -184,8 +191,14 @@ export async function executeDoclingBackgroundJob(
 export function createDoclingLayoutWorker(
   environment:Environment,executor:DoclingLayoutHandle,options?:{prefix?:string;storage?:StorageProvider},
 ):Worker<DoclingLayoutQueueData> {
-  const storage=options?.storage??storageFor(environment);
-  const worker=new Worker<DoclingLayoutQueueData>(DOCLING_LAYOUT_QUEUE,async(job)=>{
+  const privateStorage=options?.storage ? undefined : storageFor(environment);
+  const storage=options?.storage??privateStorage!;
+  // Keep ownership of the original ioredis client supplied to BullMQ.
+  // Worker.close() may only close a duplicated blocking connection.
+  const privateRedis=createRedisConnection(environment.REDIS_URL);
+  let worker:Worker<DoclingLayoutQueueData>;
+  try {
+  worker=new Worker<DoclingLayoutQueueData>(DOCLING_LAYOUT_QUEUE,async(job)=>{
     // Do not store provider/DB credentials or raw stderr in failed BullMQ
     // jobs. This candidate is never authoritative text publication.
     try{
@@ -203,12 +216,26 @@ export function createDoclingLayoutWorker(
       throw new Error("DOCLING_LAYOUT_BACKGROUND_JOB_REJECTED");
     }
   },{
-    connection:createRedisConnection(environment.REDIS_URL),
+    connection:privateRedis,
     concurrency:1,
     // Required for BullMQ's manual rateLimit; this is a small additional
     // Redis throttle, NOT the cross-host PostgreSQL resource authority.
     limiter:{max:1,duration:1_000},
     ...(options?.prefix?{prefix:options.prefix}:{}),
+  });
+  } catch(error) {
+    // No leaked caller-owned Redis, even if S3 dispose itself throws.
+    try { privateStorage?.close(); }
+    finally { privateRedis.disconnect(); }
+    throw error;
+  }
+  ownedDoclingStorage.attach(worker,{
+    close:()=>{
+      // Call only after worker.close() drains. Shared injected storage stays
+      // with its own caller; original private ioredis is always ours.
+      try { privateStorage?.close(); }
+      finally { privateRedis.disconnect(); }
+    },
   });
   return worker;
 }

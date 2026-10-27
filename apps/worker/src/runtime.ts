@@ -8,7 +8,7 @@ import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPo
 import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudioGenerationWithQueue } from "./audio-generation.js";
 import { createShortVideoGenerationWorker, createShortVideoGenerationQueue, dispatchShortVideoGenerationWithQueue, type ShortVideoRuntimeAdapter } from "./short-video-generation.js";
 import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue, resolveSourceIngestionOcrExecutor, INGESTION_JOB } from "./source-ingestion.js";
-import { createDoclingLayoutQueue, createDoclingLayoutWorker, dispatchDoclingLayoutSweep, recoverDoclingLayoutTasks, resolveDoclingBackgroundExecutor, type DoclingSweepCursor } from "./docling-layout.js";
+import { createDoclingLayoutQueue, createDoclingLayoutWorker, closeDoclingLayoutWorkerOwnedStorage, dispatchDoclingLayoutSweep, recoverDoclingLayoutTasks, resolveDoclingBackgroundExecutor, type DoclingSweepCursor } from "./docling-layout.js";
 import { reconcileIngestionDeliveries, reconcileOcrServerInstances, type IngestionReconciliationQueuePort } from "@ai-cognitive/ingestion";
 import { createBookAnalysisBootstrapWorker, createBookAnalysisBootstrapQueue, dispatchBookAnalysisBootstrapWithQueue, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "./book-analysis-bootstrap.js";
 import { createHealthCheckWorker } from "./worker.js";
@@ -208,7 +208,16 @@ export async function startWorkerRuntime(environment: Environment, options: Work
 // last waits for the interrupted job to finish its bounded unwind. No new OCR
 // claim can start after the executor entered closing, and no owned server,
 // host lease or claim temp tree survives the runtime close.
-const ingestionWorkerClose = ingestionWorker.close(); await sourceIngestionOcrRuntime?.close(); await ingestionWorkerClose; const doclingWorkerClose=doclingLayoutWorker?.close(); await doclingLayoutExecutor?.close(); await doclingWorkerClose; await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+const ingestionWorkerClose = ingestionWorker.close(); await sourceIngestionOcrRuntime?.close(); await ingestionWorkerClose; const doclingWorkerClose=doclingLayoutWorker?.close();
+try { await doclingLayoutExecutor?.close(); }
+finally {
+  try { await doclingWorkerClose; }
+  finally {
+    // Wait for active jobs to drain before releasing only worker-owned S3.
+    if(doclingLayoutWorker) closeDoclingLayoutWorkerOwnedStorage(doclingLayoutWorker);
+  }
+}
+await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
     await sourceIngestionOcrRuntime?.close();
     await doclingLayoutExecutor?.close();

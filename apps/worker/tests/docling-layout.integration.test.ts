@@ -10,6 +10,7 @@ import {
   DOCLING_LAYOUT_QUEUE,
   createDoclingLayoutQueue,
   createDoclingLayoutWorker,
+  closeDoclingLayoutWorkerOwnedStorage,
   dispatchDoclingLayoutSweep,
   doclingLayoutJobId,
   executeDoclingBackgroundJob,
@@ -467,4 +468,37 @@ describe("Docling infrastructure full-stack candidate acceptance (synthetic mode
       })).parserName).toBe("pdfjs-isolated");
     }finally{await teardown(f,storage,s);}
   },45_000);
+});
+
+describe("Docling self-owned S3 lifecycle against real isolated Redis",()=>{
+  it("starts and drains an unused worker, releases its own S3 only once",async()=>{
+    const required=["REDIS_URL","S3_ENDPOINT","S3_REGION","S3_BUCKET","S3_ACCESS_KEY","S3_SECRET_KEY"] as const;
+    for(const name of required)expect(process.env[name],name).toBeTruthy();
+    const environment={
+      REDIS_URL:process.env.REDIS_URL!,
+      S3_ENDPOINT:process.env.S3_ENDPOINT!,
+      S3_REGION:process.env.S3_REGION!,
+      S3_BUCKET:process.env.S3_BUCKET!,
+      S3_ACCESS_KEY:process.env.S3_ACCESS_KEY!,
+      S3_SECRET_KEY:process.env.S3_SECRET_KEY!,
+      S3_FORCE_PATH_STYLE:process.env.S3_FORCE_PATH_STYLE!=="false",
+    } as Environment;
+    const executor:DoclingLayoutHandle={
+      parserName:"docling-standard-layout",
+      modelSha256:modelSha,
+      close:async()=>undefined,
+      inspect:async()=>{throw new Error("NO_JOB_MAY_RUN_IN_STORAGE_LIFECYCLE_PROOF");},
+    };
+    const prefix="acs-docling-owned-s3-"+randomUUID().replace(/-/g,"");
+    const worker=createDoclingLayoutWorker(environment,executor,{prefix});
+    let released=false;
+    try {
+      await worker.waitUntilReady();
+    } finally {
+      try {await worker.close();}
+      finally {released=closeDoclingLayoutWorkerOwnedStorage(worker);}
+    }
+    expect(released).toBe(true);
+    expect(closeDoclingLayoutWorkerOwnedStorage(worker)).toBe(false);
+  },20_000);
 });

@@ -6,6 +6,7 @@ import {
   resolveDoclingBackgroundExecutor,
 } from "../src/docling-layout.js";
 import { withDoclingClaimHeartbeat, type DoclingTaskClaim } from "../src/docling-task-ledger.js";
+import { DoclingOwnedStorageRegistry } from "../src/docling-owned-storage.js";
 
 describe("isolated Docling layout background admission",()=>{
   it("is off by default and does not require a Docling installation",async()=>{
@@ -145,4 +146,33 @@ describe("Docling lease heartbeat and safe stop",()=>{
     expect(controller.signal.aborted).toBe(true);
   });
 
+});
+
+describe("Docling worker-owned S3 lifecycle",()=>{
+  it("closes only owned resources exactly once, without touching shared storage",()=>{
+    const registry=new DoclingOwnedStorageRegistry();
+    const workerA={},workerB={},sharedWorker={};
+    let countA=0,countB=0,countShared=0;
+    registry.attach(workerA,{close:()=>{countA++;}});
+    registry.attach(workerB,{close:()=>{countB++;}});
+    const sharedStorage={close:()=>{countShared++;}};
+    expect(sharedStorage).toBeDefined();
+    expect(registry.close(sharedWorker)).toBe(false);
+    expect(registry.close(workerA)).toBe(true);
+    expect(registry.close(workerA)).toBe(false);
+    expect(countA).toBe(1);
+    expect(countB).toBe(0);
+    expect(countShared).toBe(0);
+    expect(registry.close(workerB)).toBe(true);
+    expect(countB).toBe(1);
+  });
+  it("rejects duplicate ownership, propagates dispose failure and never double closes",()=>{
+    const registry=new DoclingOwnedStorageRegistry(),worker={};
+    let count=0;
+    registry.attach(worker,{close:()=>{count++;throw new Error("SYNTHETIC_CLOSE_FAILED");}});
+    expect(()=>registry.attach(worker,{close:()=>{}})).toThrow("DOCLING_OWNED_STORAGE_ALREADY_ATTACHED");
+    expect(()=>registry.close(worker)).toThrow("SYNTHETIC_CLOSE_FAILED");
+    expect(registry.close(worker)).toBe(false);
+    expect(count).toBe(1);
+  });
 });
