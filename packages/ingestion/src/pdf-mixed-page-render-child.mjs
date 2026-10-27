@@ -44,8 +44,10 @@ try {
   stage = "WRITE_PNG";
   await writeFile(output, png, { flag: "wx", mode: 0o600 });
   stage = "CLEANUP";
-  page.cleanup();
-  await document.destroy();
+  // LoadingTask owns the PDF.js worker and transport lifecycle. Avoid
+  // separately destroying the page + document (double-close on Node.js).
+  await task.destroy();
+  task = undefined;
   process.stdout.write(JSON.stringify({
     schemaVersion: 1, status: "PREVIEW_ONLY", physicalPageIndex: index,
     width, height, pngBytes: png.length, pngSha256: sha(png),
