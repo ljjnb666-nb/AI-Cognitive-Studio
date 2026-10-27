@@ -33,3 +33,5 @@ export * from "./adapters/gemini-native.js";
 export * from "./adapters/factory.js";
 export * from "./adapters/embeddings.js";
 export * from "./adapters/openai-speech.js";
+export * from "./vision/png-vision.js";
+export * from "./vision/pdf-gateway-executor.js";
