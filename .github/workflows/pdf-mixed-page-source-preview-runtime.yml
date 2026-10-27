@@ -1,0 +1,57 @@
+name: Mixed PDF source-image runtime proof
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-real-pdfjs:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-mixed-page-source-preview-20261027' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ai-cognitive-studio-dev
+      S3_ACCESS_KEY: local-development-only
+      S3_SECRET_KEY: local-development-only
+      S3_FORCE_PATH_STYLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Assert exact checkout
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install pinned project dependencies without apt or Docker
+        run: pnpm install --frozen-lockfile
+      - name: Generate type clients
+        run: pnpm db:generate
+      - name: Run actual isolated PDF.js child, PNG raster and replay-safety regression
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-mixed-content-shadow.test.ts tests/pdf-mixed-page-preview.test.ts --reporter=verbose
+      - name: Typecheck ingest API
+        run: pnpm --filter @ai-cognitive/ingestion typecheck
+      - name: Explicit limitations
+        run: |
+          echo "ACS_PDF_MIXED_PREVIEW_REAL_SYNTHETIC=PASS"
+          echo "ACS_PDF_MIXED_PREVIEW_SOURCE_BOOKS=NOT_RUN"
+          echo "ACS_PDF_MIXED_PREVIEW_PRODUCTION=OFF"
+          echo "ACS_PDF_MIXED_PREVIEW_GRAPH_GOLD=UNVERIFIED"
