@@ -127,19 +127,23 @@ export async function renderPdfMixedPageSourcePreviews(
           result.outputOverflow || result.spawnErrorCode) {
         // Child diagnostics are a fixed stage enum only, never raw parser error
         // strings, stderr, source text or PDF-extracted content.
-        let stage = "UNKNOWN";
-        try {
-          const reported: unknown = JSON.parse(result.stdout.trim());
-          if (reported && typeof reported === "object" && !Array.isArray(reported)) {
-            const record = reported as Record<string, unknown>;
-            if (record.status === "REJECTED" &&
-                typeof record.stage === "string" &&
-                ["INPUT","LOAD_PDF","SELECT_PAGE","CREATE_CANVAS",
-                 "RENDER_PAGE","ENCODE_PNG","WRITE_PNG","CLEANUP"].includes(record.stage)) {
-              stage = record.stage;
+        let stage = result.stdout.trim() ? "PROTOCOL" : "NO_REPLY";
+        for (const line of result.stdout.trim().split(/\\r?\\n/).slice(0, 4)) {
+          try {
+            const reported: unknown = JSON.parse(line);
+            if (reported && typeof reported === "object" && !Array.isArray(reported)) {
+              const record = reported as Record<string, unknown>;
+              if (record.status === "REJECTED" &&
+                  typeof record.stage === "string" &&
+                  ["INPUT","LOAD_PDF","SELECT_PAGE","CREATE_CANVAS",
+                   "RENDER_PAGE","ENCODE_PNG","WRITE_PNG","CLEANUP"].includes(record.stage)) {
+                stage = record.stage;
+              } else if (record.status === "PREVIEW_ONLY" && stage !== "UNKNOWN") {
+                stage = "ACK_BEFORE_FAILED_EXIT";
+              }
             }
-          }
-        } catch { /* do not expose source-derived errors */ }
+          } catch { /* do not expose source-derived errors */ }
+        }
         throw new Error("PDF_MIXED_PREVIEW_CHILD_REJECTED:"+stage);
       }
       const bytes = await readFile(pngPath);
