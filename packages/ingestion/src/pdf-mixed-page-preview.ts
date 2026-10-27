@@ -128,7 +128,7 @@ export async function renderPdfMixedPageSourcePreviews(
         // Child diagnostics are a fixed stage enum only, never raw parser error
         // strings, stderr, source text or PDF-extracted content.
         let stage = result.stdout.trim() ? "PROTOCOL" : "NO_REPLY";
-        for (const line of result.stdout.trim().split(/\\r?\\n/).slice(0, 4)) {
+        for (const line of result.stdout.trim().split(/\r?\n/).slice(0, 4)) {
           try {
             const reported: unknown = JSON.parse(line);
             if (reported && typeof reported === "object" && !Array.isArray(reported)) {
