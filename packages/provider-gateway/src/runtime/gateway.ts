@@ -5,6 +5,7 @@ import { resolveRoute, type WorkspaceRouteResolver } from "../routing/resolver.j
 import { createExecutionSnapshot } from "../routing/snapshot.js";
 import { canonicalGatewayRequestFingerprint } from "../request-fingerprint.js";
 import { validateTextGenerationInput } from "../text/validation.js";
+import { validatePdfVisionTextMessages } from "../vision/png-vision.js";
 import { embeddingDimensions, validateEmbeddingInput, validateVectors } from "../embedding/validation.js";
 import { validateSpeechInput, validateSpeechResponse } from "../speech/validation.js";
 import { resolvePlatformCredential, type PlatformCredentialResolver } from "./platform-credentials.js";
@@ -26,7 +27,7 @@ export type GatewayExecutionDependencies = {
 export type GatewayExecutionResult = { status: "SUCCEEDED"; response?: unknown; usage?: unknown; remoteRequestId?: string; snapshot: ExecutionSnapshot; requestFingerprint: string; attempt: number; invocationId?: string } | { status: "ALREADY_PROCESSED"; invocationId: string; response?: unknown; snapshot?: ExecutionSnapshot; embeddingConsumed?: boolean; textConsumed?: boolean } | { status: "IN_PROGRESS" | "TERMINAL_FAILED" | "BLOCKED_EXISTING" | "RECONCILIATION_REQUIRED"; invocationId: string };
 
 function assertInputHash(request: GatewayRequest): void { if (!/^[a-f0-9]{64}$/.test(request.inputHash)) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid canonical input hash"); }
-function assertBudget(request: GatewayRequest): void { const b = request.budget; const e = request.estimates; if (!b || !e) return; if ((b.maxInputTokens !== undefined && (e.inputTokens ?? 0) > b.maxInputTokens) || (b.maxOutputTokens !== undefined && (e.outputTokens ?? 0) > b.maxOutputTokens) || (b.maxEmbeddingInputTokens !== undefined && (e.embeddingInputTokens ?? 0) > b.maxEmbeddingInputTokens) || (b.maxSpeechCharacters !== undefined && (e.speechCharacters ?? 0) > b.maxSpeechCharacters)) throw new ProviderGatewayError("BUDGET_EXCEEDED"); }
+function assertBudget(request: GatewayRequest): void { const b = request.budget; const e = request.estimates; if (!b || !e) return; if ((b.maxInputTokens !== undefined && (e.inputTokens ?? 0) > b.maxInputTokens) || (b.maxOutputTokens !== undefined && (e.outputTokens ?? 0) > b.maxOutputTokens) || (b.maxEmbeddingInputTokens !== undefined && (e.embeddingInputTokens ?? 0) > b.maxEmbeddingInputTokens) || (b.maxSpeechCharacters !== undefined && (e.speechCharacters ?? 0) > b.maxSpeechCharacters) || (b.maxImageBytes !== undefined && (e.imageBytes ?? 0) > b.maxImageBytes)) throw new ProviderGatewayError("BUDGET_EXCEEDED"); }
 function safeError(error: unknown, correlationId: string): ProviderGatewayError { const source = error instanceof ProviderGatewayError ? error : undefined; return new ProviderAdapterFailure(source?.code ?? "INTERNAL_PROVIDER_ERROR", { message: "Provider execution failed", retryable: source?.retryable, correlationId, remoteRequestId: source?.remoteRequestId, retryAfterMs: source?.retryAfterMs, usage: error instanceof ProviderAdapterFailure ? error.usage : undefined }); }
 async function deadline<T>(work: (signal: AbortSignal) => Promise<T>, caller: AbortSignal | undefined, timeoutMs: number, onController?: (controller: AbortController) => void): Promise<T> { if (caller?.aborted) throw new ProviderGatewayError("CANCELLED"); const controller = new AbortController(); onController?.(controller); const onAbort = () => controller.abort(); caller?.addEventListener("abort", onAbort, { once: true }); let timedOut = false; const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs); try { return await work(controller.signal); } catch (error) { if (caller?.aborted) throw new ProviderGatewayError("CANCELLED"); if (timedOut) throw new ProviderGatewayError("TIMEOUT"); throw error; } finally { clearTimeout(timer); caller?.removeEventListener("abort", onAbort); } }
 
@@ -54,7 +55,11 @@ class ClaimHeartbeat {
 
 class ProviderGatewayCore {
   constructor(private readonly registry: ProviderRegistry, private readonly workspaceRoutes: WorkspaceRouteResolver, private readonly platformDefaults: PlatformDefaultResolver, private readonly adapterResolver: ProviderAdapterResolver, private readonly execution: GatewayExecutionDependencies = {}) {}
-  async resolveSnapshot(request: GatewayRequest): Promise<ExecutionSnapshot> { if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); const route = request.pinnedRoute ?? await resolveRoute(request, this.workspaceRoutes, this.platformDefaults); if (request.pinnedRoute && (!route.connectionId || !route.credentialVersionId || route.source !== "WORKSPACE")) throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "Pinned Book route is incomplete"); const current = this.registry.resolveCapability(route.providerKey, route.modelId, request.capability); const protocol = this.registry.resolveProtocol(route.providerKey, request.capability.family); if (request.pinnedRoute) return createExecutionSnapshot(request, route); return createExecutionSnapshot(request, { ...route, protocol, capability: current }); }
+  async resolveSnapshot(request: GatewayRequest): Promise<ExecutionSnapshot> { if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); const route = request.pinnedRoute ?? await resolveRoute(request, this.workspaceRoutes, this.platformDefaults); if (request.pinnedRoute && (!route.connectionId || !route.credentialVersionId || route.source !== "WORKSPACE")) throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "Pinned Book route is incomplete"); const current = this.registry.resolveCapability(route.providerKey, route.modelId, request.capability); const protocol = this.registry.resolveProtocol(route.providerKey, request.capability.family); if (request.routeSlot === "PDF_VISUAL_STRUCTURE" && (
+    request.capability.visionInput !== true || route.providerKey !== "zhipu" ||
+    route.protocol !== "OPENAI_COMPATIBLE" || current.visionInput !== true ||
+    route.capability.visionInput !== true)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Approved visual model required");
+    if (request.pinnedRoute) return createExecutionSnapshot(request, route); return createExecutionSnapshot(request, { ...route, protocol, capability: current }); }
   async execute(request: GatewayRequest, principal?: ExecutionPrincipal): Promise<GatewayExecutionResult> {
     if (!principal) throw new ProviderGatewayError("AUTHORIZATION_FAILED");
     await this.execution.authorize?.(principal, request); if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); assertInputHash(request);
@@ -147,7 +152,34 @@ class ProviderGatewayCore {
     }
     await this.finish(claim, snapshot, "FAILED"); throw last ?? new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
   }
-  private validatePayload(request: GatewayRequest): void { if (request.capability.family === "TEXT_GENERATION") { if (request.embedding || request.speech) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); if (request.text) validateTextGenerationInput(request.text); return; } if (request.capability.family === "EMBEDDING") { if (request.text || request.speech) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); return; } if (!request.speech || request.text || request.embedding) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family"); }
+  private validatePayload(request: GatewayRequest): void {
+    if (request.capability.family === "TEXT_GENERATION") {
+      if (request.embedding || request.speech) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family");
+      if (request.text) validateTextGenerationInput(request.text);
+      if (request.routeSlot === "PDF_VISUAL_STRUCTURE") {
+        if (request.capability.visionInput !== true || !request.text ||
+            request.text.structuredOutput?.mode !== "JSON_MODE" ||
+            request.text.messages.length !== 1 || request.text.messages.some(m=>m.role!=="user") ||
+            !request.budget || !Number.isSafeInteger(request.budget.maxImageBytes) ||
+            request.budget.maxImageBytes! < 45 || request.budget.maxImageBytes! > 8_000_000 ||
+            !request.estimates || !Number.isSafeInteger(request.estimates.imageBytes))
+          throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "PDF vision budget or payload missing");
+        const exact = validatePdfVisionTextMessages(request.text.messages);
+        if (exact !== request.estimates.imageBytes || exact > request.budget.maxImageBytes!)
+          throw new ProviderGatewayError("BUDGET_EXCEEDED", "PDF vision byte budget exceeded");
+      } else if (request.capability.visionInput || request.text?.messages.some(m=>m.image)) {
+        throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Image input requires PDF vision route");
+      }
+      return;
+    }
+    if (request.routeSlot === "PDF_VISUAL_STRUCTURE")
+      throw new ProviderGatewayError("CAPABILITY_MISMATCH", "PDF vision requires text generation route");
+    if (request.capability.family === "EMBEDDING") {
+      if (request.text || request.speech) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family");
+      return;
+    }
+    if (!request.speech || request.text || request.embedding) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Invalid runtime payload family");
+  }
   private async finish(claim: { kind: "OWNER"; invocationId?: string; claimToken?: string }, snapshot: ExecutionSnapshot, status: "FAILED" | "BLOCKED") { if (claim.invocationId && claim.claimToken) await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId, claim.claimToken, status).catch(() => undefined); }
 }
 
