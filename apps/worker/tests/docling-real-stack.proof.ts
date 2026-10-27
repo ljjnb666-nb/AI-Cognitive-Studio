@@ -18,6 +18,7 @@ import {
 import { QueueEvents } from "bullmq";
 import {
   DOCLING_LAYOUT_QUEUE, createDoclingLayoutQueue, createDoclingLayoutWorker,
+  closeDoclingLayoutWorkerOwnedStorage,
   dispatchDoclingLayoutSweep, doclingLayoutJobId, executeDoclingBackgroundJob,
 } from "../src/docling-layout.js";
 
@@ -221,6 +222,32 @@ async function main():Promise<void>{
       where:{ingestionRunId:runId},
     }))===1,"REAL_DOCLING_E2E_REPLAY_DUPLICATE");
     markStage("REPLAY_VERIFIED");
+    // Exact-head extension: construct a SECOND isolated worker with its OWN
+    // S3 client; do not use the injected/shared storage path validated above.
+    // No jobs are enqueued under this disposable, independent Redis prefix.
+    markStage("WORKER_OWNED_STORAGE");
+    const ownedEnv={
+      ...env,
+      S3_ENDPOINT:s3Endpoint,
+      S3_REGION:required("S3_REGION"),
+      S3_BUCKET:required("S3_BUCKET"),
+      S3_ACCESS_KEY:required("S3_ACCESS_KEY"),
+      S3_SECRET_KEY:required("S3_SECRET_KEY"),
+      S3_FORCE_PATH_STYLE:true,
+    } as Environment;
+    const ownedWorker=createDoclingLayoutWorker(ownedEnv,executor,{
+      prefix:prefix+"ownedstorage",
+    });
+    let released=false;
+    try {
+      await ownedWorker.waitUntilReady();
+    } finally {
+      try { await ownedWorker.close(); }
+      finally { released=closeDoclingLayoutWorkerOwnedStorage(ownedWorker); }
+    }
+    ensure(released && !closeDoclingLayoutWorkerOwnedStorage(ownedWorker),
+      "REAL_DOCLING_OWNED_STORAGE_SHUTDOWN_INVALID");
+    console.log("ACS_DOCLING_REAL_STACK_OWNED_S3_LIFECYCLE=PASS");
     console.log("ACS_DOCLING_REAL_STACK_ORIGINAL_PDF=PASS");
     console.log("ACS_DOCLING_REAL_STACK_WINDOWS_MODEL=PASS");
     console.log("ACS_DOCLING_REAL_STACK_REDIS_PG_MINIO=PASS");

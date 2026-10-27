@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   source:
-    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-docling-real-stack-windows-20261025' }}
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.pull_request.head.ref == 'feat/pdf-docling-real-stack-windows-20261025' || github.event.pull_request.head.ref == 'feat/pdf-docling-owned-s3-worker-shutdown-20261027') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -48,7 +48,7 @@ jobs:
           retention-days: 1
   real-windows:
     needs: source
-    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-docling-real-stack-windows-20261025' }}
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.pull_request.head.ref == 'feat/pdf-docling-real-stack-windows-20261025' || github.event.pull_request.head.ref == 'feat/pdf-docling-owned-s3-worker-shutdown-20261027') }}
     runs-on: [self-hosted, Windows, X64, acs-pdf-local]
     timeout-minutes: 35
     steps:
