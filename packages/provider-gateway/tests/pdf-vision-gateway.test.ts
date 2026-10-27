@@ -108,7 +108,7 @@ describe("PDF visual images through Workspace Provider Gateway",()=>{
     const digest=canonicalTextInputHash(obj);
     expect(digest).toMatch(/^[a-f0-9]{64}$/);
     expect(digest).not.toContain(png.toString("base64"));
-    expect(canonicalTextInputHash({...obj,messages:[{...obj.messages[0],image:{...obj.messages[0].image,physicalPageIndex:5}}]})).not.toBe(digest);
+    expect(canonicalTextInputHash({...obj,messages:[{...obj.messages[0]!,image:{...obj.messages[0]!.image,physicalPageIndex:5}}]})).not.toBe(digest);
   });
 
   it("returns fail-closed for a provider's malformed structured graph JSON",async()=>{
