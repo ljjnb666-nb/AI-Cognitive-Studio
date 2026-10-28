@@ -1,4 +1,5 @@
 import { open } from "node:fs/promises";
+import process from "node:process";
 import { PDFDataRangeTransport } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 /** Maximum individual disk read sent to PDF.js, independent of PDF file size. */
