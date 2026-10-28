@@ -51,6 +51,8 @@ jobs:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Verify Python RapidOCR 151MB staged-source admission and denial gates
+        run: python3 -m unittest discover -s packages/ingestion/tests/python -p 'test_*.py' -v
       - name: B03 private source SHA verifier - SYNTHETIC OFFLINE tests only
         run: python3 -m unittest discover -s tools/private-pdf-review/tests -p 'test_*.py' -v
       - uses: pnpm/action-setup@v4
