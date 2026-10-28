@@ -83,6 +83,19 @@ jobs:
         run: |
           pnpm --filter @ai-cognitive/worker lint
           pnpm --filter @ai-cognitive/web lint
+      - name: Build Next.js UI for genuine Chromium interaction
+        run: pnpm --filter @ai-cognitive/web build
+      - name: Install Playwright Chromium
+        run: pnpm --filter @ai-cognitive/web exec playwright install --with-deps chromium
+      - name: Real Chromium + Better Auth + PostgreSQL/MinIO human review flow
+        run: pnpm --filter @ai-cognitive/web exec playwright test --config playwright.pdf-human-browser.config.ts --reporter=line
+      - name: Upload synthetic browser evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-human-browser-synthetic-${{ github.event.pull_request.head.sha }}
+          path: output/playwright/pdf-human-browser
+          if-no-files-found: ignore
       - name: Scope of proof
         run: |
           echo 'PDF_VISUAL_REVIEW_POSTGRESQL=REAL'
@@ -90,7 +103,8 @@ jobs:
           echo 'PDF_VISUAL_REVIEW_PROVIDER=MOCK'
           echo 'PDF_VISUAL_REVIEW_GRAPH=UNVERIFIED'
           echo 'PDF_VISUAL_REVIEW_STORAGE_TTL=24H'
-          echo 'PDF_HUMAN_REVIEW_BROWSER_E2E=NOT_RUN'
+          echo 'PDF_HUMAN_REVIEW_CHROMIUM_E2E=REAL_SYNTHETIC_PDF'
+          echo 'PDF_HUMAN_REVIEW_CHROMIUM_NATIVE_VIEWER_PIXEL_RENDER=NOT_ASSERTED'
           echo 'PDF_HUMAN_REVIEW_PAID_MODEL=NOT_CALLED'
           echo 'PDF_HUMAN_REVIEW_PODCAST_AUTHORITY=FALSE'
           echo 'PDF_VISUAL_REQUEST_OPT_IN_DEFAULT=OFF'
