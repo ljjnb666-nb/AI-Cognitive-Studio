@@ -1229,10 +1229,30 @@ model PdfVisualReviewCandidate {
   createdAt         DateTime     @default(now())
   expiresAt         DateTime
   ingestionRun      IngestionRun @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+  humanReviewEvents PdfVisualHumanReviewEvent[]
 
+  @@unique([id, workspaceId, sourceDocumentId], map: "PdfVisualReviewCandidate_review_parent_uq")
   @@unique([ingestionRunId, physicalPageIndex, routingGeneration, sourcePngSha256], map: "PdfVisualReviewCandidate_identity_uq")
   @@index([workspaceId, sourceDocumentId, physicalPageIndex, expiresAt], map: "PdfVisualReviewCandidate_read_idx")
   @@index([expiresAt], map: "PdfVisualReviewCandidate_expiry_idx")
+}
+
+/// Explicit, append-only human judgement on the given graph fingerprint.
+//// Human confirmation DOES NOT promote this structure to Gold or podcast authority.
+model PdfVisualHumanReviewEvent {
+  id               String    @id @default(cuid())
+  candidateId      String
+  workspaceId      String
+  sourceDocumentId String
+  reviewerUserId   String
+  sourcePdfSha256  String
+  candidateSha256  String
+  action           String
+  createdAt        DateTime  @default(now())
+  candidate        PdfVisualReviewCandidate @relation(fields: [candidateId, workspaceId, sourceDocumentId], references: [id, workspaceId, sourceDocumentId], onDelete: Cascade)
+
+  @@index([candidateId, createdAt, id], map: "PdfVisualHumanReviewEvent_candidate_idx")
+  @@index([workspaceId, sourceDocumentId], map: "PdfVisualHumanReviewEvent_scope_idx")
 }
 
 model DoclingLayoutSnapshot {
