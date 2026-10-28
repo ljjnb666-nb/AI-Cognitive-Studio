@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 type RunStatus = "PENDING"|"RUNNING"|"SUCCEEDED"|"NO_FIGURES"|"FAILED"|"EXPIRED"|"INTERRUPTED";
-type State = { enabled: boolean; request: { status: RunStatus; failureCode: string|null }|null };
+type State = { enabled: boolean; candidatePhysicalPageIndex: number|null; request: { status: RunStatus; failureCode: string|null }|null };
 type Props = { sourceDocumentId: string; serverEnabled: boolean };
 
 const copy: Record<RunStatus,string> = {
@@ -92,6 +93,9 @@ export function PdfVisualReviewRequestForm({ sourceDocumentId, serverEnabled }: 
       ) : active ? (
         <div role="status">
           <strong>{copy[state!.request!.status]}</strong>
+          {state!.request!.status === "SUCCEEDED" && Number.isSafeInteger(state?.candidatePhysicalPageIndex) && state!.candidatePhysicalPageIndex !== null ? (
+            <p><Link className="btn btn-secondary" href={"/studio/library/" + sourceDocumentId + "/review?page=" + state!.candidatePhysicalPageIndex}>查看识别结果：PDF 物理第 {state!.candidatePhysicalPageIndex + 1} 页</Link></p>
+          ) : null}
           {state!.request!.failureCode ? <p>状态码：{state!.request!.failureCode}</p> : null}
         </div>
       ) : (
