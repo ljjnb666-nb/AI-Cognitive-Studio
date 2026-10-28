@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { PassThrough } from "node:stream";
+import PDFDocument from "pdfkit";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import type { StorageProvider } from "@ai-cognitive/storage";
@@ -204,6 +206,36 @@ describe("B03 151.5MB PDF-only upload boundary", () => {
 });
 
 describe("completeUpload", () => {
+  it("extracts native-text PDF without ever requesting whole-object bytes in the worker", async () => {
+    const storage = new FakeStorageProvider();
+    storage.forbidGetObjectBytes = true;
+    const pdf = new PDFDocument({ autoFirstPage: false });
+    const sink = new PassThrough();
+    const chunks: Buffer[] = [];
+    sink.on("data", (chunk: Buffer) => chunks.push(chunk);
+    const complete = new Promise<Buffer>((resolve) => sink.on("end", () => resolve(Buffer.concat(chunks))));
+    pdf.pipe(sink);
+    pdf.addPage().text("Native text source through verified file staging");
+    pdf.end();
+    const bytes = await complete;
+    const value = await createPendingUpload(storage, bytes, {
+      filename: "native-only.pdf", mediaType: "application/pdf",
+    });
+    const document = await value.service.completeUpload(value.context, value.session.id);
+    const run = await prisma.ingestionRun.findFirstOrThrow({
+      where: { sourceDocumentId: document.id, workspaceId: value.workspace.id },
+    });
+    outboxAggregateIds.push(run.id);
+
+    await value.service.processIngestionRun(run.id);
+    await expect(prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } }))
+      .resolves.toMatchObject({ status: "SUCCEEDED" });
+    const extraction = await prisma.documentExtraction.findUniqueOrThrow({ where: { ingestionRunId: run.id } });
+    const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: extraction.id } });
+    expect(blocks.some(block => block.text.includes("Native text source"))).toBe(true);
+    expect(extraction.qualityStatus).toMatch(/ACCEPTED|DEGRADED/);
+  }, 40_000);
+
   it("returns the authoritative document from UploadCompletion", async () => {
     const value = await createCompletedFixture();
     const service = createIngestionService(new FakeStorageProvider());
