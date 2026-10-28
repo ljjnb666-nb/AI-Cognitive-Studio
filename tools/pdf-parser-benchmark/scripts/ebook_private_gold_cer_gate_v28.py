@@ -144,7 +144,26 @@ def make_report(manifest, packet, source_images):
             pending.append((book, page))
             continue
         shape_keys(reference, ("text", "text_sha256", "authority", "review_origin",
-                               "source_png_sha256", "bleedthrough_verdict", "review_receipt"))
+                               "source_png_sha256", "bleedthrough_verdict", "review_receipt",
+                               "reviewer_record_id", "full_page_coverage"))
+        require(type(reference["reviewer_record_id"]) is str and
+                re.fullmatch(r"[A-Za-z0-9_-]{8,80}", reference["reviewer_record_id"]),
+                "REFERENCE_REVIEWER_ID_INVALID")
+        coverage = reference["full_page_coverage"]
+        require(type(coverage) is dict and set(coverage) == {
+                    "coverage_scope", "reviewed_grid_cells",
+                    "sidebars_and_vertical_text_reviewed",
+                    "all_visible_text_and_punctuation_transcribed",
+                    "page_reading_order_reviewed", "unresolved_text_regions"
+                } and coverage["coverage_scope"] == "COMPLETE_PHYSICAL_PAGE_TEXT" and
+                coverage["reviewed_grid_cells"] == [
+                    f"R{r}C{k}" for r in range(1, 4) for k in range(1, 4)
+                ] and coverage["sidebars_and_vertical_text_reviewed"] is True and
+                coverage["all_visible_text_and_punctuation_transcribed"] is True and
+                coverage["page_reading_order_reviewed"] is True and
+                type(coverage["unresolved_text_regions"]) is list and
+                coverage["unresolved_text_regions"] == [],
+                "REFERENCE_FULL_PAGE_COVERAGE_UNVERIFIED")
         require(valid_text(reference["text"]) and
                 digest(reference["text"].encode("utf-8")) == reference["text_sha256"] and
                 reference["source_png_sha256"] == row["source_png_sha256"], "REFERENCE_SHA_INVALID")
