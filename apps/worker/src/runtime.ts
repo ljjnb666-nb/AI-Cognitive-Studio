@@ -14,6 +14,8 @@ import { createBookAnalysisBootstrapWorker, createBookAnalysisBootstrapQueue, di
 import { createHealthCheckWorker } from "./worker.js";
 import { createBookProductionGatewayRuntime, createPodcastAudioProductionGatewayRuntime, createPodcastProductionGatewayRuntime, createShortVideoProductionGatewayRuntime, type BookGatewayRuntime, type BookProductionGatewayRuntimeOverrides, type PodcastAudioGatewayRuntime, type PodcastGatewayRuntime, type ShortVideoGatewayRuntime } from "./provider-gateway-runtime.js";
 import { startProcessingHeartbeat } from "./processing-heartbeat.js";
+import { createOnDemandPdfVisualWorkerRuntime } from "./pdf-visual-review.js";
+import { processNextPdfVisualUserRequest } from "./pdf-visual-user-request.js";
 import { resolveCredentialKeyring, resolveProviderCatalog } from "@ai-cognitive/provider-gateway";
 import { DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE, scheduleDurableOperationReconciliation, reconcileDurableExpensiveOperationsSweep, type ReconciliationQueue, type ReconciliationQueues, type ReconciliationSweepState, type ReconciliationTopics } from "./durable-operation-reconciliation.js";
 
@@ -66,6 +68,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
   let sourceIngestionOcrRuntime: Awaited<ReturnType<typeof resolveSourceIngestionOcrExecutor>>;
   let doclingLayoutExecutor: Awaited<ReturnType<typeof resolveDoclingBackgroundExecutor>> = null;
+  let visualReviewRuntime: ReturnType<typeof createOnDemandPdfVisualWorkerRuntime> | undefined;
   try {
   // Real OCR runtime (04B-3/RF01): resolved + version-verified FIRST, before
   // any worker or connection is constructed — malformed explicit MinerU
@@ -109,6 +112,10 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   if (!podcastWorker) logger.info("worker.podcast_generation.disabled", { reason: "PODCAST_GENERATION_PROVIDER_NOT_CONFIGURED" });
   if (!audioWorker) logger.info("worker.audio_generation.disabled", { reason: "AUDIO_GENERATION_PROVIDER_NOT_CONFIGURED" });
   if (!shortVideoWorker) logger.info("worker.short_video_generation.disabled", { reason: "SHORT_VIDEO_GENERATION_PROVIDER_NOT_CONFIGURED" });
+  // Completely off unless explicitly enabled in the worker environment.
+  if (source.PDF_VISUAL_REVIEW_ON_DEMAND_ENABLED === "true") {
+    visualReviewRuntime = createOnDemandPdfVisualWorkerRuntime(environment, source);
+  }
   const interval = options.dispatchIntervalMs ?? 1_000;
   let stopping = false;
   const active = new Set<Promise<void>>();
@@ -172,6 +179,10 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (podcastQueue) initial.push(dispatch("podcast-generation", () => dispatchPodcastGenerationWithQueue(podcastQueue, { ...(options.outboxTopics?.podcastGeneration ? { topic: options.outboxTopics.podcastGeneration } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (audioQueue) initial.push(dispatch("podcast-audio", () => dispatchPodcastAudioGenerationWithQueue(audioQueue, { ...(options.outboxTopics?.podcastAudio ? { topic: options.outboxTopics.podcastAudio } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
+  if (visualReviewRuntime) {
+    const visual = visualReviewRuntime;
+    initial.push(dispatch("pdf-visual-user-requests", () => processNextPdfVisualUserRequest(task => visual.execute(task)), 5_000));
+  }
   if (shortVideoQueue) initial.push(dispatch("short-video-generation", () => dispatchShortVideoGenerationWithQueue(shortVideoQueue, { ...(options.outboxTopics?.shortVideo ? { topic: options.outboxTopics.shortVideo } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   await Promise.all(initial.map((run) => run()));
   const reconciliationQueues: ReconciliationQueues = {
@@ -217,8 +228,9 @@ finally {
     if(doclingLayoutWorker) closeDoclingLayoutWorkerOwnedStorage(doclingLayoutWorker);
   }
 }
-await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+await visualReviewRuntime?.close(); await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
+    await visualReviewRuntime?.close();
     await sourceIngestionOcrRuntime?.close();
     await doclingLayoutExecutor?.close();
     await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close();
