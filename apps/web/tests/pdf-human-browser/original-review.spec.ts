@@ -129,6 +129,23 @@ test("real Chromium: logged-in PDF original page, graph, confirm/withdraw/reject
   });
   expect(user.memberships).toHaveLength(1);
   const workspaceId = user.memberships[0]!.workspaceId;
+  // Intent-only real authenticated browser request: never upload any B03 bytes.
+  // Server must allow a 151.5MB PDF but still reject an oversized EPUB.
+  const b03Intent = await page.request.post("/api/studio/upload", {
+    data: { filename: "B03-source.pdf", mediaType: "application/pdf", sizeBytes: 151_495_200 },
+  });
+  expect(b03Intent.status()).toBe(200);
+  const b03IntentJson = await b03Intent.json() as { sessionId: string };
+  expect(b03IntentJson.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+  const forbiddenEpubIntent = await page.request.post("/api/studio/upload", {
+    data: { filename: "over-cap.epub", mediaType: "application/epub+zip", sizeBytes: 151_495_200 },
+  });
+  expect(forbiddenEpubIntent.status()).toBe(400);
+  const forbiddenOversizedPdf = await page.request.post("/api/studio/upload", {
+    data: { filename: "over-cap.pdf", mediaType: "application/pdf", sizeBytes: 200 * 1024 * 1024 + 1 },
+  });
+  expect(forbiddenOversizedPdf.status()).toBe(400);
+  await prisma.uploadSession.delete({ where: { id: b03IntentJson.sessionId } });
   const f = await createFixture(user.id, workspaceId);
   const route = "/studio/library/" + f.doc.id + "/review?page=1";
 
