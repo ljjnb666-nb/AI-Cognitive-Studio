@@ -17,7 +17,7 @@ export type StorageProvider = {
   headObject(key: string): Promise<ObjectHead | null>;
   getObjectStream(key: string, options?: { ifMatch?: string }): Promise<AsyncIterable<Uint8Array>>;
   /** Conditional, bounded private byte-range read. Never a public/presigned URL. */
-  getObjectRangeStream?(key: string, input: { start: number; end: number; ifMatch: string }): Promise<{ stream: AsyncIterable<Uint8Array>; length: number }>;
+  getObjectRangeStream?(key: string, input: { start: number; end: number; totalSize: number; ifMatch: string }): Promise<{ stream: AsyncIterable<Uint8Array>; length: number }>;
   /** @deprecated Transitional compatibility method; migrate callers to getObjectStream. */
   getObjectBytes(key: string): Promise<Uint8Array>;
   putObject(input: PutObjectInput): Promise<void>;
@@ -80,10 +80,11 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     return body;
   }
 
-  async getObjectRangeStream(key: string, input: { start: number; end: number; ifMatch: string }): Promise<{ stream: AsyncIterable<Uint8Array>; length: number }> {
+  async getObjectRangeStream(key: string, input: { start: number; end: number; totalSize: number; ifMatch: string }): Promise<{ stream: AsyncIterable<Uint8Array>; length: number }> {
     assertKey(key);
     if (!Number.isSafeInteger(input.start) || !Number.isSafeInteger(input.end) ||
-        input.start < 0 || input.end < input.start || !/^"[a-zA-Z0-9-]{8,128}"$/.test(input.ifMatch))
+        input.start < 0 || input.end < input.start || !Number.isSafeInteger(input.totalSize) ||
+        input.totalSize <= input.end || !/^"[a-zA-Z0-9-]{8,128}"$/.test(input.ifMatch))
       throw new Error("STORAGE_INVALID_RANGE");
     const result = await this.serverClient.send(new GetObjectCommand({
       Bucket: this.config.bucket, Key: key,
@@ -92,8 +93,7 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     const body = result.Body as AsyncIterable<Uint8Array> | undefined;
     if (!body || !body[Symbol.asyncIterator] ||
         result.ETag !== input.ifMatch ||
-        result.ContentRange !== `bytes ${input.start}-${input.end}/${result.ContentRange?.split("/")[1]}` ||
-        !/^bytes \d+-\d+\/\d+$/.test(result.ContentRange ?? "") ||
+        result.ContentRange !== `bytes ${input.start}-${input.end}/${input.totalSize}` ||
         result.ContentLength !== input.end - input.start + 1)
       throw new Error("STORAGE_RANGE_RESPONSE_INVALID");
     return { stream: body, length: input.end - input.start + 1 };
