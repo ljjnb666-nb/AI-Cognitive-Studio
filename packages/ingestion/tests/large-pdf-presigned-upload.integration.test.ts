@@ -73,7 +73,9 @@ describe.skipIf(process.env.PDF_LARGE_UPLOAD_STORAGE_PROOF !== "true")(
         const response = await fetch(upload.url, {
           method: "PUT",
           headers: { ...upload.headers, "content-length": String(bytesTotal) },
-          body,
+          // Node's fetch accepts Readable streams with duplex: "half";
+          // TypeScript's DOM BodyInit declaration does not include Node Readable.
+          body: body as unknown as BodyInit,
           duplex: "half",
         } as RequestInit & { duplex: "half" });
         if (!response.ok) throw new Error(`SYNTHETIC_MINIO_PUT_FAILED_${response.status}`);
