@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
+import { stat } from "node:fs/promises";
 import { afterAll, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { createIngestionService } from "../src/index.js";
+import { withVerifiedPdfSourceFile } from "../src/pdf-source-stage.js";
 
 /**
  * Opt-in CI only. Uses real private MinIO, PostgreSQL and an actual presigned
@@ -88,6 +90,14 @@ describe.skipIf(process.env.PDF_LARGE_UPLOAD_STORAGE_PROOF !== "true")(
         expect(document.sha256).toBe(expectedSha256);
         expect(document.mediaType).toBe("application/pdf");
         expect((await storage.headObject(canonicalKey))?.size).toBe(bytesTotal);
+        // Exercise the new Worker staging boundary on a B03-sized real
+        // MinIO object without running PDF.js on synthetic non-PDF content.
+        const staged = await withVerifiedPdfSourceFile(
+          await storage.getObjectStream(canonicalKey),
+          { sizeBytes: bytesTotal, sha256: expectedSha256, maxBytes: 200 * 1024 * 1024 },
+          async (filePath) => (await stat(filePath)).size,
+        );
+        expect(staged).toBe(bytesTotal);
         expect(await storage.headObject(tempKey)).toBeNull();
         expect(await prisma.sourceBlob.count({ where: { workspaceId } })).toBe(1);
         expect(await prisma.sourceDocument.count({ where: { workspaceId } })).toBe(1);
