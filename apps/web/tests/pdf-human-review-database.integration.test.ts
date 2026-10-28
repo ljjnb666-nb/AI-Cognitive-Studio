@@ -110,7 +110,7 @@ describe("real PostgreSQL manual graph review evidence",()=>{
       data:{role:"OWNER"},
     });
     await prisma.pdfVisualReviewCandidate.update({
-      where:{id:f.candidate.id},data:{expiresAt:new Date(Date.now()-60_000)},
+      where:{id:f.candidate.id},data:{createdAt:new Date(Date.now()-48*3600_000),expiresAt:new Date(Date.now()-60_000)},
     });
     await expect(submitPdfHumanReview(act(f,"WITHDRAW",first.eventId)))
       .rejects.toThrow("PDF_HUMAN_REVIEW_CANDIDATE_STALE");
