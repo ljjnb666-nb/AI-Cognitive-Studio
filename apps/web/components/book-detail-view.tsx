@@ -101,6 +101,17 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
           {!item.isLatestVersion && " · 历史版本（显示所属书籍当前正式书名）"}
         </p>
 
+        {item.mediaType === "application/pdf" && (
+          <div style={{ marginBottom: 24 }}>
+            <Link href={`/studio/library/${item.id}/review`} className="btn btn-secondary">
+              核对 PDF 来源与物理页
+            </Link>
+            <p style={{ color: "var(--text-secondary)", fontSize: 12, marginTop: 8 }}>
+              仅查看已存档原文区块；图表候选未完成来源审核，不能直接作为播客依据。
+            </p>
+          </div>
+        )}
+
         {item.hasIntelligence && (
           <div style={{ display: "flex", gap: 12, marginBottom: 32 }}>
             <Link href={`/studio/podcasts/new?source=${item.id}`} className="btn btn-secondary">
