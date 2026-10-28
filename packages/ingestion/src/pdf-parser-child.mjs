@@ -90,6 +90,13 @@ try {
           annotationCount: annotations.length,
         },
       });
+      // A scanned book can contain a distinct raster XObject on every
+      // physical page. PDF.js retains operator/image buffers until cleanup;
+      // never let them accumulate across hundreds of pages in a 128 MiB
+      // old-space, process-RSS-bounded parsing child. Page evidence has
+      // already been emitted, and no page task remains outstanding.
+      page.cleanup();
+      if (number % 8 === 0) await pdf.cleanup(false);
     }
     if (!process.exitCode) send({ type: "done" });
   }
