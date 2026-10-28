@@ -1,4 +1,6 @@
-import { readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Environment } from "@ai-cognitive/shared/server";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -120,6 +122,66 @@ describe("RapidOCR executor uses existing durable page seam",()=>{
     });
     expect(runner).toHaveBeenCalledTimes(1);
     await expect(stat(savedPath)).rejects.toMatchObject({code:"ENOENT"});
+  });
+  it("uses verified 151.5MB file-backed input for one page without writing a second 151MB file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "rapidocr-stage-path-"));
+    const source = join(dir, "verified-source.pdf");
+    try {
+      // Sparse size is intentional: this unit test validates the executor's
+      // file-path protocol, NOT image/page recognition or PDF validity.
+      await writeFile(source, "%PDF-1.7\\n");
+      await truncate(source, 151_495_200);
+      let calls = 0;
+      const runner = vi.fn(async(_python:string,args:string[],opts:BoundedSpawnOptions) => {
+        calls++;
+        expect(args.slice(0,2)).toEqual([settings.script,"--pdf"]);
+        expect(args[2]).toBe(source);
+        expect(args.slice(3)).toEqual(["--page","3"]);
+        expect(opts.cwd).not.toBe(dir);
+        expect((await stat(source)).size).toBe(151_495_200);
+        return success(JSON.stringify({schemaVersion:1,status:"SUCCEEDED",text:"Synthetic OCR result"}));
+      });
+      const executor = createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner);
+      expect(executor.extractPageFile).toBeTypeOf("function");
+      const fileRequest = {
+        ingestionRunId:request.ingestionRunId,workspaceId:request.workspaceId,
+        sourceDocumentId:request.sourceDocumentId,physicalPageIndex:3,
+        routingGeneration:1,runExecutionToken:request.runExecutionToken,pdfFilePath:source,
+      };
+      await expect(executor.extractPageFile!(fileRequest)).resolves.toEqual({
+        status:"SUCCEEDED",text:"Synthetic OCR result",
+      });
+      await expect(executor.extractPageFile!(fileRequest)).resolves.toEqual({
+        status:"SUCCEEDED",text:"Synthetic OCR result",
+      });
+      expect(calls).toBe(2);
+      expect((await stat(source)).size).toBe(151_495_200);
+    } finally { await rm(dir,{recursive:true,force:true}); }
+  });
+  it("rejects missing, relative, non-PDF and oversized file paths before Python launch", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "rapidocr-stage-negative-"));
+    const runner = vi.fn(async()=>success("{}"));
+    const executor = createRapidOcrPdfOcrExecutor(settings,{modelSha256:digest},runner);
+    const base = {
+      ingestionRunId:request.ingestionRunId,workspaceId:request.workspaceId,
+      sourceDocumentId:request.sourceDocumentId,physicalPageIndex:3,
+      routingGeneration:1,runExecutionToken:request.runExecutionToken,
+    };
+    try {
+      for (const name of ["nonexistent.pdf","bad.pdf","oversized.pdf"]) {
+        const path=join(dir,name);
+        if (name==="bad.pdf") await writeFile(path,"INVALID FILE");
+        if (name==="oversized.pdf") {
+          await writeFile(path,"%PDF-1.7\\n");
+          await truncate(path,200*1024*1024+1);
+        }
+        await expect(executor.extractPageFile!({...base,pdfFilePath:path}))
+          .resolves.toMatchObject({status:"FAILED"});
+      }
+      await expect(executor.extractPageFile!({...base,pdfFilePath:"relative.pdf"}))
+        .resolves.toMatchObject({status:"FAILED",kind:"terminal"});
+      expect(runner).not.toHaveBeenCalled();
+    } finally { await rm(dir,{recursive:true,force:true}); }
   });
   it("rejects forged success, extra protocol output and null bytes",async()=>{
     for(const stdout of [
