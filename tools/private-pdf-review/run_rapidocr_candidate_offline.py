@@ -74,7 +74,7 @@ def minimal_offline_environment() -> dict[str, str]:
         "http_proxy": "http://127.0.0.1:1",
         "https_proxy": "http://127.0.0.1:1",
         "all_proxy": "http://127.0.0.1:1",
-        "NO_PROXY": "*", "no_proxy": "*",
+        "NO_PROXY": "", "no_proxy": "",
     })
     return env
 
