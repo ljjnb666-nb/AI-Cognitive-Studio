@@ -26,7 +26,7 @@ jobs:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse ${{ github.event.pull_request.head.sha }})" = "$EXPECTED_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_v28_source_bridge_v29.py
           python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_v28_source_bridge_v29.py' -v
           echo 'ACS_V29_SYNTHETIC=PASS'
@@ -55,7 +55,7 @@ jobs:
           $ErrorActionPreference='Stop'
           try {
             $checkout='acs-fivebook-v29'
-            if ((git -C $checkout rev-parse ${{ github.event.pull_request.head.sha }}).Trim() -cne $env:EXPECTED_SHA) {throw 'HEAD_MISMATCH'}
+            if ((git -C $checkout rev-parse HEAD).Trim() -cne $env:EXPECTED_SHA) {throw 'HEAD_MISMATCH'}
             $root='D:\ai-cognitive-pdf-benchmark-data'
             $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
             $manifest=Join-Path $checkout 'tools\pdf-parser-benchmark\corpus\ebook-20261022.manifest.json'
