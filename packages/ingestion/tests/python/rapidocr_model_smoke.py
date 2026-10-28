@@ -98,9 +98,13 @@ def run() -> None:
         make_scanned_page(source)
         if not source.read_bytes().startswith(b"%PDF-"):
             raise AssertionError("SYNTHETIC_PDF_MAGIC_INVALID")
-        code, result = invoke("--pdf", str(source), "--page", "0")
+        code, result = invoke("--pdf", str(source), "--page", "0", "--safe-diagnostic-stage")
         if code != 0 or result.get("schemaVersion") != 1 or result.get("status") != "SUCCEEDED":
-            raise AssertionError("RAPIDOCR_REAL_PAGE_INFERENCE_FAILED")
+            safe = {"START", "SOURCE_INPUT", "IMPORT_RASTER_AND_OCR", "RENDER_PDF_PAGE",
+                    "RAPIDOCR_INFERENCE", "RAPIDOCR_RESULT_SCHEMA"}
+            stage = result.get("safeStage")
+            raise AssertionError("RAPIDOCR_REAL_PAGE_INFERENCE_FAILED_STAGE_" +
+                                 (stage if stage in safe else "UNKNOWN"))
         raw = result.get("text")
         if not isinstance(raw, str):
             raise AssertionError("RAPIDOCR_REAL_TEXT_SCHEMA_INVALID")
