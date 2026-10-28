@@ -58,7 +58,16 @@ class ProviderGatewayCore {
   async resolveSnapshot(request: GatewayRequest): Promise<ExecutionSnapshot> { if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); const route = request.pinnedRoute ?? await resolveRoute(request, this.workspaceRoutes, this.platformDefaults); if (request.pinnedRoute && (!route.connectionId || !route.credentialVersionId || route.source !== "WORKSPACE")) throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "Pinned Book route is incomplete"); const current = this.registry.resolveCapability(route.providerKey, route.modelId, request.capability); const protocol = this.registry.resolveProtocol(route.providerKey, request.capability.family); if (request.routeSlot === "PDF_VISUAL_STRUCTURE" && (
     request.capability.visionInput !== true || route.providerKey !== "zhipu" ||
     route.protocol !== "OPENAI_COMPATIBLE" || current.visionInput !== true ||
-    route.capability.visionInput !== true)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Approved visual model required");
+    // Only the exact DB resolver placeholder may defer to the registered
+    // model. Explicit runtime denial (visionInput:false) remains authoritative.
+    !(
+      !request.pinnedRoute &&
+      route.source === "WORKSPACE" &&
+      route.capability.modelId === route.modelId &&
+      route.capability.confidence === "DECLARED" &&
+      route.capability.families.length === 0 &&
+      route.capability.visionInput === undefined
+    ) && route.capability.visionInput !== true)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Approved visual model required");
     if (request.pinnedRoute) return createExecutionSnapshot(request, route); return createExecutionSnapshot(request, { ...route, protocol, capability: current }); }
   async execute(request: GatewayRequest, principal?: ExecutionPrincipal): Promise<GatewayExecutionResult> {
     if (!principal) throw new ProviderGatewayError("AUTHORIZATION_FAILED");

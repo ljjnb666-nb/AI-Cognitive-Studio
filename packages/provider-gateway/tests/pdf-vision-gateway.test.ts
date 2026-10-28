@@ -58,6 +58,24 @@ describe("PDF visual images through Workspace Provider Gateway",()=>{
     expect(f.beforeAttempt).not.toHaveBeenCalled();
   });
 
+  it("permits the exact database placeholder but rejects explicit vision denial",async()=>{
+    const placeholder={...route,capability:{
+      modelId:"glm-4.6v",families:[] as const,confidence:"DECLARED" as const,
+    }};
+    const approved=fixture({selected:placeholder});
+    await expect(createGatewayPdfVisualExecutor(settings(approved.gateway)).inspect(image())).resolves.toEqual(graph);
+    expect(approved.transport.calls).toHaveLength(1);
+    for(const selected of [
+      {...placeholder,capability:{...placeholder.capability,visionInput:false}},
+      {...placeholder,capability:{...placeholder.capability,families:["TEXT_GENERATION"] as const}},
+      {...placeholder,capability:{...placeholder.capability,confidence:"EXPERIMENTAL" as const}},
+    ]){
+      const refused=fixture({selected});
+      await expect(createGatewayPdfVisualExecutor(settings(refused.gateway)).inspect(image())).rejects.toThrow();
+      expect(refused.transport.calls).toHaveLength(0);
+    }
+  });
+
   it("refuses text-only model, custom provider and unapproved runtime claims",async()=>{
     for(const selected of [
       {...route,modelId:"glm-4-flash",capability:{...capability,modelId:"glm-4-flash",visionInput:false}},
