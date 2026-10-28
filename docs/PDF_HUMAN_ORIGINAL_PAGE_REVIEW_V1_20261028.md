@@ -17,8 +17,20 @@
 
 原始 PDF 本身不额外持久化。在线预览为了**先完成 SHA 校验再释放私有字节**，需要暂时在 Web Worker 内聚合完整 PDF（最大 110MB）；大 PDF 加载慢且会增加服务内存开销，不支持 HTTP Range。暂未有独立文件预览频率限额。**不可据此宣布生产性能验收。**
 
-PDF 内嵌查看依赖浏览器本地 PDF viewer；不同浏览器未 E2E 兼容测试，`#page` 跳转并非由后端渲染引擎保证。人工确认也无法自动证明审核者实际查看内容，因此需要后续审计与正式评测。这一切片不做自动内容修正、不做事实引用升权、真实私有五书 Gold/CER 和付费模型精度声明。
+PDF 内嵌查看依赖浏览器本地 PDF viewer；Chromium 的真实登录、图表核对与审核按钮交互已新增专用 Playwright E2E（实际是否通过需按准确 HEAD CI 结果确认）；不同浏览器未 E2E 兼容测试，`#page` 跳转并非由后端渲染引擎保证。人工确认也无法自动证明审核者实际查看内容，因此需要后续审计与正式评测。这一切片不做自动内容修正、不做事实引用升权、真实私有五书 Gold/CER 和付费模型精度声明。
 
 ## 验收退出
 
 新增源 PDF 大小/SHA/替换检测、人工核验状态机和真实 PostgreSQL 追加事件/角色变更/过期/冲突测试，准确 HEAD 专项 CI 与主 CI 独立确认；不在同 PR 增加新解析器或人工质量评测基础设施。所有 PR 保持 Draft，未经用户授权不合并。Issue #161 OPEN，生产 UNVERIFIED，Docling 生产 OFF。
+
+## 新增真实浏览器验收（2026-10-28）
+
+沿用原来的 `pdf-human-review-original-source.yml`，没有再开单独 Benchmark/工作流。安装 Playwright Chromium，通过 `playwright.pdf-human-browser.config.ts` 启动本仓库真实 Next.js，在真实 PostgreSQL 17 和 MinIO 上测试：
+
+- 从注册页新建真实 Better Auth 测试账号，再创建一份**代码生成的两页合成 PDF**、SourceDocument、CurrentDocumentExtraction 和来源区块。
+- 仅把测试图结构候选入库，**不调用任何付费 Provider**。在物理第 2 页验证图文展示、原始 PDF iframe 指向 `#page=2`、后台原书 SHA 和浏览器认证请求返回的 PDF SHA 一致。
+- 未登录浏览器对 PDF 请求必须 404；授权浏览器执行确认 → 撤回 → 驳回三次真实按钮点击并验证 PostgreSQL 不可变事件、候选未变和无播客生成。
+- 将本人降级为 VIEWER 后刷新页面，必须阻止新增审核结论。
+- 浏览器截图和失败 trace 仅来自合成测试 PDF；绝不上传用户私有电子书截图。
+- **明确不覆盖**：Chrome 内嵌 PDF 插件的实际像素是否正确、Edge 和移动端兼容、真实付费模型输出精度、实际私有书页、100MB+ 大 PDF 的性能。这些仍待真实设备验证。
+
