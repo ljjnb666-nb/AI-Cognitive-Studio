@@ -1,0 +1,85 @@
+name: PDF Visual real PostgreSQL MinIO receipt proof
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-visual-durable-receipt:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-visual-postgres-minio-receipt-proof-20261028' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: ai_cognitive_studio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d ai_cognitive_studio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ai-cognitive-studio-dev
+      S3_ACCESS_KEY: local-development-only
+      S3_SECRET_KEY: local-development-only
+      S3_FORCE_PATH_STYLE: "true"
+      BETTER_AUTH_SECRET: phase7-ci-secret-must-be-at-least-32-characters
+      BETTER_AUTH_URL: http://localhost:3001
+      BETTER_AUTH_TRUSTED_ORIGINS: http://localhost:3001
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify exact PR HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install exact lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Start actual MinIO
+        run: docker compose up -d minio
+      - name: Create isolated MinIO bucket
+        run: docker compose run --rm minio-init
+      - name: Create PostgreSQL test database
+        run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
+      - name: Generate Prisma client
+        run: pnpm db:generate
+      - name: Apply real PostgreSQL migrations
+        run: pnpm --filter @ai-cognitive/db prisma migrate deploy
+      - name: Run source PDF → MinIO → PostgreSQL Gateway encrypted receipt → replay test
+        run: pnpm --filter @ai-cognitive/worker exec vitest run --config vitest.integration.config.ts tests/pdf-visual-durable-receipt.integration.test.ts --reporter=verbose
+      - name: Worker TypeScript check
+        run: pnpm --filter @ai-cognitive/worker typecheck
+      - name: Worker ESLint
+        run: pnpm --filter @ai-cognitive/worker lint
+      - name: Explicit proof boundaries
+        run: |
+          echo "PDF_VISUAL_REAL_MINIO=TESTED"
+          echo "PDF_VISUAL_REAL_POSTGRESQL=TESTED"
+          echo "PDF_VISUAL_DURABLE_TEXT_RECEIPT=TESTED"
+          echo "PDF_VISUAL_PROVIDER=MOCKED"
+          echo "PDF_VISUAL_PRIVATE_BOOK=NOT_RUN"
+          echo "PDF_VISUAL_PRODUCTION_QUEUE=OFF"
