@@ -159,14 +159,16 @@ test("real Chromium: logged-in PDF original page, graph, confirm/withdraw/reject
       where:{candidateId:f.candidate.id},
     })).toBe(1);
     await expect(page.getByText("人工已确认结构 · 仍不得直接进入播客")).toBeVisible();
-    await expect(page.getByRole("button",{name:"撤回本次结论"})).toBeEnabled();
+    await expect(page.getByRole("button",{name:"撤回本次结论"})).toBeVisible();
     await checkbox.check();
+    await expect(page.getByRole("button",{name:"撤回本次结论"})).toBeEnabled();
     await page.getByRole("button",{name:"撤回本次结论"}).click();
     await expect.poll(() => prisma.pdfVisualHumanReviewEvent.count({
       where:{candidateId:f.candidate.id},
     })).toBe(2);
-    await expect(page.getByRole("button",{name:"驳回：图结构不准确"})).toBeEnabled();
+    await expect(page.getByRole("button",{name:"驳回：图结构不准确"})).toBeVisible();
     await checkbox.check();
+    await expect(page.getByRole("button",{name:"驳回：图结构不准确"})).toBeEnabled();
     await page.getByRole("button",{name:"驳回：图结构不准确"}).click();
     await expect.poll(() => prisma.pdfVisualHumanReviewEvent.count({
       where:{candidateId:f.candidate.id},
