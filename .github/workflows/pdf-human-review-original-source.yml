@@ -81,7 +81,9 @@ jobs:
           PDF_LARGE_VALID_PARSER_PROOF: "true"
         run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-large-valid-parser.test.ts --reporter=verbose
       - name: Verify PDF parent-worker file staging and identical native PDF.js evidence
-        run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-source-stage.test.ts tests/document-parsers.test.ts --reporter=verbose
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-source-stage.test.ts tests/document-parsers.test.ts tests/rapidocr-executor.test.ts --reporter=verbose
+      - name: Verify verified-file RapidOCR dispatch through PostgreSQL durable OCR attempt
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run --config vitest.integration.config.ts tests/pdf-routing.integration.test.ts --reporter=verbose
       - name: Verify isolated source-bound store and Worker opt-in
         run: pnpm --filter @ai-cognitive/worker exec vitest run tests/pdf-visual-review-store.test.ts tests/pdf-visual-review.test.ts --reporter=verbose
       - name: Verify real MinIO + PostgreSQL + Gateway encrypted receipt + candidate replay
