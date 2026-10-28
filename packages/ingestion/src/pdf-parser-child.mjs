@@ -60,7 +60,9 @@ try {
     for (let number = 1; number <= pdf.numPages; number++) {
       if (process.env.PDF_RANGE_DIAGNOSTIC === "1" && (number === 1 || number % 25 === 0)) process.stderr.write("PDF_RANGE_PAGE_BEGIN=" + number + " rss=" + process.memoryUsage().rss + " requests=" + (fileRange?.diagnosticStats.requests ?? 0) + "\n");
       const page = await pdf.getPage(number);
+      if (process.env.PDF_RANGE_DIAGNOSTIC === "1" && (number === 1 || number % 25 === 0)) process.stderr.write("PDF_RANGE_PAGE_RESOLVED=" + number + "\n");
       const content = await page.getTextContent();
+      if (process.env.PDF_RANGE_DIAGNOSTIC === "1" && (number === 1 || number % 25 === 0)) process.stderr.write("PDF_RANGE_TEXT_RESOLVED=" + number + "\n");
       const text = content.items.map((item) => ("str" in item ? item.str : "")).join("");
       total += text.length;
       if (total > maxOutputChars) {
@@ -69,6 +71,7 @@ try {
         break;
       }
       const operators = await page.getOperatorList();
+      if (process.env.PDF_RANGE_DIAGNOSTIC === "1" && (number === 1 || number % 25 === 0)) process.stderr.write("PDF_RANGE_OPERATORS_RESOLVED=" + number + "\n");
       let imageCount = 0, vectorPathCount = 0;
       for (const fn of operators.fnArray) {
         if (imageOps.includes(fn)) imageCount++;
