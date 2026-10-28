@@ -1,10 +1,10 @@
 import { statSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Environment } from "@ai-cognitive/shared/server";
-import type { PdfOcrExecutor, PdfOcrPageRequest, PdfOcrPageResult } from "../pdf-routing.js";
+import type { PdfOcrExecutor, PdfOcrPageFileRequest, PdfOcrPageRequest, PdfOcrPageResult } from "../pdf-routing.js";
 import { SourceError } from "../source-errors.js";
 import { spawnBounded, type BoundedSpawnResult } from "../mineru/mineru-process.js";
 
@@ -16,6 +16,8 @@ const DEFAULT_OUTPUT_BYTES = 512_000;
 const MAX_TIMEOUT_MS = 600_000;
 const MAX_OUTPUT_BYTES = 1_000_000;
 const MAX_SOURCE_BYTES = 110_000_000;
+/** Matches the stage-level 200 MiB upload ceiling; no extra source buffer. */
+const MAX_STAGED_FILE_BYTES = 200 * 1024 * 1024;
 
 type Runner = typeof spawnBounded;
 export type RapidOcrExecutorConfig = {
@@ -89,8 +91,10 @@ export function rapidOcrOfflineEnv(source: NodeJS.ProcessEnv = process.env): Nod
     OMP_NUM_THREADS: "2",
     OPENBLAS_NUM_THREADS: "2",
     MKL_NUM_THREADS: "2",
-    NO_PROXY: "*",
-    no_proxy: "*",
+    // Do NOT use "*": it instructs clients to bypass these refusal proxies.
+    // Empty values force proxy-aware clients to attempt the denied endpoint.
+    NO_PROXY: "",
+    no_proxy: "",
     HTTP_PROXY: "http://127.0.0.1:1",
     HTTPS_PROXY: "http://127.0.0.1:1",
     ALL_PROXY: "http://127.0.0.1:1",
@@ -149,19 +153,40 @@ export function createRapidOcrPdfOcrExecutor(
   let closing = false;
   const active = new Set<{controller:AbortController; done:Promise<void>}>();
 
-  const runPage = async (request: PdfOcrPageRequest, abortSignal: AbortSignal): Promise<PdfOcrPageResult> => {
+  const runPage = async (request: PdfOcrPageRequest | PdfOcrPageFileRequest, abortSignal: AbortSignal): Promise<PdfOcrPageResult> => {
     if (abortSignal.aborted) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
-    if (!Number.isSafeInteger(request.physicalPageIndex) ||
-        request.physicalPageIndex<0 || request.pdfBytes.length>MAX_SOURCE_BYTES ||
-        request.pdfBytes.length<5) {
-      return failure(SourceError.OCR_OUTPUT_INVALID,"terminal");
-    }
+    if (!Number.isSafeInteger(request.physicalPageIndex) || request.physicalPageIndex < 0)
+      return failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
+    const isFile = "pdfFilePath" in request;
+    if (!isFile && (request.pdfBytes.length > MAX_SOURCE_BYTES || request.pdfBytes.length < 5))
+      return failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
+    if (isFile && (!request.pdfFilePath || !isAbsolute(request.pdfFilePath)))
+      return failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
     let dir: string | null = null;
     try {
       dir=await mkdtemp(join(tmpdir(),"acs-rapidocr-"));
-      const input=join(dir,"source.pdf");
-      if (abortSignal.aborted) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
-      await writeFile(input,request.pdfBytes,{flag:"wx"});
+      let input: string;
+      if (isFile) {
+        // The parent has already streamed and SHA-verified the original PDF
+        // against immutable SourceDocument identity. Read-only reuse of that
+        // private, claim-lifetime file avoids a per-page 151 MB memory copy.
+        input = request.pdfFilePath;
+        const info = await lstat(input);
+        if (info.isSymbolicLink() || !info.isFile() ||
+            info.size < 5 || info.size > MAX_STAGED_FILE_BYTES)
+          return failure(SourceError.OCR_OUTPUT_INVALID,"terminal");
+        const handle = await open(input,"r");
+        try {
+          const prefix = Buffer.alloc(5);
+          const { bytesRead } = await handle.read(prefix,0,5,0);
+          if (bytesRead !== 5 || prefix.toString("ascii") !== "%PDF-")
+            return failure(SourceError.OCR_OUTPUT_INVALID,"terminal");
+        } finally { await handle.close(); }
+      } else {
+        input = join(dir,"source.pdf");
+        if (abortSignal.aborted) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
+        await writeFile(input,request.pdfBytes,{flag:"wx"});
+      }
       if (abortSignal.aborted) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
       const result: BoundedSpawnResult=await run(config.python,[
         config.script,"--pdf",input,"--page",String(request.physicalPageIndex),
@@ -197,19 +222,26 @@ export function createRapidOcrPdfOcrExecutor(
     }
   };
 
+  async function invoke(request: PdfOcrPageRequest | PdfOcrPageFileRequest): Promise<PdfOcrPageResult> {
+    if (closing) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
+    const controller = new AbortController();
+    const operation = runPage(request,controller.signal);
+    const entry = {controller,done:operation.then(()=>undefined,()=>undefined)};
+    active.add(entry);
+    try { return await operation; }
+    finally { active.delete(entry); }
+  }
+
   return {
     descriptor: {
       name:RAPIDOCR_EXECUTOR_NAME,version:RAPIDOCR_PINNED_VERSION,
       parserMode:"offline-pdf-1.6x",modelRevision:verified.modelSha256,
     },
     async extractPage(request: PdfOcrPageRequest): Promise<PdfOcrPageResult> {
-      if (closing) return failure(SourceError.OCR_PROCESS_FAILED,"transient");
-      const controller = new AbortController();
-      const operation = runPage(request,controller.signal);
-      const entry = {controller,done:operation.then(()=>undefined,()=>undefined)};
-      active.add(entry);
-      try { return await operation; }
-      finally { active.delete(entry); }
+      return await invoke(request);
+    },
+    async extractPageFile(request: PdfOcrPageFileRequest): Promise<PdfOcrPageResult> {
+      return await invoke(request);
     },
     async close(): Promise<void> {
       closing=true;

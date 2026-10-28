@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { PassThrough } from "node:stream";
+import PDFDocument from "pdfkit";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import { createIngestionService } from "../src/index.js";
+import { createIngestionService, MAX_PDF_UPLOAD_BYTES, MAX_STANDARD_UPLOAD_BYTES } from "../src/index.js";
 import { SOURCE_SNIFF_PREFIX_BYTES } from "../src/object-inspection.js";
 
 const workspaceIds: string[] = [];
@@ -125,7 +127,119 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
+describe("B03 151.5MB PDF-only upload boundary", () => {
+  it("accepts a B03-sized PDF intent without allocating or uploading the book, but rejects oversized and other formats", async () => {
+    const { user, workspace } = await createWorkspaceFixture();
+    const ctx = { userId: user.id, workspaceId: workspace.id };
+    const storage = new FakeStorageProvider();
+    const service = createIngestionService(storage);
+    const b03Bytes = 151_495_200;
+    expect(b03Bytes).toBeGreaterThan(MAX_STANDARD_UPLOAD_BYTES);
+    expect(b03Bytes).toBeLessThan(MAX_PDF_UPLOAD_BYTES);
+    const intent = await service.createUploadIntent(ctx, {
+      filename: "B03-source.pdf", mediaType: "application/pdf", sizeBytes: b03Bytes,
+    });
+    expect(intent.session).toMatchObject({
+      workspaceId: workspace.id, declaredMediaType: "application/pdf",
+      declaredSizeBytes: BigInt(b03Bytes), status: "CREATED",
+    });
+    expect(intent.upload.url).toContain("temporary/");
+    await expect(service.createUploadIntent(ctx, {
+      filename: "too-big.pdf", mediaType: "application/pdf", sizeBytes: MAX_PDF_UPLOAD_BYTES + 1,
+    })).rejects.toThrow("UPLOAD_SIZE_INVALID");
+    await expect(service.createUploadIntent(ctx, {
+      filename: "too-large.epub", mediaType: "application/epub+zip", sizeBytes: b03Bytes,
+    })).rejects.toThrow("UPLOAD_SIZE_INVALID");
+    await expect(service.createUploadIntent(ctx, {
+      filename: "too-large.txt", mediaType: "text/plain", sizeBytes: MAX_STANDARD_UPLOAD_BYTES + 1,
+    })).rejects.toThrow("UPLOAD_SIZE_INVALID");
+    expect(await prisma.uploadSession.count({ where: { workspaceId: workspace.id } })).toBe(1);
+  });
+
+  it("rejects a streamed >100MiB text body disguised as a PDF before canonical promotion", async () => {
+    const { user, workspace } = await createWorkspaceFixture();
+    const context = { userId: user.id, workspaceId: workspace.id };
+    const storage = new FakeStorageProvider();
+    const service = createIngestionService(storage);
+    const declaredSize = MAX_STANDARD_UPLOAD_BYTES + 1;
+    const { session } = await service.createUploadIntent(context, {
+      filename: "mislabelled.txt", mediaType: "application/pdf", sizeBytes: declaredSize,
+    });
+    // HEAD declares the entire stream; keep the test's resident fixture at 1MiB.
+    storage.objects.set(session.temporaryStorageKey, Uint8Array.of(0x61));
+    storage.headSizes.set(session.temporaryStorageKey, declaredSize);
+    storage.getObjectStream = async (key: string) => {
+      if (key !== session.temporaryStorageKey) throw new Error("UNEXPECTED_CANONICAL_READ");
+      return (async function* () {
+        const chunk = Buffer.alloc(1024 * 1024, 0x61);
+        let remaining = declaredSize;
+        while (remaining > 0) {
+          const length = Math.min(remaining, chunk.byteLength);
+          yield chunk.subarray(0, length);
+          remaining -= length;
+        }
+      })();
+    };
+
+    await expect(service.completeUpload(context, session.id)).rejects.toThrow("UPLOAD_SIZE_INVALID");
+    await expect(prisma.uploadSession.findUniqueOrThrow({ where: { id: session.id } }))
+      .resolves.toMatchObject({ status: "REJECTED" });
+    await expect(prisma.sourceDocument.count({ where: { workspaceId: workspace.id } })).resolves.toBe(0);
+    await expect(prisma.sourceBlob.count({ where: { workspaceId: workspace.id } })).resolves.toBe(0);
+  });
+
+  it("does not promote a B03-size declared PDF if the stored object is short or mismatched", async () => {
+    const { user, workspace } = await createWorkspaceFixture();
+    const ctx = { userId: user.id, workspaceId: workspace.id };
+    const storage = new FakeStorageProvider();
+    const service = createIngestionService(storage);
+    const intent = await service.createUploadIntent(ctx, {
+      filename: "B03-source.pdf", mediaType: "application/pdf", sizeBytes: 151_495_200,
+    });
+    // Keep the fixture tiny. HEAD and the streaming digest may not invent missing bytes.
+    storage.objects.set(intent.session.temporaryStorageKey, new Uint8Array([37, 80, 68, 70, 45]));
+    storage.headSizes.set(intent.session.temporaryStorageKey, 151_495_200);
+    await expect(service.completeUpload(ctx, intent.session.id))
+      .rejects.toThrow("UPLOAD_STORAGE_SIZE_MISMATCH");
+    await expect(prisma.sourceDocument.count({ where: { workspaceId: workspace.id } })).resolves.toBe(0);
+  });
+});
+
 describe("completeUpload", () => {
+  it("extracts native-text PDF without ever requesting whole-object bytes in the worker", async () => {
+    const storage = new FakeStorageProvider();
+    storage.forbidGetObjectBytes = true;
+    const pdf = new PDFDocument({ autoFirstPage: false });
+    const sink = new PassThrough();
+    const chunks: Buffer[] = [];
+    sink.on("data", (chunk: Buffer) => chunks.push(chunk));
+    const complete = new Promise<Buffer>((resolve) => sink.on("end", () => resolve(Buffer.concat(chunks))));
+    pdf.pipe(sink);
+    pdf.addPage().text("Native text source through verified file staging");
+    pdf.end();
+    const bytes = await complete;
+    const value = await createPendingUpload(storage, bytes, {
+      filename: "native-only.pdf", mediaType: "application/pdf",
+    });
+    const document = await value.service.completeUpload(value.context, value.session.id);
+    const run = await prisma.ingestionRun.findFirstOrThrow({
+      where: { sourceDocumentId: document.id, workspaceId: value.workspace.id },
+    });
+    outboxAggregateIds.push(run.id);
+
+    await value.service.processIngestionRun(run.id);
+    await expect(prisma.ingestionRun.findUniqueOrThrow({ where: { id: run.id } }))
+      .resolves.toMatchObject({ status: "SUCCEEDED" });
+    const extraction = await prisma.documentExtraction.findUniqueOrThrow({ where: { ingestionRunId: run.id } });
+    const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: extraction.id } });
+    expect(blocks.some(block => block.text.includes("Native text source"))).toBe(true);
+    expect(extraction.qualityStatus).toMatch(/ACCEPTED|DEGRADED/);
+    const bootstrap = await prisma.bookAnalysisBootstrap.findUniqueOrThrow({
+      where: { ingestionRunId: run.id },
+    });
+    outboxAggregateIds.push(bootstrap.id);
+  }, 40_000);
+
   it("returns the authoritative document from UploadCompletion", async () => {
     const value = await createCompletedFixture();
     const service = createIngestionService(new FakeStorageProvider());

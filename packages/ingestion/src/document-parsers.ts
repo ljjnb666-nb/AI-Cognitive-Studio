@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -233,7 +233,19 @@ export async function extractNativePdf(bytes: Uint8Array, limits: ParserLimits):
   const dir = join(tmpdir(), `ai-cognitive-pdf-${randomUUID()}`); const input = join(dir, "source.pdf");
   try {
     await mkdir(dir); await writeFile(input, bytes);
-    const child = await runPdfChild(input, limits); if (child.error) throw new Error(child.error);
+    return await extractNativePdfFile(input, limits);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+
+/** Read the source signature without loading the whole PDF into the parent worker. */
+export async function extractNativePdfFile(input: string, limits: ParserLimits): Promise<NativePdfExtraction> {
+  const handle = await open(input, "r");
+  try {
+    const header = Buffer.alloc(5);
+    const { bytesRead } = await handle.read(header, 0, header.byteLength, 0);
+    if (bytesRead !== 5 || header.toString("ascii") !== "%PDF-") throw new Error(SourceError.CORRUPTED);
+  } finally { await handle.close(); }
+  const child = await runPdfChild(input, limits); if (child.error) throw new Error(child.error);
     const records = child.pages.sort((left, right) => left.physicalPageIndex - right.physicalPageIndex);
     // Determinism guard: the child must report every physical page exactly once.
     if (records.length !== child.pageCount || records.some((record, index) => record.physicalPageIndex !== index)) throw new Error(SourceError.PARSE);
@@ -248,7 +260,6 @@ export async function extractNativePdf(bytes: Uint8Array, limits: ParserLimits):
       return { physicalPageIndex: record.physicalPageIndex, inspection, blocks: inspection.contentEvidence === "TEXT" ? pdfTextToBlocks(record.text, record.physicalPageIndex, provenance) : [] };
     });
     return { parser: parsers.pdf, pageCount: child.pageCount, inspections: pages.map((page) => page.inspection), routingPlan: planPdfRouting({ parser: parsers.pdf, inspections: pages.map((page) => page.inspection) }), pages };
-  } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
 /**

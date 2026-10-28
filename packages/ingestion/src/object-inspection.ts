@@ -20,7 +20,8 @@ export async function inspectObjectStream(stream: AsyncIterable<Uint8Array>): Pr
     const remainingPrefixBytes = SOURCE_SNIFF_PREFIX_BYTES - prefixLength;
     if (remainingPrefixBytes > 0) {
       const prefixChunk = chunk.subarray(0, remainingPrefixBytes);
-      prefixChunks.push(prefixChunk);
+      // Copy the bounded prefix: a subarray alone retains an entire large S3 stream chunk.
+      prefixChunks.push(new Uint8Array(prefixChunk));
       prefixLength += prefixChunk.byteLength;
     }
   }

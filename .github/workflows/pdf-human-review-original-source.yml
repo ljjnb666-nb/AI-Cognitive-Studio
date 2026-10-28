@@ -1,0 +1,160 @@
+name: PDF original-vs-graph human review proof
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-human-review:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-human-review-original-page-v1-20261028' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: ai_cognitive_studio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d ai_cognitive_studio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ai-cognitive-studio-dev
+      S3_ACCESS_KEY: local-development-only
+      S3_SECRET_KEY: local-development-only
+      S3_FORCE_PATH_STYLE: "true"
+      BETTER_AUTH_SECRET: phase7-ci-secret-must-be-at-least-32-characters
+      BETTER_AUTH_URL: http://localhost:3001
+      BETTER_AUTH_TRUSTED_ORIGINS: http://localhost:3001
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Require exact PR HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Verify Python RapidOCR 151MB staged-source admission and denial gates
+        run: python3 -m unittest discover -s packages/ingestion/tests/python -p 'test_*.py' -v
+      # Real CPU-model inference gate; independent from mocked page routing.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: packages/ingestion/tests/python/rapidocr-model-smoke-requirements.txt
+      - name: Install pinned RapidOCR ONNX/PyMuPDF wheels
+        timeout-minutes: 6
+        run: python -m pip install --disable-pip-version-check --only-binary=:all: -r packages/ingestion/tests/python/rapidocr-model-smoke-requirements.txt
+      - name: Execute ACTUAL RapidOCR ONNX inference of scanned synthetic PDF
+        timeout-minutes: 5
+        run: python -I -B packages/ingestion/tests/python/rapidocr_model_smoke.py
+      - name: B03 private source SHA verifier - SYNTHETIC OFFLINE tests only
+        run: python3 -m unittest discover -s tools/private-pdf-review/tests -p 'test_*.py' -v
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install frozen lockfile
+        run: pnpm install --frozen-lockfile
+      - run: docker compose up -d minio
+      - run: docker compose run --rm minio-init
+      - name: Create dedicated PostgreSQL database
+        run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
+      - run: pnpm db:generate
+      - name: Apply real PostgreSQL migrations
+        run: pnpm --filter @ai-cognitive/db prisma migrate deploy
+      - name: Verify 151.5MB PDF-only intent and fail-closed size mismatch in real PostgreSQL
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run --config vitest.integration.config.ts tests/complete-upload.integration.test.ts --reporter=verbose
+      - name: Verify 151.5 MB SYNTHETIC presigned MinIO PUT, canonical copy and streamed SHA
+        env:
+          PDF_LARGE_UPLOAD_STORAGE_PROOF: "true"
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run --config vitest.integration.config.ts tests/large-pdf-presigned-upload.integration.test.ts --reporter=verbose
+      - name: Verify VALID 151.5 MB 271-page synthetic PDF.js parse under child RSS cap
+        timeout-minutes: 4
+        env:
+          PDF_LARGE_VALID_PARSER_PROOF: "true"
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-large-valid-parser.test.ts --reporter=verbose
+      - name: Verify 151.5 MB PDF with 271 painted raster images under parser RSS cap
+        timeout-minutes: 4
+        env:
+          PDF_REFERENCED_IMAGE_PROOF: "true"
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-referenced-image-stress.test.ts --reporter=verbose
+      - name: Verify PDF parent-worker file staging and identical native PDF.js evidence
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-source-stage.test.ts tests/document-parsers.test.ts tests/rapidocr-executor.test.ts --reporter=verbose
+      - name: Verify verified-file RapidOCR dispatch through PostgreSQL durable OCR attempt
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run --config vitest.integration.config.ts tests/pdf-routing.integration.test.ts --reporter=verbose
+      - name: Verify isolated source-bound store and Worker opt-in
+        run: pnpm --filter @ai-cognitive/worker exec vitest run tests/pdf-visual-review-store.test.ts tests/pdf-visual-review.test.ts --reporter=verbose
+      - name: Verify real MinIO + PostgreSQL + Gateway encrypted receipt + candidate replay
+        run: pnpm --filter @ai-cognitive/worker exec vitest run --config vitest.integration.config.ts tests/pdf-visual-durable-receipt.integration.test.ts --reporter=verbose
+      - name: Verify untrusted graph read model
+        run: pnpm --filter @ai-cognitive/web exec vitest run --config vitest.integration.config.mts tests/pdf-visual-candidate.integration.test.ts tests/pdf-page-review.integration.test.ts tests/pdf-visual-request-policy.integration.test.ts tests/pdf-human-review.integration.test.ts tests/pdf-human-review-database.integration.test.ts tests/pdf-human-range.integration.test.ts --reporter=verbose
+      - name: Typecheck domain, ingestion, Worker and Web
+        run: |
+          pnpm --filter @ai-cognitive/storage typecheck
+          pnpm --filter @ai-cognitive/domain typecheck
+          pnpm --filter @ai-cognitive/ingestion typecheck
+          pnpm --filter @ai-cognitive/worker typecheck
+          pnpm --filter @ai-cognitive/web typecheck
+      - name: Lint changed application packages
+        run: |
+          pnpm --filter @ai-cognitive/storage lint
+          pnpm --filter @ai-cognitive/worker lint
+          pnpm --filter @ai-cognitive/web lint
+      - name: Build Next.js UI for genuine Chromium interaction
+        run: pnpm --filter @ai-cognitive/web build
+      - name: Install Playwright Chromium
+        run: pnpm --filter @ai-cognitive/web exec playwright install --with-deps chromium msedge
+      - name: Real Chromium and Microsoft Edge + Better Auth + PostgreSQL/MinIO human review flow
+        run: pnpm --filter @ai-cognitive/web exec playwright test --config playwright.pdf-human-browser.config.ts --reporter=line
+      - name: Upload synthetic browser evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-human-browser-synthetic-${{ github.event.pull_request.head.sha }}
+          path: output/playwright/pdf-human-browser
+          if-no-files-found: ignore
+      - name: Scope of proof
+        run: |
+          echo 'PDF_VISUAL_REVIEW_POSTGRESQL=REAL'
+          echo 'PDF_VISUAL_REVIEW_MINIO=REAL'
+          echo 'PDF_VISUAL_REVIEW_PROVIDER=MOCK'
+          echo 'PDF_VISUAL_REVIEW_GRAPH=UNVERIFIED'
+          echo 'PDF_VISUAL_REVIEW_STORAGE_TTL=24H'
+          echo 'PDF_HUMAN_REVIEW_CHROMIUM_AND_EDGE_LINUX_E2E=REAL_SYNTHETIC_PDF'
+          echo 'PDF_HUMAN_REVIEW_CHROMIUM_NATIVE_VIEWER_PIXEL_RENDER=NOT_ASSERTED'
+          echo 'PDF_REVIEW_LARGE_SOURCE_RANGE=TESTED_SHA_ATTESTATION'
+          echo 'PDF_REVIEW_MAX_RANGE_BYTES=8388608'
+          echo 'B03_LOCAL_SHA_SCRIPT_SYNTHETIC_TESTS=RUN'
+          echo 'B03_REAL_WINDOWS_PRIVATE_PDF_BYTES=NOT_ACCESSED'
+          echo 'B03_PDF_UPLOAD_INTENT_BYTES=151495200'
+          echo 'PDF_UPLOAD_LIMIT_BYTES=209715200'
+          echo 'NON_PDF_UPLOAD_LIMIT_BYTES=104857600'
+          echo 'B03_SYNTHETIC_151495200_PRESIGNED_PUT_AND_CANONICAL_SHA=TESTED'
+          echo 'B03_VALID_SYNTHETIC_151495200_271PAGE_PDFJS_RSS=TESTED_ON_EXACT_HEAD'
+          echo 'B03_REAL_PRIVATE_PUT_AND_FULL_PARSER=NOT_TESTED'
+          echo 'PDF_HUMAN_REVIEW_PAID_MODEL=NOT_CALLED'
+          echo 'PDF_HUMAN_REVIEW_PODCAST_AUTHORITY=FALSE'
+          echo 'PDF_VISUAL_REQUEST_OPT_IN_DEFAULT=OFF'
+          echo 'PDF_VISUAL_REQUEST_REAL_DB_SINGLE_ATTEMPT=TESTED'
+          echo 'PDF_VISUAL_REVIEW_PRODUCTION_QUEUE=OFF'

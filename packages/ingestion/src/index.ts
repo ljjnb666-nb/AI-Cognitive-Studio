@@ -1,5 +1,6 @@
 export { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { prisma } from "@ai-cognitive/db";
 import { buildEpubProductIdentityCandidate, CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
 import type { EpubExtractionMetadata } from "@ai-cognitive/domain";
@@ -13,6 +14,7 @@ import { claimIngestionRun, completeRunSuccess, INGESTION_EXECUTION_OWNERSHIP_LO
 import { writeRoutingOutcome } from "./ocr-durability.js";
 import { classifyIngestionFailure, ingestionStatusForTerminalFailure } from "./ingestion-failure.js";
 import { runPdfExtraction, type PdfRunExtraction } from "./pdf-run.js";
+import { withVerifiedPdfSourceFile } from "./pdf-source-stage.js";
 import { OcrCapacityDeferredError, OcrCapacityDeferralError } from "./ocr-capacity-errors.js";
 import { PDF_EXTRACTION_PARSER, pdfRoutingOutcome, type PdfOcrExecutor } from "./pdf-routing.js";
 import { evaluateEpubExtractionQuality, type EpubExtractionQualityDecision } from "./epub-quality.js";
@@ -61,7 +63,9 @@ const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").m
 const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
 
 /** Service options; pdfOcrExecutor is a test seam until 04B-2's production cutover (none in 04B-2). */
-export type IngestionServiceOptions = { maxUploadBytes: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor };
+export const MAX_STANDARD_UPLOAD_BYTES = 100 * 1024 * 1024;
+export const MAX_PDF_UPLOAD_BYTES = 200 * 1024 * 1024;
+export type IngestionServiceOptions = { maxUploadBytes: number; maxPdfUploadBytes?: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor };
 
 /**
  * Canonical v1 write gate for SourceBlock.metadata, keyed on the authoritative
@@ -120,11 +124,15 @@ export function sniffMediaType(bytes: Uint8Array, declared: string, filename: st
   if (declared === "text/plain" || /\.(txt|text)$/.test(lower)) return "text/plain";
   throw new Error(SourceError.TYPE_MISMATCH);
 }
-export function createIngestionService(storage: StorageProvider, options: IngestionServiceOptions = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3 }) {
+export function createIngestionService(storage: StorageProvider, options: IngestionServiceOptions = { maxUploadBytes: MAX_STANDARD_UPLOAD_BYTES, maxPdfUploadBytes: MAX_PDF_UPLOAD_BYTES, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3 }) {
   async function assertMembership(context: TrustedRequestContext) { const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context } }); if (!member) throw new Error("WORKSPACE_ACCESS_DENIED"); }
   return {
     async createUploadIntent(context: TrustedRequestContext, input: { filename: string; mediaType: string; sizeBytes: number }) {
-      await assertMembership(context); if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0 || input.sizeBytes > options.maxUploadBytes) throw new Error("UPLOAD_SIZE_INVALID");
+      await assertMembership(context); const maxBytes = input.mediaType === "application/pdf"
+        ? (options.maxPdfUploadBytes ?? options.maxUploadBytes)
+        : Math.min(options.maxUploadBytes, MAX_STANDARD_UPLOAD_BYTES);
+      if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0 || input.sizeBytes > maxBytes)
+        throw new Error("UPLOAD_SIZE_INVALID");
       const id = randomUUID(); const temporaryStorageKey = `temporary/${context.workspaceId}/${id}`; const expiresAt = new Date(Date.now() + options.uploadTtlSeconds * 1000);
       const session = await prisma.uploadSession.create({ data: { id, workspaceId: context.workspaceId, originalFilename: safeFilename(input.filename), declaredMediaType: input.mediaType, declaredSizeBytes: input.sizeBytes, temporaryStorageKey, expiresAt } });
       const upload = await storage.createPresignedUpload({ key: temporaryStorageKey, contentType: input.mediaType, expiresInSeconds: options.uploadTtlSeconds }); return { session, upload };
@@ -153,11 +161,24 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
       }
       try {
         if (session.expiresAt < new Date()) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "EXPIRED"); throw new Error("UPLOAD_EXPIRED"); }
-        const head = await storage.headObject(session.temporaryStorageKey); if (!head || head.size !== Number(session.declaredSizeBytes) || head.size > options.maxUploadBytes) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED"); throw new Error("UPLOAD_SIZE_INVALID"); }
+        const maxCompletionBytes = session.declaredMediaType === "application/pdf"
+          ? (options.maxPdfUploadBytes ?? options.maxUploadBytes)
+          : Math.min(options.maxUploadBytes, MAX_STANDARD_UPLOAD_BYTES);
+        const head = await storage.headObject(session.temporaryStorageKey); if (!head || head.size !== Number(session.declaredSizeBytes) || head.size > maxCompletionBytes) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED"); throw new Error("UPLOAD_SIZE_INVALID"); }
         if (!await renewCompletionClaim(context.workspaceId, session.id, claim.token, options.completionLeaseMs)) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST");
         const inspected = await inspectObjectStream(await storage.getObjectStream(session.temporaryStorageKey));
         if (inspected.sizeBytes !== head.size || inspected.sizeBytes !== Number(session.declaredSizeBytes)) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED"); throw new Error("UPLOAD_STORAGE_SIZE_MISMATCH"); }
-        const mediaType = sniffMediaType(inspected.prefix, session.declaredMediaType, session.originalFilename); const digest = inspected.sha256; const storageKey = `workspaces/${context.workspaceId}/source-blobs/${digest}`;
+        const mediaType = sniffMediaType(inspected.prefix, session.declaredMediaType, session.originalFilename);
+        // A PDF-sized upload intent must not promote a >100MiB TXT/Markdown/EPUB
+        // payload merely because the client declared application/pdf.
+        const actualMaxBytes = mediaType === "application/pdf"
+          ? (options.maxPdfUploadBytes ?? options.maxUploadBytes)
+          : Math.min(options.maxUploadBytes, MAX_STANDARD_UPLOAD_BYTES);
+        if (inspected.sizeBytes > actualMaxBytes) {
+          await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED");
+          throw new Error("UPLOAD_SIZE_INVALID");
+        }
+        const digest = inspected.sha256; const storageKey = `workspaces/${context.workspaceId}/source-blobs/${digest}`;
         if (!await renewCompletionClaim(context.workspaceId, session.id, claim.token, options.completionLeaseMs)) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST");
         const existing = await prisma.sourceBlob.findUnique({ where: { workspaceId_sha256: { workspaceId: context.workspaceId, sha256: digest } } });
         let canonicalWasCreated = false;
@@ -209,7 +230,6 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
         void renewIngestionRunClaim(runId, claim.token).then((renewed) => { if (!renewed) ownershipLost = true; }).catch(() => { ownershipLost = true; });
       }, RUN_RENEW_INTERVAL_MS);
       try {
-        const bytes = await storage.getObjectBytes(run.sourceDocument.storageKey);
         const limits = { ...DEFAULT_PARSER_LIMITS, maxPdfPages: options.maxPdfPages };
         // PDFs run the 04B-2 routing pipeline: inspect → write-once routing
         // plan → native extraction + OCR executor seam → merged page-level
@@ -217,18 +237,30 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
         let parsed: Parsed;
         let pdfRouting: Extract<PdfRunExtraction, { kind: "PUBLISH" }> | null = null;
         if (run.sourceDocument.mediaType === "application/pdf") {
-          const extraction = await runPdfExtraction({
-            runId: run.id,
-            workspaceId: run.workspaceId,
-            sourceDocumentId: run.sourceDocumentId,
-            persistedRoutingPlan: run.routingPlan,
-            persistedRoutingGeneration: run.routingGeneration,
-            runExecutionToken: claim.token,
-            pdfBytes: bytes,
-            limits,
-            storage,
-            executor: options.pdfOcrExecutor,
-            ownershipLost: () => ownershipLost,
+          // Do not allocate the entire PDF in the parent worker merely to
+          // create the PDF.js child input. Verify immutable SourceDocument
+          // identity while streaming to a claim-scoped private temp file.
+          const sourceStream = await storage.getObjectStream(run.sourceDocument.storageKey);
+          const extraction = await withVerifiedPdfSourceFile(sourceStream, {
+            sha256: run.sourceDocument.sha256,
+            sizeBytes: Number(run.sourceDocument.sizeBytes),
+            maxBytes: Math.min(options.maxPdfUploadBytes ?? options.maxUploadBytes, MAX_PDF_UPLOAD_BYTES),
+          }, async (pdfFilePath) => {
+            let ocrBytes: Promise<Uint8Array> | undefined;
+            return await runPdfExtraction({
+              runId: run.id,
+              workspaceId: run.workspaceId,
+              sourceDocumentId: run.sourceDocumentId,
+              persistedRoutingPlan: run.routingPlan,
+              persistedRoutingGeneration: run.routingGeneration,
+              runExecutionToken: claim.token,
+              pdfFilePath,
+              loadPdfBytes: () => (ocrBytes ??= readFile(pdfFilePath)),
+              limits,
+              storage,
+              executor: options.pdfOcrExecutor,
+              ownershipLost: () => ownershipLost,
+            });
           });
           if (extraction.kind !== "PUBLISH") {
             // No partial publication. RF01 P1-03: the routing outcome and the
@@ -245,6 +277,7 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
           parsed = extraction.parsed;
           pdfRouting = extraction;
         } else {
+          const bytes = await storage.getObjectBytes(run.sourceDocument.storageKey);
           parsed = await parseDocument(bytes, run.sourceDocument.mediaType, limits);
         }
         const canonicalBlocks = parsed.pages.flatMap((page) => page.blocks);

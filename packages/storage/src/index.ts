@@ -9,13 +9,15 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-export type ObjectHead = { key: string; size: number; contentType?: string };
+export type ObjectHead = { key: string; size: number; contentType?: string; etag?: string };
 export type PutObjectInput = { key: string; body: Uint8Array; contentType: string };
 export type PresignedUpload = { url: string; headers: Record<string, string> };
 export type StorageProvider = {
   createPresignedUpload(input: { key: string; contentType: string; expiresInSeconds: number }): Promise<PresignedUpload>;
   headObject(key: string): Promise<ObjectHead | null>;
-  getObjectStream(key: string): Promise<AsyncIterable<Uint8Array>>;
+  getObjectStream(key: string, options?: { ifMatch?: string }): Promise<AsyncIterable<Uint8Array>>;
+  /** Conditional, bounded private byte-range read. Never a public/presigned URL. */
+  getObjectRangeStream?(key: string, input: { start: number; end: number; totalSize: number; ifMatch: string }): Promise<{ stream: AsyncIterable<Uint8Array>; length: number }>;
   /** @deprecated Transitional compatibility method; migrate callers to getObjectStream. */
   getObjectBytes(key: string): Promise<Uint8Array>;
   putObject(input: PutObjectInput): Promise<void>;
@@ -66,16 +68,35 @@ export class S3CompatibleStorageProvider implements StorageProvider {
 
   async headObject(key: string): Promise<ObjectHead | null> {
     assertKey(key);
-    try { const result = await this.serverClient.send(new HeadObjectCommand({ Bucket: this.config.bucket, Key: key })); return { key, size: result.ContentLength ?? 0, contentType: result.ContentType }; }
+    try { const result = await this.serverClient.send(new HeadObjectCommand({ Bucket: this.config.bucket, Key: key })); return { key, size: result.ContentLength ?? 0, contentType: result.ContentType, etag: result.ETag }; }
     catch (error) { if (isNotFound(error)) return null; throw error; }
   }
 
-  async getObjectStream(key: string): Promise<AsyncIterable<Uint8Array>> {
+  async getObjectStream(key: string, options?: { ifMatch?: string }): Promise<AsyncIterable<Uint8Array>> {
     assertKey(key);
-    const result = await this.serverClient.send(new GetObjectCommand({ Bucket: this.config.bucket, Key: key }));
+    const result = await this.serverClient.send(new GetObjectCommand({ Bucket: this.config.bucket, Key: key, IfMatch: options?.ifMatch }));
     const body = result.Body as AsyncIterable<Uint8Array> | undefined;
     if (!body || !body[Symbol.asyncIterator]) throw new Error("STORAGE_STREAM_UNAVAILABLE");
     return body;
+  }
+
+  async getObjectRangeStream(key: string, input: { start: number; end: number; totalSize: number; ifMatch: string }): Promise<{ stream: AsyncIterable<Uint8Array>; length: number }> {
+    assertKey(key);
+    if (!Number.isSafeInteger(input.start) || !Number.isSafeInteger(input.end) ||
+        input.start < 0 || input.end < input.start || !Number.isSafeInteger(input.totalSize) ||
+        input.totalSize <= input.end || !/^"[a-zA-Z0-9-]{8,128}"$/.test(input.ifMatch))
+      throw new Error("STORAGE_INVALID_RANGE");
+    const result = await this.serverClient.send(new GetObjectCommand({
+      Bucket: this.config.bucket, Key: key,
+      Range: `bytes=${input.start}-${input.end}`, IfMatch: input.ifMatch,
+    }));
+    const body = result.Body as AsyncIterable<Uint8Array> | undefined;
+    if (!body || !body[Symbol.asyncIterator] ||
+        result.ETag !== input.ifMatch ||
+        result.ContentRange !== `bytes ${input.start}-${input.end}/${input.totalSize}` ||
+        result.ContentLength !== input.end - input.start + 1)
+      throw new Error("STORAGE_RANGE_RESPONSE_INVALID");
+    return { stream: body, length: input.end - input.start + 1 };
   }
 
   async getObjectBytes(key: string): Promise<Uint8Array> {

@@ -1,0 +1,7 @@
+# GitHub Ubuntu Python 3.11 synthetic-only OCR proof, not application runtime.
+# All packages come from PyPI wheels; model weights are shipped by rapidocr.
+rapidocr==3.9.2
+onnxruntime==1.22.1
+PyMuPDF==1.26.6
+numpy==2.2.6
+Pillow==11.3.0

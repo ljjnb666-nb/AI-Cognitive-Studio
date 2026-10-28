@@ -3,7 +3,7 @@ import { sha256Utf8 } from "@ai-cognitive/domain";
 import { logger } from "@ai-cognitive/shared";
 import { inspectPdfMixedContentShadow } from "./pdf-mixed-content-shadow.js";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import { extractNativePdf, pdfTextToBlocks, type Parsed, type ParsedBlock, type ParserLimits } from "./document-parsers.js";
+import { extractNativePdf, extractNativePdfFile, pdfTextToBlocks, type Parsed, type ParsedBlock, type ParserLimits } from "./document-parsers.js";
 import { INGESTION_EXECUTION_OWNERSHIP_LOST } from "./ingestion-run-claim.js";
 import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, failOcrPageAttempt, writeRoutingPlan } from "./ocr-durability.js";
 import { PDF_EXTRACTION_PARSER, PDF_ROUTING_GENERATION, assertRoutingPlanReplay, evaluatePdfExtractionQuality, parseRoutingPlan, type PdfExtractionQualityDecision, type PdfOcrExecutor, type PdfOcrPageResult, type PdfPageExtractionOutcome, type PdfRoutingPlan } from "./pdf-routing.js";
@@ -20,14 +20,16 @@ export type PdfRunExtractionInput = {
   persistedRoutingGeneration: number | null;
   /** The caller's live IngestionRun execution claim token (P1-02 authority). */
   runExecutionToken: string;
-  pdfBytes: Uint8Array;
   limits: ParserLimits;
   storage: StorageProvider;
   /** Absent in 04B-2 production; tests inject fake executors. */
   executor?: PdfOcrExecutor;
   /** Observed execution-lease loss — checked before every durable write. */
   ownershipLost: () => boolean;
-};
+} & (
+  | { pdfBytes: Uint8Array; pdfFilePath?: never; loadPdfBytes?: never }
+  | { pdfBytes?: never; pdfFilePath: string; loadPdfBytes: () => Promise<Uint8Array> }
+);
 
 export type PdfRunExtraction =
   | { kind: "PUBLISH"; parsed: Parsed; routingPlan: PdfRoutingPlan; routingGeneration: number; decision: PdfExtractionQualityDecision }
@@ -35,7 +37,9 @@ export type PdfRunExtraction =
   | { kind: "REJECTED"; routingPlan: PdfRoutingPlan; routingGeneration: number; decision: PdfExtractionQualityDecision };
 
 export async function runPdfExtraction(input: PdfRunExtractionInput): Promise<PdfRunExtraction> {
-  const native = await extractNativePdf(input.pdfBytes, input.limits);
+  const native = input.pdfFilePath === undefined
+    ? await extractNativePdf(input.pdfBytes, input.limits)
+    : await extractNativePdfFile(input.pdfFilePath, input.limits);
   const generation = input.persistedRoutingGeneration ?? PDF_ROUTING_GENERATION;
 
   // Routing plan replay fence: a persisted plan is immutable history — reuse
@@ -153,7 +157,20 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
     const startedAt = Date.now();
     let result: PdfOcrPageResult;
     try {
-      result = await executor.extractPage({ ...key, runExecutionToken: input.runExecutionToken, pdfBytes: input.pdfBytes });
+      // A verified, claim-lifetime PDF path is already available to the parent
+      // Worker. File-capable OCR engines use it without allocating or copying
+      // the entire document for each claimed physical page. Legacy engines
+      // retain the existing lazy bytes path and durable attempt behavior.
+      if (input.pdfFilePath !== undefined && executor.extractPageFile) {
+        result = await executor.extractPageFile({
+          ...key, runExecutionToken: input.runExecutionToken, pdfFilePath: input.pdfFilePath,
+        });
+      } else {
+        const pdfBytes = input.pdfBytes === undefined
+          ? await input.loadPdfBytes()
+          : input.pdfBytes;
+        result = await executor.extractPage({ ...key, runExecutionToken: input.runExecutionToken, pdfBytes });
+      }
     } catch {
       result = { status: "FAILED", errorCode: SourceError.PARSE, kind: "transient" };
     }

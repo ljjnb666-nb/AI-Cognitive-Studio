@@ -71,6 +71,22 @@ jobs:
         run: pnpm typecheck
       - name: Build
         run: pnpm build
+      # Branch-gated real Python inference on a synthetic raster-only PDF.
+      # Kept in the observable static job to avoid a hidden 16th workflow run.
+      - uses: actions/setup-python@v5
+        if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-human-review-original-page-v1-20261028' }}
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: packages/ingestion/tests/python/rapidocr-model-smoke-requirements.txt
+      - name: Install pinned RapidOCR and ONNX wheels for image-only inference
+        if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-human-review-original-page-v1-20261028' }}
+        timeout-minutes: 6
+        run: python -m pip install --disable-pip-version-check --only-binary=:all: -r packages/ingestion/tests/python/rapidocr-model-smoke-requirements.txt
+      - name: REAL ONNX RapidOCR scanned PDF exact-head smoke
+        if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-human-review-original-page-v1-20261028' }}
+        timeout-minutes: 5
+        run: python -I -B packages/ingestion/tests/python/rapidocr_model_smoke.py
 
   # ---------------------------------------------------------------------------
   # Domain 2 — core-tests: unit, integration, provider gates, Phases 1-5.

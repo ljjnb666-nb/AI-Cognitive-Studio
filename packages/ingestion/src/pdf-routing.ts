@@ -200,6 +200,11 @@ export type PdfOcrExecutorDescriptor = { name: string; version: string; parserMo
  * untouched: the token is ownership lineage only, never a quality/routing input.
  */
 export type PdfOcrPageRequest = { ingestionRunId: string; workspaceId: string; sourceDocumentId: string; physicalPageIndex: number; routingGeneration: number; runExecutionToken: string; pdfBytes: Uint8Array };
+/** File-backed OCR request: accepted only by executors that explicitly
+ * support verified, private, claim-lifetime staged PDF files. The existing
+ * byte-based contract remains mandatory for all legacy executors. */
+export type PdfOcrPageFileRequest = Omit<PdfOcrPageRequest, "pdfBytes"> & { pdfFilePath: string };
+
 export type PdfOcrPageResult =
   | { status: "SUCCEEDED"; text: string }
   | { status: "FAILED"; errorCode: string; kind: "transient" | "terminal"; nextAttemptAt?: Date };
@@ -207,6 +212,8 @@ export type PdfOcrPageResult =
 export interface PdfOcrExecutor {
   readonly descriptor: PdfOcrExecutorDescriptor;
   extractPage(request: PdfOcrPageRequest): Promise<PdfOcrPageResult>;
+  /** Optional verified-file entry; called only after the durable OCR attempt is claimed. */
+  extractPageFile?(request: PdfOcrPageFileRequest): Promise<PdfOcrPageResult>;
 }
 
 // ---------------------------------------------------------------------------

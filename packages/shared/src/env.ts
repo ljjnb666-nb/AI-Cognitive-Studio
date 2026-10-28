@@ -27,6 +27,7 @@ export const environmentSchema = z.object({
   WORKER_SHORT_VIDEO_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(1),
   OUTBOX_DISPATCH_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(1),
   SOURCE_MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(104857600),
+  SOURCE_MAX_PDF_UPLOAD_BYTES: z.coerce.number().int().positive().max(536870912).default(209715200),
   SOURCE_MAX_PDF_PAGES: z.coerce.number().int().positive().default(2000),
   SOURCE_PARSE_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
   // Real PDF OCR executor (BOOK-INGESTION-04B-3). Everything is optional:

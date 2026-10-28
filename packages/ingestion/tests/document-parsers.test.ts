@@ -1,9 +1,14 @@
 import { crc32, deflateRawSync } from "node:zlib";
+import { createHash } from "node:crypto";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import PDFDocument from "pdfkit";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_PARSER_LIMITS, epubChildArgs, parseDocument, runNative } from "../src/document-parsers.js";
+import { DEFAULT_PARSER_LIMITS, epubChildArgs, extractNativePdf, extractNativePdfFile, parseDocument, runNative } from "../src/document-parsers.js";
+import { withVerifiedPdfSourceFile } from "../src/pdf-source-stage.js";
 
 type Entry = { name: string; text: string; deflate?: boolean; descriptor?: boolean; omitDescriptor?: boolean };
 function zip(entries: Entry[]): Uint8Array {
@@ -155,6 +160,74 @@ describe("safe EPUB parser", () => {
 });
 
 describe("isolated PDF parser", () => {
+  it("parses a valid 17 MiB PDF with a bounded stream and identical native evidence", async () => {
+    // A large unreferenced PDF stream, not a pathological whitespace gap:
+    // PDF.js must seek across the file while page evidence remains identical.
+    // No real book bytes, models or OCR are involved.
+    const dir = await mkdtemp(join(tmpdir(), "pdf-local-range-test-"));
+    async function makePdf(path: string, payloadBytes: number) {
+      const text = "BT /F1 18 Tf 50 700 Td (Native ranged PDF evidence) Tj ET\n";
+      const objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        "<< /Length " + Buffer.byteLength(text) + " >>\nstream\n" + text + "endstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+      ];
+      let prefix = "%PDF-1.4\n";
+      const offsets = [0];
+      objects.forEach((value, index) => {
+        offsets.push(Buffer.byteLength(prefix));
+        prefix += (index + 1) + " 0 obj\n" + value + "\nendobj\n";
+      });
+      const payloadOffset = Buffer.byteLength(prefix);
+      offsets.push(payloadOffset);
+      const header = "6 0 obj\n<< /Length " + payloadBytes + " >>\nstream\n";
+      const tail = "\nendstream\nendobj\n";
+      const xrefPosition = payloadOffset + Buffer.byteLength(header) + payloadBytes + Buffer.byteLength(tail);
+      const table = [
+        "xref", "0 7", "0000000000 65535 f ",
+        ...offsets.slice(1).map((offset) => String(offset).padStart(10, "0") + " 00000 n "),
+        "trailer", "<< /Size 7 /Root 1 0 R >>", "startxref",
+        String(xrefPosition), "%%EOF", "",
+      ].join("\n");
+      await writeFile(path, prefix + header);
+      const file = await open(path, "a");
+      try {
+        const spaces = Buffer.alloc(1024 * 1024, 0x20);
+        for (let remaining = payloadBytes; remaining > 0;) {
+          const size = Math.min(remaining, spaces.length);
+          await file.writeFile(spaces.subarray(0, size));
+          remaining -= size;
+        }
+        await file.writeFile(tail + table);
+      } finally { await file.close(); }
+    }
+    try {
+      const small = join(dir, "small.pdf"), large = join(dir, "large.pdf");
+      await makePdf(small, 0);
+      await makePdf(large, 17 * 1024 * 1024);
+      const baseline = await extractNativePdfFile(small, DEFAULT_PARSER_LIMITS);
+      const ranged = await extractNativePdfFile(large, { ...DEFAULT_PARSER_LIMITS, pdfTimeoutMs: 45_000 });
+      expect(ranged).toEqual(baseline);
+      expect(ranged.pages[0]?.blocks.some((block) => block.text.includes("Native ranged PDF evidence"))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+  it("extracts identical native evidence through SHA-verified staged PDF without caller-side buffer", async () => {
+    const bytes = await pdf(["A source-bound paragraph", "Second physical page"]);
+    const original = await extractNativePdf(bytes, DEFAULT_PARSER_LIMITS);
+    const fromFile = await withVerifiedPdfSourceFile((async function* () {
+      for (let pos = 0; pos < bytes.byteLength; pos += 101)
+        yield bytes.subarray(pos, pos + 101);
+    })(), {
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      maxBytes: 200 * 1024 * 1024,
+    }, async (path) => extractNativePdfFile(path, DEFAULT_PARSER_LIMITS));
+    expect(fromFile).toEqual(original);
+  }, 30_000);
   it("extracts ordered conservative paragraph blocks through the memory-capped child", async () => { const parsed = await parseDocument(await pdf(["Hello PDF", "Second Page"]), "application/pdf"); expect(parsed.parser.name).toBe("pdfjs-isolated"); expect(parsed.pages.map((page) => page.physicalPageIndex)).toEqual([0, 1]); expect(parsed.pages.flatMap((page) => page.blocks)).toMatchObject([{ kind: "PARAGRAPH", text: "Hello PDF" }, { kind: "PARAGRAPH", text: "Second Page" }]); });
   it("attaches a physical-page locator and native provenance to every block without fabricating bbox or confidence", async () => { const parsed = await parseDocument(await pdf(["Hello PDF", "Second Page"]), "application/pdf"); for (const [pageIndex, page] of parsed.pages.entries()) for (const block of page.blocks) { expect(block.locator).toEqual({ kind: "pdf", physicalPageIndex: pageIndex, printedPageLabel: null }); expect(block.provenance).toEqual({ sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" }); expect(block.bbox).toBeUndefined(); expect(block.provenance?.confidence ?? null).toBeNull(); } });
   it("classifies password, OCR, page, and output limits in the child", async () => { await expect(parseDocument(await pdf(["secret"], { userPassword: "secret" }), "application/pdf")).rejects.toThrow("SOURCE_PASSWORD_REQUIRED"); await expect(parseDocument(await pdf([null]), "application/pdf")).rejects.toThrow("SOURCE_OCR_REQUIRED"); await expect(parseDocument(await pdf(["one", "two", "three"]), "application/pdf", { maxPdfPages: 2 })).rejects.toThrow("SOURCE_TOO_LARGE"); await expect(parseDocument(await pdf(["x".repeat(500)]), "application/pdf", { maxPdfOutputChars: 50 })).rejects.toThrow("SOURCE_TOO_LARGE"); }, 30_000);
