@@ -13,7 +13,7 @@ export default async function PdfSourceReviewPage({
   params, searchParams,
 }: {
   params: Promise<{ sourceDocumentId: string }>;
-  searchParams: Promise<{ page?: string | string[] }>;
+  searchParams: Promise<{ page?: string | string[]; physicalPage?: string | string[] }>;
 }) {
   const { sourceDocumentId } = await params;
   let source: Awaited<ReturnType<typeof sourceDetail>>;
@@ -27,11 +27,19 @@ export default async function PdfSourceReviewPage({
   }
   if (source.mediaType !== "application/pdf") notFound();
 
-  const rawPage = (await searchParams).page;
+  const query = await searchParams;
+  const rawPage = query.page;
+  const rawPhysicalPage = query.physicalPage;
+  if (rawPage !== undefined && rawPhysicalPage !== undefined) notFound();
+  if (rawPhysicalPage !== undefined &&
+      (typeof rawPhysicalPage !== "string" || !/^[1-9]\d{0,3}$/.test(rawPhysicalPage) ||
+       Number(rawPhysicalPage) > 2000)) notFound();
   if (rawPage !== undefined &&
       (typeof rawPage !== "string" || !/^(0|[1-9]\d{0,3})$/.test(rawPage) ||
        Number(rawPage) > 1999)) notFound();
-  const physicalPageIndex = typeof rawPage === "string" ? Number(rawPage) : 0;
+  const physicalPageIndex = typeof rawPhysicalPage === "string"
+    ? Number(rawPhysicalPage) - 1
+    : typeof rawPage === "string" ? Number(rawPage) : 0;
   const title = projectBookDisplay({
     fileName: source.source.displayName,
     workTitle: source.source.edition?.work.title,
@@ -139,8 +147,15 @@ export default async function PdfSourceReviewPage({
             display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between",
             gap: 12, marginBottom: 20,
           }}>
-            <span>第 <strong>{physicalPageIndex + 1}</strong> 物理页 · 当前提取记录共 {pages} 页</span>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span>第 <strong>{physicalPageIndex + 1}</strong> 物理页 · 当前提取记录已记录 {pages} 个来源页</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <form method="get" action={`/studio/library/${source.id}/review`} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label htmlFor="pdf-review-physical-page">跳转到物理页</label>
+                <input id="pdf-review-physical-page" name="physicalPage" type="number"
+                  min={1} max={2000} step={1} required defaultValue={physicalPageIndex + 1}
+                  style={{ width: 85 }} />
+                <button type="submit" className="btn btn-secondary">跳转</button>
+              </form>
               {physicalPageIndex > 0 ? <Link href={pageHref(physicalPageIndex - 1)} className="btn btn-secondary">上一页</Link> : null}
               {physicalPageIndex + 1 < pages ? <Link href={pageHref(physicalPageIndex + 1)} className="btn btn-secondary">下一页</Link> : null}
             </div>
@@ -175,11 +190,10 @@ export default async function PdfSourceReviewPage({
                 <p role="status">此物理页没有对应的已存档来源页。可能是 OCR 待处理或旧版提取记录缺失，不应据此推断原书为空白。</p>
               )}
             </section>
-            <div style={{ display: "grid", gridTemplateColumns: visual ? "repeat(auto-fit, minmax(min(100%, 440px), 1fr))" : "1fr", gap: 20, alignItems: "start" }}>
-            {visual ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 440px), 1fr))", gap: 20, alignItems: "start" }}>
               <section className="card-panel" aria-labelledby="pdf-human-original-heading">
                 <h2 id="pdf-human-original-heading" style={{ fontSize: 20, marginTop: 0 }}>原始 PDF · 第 {physicalPageIndex + 1} 物理页</h2>
-                <p>页面来自已验证 SHA 的私有原书。可在原页上定位图表位置，必要时放大浏览。这里不是 AI 生成图。</p>
+                <p>来自已授权、经过来源 SHA 校验的私有 PDF。无需运行或付费调用视觉模型即可对照 OCR 文字；图表识别候选属于独立审核流程。</p>
                 <iframe
                   title={"已授权原始 PDF，物理页 " + (physicalPageIndex + 1)}
                   src={"/api/studio/pdf-visual-review/" + source.id + "/source-pdf#page=" + (physicalPageIndex + 1)}
@@ -192,7 +206,6 @@ export default async function PdfSourceReviewPage({
                 </p>
                 <p style={{ fontSize: 12 }}>原书只通过工作区授权接口返回，不生成公开分享链接。大文件可能加载较慢。</p>
               </section>
-            ) : null}
             <section className="card-panel" aria-labelledby="pdf-visual-review-heading">
               <h2 id="pdf-visual-review-heading" style={{ fontSize: 20, marginTop: 0 }}>图表与关系 · 模型候选（未人工核验）</h2>
               {visual ? (
