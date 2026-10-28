@@ -224,7 +224,23 @@ describe("mixed PDF routing (real PostgreSQL)", () => {
     // the actual PyMuPDF -> RapidOCR Python path independently.
     const bytes = await mixedPdf();
     const storage = new FakeStorageProvider();
-    const { workspace, run } = await createPdfRunFixture(bytes, storage);
+    const { workspace, run, storageKey } = await createPdfRunFixture(bytes, storage);
+    // Verified source must be streamed into the private stage, never
+    // fetched as whole bytes for RapidOCR's OCR_REQUIRED page.
+    const source = storage.objects.get(storageKey)!;
+    storage.getObjectStream = async (key: string) => {
+      if (key !== storageKey) throw new Error("UNEXPECTED_SOURCE_STREAM");
+      return (async function* () { yield source; })();
+    };
+    const originalGetBytes = storage.getObjectBytes.bind(storage);
+    let wholeSourceReads = 0;
+    storage.getObjectBytes = async (key: string) => {
+      if (key === storageKey) {
+        wholeSourceReads++;
+        throw new Error("FULL_SOURCE_READ_FORBIDDEN");
+      }
+      return await originalGetBytes(key);
+    };
     const modelSha = "a".repeat(64);
     let called = 0;
     let temporaryPdfPath: string | null = null;
@@ -261,6 +277,7 @@ describe("mixed PDF routing (real PostgreSQL)", () => {
 
     await service.processIngestionRun(run.id);
     expect(called).toBe(1);
+    expect(wholeSourceReads).toBe(0);
     expect(temporaryPdfPath).not.toBeNull();
     await expect(stat(temporaryPdfPath!)).rejects.toMatchObject({ code: "ENOENT" });
 
