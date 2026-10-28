@@ -133,6 +133,20 @@ test("real Chromium: logged-in PDF original page, graph, confirm/withdraw/reject
   const route = "/studio/library/" + f.doc.id + "/review?page=1";
 
   try {
+    // No graph candidate on physical page 1: reading the original must still
+    // work without paid visual calls, and non-contiguous source pages can be
+    // reached by physical page number rather than dozens of Next clicks.
+    await page.goto("/studio/library/" + f.doc.id + "/review?physicalPage=1");
+    await expect(page.getByRole("heading", {name:"原始 PDF · 第 1 物理页"})).toBeVisible();
+    await expect(page.locator('iframe[title*="原始 PDF"]'))
+      .toHaveAttribute("src", /source-pdf#page=1$/);
+    await expect(page.getByText("Physical page 1 synthetic extracted evidence")).toBeVisible();
+    await expect(page.getByText(/此页没有可读取的有效候选/)).toBeVisible();
+    await page.getByLabel("跳转到物理页").fill("2");
+    await page.getByRole("button", {name:"跳转"}).click();
+    await expect(page).toHaveURL(/physicalPage=2/);
+    await expect(page.getByRole("heading", {name:"原始 PDF · 第 2 物理页"})).toBeVisible();
+
     await page.goto(route);
     await expect(page.getByRole("heading", { name: "原始 PDF · 第 2 物理页" })).toBeVisible();
     await expect(page.getByText("Physical page 2 synthetic extracted evidence")).toBeVisible();
