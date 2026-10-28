@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import pathlib
+import stat
 import sys
 from dataclasses import dataclass
 
@@ -62,11 +63,23 @@ def digest_file(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
+def unsafe_link_or_reparse(path: pathlib.Path) -> bool:
+    # Windows junctions are not always reported by is_symlink() in Python 3.11.
+    try:
+        metadata = path.lstat()
+        return (path.is_symlink() or
+                (hasattr(path, "is_junction") and path.is_junction()) or
+                bool(getattr(metadata, "st_file_attributes", 0) &
+                     getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)))
+    except OSError:
+        raise ReviewBlocked("PATH_INSPECTION_FAILED") from None
+
+
 def identify_exact_original(
     root: pathlib.Path, expected_size: int = EXPECTED_SIZE, expected_sha: str = EXPECTED_SHA256
 ) -> pathlib.Path:
     """Match known SHA rather than a private filename. Reject symlinks and ambiguous matches."""
-    if not root.is_dir() or root.is_symlink():
+    if not root.is_dir() or unsafe_link_or_reparse(root):
         raise ReviewBlocked("PRIVATE_DATA_ROOT_UNAVAILABLE")
     if not isinstance(expected_size, int) or expected_size < 5:
         raise ReviewBlocked("INVALID_CONTRACT")
@@ -78,13 +91,13 @@ def identify_exact_original(
     for dirpath, dirs, files in os.walk(root, topdown=True, followlinks=False):
         base = pathlib.Path(dirpath)
         # Do not traverse reparse points or link targets.
-        dirs[:] = sorted(d for d in dirs if not (base / d).is_symlink())
+        dirs[:] = sorted(d for d in dirs if not unsafe_link_or_reparse(base / d))
         for name in sorted(files):
             examined += 1
             if examined > MAX_DISCOVERED_FILES:
                 raise ReviewBlocked("SEARCH_TOO_BROAD")
             candidate = base / name
-            if candidate.suffix.lower() != ".pdf" or candidate.is_symlink():
+            if candidate.suffix.lower() != ".pdf" or unsafe_link_or_reparse(candidate):
                 continue
             try:
                 stat = candidate.stat()
