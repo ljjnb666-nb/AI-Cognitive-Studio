@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { createIngestionService } from "@ai-cognitive/ingestion";
+import { createIngestionService, MAX_PDF_UPLOAD_BYTES, MAX_STANDARD_UPLOAD_BYTES } from "@ai-cognitive/ingestion";
 import { resolveWebIdentity, trustedRequestContext } from "@/lib/identity";
 import { storage } from "@/lib/storage";
 
-const createSchema = z.object({ filename: z.string().trim().min(1).max(180), mediaType: z.enum(["text/plain", "text/markdown", "application/pdf", "application/epub+zip"]), sizeBytes: z.number().int().positive().max(100 * 1024 * 1024) });
+const createSchema = z.object({ filename: z.string().trim().min(1).max(180), mediaType: z.enum(["text/plain", "text/markdown", "application/pdf", "application/epub+zip"]), sizeBytes: z.number().int().positive().max(MAX_PDF_UPLOAD_BYTES) }).refine(data => data.mediaType === "application/pdf" || data.sizeBytes <= MAX_STANDARD_UPLOAD_BYTES, { path: ["sizeBytes"], message: "NON_PDF_UPLOAD_TOO_LARGE" });
 const completeSchema = z.object({ sessionId: z.string().uuid() });
 
 function errorResponse(error: unknown) { const code = error instanceof Error ? error.message : "REQUEST_FAILED"; const status = code.includes("ACCESS_DENIED") || code === "WEB_IDENTITY_REQUIRED" ? 403 : 400; return NextResponse.json({ error: code }, { status }); }
