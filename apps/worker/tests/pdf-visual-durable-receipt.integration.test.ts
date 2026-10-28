@@ -9,6 +9,7 @@ import { readEnvironment } from "@ai-cognitive/shared/server";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { executeOnDemandPdfVisualReview } from "../src/pdf-visual-review.js";
+import { persistPdfVisualReviewCandidates } from "../src/pdf-visual-review-store.js";
 
 const environment = readEnvironment();
 const keyring = JSON.stringify({
@@ -247,6 +248,35 @@ describe("real PostgreSQL + MinIO PDF vision Gateway receipt proof", () => {
       expect(repeated.pages[0]?.figures[0]?.id).toBe(first.pages[0]?.figures[0]?.id);
       expect(modelCalls).toBe(1);
       expect(await prisma.providerInvocation.count({ where: { workspaceId: f.workspaceId } })).toBe(1);
+
+      // NEW: explicitly opt in to 24h non-authoritative visual graph storage.
+      const saved = await executeOnDemandPdfVisualReview(
+        { ...task, persistReviewCandidate: true as const },
+        { ...deps, persistReviewCandidate: persistPdfVisualReviewCandidates },
+      );
+      expect(saved.persistedVisualContent).toBe(true);
+      expect(saved.reviewPacket.persistedReviewCandidate).toBe(true);
+      const candidate = await prisma.pdfVisualReviewCandidate.findFirstOrThrow({
+        where: { workspaceId: f.workspaceId, sourceDocumentId: f.sourceDocumentId,
+          ingestionRunId: f.ingestionRunId, physicalPageIndex: 0 },
+      });
+      expect(candidate).toMatchObject({
+        sourcePdfSha256: sha256(f.bytes),
+        routingGeneration: 1,
+      });
+      expect((candidate.candidateJson as { figures: Array<{ edges: Array<{ direction: string }> }> })
+        .figures[0]?.edges[0]?.direction).toBe("DIRECTED");
+      expect(candidate.expiresAt.getTime()).toBeGreaterThan(Date.now());
+      expect(JSON.stringify(candidate.candidateJson)).not.toContain("Source-bound diagram review proof");
+      // Repeated paid-provider replay cannot silently replace the immutable candidate.
+      await executeOnDemandPdfVisualReview(
+        { ...task, persistReviewCandidate: true as const },
+        { ...deps, persistReviewCandidate: persistPdfVisualReviewCandidates },
+      );
+      expect(await prisma.pdfVisualReviewCandidate.count({
+        where: { workspaceId: f.workspaceId },
+      })).toBe(1);
+      expect(modelCalls).toBe(1);
 
       await storage.putObject({
         key: f.key, body: Buffer.from("corrupt source"), contentType: "application/pdf",
