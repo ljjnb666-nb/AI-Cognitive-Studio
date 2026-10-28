@@ -17,7 +17,6 @@ import { recordedProcessAlive } from "../../../packages/ingestion/src/mineru/min
  * test drives a real queue delivery through the real worker composition.
  */
 
-const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 const fakeMineruPath = fileURLToPath(new URL("../../../packages/ingestion/tests/helpers/mineru/fake-mineru.mjs", import.meta.url));
 const fixtureBytes = () => new Uint8Array(readFileSync(fileURLToPath(new URL("../../../packages/ingestion/tests/fixtures/mineru/scanned-mixed-real.pdf", import.meta.url))));
 
