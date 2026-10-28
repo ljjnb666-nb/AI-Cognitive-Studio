@@ -174,9 +174,17 @@ def main(argv: list[str] | None = None) -> int:
              ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         # If PyMuPDF is not installed, SHA identity is still proven; page verification stays open.
         return 0 if result.page_count == "PASS" and result.page_67_render == "PASS" else 2
-    except Exception:
-        # Deliberately never leak filesystem layout, content or exception messages.
+    except Exception as error:
+        # Only allow predeclared invariant codes, never raw OS/PDF exceptions or paths.
+        allowed = {
+            "PRIVATE_DATA_ROOT_UNAVAILABLE", "INVALID_CONTRACT", "SEARCH_TOO_BROAD",
+            "SOURCE_STAT_FAILED", "TOO_MANY_SAME_SIZE_PDFS",
+            "SOURCE_READ_FAILED", "SOURCE_CHANGED_DURING_SCAN",
+            "B03_SHA_NOT_FOUND", "MULTIPLE_IDENTICAL_B03_COPIES", "PATH_INSPECTION_FAILED",
+        }
+        reason = str(error) if isinstance(error, ReviewBlocked) and str(error) in allowed else "PRIVATE_READ_BLOCKED"
         print("ACS_B03_PRIVATE_SOURCE_PROOF=" + json.dumps({
+            "reason_code": reason,
             "policy": "ACS_B03_PRIVATE_SOURCE_IDENTITY_V1",
             "book_id": BOOK_ID,
             "source_pdf_sha256": "NOT_VERIFIED",
