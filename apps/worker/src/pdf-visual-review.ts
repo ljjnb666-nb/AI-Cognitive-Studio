@@ -6,6 +6,7 @@ import { createGatewayPdfVisualExecutor, WorkspaceMembershipExecutionAuthorizer,
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
 import type { Environment } from "@ai-cognitive/shared/server";
 import { createBookProductionGatewayRuntime } from "./provider-gateway-runtime.js";
+import { buildPdfSourceReviewPacket } from "./pdf-source-review-packet.js";
 
 const MAX_PDF_BYTES=110_000_000;
 const sha256=(bytes:Uint8Array)=>createHash("sha256").update(bytes).digest("hex");
@@ -108,6 +109,7 @@ export async function executeOnDemandPdfVisualReview(
     throw new Error("PDF_VISUAL_WORKER_ROUTE_PLAN_MISMATCH");
   return {
     ...output,
+    reviewPacket:buildPdfSourceReviewPacket(bytes,native,output),
     taskMode:"ON_DEMAND_REVIEW_ONLY" as const,
     sourceDocumentId:task.sourceDocumentId,
     ingestionRunId:task.ingestionRunId,
