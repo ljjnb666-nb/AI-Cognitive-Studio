@@ -1,0 +1,94 @@
+name: PDF Visual review candidate source-to-UI proof
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-private-review-candidate:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-visual-candidate-read-model-v1-20261028' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: ai_cognitive_studio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d ai_cognitive_studio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ai-cognitive-studio-dev
+      S3_ACCESS_KEY: local-development-only
+      S3_SECRET_KEY: local-development-only
+      S3_FORCE_PATH_STYLE: "true"
+      BETTER_AUTH_SECRET: phase7-ci-secret-must-be-at-least-32-characters
+      BETTER_AUTH_URL: http://localhost:3001
+      BETTER_AUTH_TRUSTED_ORIGINS: http://localhost:3001
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Require exact PR HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install frozen lockfile
+        run: pnpm install --frozen-lockfile
+      - run: docker compose up -d minio
+      - run: docker compose run --rm minio-init
+      - name: Create dedicated PostgreSQL database
+        run: PGPASSWORD=app psql -h localhost -U app -d postgres -c 'CREATE DATABASE ai_cognitive_studio_test;'
+      - run: pnpm db:generate
+      - name: Apply real PostgreSQL migrations
+        run: pnpm --filter @ai-cognitive/db prisma migrate deploy
+      - name: Verify isolated source-bound store and Worker opt-in
+        run: pnpm --filter @ai-cognitive/worker exec vitest run tests/pdf-visual-review-store.test.ts tests/pdf-visual-review.test.ts --reporter=verbose
+      - name: Verify real MinIO + PostgreSQL + Gateway encrypted receipt + candidate replay
+        run: pnpm --filter @ai-cognitive/worker exec vitest run --config vitest.integration.config.ts tests/pdf-visual-durable-receipt.integration.test.ts --reporter=verbose
+      - name: Verify untrusted graph read model
+        run: pnpm --filter @ai-cognitive/web exec vitest run --config vitest.integration.config.mts tests/pdf-visual-candidate.integration.test.ts tests/pdf-page-review.integration.test.ts --reporter=verbose
+      - name: Typecheck domain, ingestion, Worker and Web
+        run: |
+          pnpm --filter @ai-cognitive/domain typecheck
+          pnpm --filter @ai-cognitive/ingestion typecheck
+          pnpm --filter @ai-cognitive/worker typecheck
+          pnpm --filter @ai-cognitive/web typecheck
+      - name: Lint changed application packages
+        run: |
+          pnpm --filter @ai-cognitive/worker lint
+          pnpm --filter @ai-cognitive/web lint
+      - name: Scope of proof
+        run: |
+          echo 'PDF_VISUAL_REVIEW_POSTGRESQL=REAL'
+          echo 'PDF_VISUAL_REVIEW_MINIO=REAL'
+          echo 'PDF_VISUAL_REVIEW_PROVIDER=MOCK'
+          echo 'PDF_VISUAL_REVIEW_GRAPH=UNVERIFIED'
+          echo 'PDF_VISUAL_REVIEW_STORAGE_TTL=24H'
+          echo 'PDF_VISUAL_REVIEW_BROWSER_E2E=NOT_RUN'
+          echo 'PDF_VISUAL_REVIEW_PRODUCTION_QUEUE=OFF'

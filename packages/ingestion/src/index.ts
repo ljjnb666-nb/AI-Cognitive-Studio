@@ -1,3 +1,4 @@
+export { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
 import { randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
 import { buildEpubProductIdentityCandidate, CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";

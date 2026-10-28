@@ -67,3 +67,4 @@ export {
   type HealthCheckPayload,
   type HealthCheckResult,
 } from "./schemas/health-check.js";
+export { pdfReviewCandidateFingerprint } from "./pdf-review-candidate.js";
