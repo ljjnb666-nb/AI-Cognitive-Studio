@@ -1,0 +1,51 @@
+name: PDF source page read-only review UI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-source-review-ui:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-source-page-readonly-review-ui-20261028' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+      DATABASE_URL_TEST: postgresql://app:app@localhost:5432/ai_cognitive_studio_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify exact checkout HEAD
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+      - name: Verify PDF source review presentation safety
+        run: pnpm --filter @ai-cognitive/web exec vitest run --config vitest.integration.config.mts tests/pdf-page-review.integration.test.ts --reporter=verbose
+      - name: Web TypeScript check
+        run: pnpm --filter @ai-cognitive/web typecheck
+      - name: Web lint
+        run: pnpm --filter @ai-cognitive/web lint
+      - name: Evidence scope
+        run: |
+          echo 'PDF_SOURCE_REVIEW_UI=READ_ONLY'
+          echo 'PDF_SOURCE_REVIEW_UI_DATA=EXISTING_DB_EXTRACTION'
+          echo 'PDF_SOURCE_REVIEW_UI_VISUAL_CANDIDATE=NOT_YET_PERSISTED'
+          echo 'PDF_SOURCE_REVIEW_UI_GOLD=UNVERIFIED'
+          echo 'PDF_SOURCE_REVIEW_UI_PRODUCTION_APPROVAL=OFF'
+          echo 'PDF_SOURCE_REVIEW_UI_BROWSER_E2E=NOT_RUN_IN_THIS_JOB'
