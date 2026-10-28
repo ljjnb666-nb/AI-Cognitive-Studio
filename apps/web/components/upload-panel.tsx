@@ -71,7 +71,7 @@ export function UploadPanel() {
           添加新文献
         </h2>
         <div className="font-mono" style={{ fontSize: 12, color: "var(--outline)" }}>
-          支持 PDF、EPUB、TXT、Markdown · 单文件最大 100 MB
+          支持 PDF（最大 200 MiB）、EPUB/TXT/Markdown（最大 100 MiB）
         </div>
         {message && (
           <p aria-live="polite" style={{ fontSize: 13, color: "var(--muted-amber)", margin: "8px 0 0 0" }}>
