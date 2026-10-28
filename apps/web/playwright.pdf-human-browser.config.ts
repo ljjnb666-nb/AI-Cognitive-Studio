@@ -32,5 +32,8 @@ export default defineConfig({
       BETTER_AUTH_TEST_RATE_LIMIT_MAX: "1000",
     },
   },
-  projects: [{ name: "chromium", use: { browserName: "chromium" } }],
+  projects: [
+    { name: "chromium", use: { browserName: "chromium" } },
+    { name: "edge-linux", use: { ...devices["Desktop Edge"], browserName: "chromium", channel: "msedge" } },
+  ],
 });
