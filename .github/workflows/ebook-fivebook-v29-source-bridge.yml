@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Exact ${{ github.event.pull_request.head.sha }}, source-only 7 synthetic provenance checks
+      - name: Exact PR HEAD, source-only 7 synthetic provenance checks
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
@@ -55,7 +55,7 @@ jobs:
           $ErrorActionPreference='Stop'
           try {
             $checkout='acs-fivebook-v29'
-            if ((git -C $checkout rev-parse ${{ github.event.pull_request.head.sha }}).Trim() -cne $env:EXPECTED_SHA) {throw '${{ github.event.pull_request.head.sha }}_MISMATCH'}
+            if ((git -C $checkout rev-parse ${{ github.event.pull_request.head.sha }}).Trim() -cne $env:EXPECTED_SHA) {throw 'HEAD_MISMATCH'}
             $root='D:\ai-cognitive-pdf-benchmark-data'
             $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
             $manifest=Join-Path $checkout 'tools\pdf-parser-benchmark\corpus\ebook-20261022.manifest.json'
