@@ -1,5 +1,6 @@
 export { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { prisma } from "@ai-cognitive/db";
 import { buildEpubProductIdentityCandidate, CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
 import type { EpubExtractionMetadata } from "@ai-cognitive/domain";
@@ -13,6 +14,7 @@ import { claimIngestionRun, completeRunSuccess, INGESTION_EXECUTION_OWNERSHIP_LO
 import { writeRoutingOutcome } from "./ocr-durability.js";
 import { classifyIngestionFailure, ingestionStatusForTerminalFailure } from "./ingestion-failure.js";
 import { runPdfExtraction, type PdfRunExtraction } from "./pdf-run.js";
+import { withVerifiedPdfSourceFile } from "./pdf-source-stage.js";
 import { OcrCapacityDeferredError, OcrCapacityDeferralError } from "./ocr-capacity-errors.js";
 import { PDF_EXTRACTION_PARSER, pdfRoutingOutcome, type PdfOcrExecutor } from "./pdf-routing.js";
 import { evaluateEpubExtractionQuality, type EpubExtractionQualityDecision } from "./epub-quality.js";
@@ -228,7 +230,6 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
         void renewIngestionRunClaim(runId, claim.token).then((renewed) => { if (!renewed) ownershipLost = true; }).catch(() => { ownershipLost = true; });
       }, RUN_RENEW_INTERVAL_MS);
       try {
-        const bytes = await storage.getObjectBytes(run.sourceDocument.storageKey);
         const limits = { ...DEFAULT_PARSER_LIMITS, maxPdfPages: options.maxPdfPages };
         // PDFs run the 04B-2 routing pipeline: inspect → write-once routing
         // plan → native extraction + OCR executor seam → merged page-level
@@ -236,18 +237,30 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
         let parsed: Parsed;
         let pdfRouting: Extract<PdfRunExtraction, { kind: "PUBLISH" }> | null = null;
         if (run.sourceDocument.mediaType === "application/pdf") {
-          const extraction = await runPdfExtraction({
-            runId: run.id,
-            workspaceId: run.workspaceId,
-            sourceDocumentId: run.sourceDocumentId,
-            persistedRoutingPlan: run.routingPlan,
-            persistedRoutingGeneration: run.routingGeneration,
-            runExecutionToken: claim.token,
-            pdfBytes: bytes,
-            limits,
-            storage,
-            executor: options.pdfOcrExecutor,
-            ownershipLost: () => ownershipLost,
+          // Do not allocate the entire PDF in the parent worker merely to
+          // create the PDF.js child input. Verify immutable SourceDocument
+          // identity while streaming to a claim-scoped private temp file.
+          const sourceStream = await storage.getObjectStream(run.sourceDocument.storageKey);
+          const extraction = await withVerifiedPdfSourceFile(sourceStream, {
+            sha256: run.sourceDocument.sha256,
+            sizeBytes: Number(run.sourceDocument.sizeBytes),
+            maxBytes: Math.min(options.maxPdfUploadBytes ?? options.maxUploadBytes, MAX_PDF_UPLOAD_BYTES),
+          }, async (pdfFilePath) => {
+            let ocrBytes: Promise<Uint8Array> | undefined;
+            return await runPdfExtraction({
+              runId: run.id,
+              workspaceId: run.workspaceId,
+              sourceDocumentId: run.sourceDocumentId,
+              persistedRoutingPlan: run.routingPlan,
+              persistedRoutingGeneration: run.routingGeneration,
+              runExecutionToken: claim.token,
+              pdfFilePath,
+              loadPdfBytes: () => (ocrBytes ??= readFile(pdfFilePath)),
+              limits,
+              storage,
+              executor: options.pdfOcrExecutor,
+              ownershipLost: () => ownershipLost,
+            });
           });
           if (extraction.kind !== "PUBLISH") {
             // No partial publication. RF01 P1-03: the routing outcome and the
@@ -264,6 +277,7 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
           parsed = extraction.parsed;
           pdfRouting = extraction;
         } else {
+          const bytes = await storage.getObjectBytes(run.sourceDocument.storageKey);
           parsed = await parseDocument(bytes, run.sourceDocument.mediaType, limits);
         }
         const canonicalBlocks = parsed.pages.flatMap((page) => page.blocks);
