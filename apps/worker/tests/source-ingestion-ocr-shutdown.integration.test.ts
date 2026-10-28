@@ -75,7 +75,7 @@ describe("worker runtime shutdown aborts active OCR (RF01 P1-02, real compositio
     cleanupIds.userIds.push(user.id);
     cleanupIds.workspaceIds.push(workspace.id);
     await prisma.workspaceMember.create({ data: { workspaceId: workspace.id, userId: user.id, role: "OWNER" } });
-    const blob = await prisma.sourceBlob.create({ data: { workspaceId: workspace.id, sha256: sha256(storageKey), sizeBytes: bytes.length, mediaType: "application/pdf", storageKey } });
+    const blob = await prisma.sourceBlob.create({ data: { workspaceId: workspace.id, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length, mediaType: "application/pdf", storageKey } });
     const source = await prisma.source.create({ data: { workspaceId: workspace.id, kind: "FILE", displayName: "worker-shutdown.pdf" } });
     const document = await prisma.sourceDocument.create({ data: { sourceId: source.id, sourceBlobId: blob.id, workspaceId: workspace.id, version: 1, sha256: blob.sha256, sizeBytes: bytes.length, mediaType: "application/pdf", storageKey } });
     const job = await prisma.job.create({ data: { userId: user.id, workspaceId: workspace.id, type: "source.ingest", payload: { sourceDocumentId: document.id } } });
