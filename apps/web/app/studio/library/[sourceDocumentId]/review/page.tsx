@@ -6,6 +6,8 @@ import { projectBookDisplay } from "@/lib/book-display";
 import { projectPdfPageEvidence } from "@/lib/pdf-page-review";
 import { projectStoredPdfVisualCandidate } from "@/lib/pdf-visual-candidate";
 import { PdfVisualReviewRequestForm } from "@/components/pdf-visual-review-request";
+import { PdfHumanGraphReviewForm } from "@/components/pdf-human-graph-review";
+import { resolveWebIdentity } from "@/lib/identity";
 
 export default async function PdfSourceReviewPage({
   params, searchParams,
@@ -78,7 +80,7 @@ export default async function PdfSourceReviewPage({
       expiresAt: { gt: new Date() },
     },
     select: {
-      physicalPageIndex: true, sourcePdfSha256: true, sourcePngSha256: true,
+      id: true, physicalPageIndex: true, sourcePdfSha256: true, sourcePngSha256: true,
       routingGeneration: true, candidateJson: true, candidateSha256: true, expiresAt: true,
     },
     orderBy: { createdAt: "desc" },
@@ -92,6 +94,17 @@ export default async function PdfSourceReviewPage({
     // Corrupt or stale model evidence must never become a reviewed fact.
     visualInvalid = true;
   }
+  const reviewEvent = visual && row ? await prisma.pdfVisualHumanReviewEvent.findFirst({
+    where: { candidateId: row.id, workspaceId: source.workspaceId, sourceDocumentId: source.id },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true, action: true, reviewerUserId: true, createdAt: true },
+  }) : null;
+  const identity = visual ? await resolveWebIdentity() : null;
+  const reviewer = identity ? await prisma.workspaceMember.findUnique({
+    where: { workspaceId_userId: { workspaceId: source.workspaceId, userId: identity.userId } },
+    select: { role: true },
+  }) : null;
+  const canDecide = Boolean(reviewer && reviewer.role !== "VIEWER");
   const pageHref = (page: number) => `/studio/library/${source.id}/review?page=${page}`;
   return (
     <main className="container" style={{ maxWidth: 1150, margin: "0 auto", padding: "28px 20px 60px" }}>
@@ -162,6 +175,24 @@ export default async function PdfSourceReviewPage({
                 <p role="status">此物理页没有对应的已存档来源页。可能是 OCR 待处理或旧版提取记录缺失，不应据此推断原书为空白。</p>
               )}
             </section>
+            <div style={{ display: "grid", gridTemplateColumns: visual ? "repeat(auto-fit, minmax(min(100%, 440px), 1fr))" : "1fr", gap: 20, alignItems: "start" }}>
+            {visual ? (
+              <section className="card-panel" aria-labelledby="pdf-human-original-heading">
+                <h2 id="pdf-human-original-heading" style={{ fontSize: 20, marginTop: 0 }}>原始 PDF · 第 {physicalPageIndex + 1} 物理页</h2>
+                <p>页面来自已验证 SHA 的私有原书。可在原页上定位图表位置，必要时放大浏览。这里不是 AI 生成图。</p>
+                <iframe
+                  title={"已授权原始 PDF，物理页 " + (physicalPageIndex + 1)}
+                  src={"/api/studio/pdf-visual-review/" + source.id + "/source-pdf#page=" + (physicalPageIndex + 1)}
+                  style={{ width: "100%", height: 620, border: "1px solid var(--outline-variant,#d4d4d4)" }}
+                  loading="lazy"
+                />
+                <p style={{ fontSize: 13 }}>如果浏览器不支持内嵌 PDF，请
+                  {" "}<a href={"/api/studio/pdf-visual-review/" + source.id + "/source-pdf#page=" + (physicalPageIndex + 1)}
+                    target="_blank" rel="noopener noreferrer">在新标签页查看原始 PDF</a>。
+                </p>
+                <p style={{ fontSize: 12 }}>原书只通过工作区授权接口返回，不生成公开分享链接。大文件可能加载较慢。</p>
+              </section>
+            ) : null}
             <section className="card-panel" aria-labelledby="pdf-visual-review-heading">
               <h2 id="pdf-visual-review-heading" style={{ fontSize: 20, marginTop: 0 }}>图表与关系 · 模型候选（未人工核验）</h2>
               {visual ? (
@@ -190,9 +221,33 @@ export default async function PdfSourceReviewPage({
                     : "此页没有可读取的有效候选：可能尚未执行获授权的视觉任务、未检测到图表，或记录已经过期。"}
                 </p>
               )}
-              <div role="status" style={{ fontWeight: 600 }}>未审核 · 不得作为播客事实依据</div>
-              <p style={{ marginBottom: 0, color: "var(--text-secondary)" }}>需与原始 PDF 图像人工对照。此页面没有“批准”按钮，不会修改提取记录或播客素材。</p>
+              <div role="status" style={{ fontWeight: 600 }}>
+                {reviewEvent?.action === "CONFIRM_STRUCTURE"
+                  ? "人工已确认结构 · 仍不得直接进入播客"
+                  : reviewEvent?.action === "REJECT_STRUCTURE"
+                  ? "人工已驳回结构 · 不得进入播客"
+                  : reviewEvent?.action === "WITHDRAW"
+                  ? "已撤回人工结论 · 等待重新审核"
+                  : "未审核 · 不得作为播客事实依据"}
+              </div>
+              {reviewEvent ? <p style={{fontSize:12,color:"var(--text-secondary)"}}>
+                最近审核记录：{reviewEvent.createdAt.toISOString()} · 审核人 {reviewEvent.reviewerUserId}
+              </p> : null}
+              {visual && row ? (
+                <PdfHumanGraphReviewForm
+                  sourceDocumentId={source.id}
+                  candidateId={row.id}
+                  candidateSha256={row.candidateSha256}
+                  previousEventId={reviewEvent?.id ?? null}
+                  previousAction={reviewEvent?.action ?? null}
+                  canDecide={canDecide}
+                />
+              ) : null}
+              <p style={{ marginBottom: 0, color: "var(--text-secondary)" }}>
+                人工确认仅记录本次模型候选的结构判断，不修改 canonical SourceBlock、独立 Gold、Book Intelligence 或播客素材。
+              </p>
             </section>
+            </div>
           </div>
         </>
       )}
