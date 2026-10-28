@@ -159,7 +159,29 @@ def verify_page_source(path: pathlib.Path) -> tuple[str, str]:
 
 def inspect(root: pathlib.Path) -> Finding:
     path = identify_exact_original(root)
-    page_count, render = verify_page_source(path)
+    # Hashing the original and opening a page are separate operations.
+    # Re-check after rendering to detect a private PDF replaced or edited
+    # between the first SHA verification and its second path-based open.
+    try:
+        before = path.stat()
+        if before.st_size != EXPECTED_SIZE or unsafe_link_or_reparse(path):
+            raise ReviewBlocked("SOURCE_CHANGED_DURING_PAGE_VERIFY")
+        page_count, render = verify_page_source(path)
+        middle = path.stat()
+        if (before.st_size != middle.st_size or
+                before.st_mtime_ns != middle.st_mtime_ns or
+                unsafe_link_or_reparse(path)):
+            raise ReviewBlocked("SOURCE_CHANGED_DURING_PAGE_VERIFY")
+        # Even a same-size, timestamp-preserving replacement must fail.
+        if digest_file(path) != EXPECTED_SHA256:
+            raise ReviewBlocked("SOURCE_CHANGED_DURING_PAGE_VERIFY")
+        after = path.stat()
+        if (middle.st_size != after.st_size or
+                middle.st_mtime_ns != after.st_mtime_ns or
+                unsafe_link_or_reparse(path)):
+            raise ReviewBlocked("SOURCE_CHANGED_DURING_PAGE_VERIFY")
+    except OSError:
+        raise ReviewBlocked("SOURCE_CHANGED_DURING_PAGE_VERIFY") from None
     return Finding("PASS", page_count, render)
 
 
@@ -181,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
             "SOURCE_STAT_FAILED", "TOO_MANY_SAME_SIZE_PDFS",
             "SOURCE_READ_FAILED", "SOURCE_CHANGED_DURING_SCAN",
             "B03_SHA_NOT_FOUND", "MULTIPLE_IDENTICAL_B03_COPIES", "PATH_INSPECTION_FAILED",
+            "SOURCE_CHANGED_DURING_PAGE_VERIFY",
         }
         reason = str(error) if isinstance(error, ReviewBlocked) and str(error) in allowed else "PRIVATE_READ_BLOCKED"
         print("ACS_B03_PRIVATE_SOURCE_PROOF=" + json.dumps({
