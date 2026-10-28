@@ -111,7 +111,7 @@ export default async function PdfSourceReviewPage({
       <Link href={`/studio/library/${source.id}`} className="btn btn-secondary" style={{ marginBottom: 20 }}>
         返回书籍详情
       </Link>
-      <div className="page-eyebrow">PDF 来源核对 · 只读</div>
+      <div className="page-eyebrow">PDF 来源与图表人工核对</div>
       <h1 className="font-serif" style={{ fontSize: 30, overflowWrap: "anywhere", margin: "10px 0" }}>
         {title}
       </h1>
@@ -235,6 +235,7 @@ export default async function PdfSourceReviewPage({
               </p> : null}
               {visual && row ? (
                 <PdfHumanGraphReviewForm
+                  key={reviewEvent?.id ?? "initial"}
                   sourceDocumentId={source.id}
                   candidateId={row.id}
                   candidateSha256={row.candidateSha256}
