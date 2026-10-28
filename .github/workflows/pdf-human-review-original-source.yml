@@ -72,15 +72,17 @@ jobs:
       - name: Verify real MinIO + PostgreSQL + Gateway encrypted receipt + candidate replay
         run: pnpm --filter @ai-cognitive/worker exec vitest run --config vitest.integration.config.ts tests/pdf-visual-durable-receipt.integration.test.ts --reporter=verbose
       - name: Verify untrusted graph read model
-        run: pnpm --filter @ai-cognitive/web exec vitest run --config vitest.integration.config.mts tests/pdf-visual-candidate.integration.test.ts tests/pdf-page-review.integration.test.ts tests/pdf-visual-request-policy.integration.test.ts tests/pdf-human-review.integration.test.ts tests/pdf-human-review-database.integration.test.ts --reporter=verbose
+        run: pnpm --filter @ai-cognitive/web exec vitest run --config vitest.integration.config.mts tests/pdf-visual-candidate.integration.test.ts tests/pdf-page-review.integration.test.ts tests/pdf-visual-request-policy.integration.test.ts tests/pdf-human-review.integration.test.ts tests/pdf-human-review-database.integration.test.ts tests/pdf-human-range.integration.test.ts --reporter=verbose
       - name: Typecheck domain, ingestion, Worker and Web
         run: |
+          pnpm --filter @ai-cognitive/storage typecheck
           pnpm --filter @ai-cognitive/domain typecheck
           pnpm --filter @ai-cognitive/ingestion typecheck
           pnpm --filter @ai-cognitive/worker typecheck
           pnpm --filter @ai-cognitive/web typecheck
       - name: Lint changed application packages
         run: |
+          pnpm --filter @ai-cognitive/storage lint
           pnpm --filter @ai-cognitive/worker lint
           pnpm --filter @ai-cognitive/web lint
       - name: Build Next.js UI for genuine Chromium interaction
@@ -105,6 +107,8 @@ jobs:
           echo 'PDF_VISUAL_REVIEW_STORAGE_TTL=24H'
           echo 'PDF_HUMAN_REVIEW_CHROMIUM_AND_EDGE_LINUX_E2E=REAL_SYNTHETIC_PDF'
           echo 'PDF_HUMAN_REVIEW_CHROMIUM_NATIVE_VIEWER_PIXEL_RENDER=NOT_ASSERTED'
+          echo 'PDF_REVIEW_LARGE_SOURCE_RANGE=TESTED_SHA_ATTESTATION'
+          echo 'PDF_REVIEW_MAX_RANGE_BYTES=8388608'
           echo 'PDF_HUMAN_REVIEW_PAID_MODEL=NOT_CALLED'
           echo 'PDF_HUMAN_REVIEW_PODCAST_AUTHORITY=FALSE'
           echo 'PDF_VISUAL_REQUEST_OPT_IN_DEFAULT=OFF'
