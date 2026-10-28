@@ -111,3 +111,15 @@ python -I -B .\tools\private-pdf-review\run_rapidocr_candidate_offline.py --root
 比较器会额外校验 receipt 的原书 SHA/大小、页码、引擎名称/版本、模型 SHA 格式、文本字节 SHA 和字符数。如果有人更改原文本或交叉复用收据，会直接拒绝，而不是悄悄统计差异。旧候选没有 receipt 仍可进入**未核验候选**列表，但不会被升级为可信运行证据。
 
 **证据边界**：本地收据不包含独立签名，也不能证明声称的其他引擎确实运行过；它只能证明当前私有文件/收据字段自洽。参考文本未完整独立审核前，`official_cer` 与 `engine_ranking` 始终为 null。不能以模型烟测、文本相似度或收据一致性代替真实 B03 准确率。
+
+## RapidOCR 3.9.2 模型完整性与分发门禁
+
+当前固定的 `rapidocr==3.9.2` 发行版自带三个小型 ONNX 权重。项目现已在 Python 子进程 `--probe` 和真正的 `--pdf` 路径上逐个检查权重名称、数量与 **每个文件的固定 SHA256**，不再只检查版本号或计算任意模型自报摘要。文件被替换、缺失、增加或通过符号链接代入时拒绝继续识别。请勿为了让 CI 变绿而删除模型哈希核验。
+
+上游安装文档：https://github.com/RapidAI/RapidOCRDocs/blob/main/docs/install_usage/rapidocr/install.en.md
+
+v3.9.2 三权重的发行文件哈希记录与许可证讨论：https://github.com/RapidAI/RapidOCR/discussions/736
+
+**许可边界：** 仓库只记录已公开的哈希，不上传/镜像/重分发 ONNX 权重。上游项目代码许可证与模型权重的商业使用、分发授权不应直接等同；未经许可证材料核实，不得将“技术可运行”视为商业生产分发许可已通过。
+
+**验收边界：** 这些检查只证明本地权重与固定发行文件一致，既不代表已实际完成 ONNX 推理，也不能证明原书 B03 的 OCR 准确率。真实模型 smoke、源文件 SHA、私有来源收据与独立 Gold/CER 必须分别验收。
