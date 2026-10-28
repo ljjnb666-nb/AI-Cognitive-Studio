@@ -42,8 +42,19 @@ export async function GET(_request: Request, { params }: Params) {
       } },
       select: { status: true, failureCode: true, createdAt: true, completedAt: true, expiresAt: true },
     });
+    const candidate = record?.status === "SUCCEEDED"
+      ? await prisma.pdfVisualReviewCandidate.findFirst({
+          where: {
+            workspaceId: source.workspaceId, sourceDocumentId: source.id,
+            ingestionRunId: run.id, routingGeneration: run.routingGeneration!,
+            sourcePdfSha256: source.sha256, expiresAt: { gt: new Date() },
+          },
+          select: { physicalPageIndex: true },
+          orderBy: { createdAt: "desc" },
+        }) : null;
     return statusResponse({
       enabled: enabled(),
+      candidatePhysicalPageIndex: candidate?.physicalPageIndex ?? null,
       mode: "FIRST_MIXED_PAGE",
       request: record ? {
         status: record.status === "PENDING" && record.expiresAt <= new Date() ? "EXPIRED" :
