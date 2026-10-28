@@ -34,9 +34,11 @@ export function PdfVisualReviewRequestForm({ sourceDocumentId, serverEnabled }: 
   }, [url]);
   useEffect(() => {
     let disposed = false;
-    void refresh().then(x => { if (!disposed && x.request?.status === "SUCCEEDED") router.refresh(); })
-      .catch(() => { if (!disposed) setError("状态暂时无法读取，请稍后重新打开页面。"); });
-    return () => { disposed = true; };
+    const timeout = window.setTimeout(() => {
+      void refresh().then(x => { if (!disposed && x.request?.status === "SUCCEEDED") router.refresh(); })
+        .catch(() => { if (!disposed) setError("状态暂时无法读取，请稍后重新打开页面。"); });
+    }, 0);
+    return () => { disposed = true; window.clearTimeout(timeout); };
   }, [refresh,router]);
   useEffect(() => {
     const status=state?.request?.status;
