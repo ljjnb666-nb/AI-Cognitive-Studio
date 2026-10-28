@@ -5,6 +5,7 @@ import { sourceDetail } from "@/lib/product";
 import { projectBookDisplay } from "@/lib/book-display";
 import { projectPdfPageEvidence } from "@/lib/pdf-page-review";
 import { projectStoredPdfVisualCandidate } from "@/lib/pdf-visual-candidate";
+import { PdfVisualReviewRequestForm } from "@/components/pdf-visual-review-request";
 
 export default async function PdfSourceReviewPage({
   params, searchParams,
@@ -113,6 +114,7 @@ export default async function PdfSourceReviewPage({
           原书 SHA256：<code style={{ overflowWrap: "anywhere" }}>{source.sha256}</code>
         </p>
       </div>
+      {current && <PdfVisualReviewRequestForm sourceDocumentId={source.id} serverEnabled={process.env.PDF_VISUAL_REVIEW_ON_DEMAND_ENABLED === "true"} />}
       {!current ? (
         <section className="card-panel" role="status">
           <h2 style={{ fontSize: 18 }}>暂无可审阅的 PDF 提取记录</h2>
