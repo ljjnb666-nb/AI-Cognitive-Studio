@@ -203,6 +203,16 @@ describe("real PostgreSQL + MinIO PDF vision Gateway receipt proof", () => {
         examinedPageCount: 1, mixedPageCount: 1,
         reviewRequired: true, canonicalTextUpdated: false, persistedVisualContent: false,
       });
+      if(first.pages[0]?.status!=="CANDIDATE_AVAILABLE"){
+        const invocationStates=await prisma.providerInvocation.findMany({
+          where:{workspaceId:f.workspaceId},
+          select:{routeSlot:true,status:true},
+        });
+        throw new Error("PDF_VISUAL_REAL_STACK_DIAGNOSTIC:"+JSON.stringify({
+          pages:first.pages.map(page=>({status:page.status,reason:page.failureReason})),
+          invocationStates,modelCalls,
+        }));
+      }
       expect(first.pages[0]?.figures[0]?.edges[0]?.direction).toBe("DIRECTED");
       expect(modelCalls).toBe(1);
       const invocation = await prisma.providerInvocation.findFirstOrThrow({
