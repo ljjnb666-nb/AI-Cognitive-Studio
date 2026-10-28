@@ -82,7 +82,9 @@ describe("large private PDF SHA attestation + bounded no-buffer byte ranges", ()
   it("supports suffix requests and rejects multipart/invalid/over-end ranges", () => {
     expect(parsePdfPreviewByteRange("bytes=-20", 300)).toEqual({ start: 280, end: 299 });
     expect(parsePdfPreviewByteRange("bytes=0-99", 300)).toEqual({ start: 0, end: 99 });
-    for (const invalid of ["bytes=300-", "bytes=10-1", "bytes=0-300",
+    expect(parsePdfPreviewByteRange("bytes=0-300", 300)).toEqual({ start: 0, end: 299 });
+    expect(parsePdfPreviewByteRange("bytes=-99999999", 300)).toEqual({ start: 0, end: 299 });
+    for (const invalid of ["bytes=300-", "bytes=10-1",
       "bytes=0-5,10-15", "bytes=-0", "items=0-5", "bytes=abc-10"])
       expect(() => parsePdfPreviewByteRange(invalid, 300)).toThrow("PDF_REVIEW_RANGE_UNSATISFIABLE");
   });
