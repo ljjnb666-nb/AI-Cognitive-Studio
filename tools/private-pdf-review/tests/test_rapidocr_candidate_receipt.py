@@ -160,7 +160,7 @@ class LocalRapidOcrReceiptTests(unittest.TestCase):
 
     def test_unsafe_output_stem_denied(self):
         with self.assertRaisesRegex(comp.Blocked, "PRIVATE_OUTPUT_NAME_INVALID"):
-            self.emit(fake=None) if False else runner.run_candidate(
+            runner.run_candidate(
                 self.root, self.source, "output", "../escape", runner=self.fake_run
             )
 
