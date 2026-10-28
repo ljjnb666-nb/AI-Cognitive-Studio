@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import { createIngestionService } from "../src/index.js";
+import { createIngestionService, MAX_PDF_UPLOAD_BYTES, MAX_STANDARD_UPLOAD_BYTES } from "../src/index.js";
 import { SOURCE_SNIFF_PREFIX_BYTES } from "../src/object-inspection.js";
 
 const workspaceIds: string[] = [];
@@ -123,6 +123,52 @@ afterEach(async () => {
 
 afterAll(async () => {
   await prisma.$disconnect();
+});
+
+describe("B03 151.5MB PDF-only upload boundary", () => {
+  it("accepts a B03-sized PDF intent without allocating or uploading the book, but rejects oversized and other formats", async () => {
+    const { user, workspace } = await createWorkspaceFixture();
+    const ctx = { userId: user.id, workspaceId: workspace.id };
+    const storage = new FakeStorageProvider();
+    const service = createIngestionService(storage);
+    const b03Bytes = 151_495_200;
+    expect(b03Bytes).toBeGreaterThan(MAX_STANDARD_UPLOAD_BYTES);
+    expect(b03Bytes).toBeLessThan(MAX_PDF_UPLOAD_BYTES);
+    const intent = await service.createUploadIntent(ctx, {
+      filename: "B03-source.pdf", mediaType: "application/pdf", sizeBytes: b03Bytes,
+    });
+    expect(intent.session).toMatchObject({
+      workspaceId: workspace.id, declaredMediaType: "application/pdf",
+      declaredSizeBytes: BigInt(b03Bytes), status: "PENDING",
+    });
+    expect(intent.upload.url).toContain("temporary/");
+    await expect(service.createUploadIntent(ctx, {
+      filename: "too-big.pdf", mediaType: "application/pdf", sizeBytes: MAX_PDF_UPLOAD_BYTES + 1,
+    })).rejects.toThrow("UPLOAD_SIZE_INVALID");
+    await expect(service.createUploadIntent(ctx, {
+      filename: "too-large.epub", mediaType: "application/epub+zip", sizeBytes: b03Bytes,
+    })).rejects.toThrow("UPLOAD_SIZE_INVALID");
+    await expect(service.createUploadIntent(ctx, {
+      filename: "too-large.txt", mediaType: "text/plain", sizeBytes: MAX_STANDARD_UPLOAD_BYTES + 1,
+    })).rejects.toThrow("UPLOAD_SIZE_INVALID");
+    expect(await prisma.uploadSession.count({ where: { workspaceId: workspace.id } })).toBe(1);
+  });
+
+  it("does not promote a B03-size declared PDF if the stored object is short or mismatched", async () => {
+    const { user, workspace } = await createWorkspaceFixture();
+    const ctx = { userId: user.id, workspaceId: workspace.id };
+    const storage = new FakeStorageProvider();
+    const service = createIngestionService(storage);
+    const intent = await service.createUploadIntent(ctx, {
+      filename: "B03-source.pdf", mediaType: "application/pdf", sizeBytes: 151_495_200,
+    });
+    // Keep the fixture tiny. HEAD and the streaming digest may not invent missing bytes.
+    storage.objects.set(intent.session.temporaryStorageKey, new Uint8Array([37, 80, 68, 70, 45]));
+    storage.headSizes.set(intent.session.temporaryStorageKey, 151_495_200);
+    await expect(service.completeUpload(ctx, intent.session.id))
+      .rejects.toThrow("UPLOAD_STORAGE_SIZE_MISMATCH");
+    await expect(prisma.sourceDocument.count({ where: { workspaceId: workspace.id } })).resolves.toBe(0);
+  });
 });
 
 describe("completeUpload", () => {
