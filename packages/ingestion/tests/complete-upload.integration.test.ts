@@ -212,7 +212,7 @@ describe("completeUpload", () => {
     const pdf = new PDFDocument({ autoFirstPage: false });
     const sink = new PassThrough();
     const chunks: Buffer[] = [];
-    sink.on("data", (chunk: Buffer) => chunks.push(chunk);
+    sink.on("data", (chunk: Buffer) => chunks.push(chunk));
     const complete = new Promise<Buffer>((resolve) => sink.on("end", () => resolve(Buffer.concat(chunks))));
     pdf.pipe(sink);
     pdf.addPage().text("Native text source through verified file staging");
