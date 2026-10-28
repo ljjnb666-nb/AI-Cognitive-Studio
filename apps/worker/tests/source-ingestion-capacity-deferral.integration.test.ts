@@ -52,10 +52,12 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-async function createOcrRunAt(workspaceId: string, userId: string, storageKey: string, sizeBytes: number): Promise<string> {
+async function createOcrRunAt(workspaceId: string, userId: string, storageKey: string, bytes: Uint8Array): Promise<string> {
+  const sizeBytes = bytes.byteLength;
+  const sourceSha = createHash("sha256").update(bytes).digest("hex");
   const blob = await prisma.sourceBlob.upsert({
-    where: { workspaceId_sha256: { workspaceId, sha256: sha256(storageKey) } },
-    create: { workspaceId, sha256: sha256(storageKey), sizeBytes, mediaType: "application/pdf", storageKey },
+    where: { workspaceId_sha256: { workspaceId, sha256: sourceSha } },
+    create: { workspaceId, sha256: sourceSha, sizeBytes, mediaType: "application/pdf", storageKey },
     update: {},
   });
   const source = await prisma.source.create({ data: { workspaceId, kind: "FILE", displayName: `deferral-${crypto.randomUUID()}.pdf` } });
@@ -89,8 +91,8 @@ describe("real BullMQ OCR capacity deferral (RF03 P1-03)", () => {
     const storageKey0 = `test/${crypto.randomUUID()}`;
     await storage.putObject({ key: storageKey0, body: bytes, contentType: "application/pdf" });
     // Route BOTH fixtures at the uploaded canonical object.
-    const runA = await createOcrRunAt(workspace.id, user.id, storageKey0, bytes.length);
-    const runB = await createOcrRunAt(workspace.id, user.id, storageKey0, bytes.length);
+    const runA = await createOcrRunAt(workspace.id, user.id, storageKey0, bytes);
+    const runB = await createOcrRunAt(workspace.id, user.id, storageKey0, bytes);
     await prisma.outboxEvent.create({ data: { topic: ingestionTopic, aggregateId: runA, payload: { ingestionRunId: runA } } });
     await prisma.outboxEvent.create({ data: { topic: ingestionTopic, aggregateId: runB, payload: { ingestionRunId: runB } } });
     const jobBId = (await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runB } })).jobId;
