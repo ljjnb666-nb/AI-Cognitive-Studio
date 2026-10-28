@@ -93,11 +93,14 @@ def identify_exact_original(
         # Do not traverse reparse points or link targets.
         dirs[:] = sorted(d for d in dirs if not unsafe_link_or_reparse(base / d))
         for name in sorted(files):
+            # Filter non-PDF OCR caches/images before applying scan budget.
+            if not name.lower().endswith(".pdf"):
+                continue
             examined += 1
             if examined > MAX_DISCOVERED_FILES:
                 raise ReviewBlocked("SEARCH_TOO_BROAD")
             candidate = base / name
-            if candidate.suffix.lower() != ".pdf" or unsafe_link_or_reparse(candidate):
+            if unsafe_link_or_reparse(candidate):
                 continue
             try:
                 stat = candidate.stat()
