@@ -26,6 +26,27 @@ class PrivateB03SourceVerifierTests(unittest.TestCase):
         target.write_bytes(content)
         return target, len(content), hashlib.sha256(content).hexdigest()
 
+    def test_30005_non_pdf_files_do_not_block_exact_pdf_sha(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            expected, size, sha = self.make_fixture(root, "private/book.pdf")
+            junk = [f"ocr_cache_{i:05}.png" for i in range(30005)]
+            with patch.object(module.os, "walk", return_value=[
+                (str(root), ["private"], junk),
+                (str(root / "private"), [], ["book.pdf"]),
+            ]):
+                result = module.identify_exact_original(root, size, sha)
+            self.assertEqual(result, expected)
+
+    def test_pdf_scan_limit_still_rejects_too_many_actual_pdfs(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            for n in range(5):
+                self.make_fixture(root, f"books/{n}.pdf")
+            with patch.object(module, "MAX_DISCOVERED_FILES", 4):
+                with self.assertRaisesRegex(module.ReviewBlocked, "SEARCH_TOO_BROAD"):
+                    module.identify_exact_original(root, 100, "a" * 64)
+
     def test_known_sha_finds_only_matching_book(self):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
