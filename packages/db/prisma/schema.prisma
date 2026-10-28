@@ -1137,6 +1137,7 @@ model IngestionRun {
   doclingLayoutSnapshots DoclingLayoutSnapshot[]
   doclingLayoutTasks     DoclingLayoutTask[]
   pdfVisualReviewCandidates PdfVisualReviewCandidate[]
+  pdfVisualReviewRequests PdfVisualReviewRequest[]
 
   @@unique([id, sourceDocumentId, workspaceId])
   @@index([executionLeaseUntil])
@@ -1190,6 +1191,30 @@ model DoclingLayoutTask {
 }
 
 /// Time-limited source-bound UNVERIFIED visual graph snapshots for authenticated review.
+/// One paid-model request per PDF ingestion/generation, admitted only by a
+/// user consent action. No automatic retry after worker crash or model failure.
+model PdfVisualReviewRequest {
+  id                String       @id @default(cuid())
+  workspaceId       String
+  userId            String
+  sourceDocumentId  String
+  ingestionRunId    String
+  routingGeneration Int
+  sourcePdfSha256   String
+  status            String       @default("PENDING")
+  failureCode       String?
+  claimToken        String?
+  createdAt         DateTime     @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  expiresAt         DateTime
+  ingestionRun      IngestionRun @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@unique([ingestionRunId, routingGeneration], map: "PdfVisualReviewRequest_single_attempt_uq")
+  @@index([status, expiresAt, createdAt], map: "PdfVisualReviewRequest_pending_idx")
+  @@index([workspaceId, sourceDocumentId], map: "PdfVisualReviewRequest_read_idx")
+}
+
 model PdfVisualReviewCandidate {
   id                String       @id @default(cuid())
   workspaceId       String
