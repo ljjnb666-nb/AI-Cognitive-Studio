@@ -72,7 +72,7 @@ jobs:
       - name: Verify real MinIO + PostgreSQL + Gateway encrypted receipt + candidate replay
         run: pnpm --filter @ai-cognitive/worker exec vitest run --config vitest.integration.config.ts tests/pdf-visual-durable-receipt.integration.test.ts --reporter=verbose
       - name: Verify untrusted graph read model
-        run: pnpm --filter @ai-cognitive/web exec vitest run --config vitest.integration.config.mts tests/pdf-visual-candidate.integration.test.ts tests/pdf-page-review.integration.test.ts --reporter=verbose
+        run: pnpm --filter @ai-cognitive/web exec vitest run --config vitest.integration.config.mts tests/pdf-visual-candidate.integration.test.ts tests/pdf-page-review.integration.test.ts tests/pdf-visual-request-policy.integration.test.ts --reporter=verbose
       - name: Typecheck domain, ingestion, Worker and Web
         run: |
           pnpm --filter @ai-cognitive/domain typecheck
