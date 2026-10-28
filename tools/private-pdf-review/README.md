@@ -5,7 +5,7 @@
 - 脚本路径：tools/private-pdf-review/verify_b03_source_readonly.py。
 - 默认只扫描 D:\ai-cognitive-pdf-benchmark-data；可用 --root 指定经过确认的私有原书根目录。
 - 固定 B03 文件长度 151,495,200 字节和已归档的完整 SHA256；不按猜测书名推断身份。拒绝多份完全匹配、超宽扫描、软链接及 Windows Junction/reparse 路径。
-- 使用 4 MiB 流式 SHA；若本机预装 PyMuPDF (fitz)，验证总页数 271 和第 67 页小尺寸渲染，最长边限制 768 像素。不会导出像素或扫描内容。
+- 使用 4 MiB 流式 SHA；若本机预装 PyMuPDF (fitz)，验证总页数 271 和第 67 页小尺寸渲染，最长边限制 768 像素。**渲染后再次完整计算 SHA，核对修改时间与大小**，防止首次 SHA 校验后原书在另一次按路径打开期间被替换；不会导出像素或扫描内容。通过时将对同一 151.5 MB 原书至少做两轮顺序读取，需考虑本机磁盘 I/O。
 - 输出固定的 ACS_B03_PRIVATE_SOURCE_PROOF JSON，只包含安全枚举与 PASS/NOT_VERIFIED；**不输出私有路径、书名、原文、图片或任意异常内容**。
 - 即使完整 PDF SHA 和第 67 页渲染均成功，仍不能证明此前上传的 Library 单张 PNG 与当前 PDF 密码学同源。uploaded_library_png_identity 始终为 NOT_ATTESTED。
 - 完全验证 PASS 返回退出码 0；任何缺库、未测、找不到或校验失败均返回 2。
