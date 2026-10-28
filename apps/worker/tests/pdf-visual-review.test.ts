@@ -69,6 +69,20 @@ describe("Worker on-demand PDF visual candidate task",()=>{
     });
     expect(out.pages[0]?.figures[0]?.edges[0]?.direction).toBe("DIRECTED");
     expect(out.pages[0]?.status).toBe("CANDIDATE_AVAILABLE");
+    expect(out.reviewPacket).toMatchObject({
+      schemaVersion:"pdf-source-review-packet-v1",authority:"SOURCE_BOUND_REVIEW_ONLY",
+      sourcePdfSha256:sha(f.bytes),totalPhysicalPages:2,examinedPages:1,
+      independentGoldApproved:false,approvedForBookIntelligence:false,
+      approvedForPodcast:false,persistedReviewCandidate:false,canonicalTextUpdated:false,
+    });
+    expect(out.reviewPacket.pages[0]).toMatchObject({
+      physicalPageIndex:0,sourcePdfSha256:sha(f.bytes),reviewRequired:true,
+      nativeText:{status:"EXTRACTED_UNVERIFIED",sourceMethod:"PDFJS_NATIVE"},
+      visual:{status:"CANDIDATE_UNVERIFIED",failureReason:null},
+      approvedForBookIntelligence:false,approvedForPodcast:false,
+    });
+    expect(out.reviewPacket.pages[0]?.nativeText.excerpt).toContain("Authenticated document source text");
+    expect(out.reviewPacket.pages[0]?.visual.figures[0]?.edges[0]?.direction).toBe("DIRECTED");
   },90_000);
 
   it("rejects missing express image-to-provider consent before reading any record",async()=>{
