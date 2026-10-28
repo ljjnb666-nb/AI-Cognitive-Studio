@@ -16,7 +16,9 @@ import sys
 
 RAPIDOCR="3.9.2"
 ONNX="1.22.1"
-MAX_BYTES=110_000_000
+# Verified staged PDF files may be up to 200 MiB; the Node legacy byte-input
+# executor still separately enforces its existing 110,000,000-byte limit.
+MAX_BYTES=200*1024*1024
 MAX_PIXELS=8_000_000
 MAX_TEXT_CHARS=180_000
 # Private runtime diagnostic reports only this allowlisted stage, never source text.
@@ -54,11 +56,23 @@ def check_runtime():
                 h.update(part)
     return h.hexdigest()
 
+def validate_source_file(path):
+    # Defense-in-depth for both the verified-file and legacy temporary paths.
+    # The SHA/size authority remains the parent Worker source staging fence.
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("OCR_INPUT_INVALID")
+    size=path.stat().st_size
+    if not 5<=size<=MAX_BYTES:
+        raise RuntimeError("OCR_INPUT_INVALID")
+    with path.open("rb") as source:
+        if source.read(5)!=b"%PDF-":
+            raise RuntimeError("OCR_INPUT_INVALID")
+
+
 def extract(path,page):
     global TRACE_STAGE
     TRACE_STAGE="SOURCE_INPUT"
-    if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=MAX_BYTES:
-        raise RuntimeError("OCR_INPUT_INVALID")
+    validate_source_file(path)
     TRACE_STAGE="IMPORT_RASTER_AND_OCR"
     import fitz
     import numpy as np
