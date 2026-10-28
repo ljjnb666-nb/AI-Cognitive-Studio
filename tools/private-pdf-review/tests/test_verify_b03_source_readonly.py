@@ -88,6 +88,40 @@ class PrivateB03SourceVerifierTests(unittest.TestCase):
             count, rendered = module.verify_page_source(pathlib.Path("fake.pdf"))
         self.assertEqual((count, rendered), ("PASS", "PASS"))
 
+    def test_source_changed_while_rendering_is_rejected_even_if_size_and_mtime_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            original, size, original_sha = self.make_fixture(root)
+            first = original.stat()
+
+            def swapped_during_render(path):
+                content = bytearray(path.read_bytes())
+                content[10] ^= 1
+                path.write_bytes(content)
+                import os
+                os.utime(path, ns=(first.st_atime_ns, first.st_mtime_ns))
+                return "PASS", "PASS"
+
+            with patch.object(module, "identify_exact_original", return_value=original), \\
+                 patch.object(module, "verify_page_source", side_effect=swapped_during_render), \\
+                 patch.object(module, "EXPECTED_SIZE", size), \\
+                 patch.object(module, "EXPECTED_SHA256", original_sha):
+                with self.assertRaisesRegex(module.ReviewBlocked,
+                                            "SOURCE_CHANGED_DURING_PAGE_VERIFY"):
+                    module.inspect(root)
+
+    def test_stable_source_remains_verified_after_page_render(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            original, size, original_sha = self.make_fixture(root)
+            with patch.object(module, "identify_exact_original", return_value=original), \\
+                 patch.object(module, "verify_page_source", return_value=("PASS", "PASS")), \\
+                 patch.object(module, "EXPECTED_SIZE", size), \\
+                 patch.object(module, "EXPECTED_SHA256", original_sha):
+                found = module.inspect(root)
+                self.assertEqual((found.source, found.page_count, found.page_67_render),
+                                 ("PASS", "PASS"))
+
     def test_main_redacts_private_path_and_still_rejects_incomplete_page_review(self):
         sentinel = pathlib.Path("C:/PRIVATE_SENTINEL_ONLY_DO_NOT_OUTPUT/secret.pdf")
         with patch.object(module, "inspect", side_effect=ValueError(str(sentinel))):
