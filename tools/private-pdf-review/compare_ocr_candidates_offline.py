@@ -23,6 +23,10 @@ MAX_PAGE_CHARS = 6_000
 MAX_MANIFEST_BYTES = 32_000
 MAX_PDF_BYTES = 200 * 1024 * 1024
 MAX_PAGES = 2_000
+# Independently established B03 source identity, not inferred from a filename.
+B03_SHA256 = "5be652d2066b680f1242bf358979c549aaf8a1588d9648926ecd8b6c30697440"
+B03_BYTES = 151_495_200
+B03_PAGES = 271
 ENGINES = {"mineru", "docling", "rapidocr", "pdfjs-native", "other"}
 
 
@@ -137,6 +141,8 @@ def validate_source(root: Path, source: object) -> dict:
     book_id = source["book_id"]
     if not isinstance(book_id, str) or re.fullmatch(r"B[0-9]{2}", book_id) is None:
         raise Blocked("SOURCE_CONTRACT_INVALID")
+    if book_id == "B03" and (digest != B03_SHA256 or size != B03_BYTES or pages != B03_PAGES):
+        raise Blocked("B03_PINNED_SOURCE_IDENTITY_MISMATCH")
     path = require_relative(root, source["pdf"])
     if path.stat().st_size != size or sha_of(path, MAX_PDF_BYTES) != digest:
         raise Blocked("SOURCE_SHA_MISMATCH")
@@ -199,7 +205,8 @@ def compare(root: Path, manifest: object) -> dict:
 
     result = {
         "schema": SCHEMA,
-        "source_pdf_bytes_sha256": "VERIFIED",
+        "source_pdf_bytes_sha256": "MATCHES_PRIVATE_MANIFEST",
+        "book_identity": "B03_PINNED_SHA_MATCHED" if source["book_id"] == "B03" else "MANIFEST_DECLARED_ONLY",
         "physical_page": source["physical_page_1_based"],
         "page_count": source["page_count"],
         "candidate_lineage": "DECLARED_NOT_INDEPENDENTLY_ATTESTED",
@@ -228,12 +235,13 @@ def compare(root: Path, manifest: object) -> dict:
         raise Blocked("REFERENCE_SOURCE_PAGE_MISMATCH")
     approved = read_text(root, reference["text"])
     result["reference_status"] = "DECLARED_APPROVED_NOT_INDEPENDENTLY_VERIFIED"
-    result["provisional_cer"] = [
-        {"engine": name, "character_errors": distance(approved, text),
-         "reference_chars": len(approved),
-         "cer": round(distance(approved, text) / len(approved), 6)}
-        for name, text in texts
-    ]
+    result["provisional_cer"] = []
+    for name, text in texts:
+        errors = distance(approved, text)
+        result["provisional_cer"].append({
+            "engine": name, "character_errors": errors, "reference_chars": len(approved),
+            "cer": round(errors / len(approved), 6),
+        })
     # Even a self-attested approved reference is not independently established Gold.
     # Human/independent provenance admission is a separate, future gate.
     return result
