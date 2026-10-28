@@ -166,19 +166,19 @@ describe("isolated PDF parser", () => {
     // content never enters this fixture and no OCR/model is called.
     const dir = await mkdtemp(join(tmpdir(), "pdf-local-range-test-"));
     async function makePdf(path: string, gapBytes: number) {
-      const text = "BT /F1 18 Tf 50 700 Td (Native ranged PDF evidence) Tj ET\\n";
+      const text = "BT /F1 18 Tf 50 700 Td (Native ranged PDF evidence) Tj ET\n";
       const objects = [
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-        `<< /Length ${Buffer.byteLength(text)} >>\\nstream\\n${text}endstream`,
+        `<< /Length ${Buffer.byteLength(text)} >>\nstream\n${text}endstream`,
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
       ];
-      let prefix = "%PDF-1.4\\n";
+      let prefix = "%PDF-1.4\n";
       const offsets = [0];
       objects.forEach((value, index) => {
         offsets.push(Buffer.byteLength(prefix));
-        prefix += `${index + 1} 0 obj\\n${value}\\nendobj\\n`;
+        prefix += `${index + 1} 0 obj\n${value}\nendobj\n`;
       });
       const xrefPosition = Buffer.byteLength(prefix) + gapBytes;
       const table = [
@@ -186,7 +186,7 @@ describe("isolated PDF parser", () => {
         ...offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n `),
         "trailer", "<< /Size 6 /Root 1 0 R >>", "startxref",
         String(xrefPosition), "%%EOF", "",
-      ].join("\\n");
+      ].join("\n");
       await writeFile(path, prefix);
       const file = await open(path, "a");
       try {
