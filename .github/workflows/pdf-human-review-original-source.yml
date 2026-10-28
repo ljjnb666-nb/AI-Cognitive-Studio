@@ -69,6 +69,8 @@ jobs:
       - run: pnpm db:generate
       - name: Apply real PostgreSQL migrations
         run: pnpm --filter @ai-cognitive/db prisma migrate deploy
+      - name: Verify 151.5MB PDF-only intent and fail-closed size mismatch in real PostgreSQL
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run --config vitest.integration.config.ts tests/complete-upload.integration.test.ts --reporter=verbose
       - name: Verify isolated source-bound store and Worker opt-in
         run: pnpm --filter @ai-cognitive/worker exec vitest run tests/pdf-visual-review-store.test.ts tests/pdf-visual-review.test.ts --reporter=verbose
       - name: Verify real MinIO + PostgreSQL + Gateway encrypted receipt + candidate replay
@@ -113,6 +115,10 @@ jobs:
           echo 'PDF_REVIEW_MAX_RANGE_BYTES=8388608'
           echo 'B03_LOCAL_SHA_SCRIPT_SYNTHETIC_TESTS=RUN'
           echo 'B03_REAL_WINDOWS_PRIVATE_PDF_BYTES=NOT_ACCESSED'
+          echo 'B03_PDF_UPLOAD_INTENT_BYTES=151495200'
+          echo 'PDF_UPLOAD_LIMIT_BYTES=209715200'
+          echo 'NON_PDF_UPLOAD_LIMIT_BYTES=104857600'
+          echo 'B03_REAL_PUT_AND_FULL_PARSER=NOT_TESTED'
           echo 'PDF_HUMAN_REVIEW_PAID_MODEL=NOT_CALLED'
           echo 'PDF_HUMAN_REVIEW_PODCAST_AUTHORITY=FALSE'
           echo 'PDF_VISUAL_REQUEST_OPT_IN_DEFAULT=OFF'
