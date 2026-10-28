@@ -1,0 +1,95 @@
+name: Fivebook v29 private source bridge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-source-bridge:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-v28-private-source-bridge-v29-20261028' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Exact ${{ github.event.pull_request.head.sha }}, source-only 7 synthetic provenance checks
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse ${{ github.event.pull_request.head.sha }})" = "$EXPECTED_SHA"
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_fivebook_v28_source_bridge_v29.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_fivebook_v28_source_bridge_v29.py' -v
+          echo 'ACS_V29_SYNTHETIC=PASS'
+          echo 'ACS_V29_REAL_PRIVATE_SOURCE=NOT_RUN_IN_PUBLIC_CI'
+          echo 'ACS_V29_GOLD=UNVERIFIED'
+          echo 'ACS_V29_CER=NULL'
+
+  owner-only-windows-private-source-bridge:
+    needs: synthetic-source-bridge
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/fivebook-v28-private-source-bridge-v29-20261028' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: acs-fivebook-v29
+          persist-credentials: false
+          clean: false
+      - name: Stage verified existing five source pages on D without model calls
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        timeout-minutes: 22
+        run: |
+          $ErrorActionPreference='Stop'
+          try {
+            $checkout='acs-fivebook-v29'
+            if ((git -C $checkout rev-parse ${{ github.event.pull_request.head.sha }}).Trim() -cne $env:EXPECTED_SHA) {throw '${{ github.event.pull_request.head.sha }}_MISMATCH'}
+            $root='D:\ai-cognitive-pdf-benchmark-data'
+            $python=Join-Path $root 'tool-env\docling-2.141.0\Scripts\python.exe'
+            $manifest=Join-Path $checkout 'tools\pdf-parser-benchmark\corpus\ebook-20261022.manifest.json'
+            $script=Join-Path $checkout 'tools\pdf-parser-benchmark\scripts\ebook_fivebook_v28_source_bridge_v29.py'
+            if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {throw 'PYTHON_MISSING'}
+            $env:HF_HUB_OFFLINE='1'
+            $env:TRANSFORMERS_OFFLINE='1'
+            $env:HTTP_PROXY='http://127.0.0.1:1'
+            $env:HTTPS_PROXY='http://127.0.0.1:1'
+            $env:ALL_PROXY='http://127.0.0.1:1'
+            $folder=Join-Path $root 'semantic_gate\multibook_matrix_20261023\fivebook_v28_source_bridge_v29'
+            $mode=if (Test-Path -LiteralPath $folder) {'--audit-only'} else {'--write'}
+            $attempt=@(& $python $script --private-root $root --manifest $manifest $mode 2>$null)
+            if ($LASTEXITCODE -ne 0) {throw 'PRIVATE_SOURCE_STAGE_FAILED'}
+            $proof=@(& $python $script --private-root $root --manifest $manifest --audit-only 2>$null)
+            if ($LASTEXITCODE -ne 0) {throw 'PRIVATE_SOURCE_AUDIT_FAILED'}
+            foreach($line in @(
+              'ACS_FIVEBOOK_V29=PRIVATE_AUDIT_PASS',
+              'ACS_FIVEBOOK_V29_SOURCE_PAGES=5',
+              'ACS_FIVEBOOK_V29_UNAVAILABLE_SELECTED_PAGES=15',
+              'ACS_FIVEBOOK_V29_GOLD_APPROVED=0',
+              'ACS_FIVEBOOK_V29_OFFICIAL_CER=NULL',
+              'ACS_FIVEBOOK_V29_NEW_MODEL_CALLS=0')) {
+                if (@($proof | Where-Object { $_ -ceq $line }).Count -ne 1) {
+                  throw 'PRIVATE_AUDIT_RECEIPT_INVALID'
+                }
+            }
+            Write-Output 'ACS_FIVEBOOK_V29_WINDOWS=READ_ONLY_AUDIT_PASS'
+            Write-Output 'ACS_FIVEBOOK_V29_PRIVATE_STAGED_PAGES=5'
+            Write-Output 'ACS_FIVEBOOK_V29_MISSING_SELECTED_PAGES=15'
+            Write-Output 'ACS_FIVEBOOK_V29_GOLD=UNVERIFIED'
+            Write-Output 'ACS_FIVEBOOK_V29_CER=NULL'
+            Write-Output 'ACS_FIVEBOOK_V29_MODEL_CALLS=0'
+          } catch {
+            Write-Output 'ACS_FIVEBOOK_V29_WINDOWS=REJECTED'
+            exit 2
+          }
