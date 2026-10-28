@@ -42,6 +42,15 @@ class GoldGateTests(unittest.TestCase):
             "authority":"SOURCE_INDEPENDENT_APPROVED","review_origin":"DIRECT_SOURCE_IMAGE",
             "source_png_sha256":row["source_png_sha256"],
             "bleedthrough_verdict":row["bleedthrough"],
+            "reviewer_record_id":"synthetic_review_0001",
+            "full_page_coverage":{
+                "coverage_scope":"COMPLETE_PHYSICAL_PAGE_TEXT",
+                "reviewed_grid_cells":[f"R{r}C{k}" for r in range(1,4) for k in range(1,4)],
+                "sidebars_and_vertical_text_reviewed":True,
+                "all_visible_text_and_punctuation_transcribed":True,
+                "page_reading_order_reviewed":True,
+                "unresolved_text_regions":[],
+            },
             "review_receipt":{"status":"APPROVED","source_png_sha256":row["source_png_sha256"],
                 "reference_text_sha256":SHA(text.encode()),"review_source":"ORIGINAL_PAGE_IMAGE",
                 "engine_candidates_not_used_as_reference":True}}
@@ -72,6 +81,25 @@ class GoldGateTests(unittest.TestCase):
         self.approve(self.packet["rows"][0])
         self.packet["rows"][0]["reference"]["review_receipt"]["engine_candidates_not_used_as_reference"]=False
         with self.assertRaisesRegex(gate.GateError,"REFERENCE_REVIEW_RECEIPT_INVALID"):
+            self.report()
+    def test_no_gold_without_full_page_nine_grid_and_punctuation(self):
+        self.approve(self.packet["rows"][0])
+        coverage=self.packet["rows"][0]["reference"]["full_page_coverage"]
+        coverage["reviewed_grid_cells"].pop()
+        with self.assertRaisesRegex(gate.GateError,"REFERENCE_FULL_PAGE_COVERAGE_UNVERIFIED"):
+            self.report()
+        coverage["reviewed_grid_cells"].append("R3C3")
+        coverage["all_visible_text_and_punctuation_transcribed"]=False
+        with self.assertRaisesRegex(gate.GateError,"REFERENCE_FULL_PAGE_COVERAGE_UNVERIFIED"):
+            self.report()
+        coverage["all_visible_text_and_punctuation_transcribed"]=True
+        coverage["unresolved_text_regions"]=["unreadable"]
+        with self.assertRaisesRegex(gate.GateError,"REFERENCE_FULL_PAGE_COVERAGE_UNVERIFIED"):
+            self.report()
+    def test_reviewer_approval_record_required(self):
+        self.approve(self.packet["rows"][0])
+        self.packet["rows"][0]["reference"]["reviewer_record_id"]="bad"
+        with self.assertRaisesRegex(gate.GateError,"REFERENCE_REVIEWER_ID_INVALID"):
             self.report()
     def test_bleedthrough_unresolved_must_not_be_gold(self):
         self.approve(self.packet["rows"][1])
