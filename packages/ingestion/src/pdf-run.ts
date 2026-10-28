@@ -157,12 +157,20 @@ async function executeOcrPage(input: PdfRunExtractionInput, generation: number, 
     const startedAt = Date.now();
     let result: PdfOcrPageResult;
     try {
-      // The worker only loads full source bytes if an OCR page really needs
-      // the legacy byte-oriented executor. Native PDF.js pages stay file-backed.
-      const pdfBytes = input.pdfBytes === undefined
-        ? await input.loadPdfBytes()
-        : input.pdfBytes;
-      result = await executor.extractPage({ ...key, runExecutionToken: input.runExecutionToken, pdfBytes });
+      // A verified, claim-lifetime PDF path is already available to the parent
+      // Worker. File-capable OCR engines use it without allocating or copying
+      // the entire document for each claimed physical page. Legacy engines
+      // retain the existing lazy bytes path and durable attempt behavior.
+      if (input.pdfFilePath !== undefined && executor.extractPageFile) {
+        result = await executor.extractPageFile({
+          ...key, runExecutionToken: input.runExecutionToken, pdfFilePath: input.pdfFilePath,
+        });
+      } else {
+        const pdfBytes = input.pdfBytes === undefined
+          ? await input.loadPdfBytes()
+          : input.pdfBytes;
+        result = await executor.extractPage({ ...key, runExecutionToken: input.runExecutionToken, pdfBytes });
+      }
     } catch {
       result = { status: "FAILED", errorCode: SourceError.PARSE, kind: "transient" };
     }
