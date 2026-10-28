@@ -10,6 +10,7 @@ import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { executeOnDemandPdfVisualReview } from "../src/pdf-visual-review.js";
 import { persistPdfVisualReviewCandidates } from "../src/pdf-visual-review-store.js";
+import { processNextPdfVisualUserRequest } from "../src/pdf-visual-user-request.js";
 
 const environment = readEnvironment();
 const keyring = JSON.stringify({
@@ -277,6 +278,30 @@ describe("real PostgreSQL + MinIO PDF vision Gateway receipt proof", () => {
         where: { workspaceId: f.workspaceId },
       })).toBe(1);
       expect(modelCalls).toBe(1);
+
+      // Explicit browser-style consent ledger is claimed just once against
+      // this real PostgreSQL ingestion. Provider invocation stays idempotent.
+      const queued = await prisma.pdfVisualReviewRequest.create({
+        data: { workspaceId: f.workspaceId, userId: f.userId,
+          sourceDocumentId: f.sourceDocumentId, ingestionRunId: f.ingestionRunId,
+          routingGeneration: 1, sourcePdfSha256: sha256(f.bytes),
+          expiresAt: new Date(Date.now() + 15*60*1000) },
+      });
+      const runOne = () => processNextPdfVisualUserRequest(input =>
+        executeOnDemandPdfVisualReview(input,{
+          ...deps, persistReviewCandidate: persistPdfVisualReviewCandidates,
+        }));
+      expect(await runOne()).toBe("DONE");
+      const completed = await prisma.pdfVisualReviewRequest.findUniqueOrThrow({
+        where: { id: queued.id },
+      });
+      expect(completed.status).toBe("SUCCEEDED");
+      expect(completed.completedAt).toBeTruthy();
+      expect(await runOne()).toBe("IDLE");
+      expect(modelCalls).toBe(1);
+      expect(await prisma.pdfVisualReviewCandidate.count({
+        where: { workspaceId: f.workspaceId },
+      })).toBe(1);
 
       await storage.putObject({
         key: f.key, body: Buffer.from("corrupt source"), contentType: "application/pdf",
