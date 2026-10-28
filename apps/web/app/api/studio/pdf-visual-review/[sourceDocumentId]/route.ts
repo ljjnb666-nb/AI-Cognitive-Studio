@@ -83,6 +83,20 @@ export async function POST(request: Request, { params }: Params) {
     const { sourceDocumentId } = await params;
     const { source, run } = await scopedSource(sourceDocumentId);
     const identity = await resolveWebIdentity();
+    // A VIEWER can inspect authorized source evidence, but cannot authorize
+    // third-party image processing or incur workspace provider charges.
+    if (identity.workspaceId !== source.workspaceId) {
+      return statusResponse({ error: "PDF_VISUAL_REQUEST_ACCESS_DENIED" }, 403);
+    }
+    const member = await prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: {
+        workspaceId: identity.workspaceId, userId: identity.userId,
+      } },
+      select: { role: true },
+    });
+    if (!member || member.role === "VIEWER") {
+      return statusResponse({ error: "PDF_VISUAL_REQUEST_ACCESS_DENIED" }, 403);
+    }
     const bound = await prisma.providerRouteBinding.findFirst({
       where: { workspaceId: identity.workspaceId, routeSlot: "PDF_VISUAL_STRUCTURE",
         connection: { status: "ACTIVE" } },
