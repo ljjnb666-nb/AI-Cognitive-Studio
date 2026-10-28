@@ -158,6 +158,14 @@ class LocalRapidOcrReceiptTests(unittest.TestCase):
         self.assertEqual(compare["candidate_lineage"], "DECLARED_NOT_INDEPENDENTLY_ATTESTED")
         self.assertIn("SELF_ATTESTED", compare["candidate_receipts"][1]["state"])
 
+    def test_offline_child_environment_does_not_bypass_refusal_proxy(self):
+        env = runner.minimal_offline_environment()
+        self.assertEqual(env["HTTP_PROXY"], "http://127.0.0.1:1")
+        self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:1")
+        self.assertEqual(env["ALL_PROXY"], "http://127.0.0.1:1")
+        self.assertEqual(env["NO_PROXY"], "")
+        self.assertEqual(env["no_proxy"], "")
+
     def test_unsafe_output_stem_denied(self):
         with self.assertRaisesRegex(comp.Blocked, "PRIVATE_OUTPUT_NAME_INVALID"):
             runner.run_candidate(
