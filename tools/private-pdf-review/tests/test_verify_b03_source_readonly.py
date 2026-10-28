@@ -102,10 +102,12 @@ class PrivateB03SourceVerifierTests(unittest.TestCase):
                 os.utime(path, ns=(first.st_atime_ns, first.st_mtime_ns))
                 return "PASS", "PASS"
 
-            with patch.object(module, "identify_exact_original", return_value=original), \\
-                 patch.object(module, "verify_page_source", side_effect=swapped_during_render), \\
-                 patch.object(module, "EXPECTED_SIZE", size), \\
-                 patch.object(module, "EXPECTED_SHA256", original_sha):
+            with (
+                patch.object(module, "identify_exact_original", return_value=original),
+                patch.object(module, "verify_page_source", side_effect=swapped_during_render),
+                patch.object(module, "EXPECTED_SIZE", size),
+                patch.object(module, "EXPECTED_SHA256", original_sha),
+            ):
                 with self.assertRaisesRegex(module.ReviewBlocked,
                                             "SOURCE_CHANGED_DURING_PAGE_VERIFY"):
                     module.inspect(root)
@@ -114,10 +116,12 @@ class PrivateB03SourceVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
             original, size, original_sha = self.make_fixture(root)
-            with patch.object(module, "identify_exact_original", return_value=original), \\
-                 patch.object(module, "verify_page_source", return_value=("PASS", "PASS")), \\
-                 patch.object(module, "EXPECTED_SIZE", size), \\
-                 patch.object(module, "EXPECTED_SHA256", original_sha):
+            with (
+                patch.object(module, "identify_exact_original", return_value=original),
+                patch.object(module, "verify_page_source", return_value=("PASS", "PASS")),
+                patch.object(module, "EXPECTED_SIZE", size),
+                patch.object(module, "EXPECTED_SHA256", original_sha),
+            ):
                 found = module.inspect(root)
                 self.assertEqual((found.source, found.page_count, found.page_67_render),
                                  ("PASS", "PASS"))
