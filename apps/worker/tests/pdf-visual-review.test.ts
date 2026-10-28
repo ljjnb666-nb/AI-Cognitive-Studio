@@ -55,6 +55,35 @@ async function fixture(mixed=true) {
 }
 
 describe("Worker on-demand PDF visual candidate task",()=>{
+  it("rejects durable-storage opt-in before any source lookup when storage dependency is absent",async()=>{
+    const f=await fixture();
+    await expect(executeOnDemandPdfVisualReview(
+      {...task,persistReviewCandidate:true},f.deps,
+    )).rejects.toThrow("PDF_VISUAL_REVIEW_STORAGE_UNAVAILABLE");
+    expect(f.authorize).not.toHaveBeenCalled();
+    expect(f.loadRun).not.toHaveBeenCalled();
+    expect(f.execute).not.toHaveBeenCalled();
+  });
+  it("persists only after explicit review storage consent, using exact source/run identity",async()=>{
+    const f=await fixture();
+    const saved=vi.fn(async(_identity:unknown,_packet:unknown)=>1);
+    f.deps.persistReviewCandidate=saved;
+    const unchanged=await executeOnDemandPdfVisualReview(task,f.deps);
+    expect(saved).not.toHaveBeenCalled();
+    expect(unchanged.persistedVisualContent).toBe(false);
+    const persisted=await executeOnDemandPdfVisualReview(
+      {...task,persistReviewCandidate:true},f.deps,
+    );
+    expect(saved).toHaveBeenCalledTimes(1);
+    expect(saved.mock.calls[0]?.[0]).toMatchObject({
+      workspaceId:task.workspaceId,sourceDocumentId:task.sourceDocumentId,
+      ingestionRunId:task.ingestionRunId,routingGeneration:1,sourcePdfSha256:sha(f.bytes),
+    });
+    expect(persisted.persistedVisualContent).toBe(true);
+    expect(persisted.reviewPacket.persistedReviewCandidate).toBe(true);
+    expect(persisted.reviewPacket.approvedForPodcast).toBe(false);
+  },90_000);
+
   it("authenticates first, reads real private PDF, replay-checks and sends one mixed page through gateway",async()=>{
     const f=await fixture();
     const out=await executeOnDemandPdfVisualReview(task,f.deps);
