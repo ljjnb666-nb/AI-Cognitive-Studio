@@ -70,15 +70,16 @@ export function parsePdfPreviewByteRange(value: string, total: number): { start:
     const suffix = Number(match[2]);
     if (!Number.isSafeInteger(suffix) || suffix <= 0)
       throw new Error("PDF_REVIEW_RANGE_UNSATISFIABLE");
-    start = Math.max(0, total - suffix);
+    start = Math.max(0, total - Math.min(suffix, MAX_PDF_REVIEW_RANGE_BYTES));
     end = total - 1;
   } else {
     start = Number(match[1]);
     end = match[2] ? Number(match[2]) : total - 1;
   }
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
-      start >= total || end < start || (match[2] && end >= total))
+      start >= total || end < start)
     throw new Error("PDF_REVIEW_RANGE_UNSATISFIABLE");
+  end = Math.min(end, total - 1);
   // A client can request the next portion with another Range header. Even
   // "bytes=0-" cannot force a multi-hundred-MB response into one request.
   return { start, end: Math.min(end, start + MAX_PDF_REVIEW_RANGE_BYTES - 1) };
@@ -128,9 +129,11 @@ export async function prepareVerifiedPdfReviewResponse(
   if (!head || head.size !== Number(source.sizeBytes) ||
       typeof head.etag !== "string" || !ETAG_PATTERN.test(head.etag))
     throw new Error("PDF_REVIEW_RANGE_SOURCE_CHANGED");
+  // Cheap malformed/unsatisfiable range rejection before any full-object SHA pass.
+  const requestedRange = rangeHeader === null ? null : parsePdfPreviewByteRange(rangeHeader, head.size);
   await attestSource(storage, source, head.etag, head.size);
-  if (rangeHeader !== null) {
-    const range = parsePdfPreviewByteRange(rangeHeader, head.size);
+  if (requestedRange !== null) {
+    const range = requestedRange;
     if (!storage.getObjectRangeStream)
       throw new Error("PDF_REVIEW_RANGE_STORAGE_UNSUPPORTED");
     const result = await storage.getObjectRangeStream(source.storageKey, {
