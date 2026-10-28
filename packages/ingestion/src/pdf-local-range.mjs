@@ -9,6 +9,10 @@ class LocalFilePdfTransport extends PDFDataRangeTransport {
   #closed = false;
   #pending = new Set();
   #onFailure;
+  #requests = 0;
+  #requestedBytes = 0;
+
+  get diagnosticStats() { return { requests: this.#requests, requestedBytes: this.#requestedBytes }; }
 
   constructor(file, length, onFailure) {
     // No progressive body and no eager full-file allocation.
@@ -26,6 +30,13 @@ class LocalFilePdfTransport extends PDFDataRangeTransport {
       return;
     }
 
+    this.#requests++;
+    this.#requestedBytes += end - begin;
+    if (process.env.PDF_RANGE_DIAGNOSTIC === "1" &&
+        (this.#requests === 1 || this.#requests % 100 === 0)) {
+      process.stderr.write("PDF_RANGE_REQUESTS=" + this.#requests +
+        " BYTES=" + this.#requestedBytes + " OFFSET=" + begin + "\n");
+    }
     const request = (async () => {
       const chunk = new Uint8Array(end - begin);
       let offset = 0;
