@@ -42,16 +42,19 @@ export function PdfVisualReviewRequestForm({ sourceDocumentId, serverEnabled }: 
     return () => { disposed = true; window.clearTimeout(timeout); };
   }, [refresh,router]);
   useEffect(() => {
-    const status=state?.request?.status;
+    const status = state?.request?.status;
     if (status !== "PENDING" && status !== "RUNNING") return;
-    const timeout = window.setTimeout(() => {
-      if (document.hidden) return;
-      void refresh().then(x => {
-        if (x.request?.status === "SUCCEEDED") router.refresh();
-      }).catch(() => setError("暂时无法读取任务状态。"));
+    let disposed = false;
+    const timer = window.setInterval(() => {
+      if (disposed || document.hidden) return;
+      void refresh().then(next => {
+        if (!disposed && next.request?.status === "SUCCEEDED") router.refresh();
+      }).catch(() => {
+        if (!disposed) setError("暂时无法读取任务状态。");
+      });
     }, 3500);
-    return () => window.clearTimeout(timeout);
-  }, [state?.request?.status,refresh,router]);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [state?.request?.status, refresh, router]);
   async function submit() {
     if (!serverEnabled || !allowImage || !allowCharges || busy || state?.request) return;
     setBusy(true);
