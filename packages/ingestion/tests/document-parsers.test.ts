@@ -1,5 +1,8 @@
 import { crc32, deflateRawSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import PDFDocument from "pdfkit";
@@ -157,6 +160,58 @@ describe("safe EPUB parser", () => {
 });
 
 describe("isolated PDF parser", () => {
+  it("parses a valid 17 MiB sparse-layout PDF with local file ranges and preserves native evidence", async () => {
+    // A structurally valid synthetic PDF: a large whitespace gap precedes the
+    // cross-reference table, whose byte offsets remain exact. Real source
+    // content never enters this fixture and no OCR/model is called.
+    const dir = await mkdtemp(join(tmpdir(), "pdf-local-range-test-"));
+    async function makePdf(path: string, gapBytes: number) {
+      const text = "BT /F1 18 Tf 50 700 Td (Native ranged PDF evidence) Tj ET\\n";
+      const objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        `<< /Length ${Buffer.byteLength(text)} >>\\nstream\\n${text}endstream`,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+      ];
+      let prefix = "%PDF-1.4\\n";
+      const offsets = [0];
+      objects.forEach((value, index) => {
+        offsets.push(Buffer.byteLength(prefix));
+        prefix += `${index + 1} 0 obj\\n${value}\\nendobj\\n`;
+      });
+      const xrefPosition = Buffer.byteLength(prefix) + gapBytes;
+      const table = [
+        "xref", "0 6", "0000000000 65535 f ",
+        ...offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n `),
+        "trailer", "<< /Size 6 /Root 1 0 R >>", "startxref",
+        String(xrefPosition), "%%EOF", "",
+      ].join("\\n");
+      await writeFile(path, prefix);
+      const file = await open(path, "a");
+      try {
+        const spaces = Buffer.alloc(1024 * 1024, 0x20);
+        let remaining = gapBytes;
+        while (remaining > 0) {
+          const size = Math.min(remaining, spaces.length);
+          await file.writeFile(spaces.subarray(0, size));
+          remaining -= size;
+        }
+        await file.writeFile(table);
+      } finally { await file.close(); }
+    }
+    try {
+      const small = join(dir, "small.pdf"), large = join(dir, "large.pdf");
+      await makePdf(small, 0);
+      await makePdf(large, 17 * 1024 * 1024);
+      const baseline = await extractNativePdfFile(small, DEFAULT_PARSER_LIMITS);
+      const ranged = await extractNativePdfFile(large, { ...DEFAULT_PARSER_LIMITS, pdfTimeoutMs: 45_000 });
+      expect(ranged).toEqual(baseline);
+      expect(ranged.pages[0]?.blocks.some((block) => block.text.includes("Native ranged PDF evidence"))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
   it("extracts identical native evidence through SHA-verified staged PDF without caller-side buffer", async () => {
     const bytes = await pdf(["A source-bound paragraph", "Second physical page"]);
     const original = await extractNativePdf(bytes, DEFAULT_PARSER_LIMITS);
