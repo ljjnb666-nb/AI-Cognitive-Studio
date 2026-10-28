@@ -51,6 +51,8 @@ jobs:
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: B03 private source SHA verifier - SYNTHETIC OFFLINE tests only
+        run: python3 -m unittest discover -s tools/private-pdf-review/tests -p 'test_*.py' -v
       - uses: pnpm/action-setup@v4
         with:
           version: 10.30.3
@@ -109,6 +111,8 @@ jobs:
           echo 'PDF_HUMAN_REVIEW_CHROMIUM_NATIVE_VIEWER_PIXEL_RENDER=NOT_ASSERTED'
           echo 'PDF_REVIEW_LARGE_SOURCE_RANGE=TESTED_SHA_ATTESTATION'
           echo 'PDF_REVIEW_MAX_RANGE_BYTES=8388608'
+          echo 'B03_LOCAL_SHA_SCRIPT_SYNTHETIC_TESTS=RUN'
+          echo 'B03_REAL_WINDOWS_PRIVATE_PDF_BYTES=NOT_ACCESSED'
           echo 'PDF_HUMAN_REVIEW_PAID_MODEL=NOT_CALLED'
           echo 'PDF_HUMAN_REVIEW_PODCAST_AUTHORITY=FALSE'
           echo 'PDF_VISUAL_REQUEST_OPT_IN_DEFAULT=OFF'
