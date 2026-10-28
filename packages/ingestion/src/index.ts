@@ -167,16 +167,16 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
         const inspected = await inspectObjectStream(await storage.getObjectStream(session.temporaryStorageKey));
         if (inspected.sizeBytes !== head.size || inspected.sizeBytes !== Number(session.declaredSizeBytes)) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED"); throw new Error("UPLOAD_STORAGE_SIZE_MISMATCH"); }
         const mediaType = sniffMediaType(inspected.prefix, session.declaredMediaType, session.originalFilename);
-// A PDF-sized upload intent must not promote a >100MiB TXT/Markdown/EPUB
-// payload merely because the client declared application/pdf.
-const actualMaxBytes = mediaType === "application/pdf"
-  ? (options.maxPdfUploadBytes ?? options.maxUploadBytes)
-  : Math.min(options.maxUploadBytes, MAX_STANDARD_UPLOAD_BYTES);
-if (inspected.sizeBytes > actualMaxBytes) {
-  await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED");
-  throw new Error("UPLOAD_SIZE_INVALID");
-}
-const digest = inspected.sha256; const storageKey = `workspaces/${context.workspaceId}/source-blobs/${digest}`;
+        // A PDF-sized upload intent must not promote a >100MiB TXT/Markdown/EPUB
+        // payload merely because the client declared application/pdf.
+        const actualMaxBytes = mediaType === "application/pdf"
+          ? (options.maxPdfUploadBytes ?? options.maxUploadBytes)
+          : Math.min(options.maxUploadBytes, MAX_STANDARD_UPLOAD_BYTES);
+        if (inspected.sizeBytes > actualMaxBytes) {
+          await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED");
+          throw new Error("UPLOAD_SIZE_INVALID");
+        }
+        const digest = inspected.sha256; const storageKey = `workspaces/${context.workspaceId}/source-blobs/${digest}`;
         if (!await renewCompletionClaim(context.workspaceId, session.id, claim.token, options.completionLeaseMs)) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST");
         const existing = await prisma.sourceBlob.findUnique({ where: { workspaceId_sha256: { workspaceId: context.workspaceId, sha256: digest } } });
         let canonicalWasCreated = false;
