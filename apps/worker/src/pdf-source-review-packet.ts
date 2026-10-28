@@ -131,7 +131,7 @@ export function buildPdfSourceReviewPacket(
   return {
     schemaVersion: PDF_SOURCE_REVIEW_PACKET_VERSION,
     authority: "SOURCE_BOUND_REVIEW_ONLY",
-    sourcePdfSha256,
+    sourcePdfSha256: sourceSha256,
     totalPhysicalPages: native.pageCount,
     examinedPages: pages.length,
     pages,
