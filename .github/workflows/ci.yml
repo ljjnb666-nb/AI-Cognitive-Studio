@@ -29,34 +29,6 @@ env:
   BETTER_AUTH_TRUSTED_ORIGINS: http://localhost:3001
 
 jobs:
-  # Only PR #212's owner-controlled exact HEAD runs this new real-model proof.
-  # No private PDFs, BYOK credentials or externally hosted model API calls.
-  rapidocr-real-synthetic-smoke:
-    if: ${{ github.event_name == 'pull_request' && github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/pdf-human-review-original-page-v1-20261028' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 12
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-      - name: Verify exact HEAD
-        env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-          cache-dependency-path: packages/ingestion/tests/python/rapidocr-model-smoke-requirements.txt
-      - name: Install pinned model and OCR runtime wheels
-        timeout-minutes: 6
-        run: python -m pip install --disable-pip-version-check --only-binary=:all: -r packages/ingestion/tests/python/rapidocr-model-smoke-requirements.txt
-      - name: Real ONNX OCR of a synthetic scanned one-page PDF
-        timeout-minutes: 5
-        run: python -I -B packages/ingestion/tests/python/rapidocr_model_smoke.py
   # ---------------------------------------------------------------------------
   # Domain 1 — static: lint, typecheck, build. No infrastructure services.
   # (Verified: every web route is server-rendered on demand, so `next build`
