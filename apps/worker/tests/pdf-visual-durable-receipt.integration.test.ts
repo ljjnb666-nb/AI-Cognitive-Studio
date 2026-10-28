@@ -4,7 +4,7 @@ import PDFDocument from "pdfkit";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { DEFAULT_PARSER_LIMITS, extractNativePdf } from "@ai-cognitive/ingestion";
-import { ProviderGatewayRepository, parseKeyring } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayRepository, parseKeyring, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { readEnvironment } from "@ai-cognitive/shared/server";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
@@ -178,6 +178,22 @@ describe("real PostgreSQL + MinIO PDF vision Gateway receipt proof", () => {
         },
       }),
     });
+    const gatewayStates: Array<{status?:string;code?:string;message?:string}> = [];
+    const monitoredGateway = {
+      execute: async (...args: Parameters<typeof runtime.gateway.execute>) => {
+        try {
+          const result = await runtime.gateway.execute(...args);
+          gatewayStates.push({ status: result.status });
+          return result;
+        } catch(error) {
+          const value = error as {code?:string;message?:string};
+          gatewayStates.push({
+            code: value.code ?? "UNKNOWN", message: value.message?.slice(0, 160) ?? "unknown",
+          });
+          throw error;
+        }
+      },
+    } as unknown as ProviderGateway;
     const task = {
       enabled: true as const, allowExternalVisualModel: true as const,
       workspaceId: f.workspaceId, userId: f.userId,
@@ -195,7 +211,7 @@ describe("real PostgreSQL + MinIO PDF vision Gateway receipt proof", () => {
         prisma.ingestionRun.findFirst({
           where: { id: ingestionRunId, workspaceId }, include: { sourceDocument: true },
         }),
-      storage, gateway: runtime.gateway,
+      storage, gateway: monitoredGateway,
     };
     try {
       const first = await executeOnDemandPdfVisualReview(task, deps);
@@ -210,7 +226,7 @@ describe("real PostgreSQL + MinIO PDF vision Gateway receipt proof", () => {
         });
         throw new Error("PDF_VISUAL_REAL_STACK_DIAGNOSTIC:"+JSON.stringify({
           pages:first.pages.map(page=>({status:page.status,reason:page.failureReason})),
-          invocationStates,modelCalls,
+          invocationStates,modelCalls,gatewayStates,
         }));
       }
       expect(first.pages[0]?.figures[0]?.edges[0]?.direction).toBe("DIRECTED");
