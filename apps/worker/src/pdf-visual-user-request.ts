@@ -51,6 +51,18 @@ export async function processNextPdfVisualUserRequest(execute: Execute): Promise
       select: { id: true },
     });
     if (!run) throw new Error("PDF_VISUAL_REQUEST_STALE");
+    // Recheck paid-action role at execution, not just on original browser POST.
+    // A revoked member or downgraded VIEWER must never send a private book page
+    // to an external model or charge this workspace.
+    const member = await prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: {
+        workspaceId: candidate.workspaceId, userId: candidate.userId,
+      } },
+      select: { role: true },
+    });
+    if (!member || member.role === "VIEWER") {
+      throw new Error("PDF_VISUAL_REQUEST_ACCESS_REVOKED");
+    }
     const outcome = await execute({
       enabled: true,
       allowExternalVisualModel: true,
