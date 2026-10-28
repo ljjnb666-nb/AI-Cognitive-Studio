@@ -164,6 +164,41 @@ afterEach(async () => {
 afterAll(async () => { storage.close(); });
 
 describe("real PostgreSQL + MinIO PDF vision Gateway receipt proof", () => {
+  it("does not send a private book to the model after a queued request owner becomes VIEWER", async () => {
+    const f = await fixture();
+    const request = await prisma.pdfVisualReviewRequest.create({
+      data: {
+        workspaceId: f.workspaceId, userId: f.userId,
+        sourceDocumentId: f.sourceDocumentId, ingestionRunId: f.ingestionRunId,
+        routingGeneration: 1, sourcePdfSha256: sha256(f.bytes),
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      },
+    });
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: f.workspaceId, userId: f.userId } },
+      data: { role: "VIEWER" },
+    });
+    let calls = 0;
+    expect(await processNextPdfVisualUserRequest(async () => {
+      calls += 1;
+      throw new Error("MUST_NEVER_CALL_PAID_MODEL");
+    })).toBe("DONE");
+    expect(calls).toBe(0);
+    const completed = await prisma.pdfVisualReviewRequest.findUniqueOrThrow({
+      where: { id: request.id },
+    });
+    expect(completed.status).toBe("FAILED");
+    expect(completed.claimToken).toBeNull();
+    expect(await processNextPdfVisualUserRequest(async () => {
+      calls += 1;
+      throw new Error("MUST_NEVER_CALL_PAID_MODEL");
+    })).toBe("IDLE");
+    expect(calls).toBe(0);
+    expect(await prisma.pdfVisualReviewCandidate.count({
+      where: { workspaceId: f.workspaceId },
+    })).toBe(0);
+  }, 30_000);
+
   it("reads authentic S3 bytes, writes an encrypted durable receipt and replays idempotently", async () => {
     const f = await fixture();
     let modelCalls = 0;
