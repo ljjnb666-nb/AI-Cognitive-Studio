@@ -57,7 +57,7 @@ describe.skipIf(process.env.PDF_LARGE_UPLOAD_STORAGE_PROOF !== "true")(
         // Node Buffer. The PDF signature is enough for the ingestion sniff
         // gate, but this fixture is NOT a parseable PDF and MUST NOT be parsed.
         const firstChunk = Buffer.alloc(1024 * 1024, 0x20);
-        firstChunk.write("%PDF-1.7\\n", 0, "ascii");
+        firstChunk.write("%PDF-1.7\n", 0, "ascii");
         const bodyChunk = Buffer.alloc(1024 * 1024, 0x20);
         const hash = createHash("sha256");
         let sentBytes = 0;
