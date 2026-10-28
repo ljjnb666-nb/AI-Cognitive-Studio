@@ -1,0 +1,36 @@
+name: Fivebook private Gold CER authority v28
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-synthetic-gold-gate:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.user.login == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/private-fivebook-gold-cer-gate-v28-20261028' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify exact PR SHA and synthetic-only private Gold approval contract
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python -m py_compile tools/pdf-parser-benchmark/scripts/ebook_private_gold_cer_gate_v28.py
+          python -m unittest discover -s tools/pdf-parser-benchmark/tests -p 'test_ebook_private_gold_cer_gate_v28.py' -v
+          echo 'ACS_GOLD_V28_SYNTHETIC=PASS'
+          echo 'ACS_GOLD_V28_REAL_BOOKS=NOT_RUN'
+          echo 'ACS_GOLD_V28_INDEPENDENT_GOLD=0_OF_5_UNVERIFIED'
+          echo 'ACS_GOLD_V28_OFFICIAL_CER=NULL'
+          echo 'ACS_GOLD_V28_PAID_MODEL_CALLS=0'
