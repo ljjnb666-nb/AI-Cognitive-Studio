@@ -1136,6 +1136,7 @@ model IngestionRun {
   ocrServerInstances    OcrServerInstance[]
   doclingLayoutSnapshots DoclingLayoutSnapshot[]
   doclingLayoutTasks     DoclingLayoutTask[]
+  pdfVisualReviewCandidates PdfVisualReviewCandidate[]
 
   @@unique([id, sourceDocumentId, workspaceId])
   @@index([executionLeaseUntil])
@@ -1186,6 +1187,27 @@ model DoclingLayoutTask {
   @@unique([ingestionRunId, physicalPageIndex, routingGeneration, modelSha256], name: "byPageAndModel", map: "DoclingLayoutTask_unique_page_model")
   @@index([status, leaseUntil], map: "DoclingLayoutTask_status_lease_idx")
   @@index([workspaceId, sourceDocumentId], map: "DoclingLayoutTask_workspace_source_idx")
+}
+
+/// Time-limited source-bound UNVERIFIED visual graph snapshots for authenticated review.
+model PdfVisualReviewCandidate {
+  id                String       @id @default(cuid())
+  workspaceId       String
+  sourceDocumentId  String
+  ingestionRunId    String
+  routingGeneration Int
+  physicalPageIndex Int
+  sourcePdfSha256   String
+  sourcePngSha256   String
+  candidateJson     Json
+  candidateSha256   String
+  createdAt         DateTime     @default(now())
+  expiresAt         DateTime
+  ingestionRun      IngestionRun @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@unique([ingestionRunId, physicalPageIndex, routingGeneration, sourcePngSha256], map: "PdfVisualReviewCandidate_identity_uq")
+  @@index([workspaceId, sourceDocumentId, physicalPageIndex, expiresAt], map: "PdfVisualReviewCandidate_read_idx")
+  @@index([expiresAt], map: "PdfVisualReviewCandidate_expiry_idx")
 }
 
 model DoclingLayoutSnapshot {
