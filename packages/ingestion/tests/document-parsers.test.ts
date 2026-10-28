@@ -160,44 +160,47 @@ describe("safe EPUB parser", () => {
 });
 
 describe("isolated PDF parser", () => {
-  it("parses a valid 17 MiB sparse-layout PDF with local file ranges and preserves native evidence", async () => {
-    // A structurally valid synthetic PDF: a large whitespace gap precedes the
-    // cross-reference table, whose byte offsets remain exact. Real source
-    // content never enters this fixture and no OCR/model is called.
+  it("parses a valid 17 MiB PDF with a bounded stream and identical native evidence", async () => {
+    // A large unreferenced PDF stream, not a pathological whitespace gap:
+    // PDF.js must seek across the file while page evidence remains identical.
+    // No real book bytes, models or OCR are involved.
     const dir = await mkdtemp(join(tmpdir(), "pdf-local-range-test-"));
-    async function makePdf(path: string, gapBytes: number) {
+    async function makePdf(path: string, payloadBytes: number) {
       const text = "BT /F1 18 Tf 50 700 Td (Native ranged PDF evidence) Tj ET\n";
       const objects = [
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-        `<< /Length ${Buffer.byteLength(text)} >>\nstream\n${text}endstream`,
+        "<< /Length " + Buffer.byteLength(text) + " >>\nstream\n" + text + "endstream",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
       ];
       let prefix = "%PDF-1.4\n";
       const offsets = [0];
       objects.forEach((value, index) => {
         offsets.push(Buffer.byteLength(prefix));
-        prefix += `${index + 1} 0 obj\n${value}\nendobj\n`;
+        prefix += (index + 1) + " 0 obj\n" + value + "\nendobj\n";
       });
-      const xrefPosition = Buffer.byteLength(prefix) + gapBytes;
+      const payloadOffset = Buffer.byteLength(prefix);
+      offsets.push(payloadOffset);
+      const header = "6 0 obj\n<< /Length " + payloadBytes + " >>\nstream\n";
+      const tail = "\nendstream\nendobj\n";
+      const xrefPosition = payloadOffset + Buffer.byteLength(header) + payloadBytes + Buffer.byteLength(tail);
       const table = [
-        "xref", "0 6", "0000000000 65535 f ",
-        ...offsets.slice(1).map((offset) => `${String(offset).padStart(10, "0")} 00000 n `),
-        "trailer", "<< /Size 6 /Root 1 0 R >>", "startxref",
+        "xref", "0 7", "0000000000 65535 f ",
+        ...offsets.slice(1).map((offset) => String(offset).padStart(10, "0") + " 00000 n "),
+        "trailer", "<< /Size 7 /Root 1 0 R >>", "startxref",
         String(xrefPosition), "%%EOF", "",
       ].join("\n");
-      await writeFile(path, prefix);
+      await writeFile(path, prefix + header);
       const file = await open(path, "a");
       try {
         const spaces = Buffer.alloc(1024 * 1024, 0x20);
-        let remaining = gapBytes;
-        while (remaining > 0) {
+        for (let remaining = payloadBytes; remaining > 0;) {
           const size = Math.min(remaining, spaces.length);
           await file.writeFile(spaces.subarray(0, size));
           remaining -= size;
         }
-        await file.writeFile(table);
+        await file.writeFile(tail + table);
       } finally { await file.close(); }
     }
     try {
