@@ -124,7 +124,7 @@ class PrivateB03SourceVerifierTests(unittest.TestCase):
             ):
                 found = module.inspect(root)
                 self.assertEqual((found.source, found.page_count, found.page_67_render),
-                                 ("PASS", "PASS"))
+                                 ("PASS", "PASS", "PASS"))
 
     def test_main_redacts_private_path_and_still_rejects_incomplete_page_review(self):
         sentinel = pathlib.Path("C:/PRIVATE_SENTINEL_ONLY_DO_NOT_OUTPUT/secret.pdf")
