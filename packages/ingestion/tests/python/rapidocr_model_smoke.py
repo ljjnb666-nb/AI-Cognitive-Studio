@@ -54,11 +54,11 @@ def offline_env() -> dict[str, str]:
         "HTTP_PROXY": "http://127.0.0.1:1",
         "HTTPS_PROXY": "http://127.0.0.1:1",
         "ALL_PROXY": "http://127.0.0.1:1",
-        "NO_PROXY": "*",
+        "NO_PROXY": "",
         "http_proxy": "http://127.0.0.1:1",
         "https_proxy": "http://127.0.0.1:1",
         "all_proxy": "http://127.0.0.1:1",
-        "no_proxy": "*",
+        "no_proxy": "",
     })
     return env
 
