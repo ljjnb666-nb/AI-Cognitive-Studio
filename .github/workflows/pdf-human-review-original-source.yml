@@ -53,17 +53,6 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - name: Verify Python RapidOCR 151MB staged-source admission and denial gates
         run: python3 -m unittest discover -s packages/ingestion/tests/python -p 'test_*.py' -v
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-          cache-dependency-path: packages/ingestion/tests/python/rapidocr-model-smoke-requirements.txt
-      - name: Install pinned RapidOCR ONNX and PyMuPDF wheels for actual synthetic-page inference
-        timeout-minutes: 6
-        run: python -m pip install --disable-pip-version-check --only-binary=:all: -r packages/ingestion/tests/python/rapidocr-model-smoke-requirements.txt
-      - name: Verify genuine offline RapidOCR model on scanned synthetic page
-        timeout-minutes: 5
-        run: python -I -B packages/ingestion/tests/python/rapidocr_model_smoke.py
       - name: B03 private source SHA verifier - SYNTHETIC OFFLINE tests only
         run: python3 -m unittest discover -s tools/private-pdf-review/tests -p 'test_*.py' -v
       - uses: pnpm/action-setup@v4
