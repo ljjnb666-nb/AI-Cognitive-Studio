@@ -152,9 +152,16 @@ def validate_source(root: Path, source: object) -> dict:
         try:
             if doc.needs_pass or doc.page_count != pages:
                 raise Blocked("SOURCE_PAGE_COUNT_MISMATCH")
-            rect = doc.load_page(index - 1).rect
-            if rect.width <= 0 or rect.height <= 0:
+            page = doc.load_page(index - 1)
+            rect = page.rect
+            if rect.width <= 0 or rect.height <= 0 or max(rect.width, rect.height) > 20_000:
                 raise Blocked("SOURCE_PAGE_INVALID")
+            # Verify this physical page can actually be rendered, without
+            # exporting its pixels. Huge pages are downscaled before decode.
+            scale = min(1.0, 384.0 / max(rect.width, rect.height))
+            pixels = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            if not (1 <= pixels.width <= 384 and 1 <= pixels.height <= 384):
+                raise Blocked("SOURCE_PAGE_RENDER_INVALID")
         finally:
             doc.close()
     except ImportError:
