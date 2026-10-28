@@ -75,6 +75,11 @@ jobs:
         env:
           PDF_LARGE_UPLOAD_STORAGE_PROOF: "true"
         run: pnpm --filter @ai-cognitive/ingestion exec vitest run --config vitest.integration.config.ts tests/large-pdf-presigned-upload.integration.test.ts --reporter=verbose
+      - name: Verify VALID 151.5 MB 271-page synthetic PDF.js parse under child RSS cap
+        timeout-minutes: 4
+        env:
+          PDF_LARGE_VALID_PARSER_PROOF: "true"
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-large-valid-parser.test.ts --reporter=verbose
       - name: Verify PDF parent-worker file staging and identical native PDF.js evidence
         run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-source-stage.test.ts tests/document-parsers.test.ts --reporter=verbose
       - name: Verify isolated source-bound store and Worker opt-in
@@ -125,6 +130,7 @@ jobs:
           echo 'PDF_UPLOAD_LIMIT_BYTES=209715200'
           echo 'NON_PDF_UPLOAD_LIMIT_BYTES=104857600'
           echo 'B03_SYNTHETIC_151495200_PRESIGNED_PUT_AND_CANONICAL_SHA=TESTED'
+          echo 'B03_VALID_SYNTHETIC_151495200_271PAGE_PDFJS_RSS=TESTED_ON_EXACT_HEAD'
           echo 'B03_REAL_PRIVATE_PUT_AND_FULL_PARSER=NOT_TESTED'
           echo 'PDF_HUMAN_REVIEW_PAID_MODEL=NOT_CALLED'
           echo 'PDF_HUMAN_REVIEW_PODCAST_AUTHORITY=FALSE'
