@@ -154,6 +154,38 @@ describe("B03 151.5MB PDF-only upload boundary", () => {
     expect(await prisma.uploadSession.count({ where: { workspaceId: workspace.id } })).toBe(1);
   });
 
+  it("rejects a streamed >100MiB text body disguised as a PDF before canonical promotion", async () => {
+    const { user, workspace } = await createWorkspaceFixture();
+    const context = { userId: user.id, workspaceId: workspace.id };
+    const storage = new FakeStorageProvider();
+    const service = createIngestionService(storage);
+    const declaredSize = MAX_STANDARD_UPLOAD_BYTES + 1;
+    const { session } = await service.createUploadIntent(context, {
+      filename: "mislabelled.txt", mediaType: "application/pdf", sizeBytes: declaredSize,
+    });
+    // HEAD declares the entire stream; keep the test's resident fixture at 1MiB.
+    storage.objects.set(session.temporaryStorageKey, Uint8Array.of(0x61));
+    storage.headSizes.set(session.temporaryStorageKey, declaredSize);
+    storage.getObjectStream = async (key: string) => {
+      if (key !== session.temporaryStorageKey) throw new Error("UNEXPECTED_CANONICAL_READ");
+      return (async function* () {
+        const chunk = Buffer.alloc(1024 * 1024, 0x61);
+        let remaining = declaredSize;
+        while (remaining > 0) {
+          const length = Math.min(remaining, chunk.byteLength);
+          yield chunk.subarray(0, length);
+          remaining -= length;
+        }
+      })();
+    };
+
+    await expect(service.completeUpload(context, session.id)).rejects.toThrow("UPLOAD_SIZE_INVALID");
+    await expect(prisma.uploadSession.findUniqueOrThrow({ where: { id: session.id } }))
+      .resolves.toMatchObject({ status: "REJECTED" });
+    await expect(prisma.sourceDocument.count({ where: { workspaceId: workspace.id } })).resolves.toBe(0);
+    await expect(prisma.sourceBlob.count({ where: { workspaceId: workspace.id } })).resolves.toBe(0);
+  });
+
   it("does not promote a B03-size declared PDF if the stored object is short or mismatched", async () => {
     const { user, workspace } = await createWorkspaceFixture();
     const ctx = { userId: user.id, workspaceId: workspace.id };
