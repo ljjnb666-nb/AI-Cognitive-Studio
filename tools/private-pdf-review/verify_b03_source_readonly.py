@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""B03 private Windows original-book identity check.
+
+No OCR, model, network, dependency installation, file writes, or content export.
+Only safe booleans/status strings are emitted.  A successful source match alone
+does NOT establish lineage of an independently uploaded Library PNG.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import sys
+from dataclasses import dataclass
+
+BOOK_ID = "B03"
+EXPECTED_SIZE = 151_495_200
+EXPECTED_SHA256 = "5be652d2066b680f1242bf358979c549aaf8a1588d9648926ecd8b6c30697440"
+EXPECTED_PAGES = 271
+TARGET_PAGE_ONE_BASED = 67
+DEFAULT_ROOT = r"D:\ai-cognitive-pdf-benchmark-data"
+MAX_DISCOVERED_FILES = 30_000
+MAX_CANDIDATES = 8
+CHUNK = 4 * 1024 * 1024
+
+
+class ReviewBlocked(Exception):
+    """Fail closed; exception text must never go to CI or stdout."""
+
+
+@dataclass(frozen=True)
+class Finding:
+    source: str
+    page_count: str
+    page_67_render: str
+    library_image_lineage: str = "NOT_ATTESTED"
+
+    def safe_record(self) -> dict[str, str | int]:
+        return {
+            "policy": "ACS_B03_PRIVATE_SOURCE_IDENTITY_V1",
+            "book_id": BOOK_ID,
+            "expected_physical_page_1_based": TARGET_PAGE_ONE_BASED,
+            "source_pdf_sha256": self.source,
+            "pdf_page_count_271": self.page_count,
+            "page67_render_from_matched_pdf": self.page_67_render,
+            "uploaded_library_png_identity": self.library_image_lineage,
+            "full_page_gold": "NOT_MEASURED",
+            "production": "UNVERIFIED",
+        }
+
+
+def digest_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(CHUNK)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def identify_exact_original(
+    root: pathlib.Path, expected_size: int = EXPECTED_SIZE, expected_sha: str = EXPECTED_SHA256
+) -> pathlib.Path:
+    """Match known SHA rather than a private filename. Reject symlinks and ambiguous matches."""
+    if not root.is_dir() or root.is_symlink():
+        raise ReviewBlocked("PRIVATE_DATA_ROOT_UNAVAILABLE")
+    if not isinstance(expected_size, int) or expected_size < 5:
+        raise ReviewBlocked("INVALID_CONTRACT")
+    if len(expected_sha) != 64 or any(ch not in "0123456789abcdef" for ch in expected_sha):
+        raise ReviewBlocked("INVALID_CONTRACT")
+
+    examined = 0
+    candidates: list[pathlib.Path] = []
+    for dirpath, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        base = pathlib.Path(dirpath)
+        # Do not traverse reparse points or link targets.
+        dirs[:] = sorted(d for d in dirs if not (base / d).is_symlink())
+        for name in sorted(files):
+            examined += 1
+            if examined > MAX_DISCOVERED_FILES:
+                raise ReviewBlocked("SEARCH_TOO_BROAD")
+            candidate = base / name
+            if candidate.suffix.lower() != ".pdf" or candidate.is_symlink():
+                continue
+            try:
+                stat = candidate.stat()
+            except OSError:
+                raise ReviewBlocked("SOURCE_STAT_FAILED") from None
+            if stat.st_size == expected_size:
+                candidates.append(candidate)
+                if len(candidates) > MAX_CANDIDATES:
+                    raise ReviewBlocked("TOO_MANY_SAME_SIZE_PDFS")
+
+    matched: list[pathlib.Path] = []
+    for path in candidates:
+        try:
+            first = path.stat()
+            if digest_file(path) != expected_sha:
+                continue
+            second = path.stat()
+        except OSError:
+            raise ReviewBlocked("SOURCE_READ_FAILED") from None
+        if first.st_size != expected_size or second.st_size != expected_size or \
+                first.st_mtime_ns != second.st_mtime_ns:
+            raise ReviewBlocked("SOURCE_CHANGED_DURING_SCAN")
+        matched.append(path)
+    if not matched:
+        raise ReviewBlocked("B03_SHA_NOT_FOUND")
+    # Identical files may exist in caches and archives. A single selected
+    # source is required before establishing any downstream page lineage.
+    if len(matched) != 1:
+        raise ReviewBlocked("MULTIPLE_IDENTICAL_B03_COPIES")
+    return matched[0]
+
+
+def verify_page_source(path: pathlib.Path) -> tuple[str, str]:
+    """Optional local PDF rendering, not visual equality with uploaded Library PNG."""
+    try:
+        import fitz  # PyMuPDF, optional preinstalled package; never auto-install
+    except ImportError:
+        return "NOT_TESTED_PYMUPDF_UNAVAILABLE", "NOT_TESTED_PYMUPDF_UNAVAILABLE"
+    try:
+        document = fitz.open(str(path))  # lazily opens file; do NOT read_bytes()
+        try:
+            if len(document) != EXPECTED_PAGES:
+                return "MISMATCH", "NOT_TESTED_PAGE_COUNT_INVALID"
+            page = document.load_page(TARGET_PAGE_ONE_BASED - 1)
+            rect = page.rect
+            if rect.width <= 0 or rect.height <= 0 or max(rect.width, rect.height) > 20000:
+                return "PASS", "INVALID_PAGE_GEOMETRY"
+            scale = min(1.0, 768.0 / max(rect.width, rect.height))
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            if pixmap.width < 1 or pixmap.height < 1 or pixmap.width > 768 or pixmap.height > 768:
+                return "PASS", "INVALID_RENDER_DIMENSIONS"
+            # Rendering only; no pixels written, printed, uploaded or hashed.
+            return "PASS", "PASS"
+        finally:
+            document.close()
+    except Exception:
+        return "NOT_VERIFIED_PDF_RENDER_ERROR", "NOT_VERIFIED_PDF_RENDER_ERROR"
+
+
+def inspect(root: pathlib.Path) -> Finding:
+    path = identify_exact_original(root)
+    page_count, render = verify_page_source(path)
+    return Finding("PASS", page_count, render)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="B03 read-only local SHA + physical page check")
+    parser.add_argument("--root", default=DEFAULT_ROOT,
+                        help="Local PRIVATE data root; never uploaded or printed")
+    args = parser.parse_args(argv)
+    try:
+        result = inspect(pathlib.Path(args.root))
+        print("ACS_B03_PRIVATE_SOURCE_PROOF=" + json.dumps(result.safe_record(),
+             ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        # If PyMuPDF is not installed, SHA identity is still proven; page verification stays open.
+        return 0 if result.page_count == "PASS" and result.page_67_render == "PASS" else 2
+    except Exception:
+        # Deliberately never leak filesystem layout, content or exception messages.
+        print("ACS_B03_PRIVATE_SOURCE_PROOF=" + json.dumps({
+            "policy": "ACS_B03_PRIVATE_SOURCE_IDENTITY_V1",
+            "book_id": BOOK_ID,
+            "source_pdf_sha256": "NOT_VERIFIED",
+            "pdf_page_count_271": "NOT_VERIFIED",
+            "page67_render_from_matched_pdf": "NOT_VERIFIED",
+            "uploaded_library_png_identity": "NOT_ATTESTED",
+            "full_page_gold": "NOT_MEASURED",
+            "production": "UNVERIFIED",
+        }, sort_keys=True, separators=(",", ":")))
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
