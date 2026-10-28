@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
 import { prisma } from "@ai-cognitive/db";
 import { validatePdfVisualStructureCandidate } from "@ai-cognitive/ingestion";
 import type { PdfSourceReviewPacket } from "./pdf-source-review-packet.js";
 
 /** No original page PNG, source text excerpt, prompt or credential is persisted. */
 export const PDF_VISUAL_CANDIDATE_TTL_MS = 24 * 60 * 60 * 1000;
-const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
 export type StorePdfVisualCandidateIdentity = {
   workspaceId: string;
@@ -71,7 +71,7 @@ export function buildPdfVisualReviewStorageRows(
       sourcePdfSha256: identity.sourcePdfSha256,
       sourcePngSha256: page.sourcePngSha256,
       candidateJson,
-      candidateSha256: hash(serialized),
+      candidateSha256: pdfReviewCandidateFingerprint(candidateJson),
       expiresAt: expiry,
     }];
   });
