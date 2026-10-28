@@ -20,6 +20,8 @@ B03、B08、B15、B29、B31 五本 PDF，每本沿用已有来源 manifest 的 s
 
 严格图像文件名如 B08_p0064_FULL.private.png；脚本比对实际原图 SHA，不允许原页错位或更换。B08 相邻页不必然是背面：若透印归属未确认，不能出 Gold。
 
+v28 已与此前的更严格参考验收标准对齐：**reference 必须额外带有 reviewer_record_id（8–80 位安全标识）与 full_page_coverage**，其中 coverage_scope=COMPLETE_PHYSICAL_PAGE_TEXT、reviewed_grid_cells 必须按 R1C1 至 R3C3 顺序包含完整九宫格，侧栏/竖排、整页可见标点文字、阅读顺序均必须为 true，unresolved_text_regions 必须为空。任何未核完的页面拒绝作为 Gold，不接受只看重点文字区域的假全页 CER。此前五书参考系统已存在严格的九宫格验收，v28 不得成为绕过旧门禁的替代路径。
+
 注意：代码只能验证审核声明与来源的绑定，不能仅凭这些字段证明审阅者真正独立观察过源页。因此仍需真实、可复核的直接原页审核事实；引擎一致绝不构成 Gold。
 
 ## 私有执行
