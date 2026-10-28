@@ -30,7 +30,8 @@ class PrivateB03SourceVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
             expected, size, sha = self.make_fixture(root)
-            self.make_fixture(root, "other/another.pdf")
+            unrelated, _, _ = self.make_fixture(root, "other/another.pdf")
+            unrelated.write_bytes(b"%PDF-1.4\nSYNTHETIC PAGE REFERENCE ONLY?\n")
             result = module.identify_exact_original(root, size, sha)
             with self.subTest("matching_sha"):
                 self.assertEqual(result, expected)
