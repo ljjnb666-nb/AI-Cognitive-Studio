@@ -75,6 +75,8 @@ jobs:
         env:
           PDF_LARGE_UPLOAD_STORAGE_PROOF: "true"
         run: pnpm --filter @ai-cognitive/ingestion exec vitest run --config vitest.integration.config.ts tests/large-pdf-presigned-upload.integration.test.ts --reporter=verbose
+      - name: Verify PDF parent-worker file staging and identical native PDF.js evidence
+        run: pnpm --filter @ai-cognitive/ingestion exec vitest run tests/pdf-source-stage.test.ts tests/document-parsers.test.ts --reporter=verbose
       - name: Verify isolated source-bound store and Worker opt-in
         run: pnpm --filter @ai-cognitive/worker exec vitest run tests/pdf-visual-review-store.test.ts tests/pdf-visual-review.test.ts --reporter=verbose
       - name: Verify real MinIO + PostgreSQL + Gateway encrypted receipt + candidate replay
