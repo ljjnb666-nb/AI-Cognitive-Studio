@@ -61,7 +61,9 @@ const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").m
 const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
 
 /** Service options; pdfOcrExecutor is a test seam until 04B-2's production cutover (none in 04B-2). */
-export type IngestionServiceOptions = { maxUploadBytes: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor };
+export const MAX_STANDARD_UPLOAD_BYTES = 100 * 1024 * 1024;
+export const MAX_PDF_UPLOAD_BYTES = 200 * 1024 * 1024;
+export type IngestionServiceOptions = { maxUploadBytes: number; maxPdfUploadBytes?: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor };
 
 /**
  * Canonical v1 write gate for SourceBlock.metadata, keyed on the authoritative
@@ -120,11 +122,15 @@ export function sniffMediaType(bytes: Uint8Array, declared: string, filename: st
   if (declared === "text/plain" || /\.(txt|text)$/.test(lower)) return "text/plain";
   throw new Error(SourceError.TYPE_MISMATCH);
 }
-export function createIngestionService(storage: StorageProvider, options: IngestionServiceOptions = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3 }) {
+export function createIngestionService(storage: StorageProvider, options: IngestionServiceOptions = { maxUploadBytes: MAX_STANDARD_UPLOAD_BYTES, maxPdfUploadBytes: MAX_PDF_UPLOAD_BYTES, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3 }) {
   async function assertMembership(context: TrustedRequestContext) { const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context } }); if (!member) throw new Error("WORKSPACE_ACCESS_DENIED"); }
   return {
     async createUploadIntent(context: TrustedRequestContext, input: { filename: string; mediaType: string; sizeBytes: number }) {
-      await assertMembership(context); if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0 || input.sizeBytes > options.maxUploadBytes) throw new Error("UPLOAD_SIZE_INVALID");
+      await assertMembership(context); const maxBytes = input.mediaType === "application/pdf"
+        ? (options.maxPdfUploadBytes ?? options.maxUploadBytes)
+        : Math.min(options.maxUploadBytes, MAX_STANDARD_UPLOAD_BYTES);
+      if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0 || input.sizeBytes > maxBytes)
+        throw new Error("UPLOAD_SIZE_INVALID");
       const id = randomUUID(); const temporaryStorageKey = `temporary/${context.workspaceId}/${id}`; const expiresAt = new Date(Date.now() + options.uploadTtlSeconds * 1000);
       const session = await prisma.uploadSession.create({ data: { id, workspaceId: context.workspaceId, originalFilename: safeFilename(input.filename), declaredMediaType: input.mediaType, declaredSizeBytes: input.sizeBytes, temporaryStorageKey, expiresAt } });
       const upload = await storage.createPresignedUpload({ key: temporaryStorageKey, contentType: input.mediaType, expiresInSeconds: options.uploadTtlSeconds }); return { session, upload };
@@ -153,7 +159,10 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
       }
       try {
         if (session.expiresAt < new Date()) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "EXPIRED"); throw new Error("UPLOAD_EXPIRED"); }
-        const head = await storage.headObject(session.temporaryStorageKey); if (!head || head.size !== Number(session.declaredSizeBytes) || head.size > options.maxUploadBytes) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED"); throw new Error("UPLOAD_SIZE_INVALID"); }
+        const maxCompletionBytes = session.declaredMediaType === "application/pdf"
+          ? (options.maxPdfUploadBytes ?? options.maxUploadBytes)
+          : Math.min(options.maxUploadBytes, MAX_STANDARD_UPLOAD_BYTES);
+        const head = await storage.headObject(session.temporaryStorageKey); if (!head || head.size !== Number(session.declaredSizeBytes) || head.size > maxCompletionBytes) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED"); throw new Error("UPLOAD_SIZE_INVALID"); }
         if (!await renewCompletionClaim(context.workspaceId, session.id, claim.token, options.completionLeaseMs)) throw new Error("UPLOAD_COMPLETION_CLAIM_LOST");
         const inspected = await inspectObjectStream(await storage.getObjectStream(session.temporaryStorageKey));
         if (inspected.sizeBytes !== head.size || inspected.sizeBytes !== Number(session.declaredSizeBytes)) { await rejectCompletionClaim(context.workspaceId, session.id, claim.token, "REJECTED"); throw new Error("UPLOAD_STORAGE_SIZE_MISMATCH"); }
