@@ -63,3 +63,16 @@ PDF 内嵌查看依赖浏览器本地 PDF viewer；Chromium 的真实登录、�
 Chromium/Edge 的真实 Next.js Playwright 回归新增：无候选第 1 物理页也有原书 iframe 和 OCR 区块；按页码输入 2 能切到第 2 物理页；原先确认→撤回→驳回、权限降级场景继续存在。
 
 **注意：此修复证明用户无需付费候选即可打开原书，不意味着真实 B03 的整本 SHA/页 67 同源或原生 PDF 像素已核准。**
+
+
+## B03 大文件入库入口修复（2026-10-28）
+
+新发现的产品级门槛：旧 `/api/studio/upload` 和 Web 上传页面、`createIngestionService` 均限制上传 **100 MiB**，但 B03 原书 151,495,200 bytes（约 144.5 MiB）。即使此前原始 PDF Range 预览已支持 151MB，旧上传 API 仍会在获取上传会话时拒绝 B03。
+
+现保持工作区身份与完整 SHA/尺寸一致性门禁：
+- **PDF** 上传会话上限 **200 MiB (209,715,200 bytes)**；**其他文件**上限继续 **100 MiB (104,857,600 bytes)**。API schema、核心 Ingestion Service 的 create/complete 双关口、Worker 环境 `SOURCE_MAX_PDF_UPLOAD_BYTES`、示例配置、前端提示全部一致；既有 `SOURCE_MAX_UPLOAD_BYTES` 仍用于非 PDF。
+- 浏览器仍通过预签名 S3 直传，不把 151.5MB 上传请求压给 Next.js 进程。完成阶段要核对存储对象真实字节数、逐块 SHA256、媒体格式，再创建原书存储与解析任务；**仅创建 UploadIntent 不会把缺字节 PDF 标记成成功**。
+- 新增真实 PostgreSQL 约束测试：允许声明 151,495,200 bytes 的 PDF intent（测试不分配此体积字节），但拒绝超过 200MiB 的 PDF、同尺寸 EPUB、超过 100MiB 的 TXT；当 MinIO/fake object HEAD 声称 B03 尺寸、流却只有 5 bytes 时必须 fail-closed 且零 SourceDocument。
+- 新增 Chromium/微软 Edge 真实登录 API 测试：确认 B03-size PDF 的 upload intent 允许、超限 EPUB/PDF 不允许；**绝不上传任何私有原书字节**。
+- `inspectObjectStream` 在最多 64 KiB 的 sniff prefix 处从底层 S3 chunk 显式复制数据，避免 subarray 维持整个大 chunk 的底层 Buffer 生命周期。
+- 尽管所有接口和意图测试若通过，可将该工程缺口视为修复，**不可宣称 B03 真 PDF 已完成浏览器直传、MinIO 200MiB 完整 Put/Copy、实际解析、Windows Edge 页图源身份或 Gold**。真实 151.5MB 上传的网络性能、超时、Worker RAM、OCR 容量仍须实机压测。
