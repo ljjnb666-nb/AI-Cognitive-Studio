@@ -56,6 +56,12 @@ describe("RapidOCR startup contract",()=>{
     const offline=rapidOcrOfflineEnv();
     expect(offline.HF_HUB_OFFLINE).toBe("1");
     expect(offline.HTTP_PROXY).toBe("http://127.0.0.1:1");
+    expect(offline.HTTPS_PROXY).toBe("http://127.0.0.1:1");
+    expect(offline.ALL_PROXY).toBe("http://127.0.0.1:1");
+    expect(offline.NO_PROXY).toBe("");
+    expect(offline.no_proxy).toBe("");
+    // In particular NO_PROXY=* would bypass the explicit refusal proxy.
+    expect(offline.NO_PROXY).not.toBe("*");
     expect(offline.OPENBLAS_NUM_THREADS).toBe("2");
   });
   it("never forwards parent database, auth, provider keys or PYTHONPATH into untrusted PDF subprocess",()=>{
