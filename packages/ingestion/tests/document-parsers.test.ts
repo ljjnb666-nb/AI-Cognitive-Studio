@@ -1,9 +1,11 @@
 import { crc32, deflateRawSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import PDFDocument from "pdfkit";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_PARSER_LIMITS, epubChildArgs, parseDocument, runNative } from "../src/document-parsers.js";
+import { DEFAULT_PARSER_LIMITS, epubChildArgs, extractNativePdf, extractNativePdfFile, parseDocument, runNative } from "../src/document-parsers.js";
+import { withVerifiedPdfSourceFile } from "../src/pdf-source-stage.js";
 
 type Entry = { name: string; text: string; deflate?: boolean; descriptor?: boolean; omitDescriptor?: boolean };
 function zip(entries: Entry[]): Uint8Array {
@@ -155,6 +157,19 @@ describe("safe EPUB parser", () => {
 });
 
 describe("isolated PDF parser", () => {
+  it("extracts identical native evidence through SHA-verified staged PDF without caller-side buffer", async () => {
+    const bytes = await pdf(["A source-bound paragraph", "Second physical page"]);
+    const original = await extractNativePdf(bytes, DEFAULT_PARSER_LIMITS);
+    const fromFile = await withVerifiedPdfSourceFile((async function* () {
+      for (let pos = 0; pos < bytes.byteLength; pos += 101)
+        yield bytes.subarray(pos, pos + 101);
+    })(), {
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      maxBytes: 200 * 1024 * 1024,
+    }, async (path) => extractNativePdfFile(path, DEFAULT_PARSER_LIMITS));
+    expect(fromFile).toEqual(original);
+  }, 30_000);
   it("extracts ordered conservative paragraph blocks through the memory-capped child", async () => { const parsed = await parseDocument(await pdf(["Hello PDF", "Second Page"]), "application/pdf"); expect(parsed.parser.name).toBe("pdfjs-isolated"); expect(parsed.pages.map((page) => page.physicalPageIndex)).toEqual([0, 1]); expect(parsed.pages.flatMap((page) => page.blocks)).toMatchObject([{ kind: "PARAGRAPH", text: "Hello PDF" }, { kind: "PARAGRAPH", text: "Second Page" }]); });
   it("attaches a physical-page locator and native provenance to every block without fabricating bbox or confidence", async () => { const parsed = await parseDocument(await pdf(["Hello PDF", "Second Page"]), "application/pdf"); for (const [pageIndex, page] of parsed.pages.entries()) for (const block of page.blocks) { expect(block.locator).toEqual({ kind: "pdf", physicalPageIndex: pageIndex, printedPageLabel: null }); expect(block.provenance).toEqual({ sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" }); expect(block.bbox).toBeUndefined(); expect(block.provenance?.confidence ?? null).toBeNull(); } });
   it("classifies password, OCR, page, and output limits in the child", async () => { await expect(parseDocument(await pdf(["secret"], { userPassword: "secret" }), "application/pdf")).rejects.toThrow("SOURCE_PASSWORD_REQUIRED"); await expect(parseDocument(await pdf([null]), "application/pdf")).rejects.toThrow("SOURCE_OCR_REQUIRED"); await expect(parseDocument(await pdf(["one", "two", "three"]), "application/pdf", { maxPdfPages: 2 })).rejects.toThrow("SOURCE_TOO_LARGE"); await expect(parseDocument(await pdf(["x".repeat(500)]), "application/pdf", { maxPdfOutputChars: 50 })).rejects.toThrow("SOURCE_TOO_LARGE"); }, 30_000);
