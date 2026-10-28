@@ -66,7 +66,7 @@ describe("Worker on-demand PDF visual candidate task",()=>{
   });
   it("persists only after explicit review storage consent, using exact source/run identity",async()=>{
     const f=await fixture();
-    const saved=vi.fn(async(_identity:unknown,_packet:unknown)=>1);
+    const saved=vi.fn(async(...args:unknown[])=>{expect(args).toHaveLength(2);return 1;});
     f.deps.persistReviewCandidate=saved;
     const unchanged=await executeOnDemandPdfVisualReview(task,f.deps);
     expect(saved).not.toHaveBeenCalled();
