@@ -234,6 +234,10 @@ describe("completeUpload", () => {
     const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: extraction.id } });
     expect(blocks.some(block => block.text.includes("Native text source"))).toBe(true);
     expect(extraction.qualityStatus).toMatch(/ACCEPTED|DEGRADED/);
+    const bootstrap = await prisma.bookAnalysisBootstrap.findUniqueOrThrow({
+      where: { ingestionRunId: run.id },
+    });
+    outboxAggregateIds.push(bootstrap.id);
   }, 40_000);
 
   it("returns the authoritative document from UploadCompletion", async () => {
