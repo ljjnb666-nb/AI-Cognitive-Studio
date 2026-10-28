@@ -91,8 +91,10 @@ export function rapidOcrOfflineEnv(source: NodeJS.ProcessEnv = process.env): Nod
     OMP_NUM_THREADS: "2",
     OPENBLAS_NUM_THREADS: "2",
     MKL_NUM_THREADS: "2",
-    NO_PROXY: "*",
-    no_proxy: "*",
+    // Do NOT use "*": it instructs clients to bypass these refusal proxies.
+    // Empty values force proxy-aware clients to attempt the denied endpoint.
+    NO_PROXY: "",
+    no_proxy: "",
     HTTP_PROXY: "http://127.0.0.1:1",
     HTTPS_PROXY: "http://127.0.0.1:1",
     ALL_PROXY: "http://127.0.0.1:1",
