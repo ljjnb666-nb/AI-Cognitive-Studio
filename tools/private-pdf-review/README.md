@@ -65,3 +65,49 @@ python -I -B .\tools\private-pdf-review\compare_ocr_candidates_offline.py --root
 - `reference: null` 或未覆盖整页的视觉草稿时，**只生成引擎间编辑距离**，不是 CER、Gold 或引擎排名。输出无书页原文、无文件路径。
 - 如本地 manifest 自报 `coverage=FULL_PAGE`、`review_status=APPROVED`、`independent_review=true` 且包含 `reviewer_approval_id`，可得到 `provisional_cer`；但标记仍是自报参考，`official_cer=null` 且 `engine_ranking=null`。后续必须完成独立来源审查后才能作正式质量结论。
 - 当前阶段不能借此声称 B03、B08/B15 整页 OCR Gold 已验收，也不能以候选间相似度替代准确率评测。正式来源同源证据、人工审核意见和引擎版本记录保持在私有目录，禁止提交真实书页和候选全文。
+
+
+## 单页 RapidOCR 真实运行 + 私有执行收据（候选产出，不是正式 Gold）
+
+`run_rapidocr_candidate_offline.py` 可在已配置 **RapidOCR 3.9.2、ONNX Runtime 1.22.1、PyMuPDF** 的本机 Python 环境运行。它会复用仓库内的 `packages/ingestion/src/rapidocr/rapidocr-child.py`，执行真实模型识别（不是 Mock），**不会自动安装模型或依赖、不会请求云端 API，也不把书页传到 GitHub**。请在审阅脚本后手动在受信任的私有 Windows 环境中运行。
+
+先在私有 Benchmark 根目录准备 `b03-source.json`（仅原书声明；原书必须已存在且精确匹配 SHA，注意 67 是 PDF 物理页码，而非书中印刷页码）：
+
+```json
+{
+  "book_id": "B03",
+  "pdf": "original-book.pdf",
+  "sha256": "5be652d2066b680f1242bf358979c549aaf8a1588d9648926ecd8b6c30697440",
+  "size_bytes": 151495200,
+  "page_count": 271,
+  "physical_page_1_based": 67
+}
+```
+
+示例中的文件名仅为占位符，必须替换为私有根目录内实际 PDF **相对路径**。在私有根目录内预先建立 `private-candidates` 子目录；不允许符号链接、路径穿越、复用同名输出：
+
+```powershell
+python -I -B .\tools\private-pdf-review\run_rapidocr_candidate_offline.py --root D:\ai-cognitive-pdf-benchmark-data --source-manifest b03-source.json --output-dir private-candidates --stem rapidocr-B03-p67
+```
+
+成功后私有目录内生成 **两份文件**：
+
+- `private-candidates/rapidocr-B03-p67.txt`：真实 OCR 候选文本，仅留本地；
+- `private-candidates/rapidocr-B03-p67.receipt.json`：本地运行收据，包含原书 SHA/大小、物理页、RapidOCR 版本、ONNX 模型权重 SHA256、候选文本 SHA256 和字符数，不含原文。
+
+再将主比较 manifest 中 RapidOCR 候选字段设置为：
+
+```json
+{
+  "engine": "rapidocr",
+  "revision": "3.9.2",
+  "text": "private-candidates/rapidocr-B03-p67.txt",
+  "receipt": "private-candidates/rapidocr-B03-p67.receipt.json",
+  "source_sha256": "5be652d2066b680f1242bf358979c549aaf8a1588d9648926ecd8b6c30697440",
+  "physical_page_1_based": 67
+}
+```
+
+比较器会额外校验 receipt 的原书 SHA/大小、页码、引擎名称/版本、模型 SHA 格式、文本字节 SHA 和字符数。如果有人更改原文本或交叉复用收据，会直接拒绝，而不是悄悄统计差异。旧候选没有 receipt 仍可进入**未核验候选**列表，但不会被升级为可信运行证据。
+
+**证据边界**：本地收据不包含独立签名，也不能证明声称的其他引擎确实运行过；它只能证明当前私有文件/收据字段自洽。参考文本未完整独立审核前，`official_cer` 与 `engine_ranking` 始终为 null。不能以模型烟测、文本相似度或收据一致性代替真实 B03 准确率。
