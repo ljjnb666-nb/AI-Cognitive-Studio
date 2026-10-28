@@ -128,7 +128,7 @@ test("real Chromium: logged-in PDF original page, graph, confirm/withdraw/reject
     await expect(page.getByRole("heading", { name: "原始 PDF · 第 2 物理页" })).toBeVisible();
     await expect(page.getByText("Physical page 2 synthetic extracted evidence")).toBeVisible();
     await expect(page.getByText("Synthetic source-only diagram")).toBeVisible();
-    await expect(page.getByText("Source", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("left：Source")).toBeVisible();
     await expect(page.getByText("DIRECTED")).toBeVisible();
     const preview = page.locator('iframe[title*="原始 PDF"]');
     await expect(preview).toHaveAttribute("src", /source-pdf#page=2$/);
