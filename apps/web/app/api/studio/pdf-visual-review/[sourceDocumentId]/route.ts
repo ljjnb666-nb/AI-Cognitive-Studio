@@ -2,13 +2,9 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@ai-cognitive/db";
 import { sourceDetail } from "@/lib/product";
+import { isSameOriginPdfVisualRequest, pdfVisualRequestConsentSchema } from "@/lib/pdf-visual-request-policy";
 import { resolveWebIdentity } from "@/lib/identity";
 
-const consentSchema = z.strictObject({
-  mode: z.literal("FIRST_MIXED_PAGE"),
-  consentToExternalImageProcessing: z.literal(true),
-  consentToProviderCharges: z.literal(true),
-});
 type Params = { params: Promise<{ sourceDocumentId: string }> };
 const statusResponse = (data: object, status = 200) =>
   NextResponse.json(data, { status, headers: { "Cache-Control": "no-store" } });
@@ -67,12 +63,12 @@ export async function POST(request: Request, { params }: Params) {
   // Same-origin POST + strict content contract; never use a cookie-only cross-site
   // request to purchase external model calls.
   const origin = request.headers.get("origin");
-  if (!origin || origin !== new URL(request.url).origin)
+  if (!isSameOriginPdfVisualRequest(request.url, origin))
     return statusResponse({ error: "PDF_VISUAL_REQUEST_ORIGIN_DENIED" }, 403);
   if (!enabled()) return statusResponse({ error: "PDF_VISUAL_REQUEST_DISABLED" }, 503);
   try {
     const raw: unknown = await request.json();
-    consentSchema.parse(raw);
+    pdfVisualRequestConsentSchema.parse(raw);
     const { sourceDocumentId } = await params;
     const { source, run } = await scopedSource(sourceDocumentId);
     const identity = await resolveWebIdentity();
