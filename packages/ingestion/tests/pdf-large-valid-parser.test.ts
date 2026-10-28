@@ -10,7 +10,8 @@ import { DEFAULT_PARSER_LIMITS, pdfChildArgs } from "../src/document-parsers.js"
 const BYTES = 151_495_200;
 const PAGES = 271;
 const MAX_RSS_KIB = 512 * 1024;
-const TIMEOUT_MS = 150_000;
+// Short diagnostic run; this does not relax the 150s benchmark that failed.
+const TIMEOUT_MS = 60_000;
 
 async function makePdf(path: string) {
   const font = 3 + 2 * PAGES;
@@ -69,7 +70,7 @@ async function parseAndMeasure(path: string) {
   if (process.platform !== "linux") throw new Error("LINUX_PROC_RSS_REQUIRED");
   const child = spawn(process.execPath, pdfChildArgs(path, {
     ...DEFAULT_PARSER_LIMITS, pdfMemoryMb: 128, maxPdfPages: PAGES, maxPdfOutputChars: 100_000,
-  }), { stdio: ["ignore", "pipe", "pipe"] });
+  }), { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PDF_RANGE_DIAGNOSTIC: "1" } });
   if (!child.pid) throw new Error("PDF_CHILD_NOT_STARTED");
   let stdout = "", stderr = "", peakKiB = 0, samples = 0;
   let exceeded = false, timedOut = false;
@@ -98,7 +99,11 @@ async function parseAndMeasure(path: string) {
       child.on("error", reject);
       child.on("close", (code, signal) => resolve({ code, signal }));
     });
-    expect(timedOut, "151.5MB parser exceeded 150-second limit").toBe(false);
+    const diagnostic = "peakRSSMiB=" + (peakKiB / 1024).toFixed(1) +
+      " samples=" + samples + " outputBytes=" + stdout.length +
+      " childStderr=" + stderr.slice(-3000);
+    process.stdout.write("PDF_VALID_SYNTHETIC_DIAGNOSTIC=" + diagnostic + "\n");
+    expect(timedOut, "151.5MB parser remains incomplete after 60 seconds; " + diagnostic).toBe(false);
     expect(exceeded, "parser exceeded 512MiB RSS or bounded IPC").toBe(false);
     expect(samples, "child RSS never sampled").toBeGreaterThan(0);
     expect(peakKiB).toBeLessThanOrEqual(MAX_RSS_KIB);
