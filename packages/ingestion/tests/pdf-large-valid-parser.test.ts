@@ -15,6 +15,7 @@ const TIMEOUT_MS = 60_000;
 
 async function makePdf(path: string) {
   const font = 3 + 2 * PAGES;
+  const paddingObject = font + 1;
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [" + Array.from({ length: PAGES }, (_, i) => (i + 3) + " 0 R").join(" ") + "] /Count " + PAGES + " >>",
@@ -29,38 +30,55 @@ async function makePdf(path: string) {
   }
   objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
   if (objects.length !== font) throw new Error("INVALID_SYNTHETIC_OBJECT_COUNT");
+
+  // A very large whitespace gap between objects is legal PDF, but triggers
+  // pathological page-lookup behavior in PDF.js. Model a large embedded byte
+  // stream as a separate, explicitly bounded PDF object instead. This tests
+  // large-file RANGE seeking; the synthetic stream is deliberately NOT
+  // referenced by the page tree and does NOT prove dense image OCR.
   let header = "%PDF-1.4\n";
   const offsets: number[] = [0];
   for (let i = 0; i < objects.length; i++) {
     offsets.push(Buffer.byteLength(header));
     header += (i + 1) + " 0 obj\n" + objects[i] + "\nendobj\n";
   }
+  const headerBytes = Buffer.byteLength(header);
+  offsets.push(headerBytes);
   const table = [
-    "xref", "0 " + (font + 1), "0000000000 65535 f ",
+    "xref", "0 " + (paddingObject + 1), "0000000000 65535 f ",
     ...offsets.slice(1).map(x => String(x).padStart(10, "0") + " 00000 n "),
-    "trailer", "<< /Size " + (font + 1) + " /Root 1 0 R >>",
+    "trailer", "<< /Size " + (paddingObject + 1) + " /Root 1 0 R >>",
     "startxref",
   ].join("\n");
-  const headSize = Buffer.byteLength(header);
-  let gap = BYTES - headSize - Buffer.byteLength(table + "\n0\n%%EOF\n");
-  for (let i = 0; i < 8; i++) {
-    const trailer = table + "\n" + (headSize + gap) + "\n%%EOF\n";
-    const corrected = BYTES - headSize - Buffer.byteLength(trailer);
-    if (gap === corrected) break;
-    gap = corrected;
+  const end = "\nendstream\nendobj\n";
+  const padHeader = (bytes: number) =>
+    paddingObject + " 0 obj\n<< /Length " + bytes + " >>\nstream\n";
+  let padBytes = BYTES - headerBytes - Buffer.byteLength(padHeader(0)) -
+    Buffer.byteLength(end) - Buffer.byteLength(table + "\n0\n%%EOF\n");
+  for (let i = 0; i < 12; i++) {
+    const offset = headerBytes + Buffer.byteLength(padHeader(padBytes)) + padBytes + Buffer.byteLength(end);
+    const trailer = table + "\n" + offset + "\n%%EOF\n";
+    const corrected = BYTES - headerBytes - Buffer.byteLength(padHeader(padBytes)) -
+      Buffer.byteLength(end) - Buffer.byteLength(trailer);
+    if (corrected === padBytes) break;
+    padBytes = corrected;
   }
-  const trailer = table + "\n" + (headSize + gap) + "\n%%EOF\n";
-  if (gap < 0 || headSize + gap + Buffer.byteLength(trailer) !== BYTES)
+  const xrefOffset = headerBytes + Buffer.byteLength(padHeader(padBytes)) + padBytes + Buffer.byteLength(end);
+  const trailer = table + "\n" + xrefOffset + "\n%%EOF\n";
+  if (padBytes < 1 || xrefOffset + Buffer.byteLength(trailer) !== BYTES)
     throw new Error("INVALID_SYNTHETIC_PDF_SIZE");
+
   const file = await open(path, "wx", 0o600);
   try {
     await file.writeFile(header);
+    await file.writeFile(padHeader(padBytes));
     const padding = Buffer.alloc(1024 * 1024, 0x20);
-    for (let remaining = gap; remaining > 0;) {
-      const count = Math.min(remaining, padding.length);
+    for (let left = padBytes; left > 0;) {
+      const count = Math.min(left, padding.length);
       await file.writeFile(padding.subarray(0, count));
-      remaining -= count;
+      left -= count;
     }
+    await file.writeFile(end);
     await file.writeFile(trailer);
     expect((await file.stat()).size).toBe(BYTES);
   } finally { await file.close(); }
