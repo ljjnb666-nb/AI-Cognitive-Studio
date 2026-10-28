@@ -175,6 +175,47 @@ def validate_source(root: Path, source: object) -> dict:
     return source
 
 
+def inspect_candidate_receipt(
+    root: Path, candidate: dict, source: dict, text: str, content_sha256: str
+) -> str:
+    """Verify local artifact/receipt consistency, not a trusted engine signature."""
+    if "receipt" not in candidate:
+        return "DECLARED_ONLY"
+    receipt = json.loads(read_bounded(require_relative(root, candidate["receipt"]), MAX_MANIFEST_BYTES))
+    fields = {
+        "schema_version", "status", "runner", "engine", "engine_version",
+        "source_sha256", "source_size_bytes", "physical_page_1_based",
+        "text_sha256", "text_chars", "model_sha256",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != fields or receipt["schema_version"] != 1:
+        raise Blocked("RECEIPT_CONTRACT_INVALID")
+    if receipt["status"] != "SUCCEEDED" or receipt["runner"] != "ACS_PRIVATE_LOCAL_OCR_V1":
+        raise Blocked("RECEIPT_CONTRACT_INVALID")
+    if (receipt["engine"] != candidate["engine"] or
+        receipt["engine_version"] != candidate["revision"] or
+        receipt["source_sha256"] != source["sha256"] or
+        type(receipt["source_size_bytes"]) is not int or
+        receipt["source_size_bytes"] != source["size_bytes"] or
+        type(receipt["physical_page_1_based"]) is not int or
+        receipt["physical_page_1_based"] != source["physical_page_1_based"]):
+        raise Blocked("RECEIPT_SOURCE_PAGE_MISMATCH")
+    if (not isinstance(receipt["text_sha256"], str) or
+        not re.fullmatch("[0-9a-f]{64}", receipt["text_sha256"]) or
+        receipt["text_sha256"] != content_sha256 or
+        type(receipt["text_chars"]) is not int or
+        receipt["text_chars"] != len(text)):
+        raise Blocked("RECEIPT_TEXT_MISMATCH")
+    model = receipt["model_sha256"]
+    if (candidate["engine"] == "rapidocr" and
+        (not isinstance(model, str) or re.fullmatch("[0-9a-f]{64}", model) is None)):
+        raise Blocked("RECEIPT_MODEL_PROVENANCE_INVALID")
+    if candidate["engine"] != "rapidocr" and model is not None and (
+        not isinstance(model, str) or re.fullmatch("[0-9a-f]{64}", model) is None
+    ):
+        raise Blocked("RECEIPT_MODEL_PROVENANCE_INVALID")
+    return "LOCAL_HASH_CONSISTENT_SELF_ATTESTED"
+
+
 def compare(root: Path, manifest: object) -> dict:
     if not isinstance(manifest, dict) or set(manifest) != {"schema_version", "source", "candidates", "reference"} or manifest["schema_version"] != 1:
         raise Blocked("MANIFEST_CONTRACT_INVALID")
@@ -184,10 +225,12 @@ def compare(root: Path, manifest: object) -> dict:
         raise Blocked("CANDIDATES_CONTRACT_INVALID")
     seen = set()
     texts: list[tuple[str, str]] = []
+    receipts: list[dict[str, str]] = []
     for candidate in candidates:
-        if not isinstance(candidate, dict) or set(candidate) != {
-            "engine", "revision", "text", "source_sha256", "physical_page_1_based"
-        }:
+        if not isinstance(candidate, dict) or set(candidate) not in (
+            {"engine", "revision", "text", "source_sha256", "physical_page_1_based"},
+            {"engine", "revision", "text", "source_sha256", "physical_page_1_based", "receipt"},
+        ):
             raise Blocked("CANDIDATE_CONTRACT_INVALID")
         engine, revision = candidate["engine"], candidate["revision"]
         if engine not in ENGINES or not isinstance(revision, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,48}", revision):
@@ -197,7 +240,16 @@ def compare(root: Path, manifest: object) -> dict:
         seen.add(engine)
         if candidate["source_sha256"] != source["sha256"] or type(candidate["physical_page_1_based"]) is not int or candidate["physical_page_1_based"] != source["physical_page_1_based"]:
             raise Blocked("CANDIDATE_SOURCE_PAGE_MISMATCH")
-        texts.append((engine, read_text(root, candidate["text"])))
+        candidate_path = require_relative(root, candidate["text"])
+        raw = read_bounded(candidate_path, MAX_FILE_BYTES)
+        text = read_text(root, candidate["text"])
+        receipts.append({
+            "engine": engine,
+            "state": inspect_candidate_receipt(
+                root, candidate, source, text, hashlib.sha256(raw).hexdigest()
+            ),
+        })
+        texts.append((engine, text))
     # Candidates' source_sha256 and revisions are declared metadata, NOT proof
     # they were actually generated from that source by the stated engines.
     pairwise = []
@@ -216,7 +268,12 @@ def compare(root: Path, manifest: object) -> dict:
         "book_identity": "B03_PINNED_SHA_MATCHED" if source["book_id"] == "B03" else "MANIFEST_DECLARED_ONLY",
         "physical_page": source["physical_page_1_based"],
         "page_count": source["page_count"],
-        "candidate_lineage": "DECLARED_NOT_INDEPENDENTLY_ATTESTED",
+        "candidate_lineage": (
+            "LOCAL_RECEIPTS_CONSISTENT_NOT_INDEPENDENTLY_ATTESTED"
+            if all(entry["state"] == "LOCAL_HASH_CONSISTENT_SELF_ATTESTED" for entry in receipts)
+            else "DECLARED_NOT_INDEPENDENTLY_ATTESTED"
+        ),
+        "candidate_receipts": receipts,
         "reference_status": "NOT_APPROVED",
         "official_cer": None,
         "engine_ranking": None,
