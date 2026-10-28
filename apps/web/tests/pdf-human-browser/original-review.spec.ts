@@ -2,7 +2,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import { prisma } from "@ai-cognitive/db";
 import { createS3CompatibleStorageProvider } from "@ai-cognitive/storage";
-import { pdfReviewCandidateFingerprint } from "@ai-cognitive/ingestion";
+// Playwright Node fixtures must not load the PDF engine (which uses import.meta).
+// Canonical JSON key order matches the production source-bound digest contract.
+function fixtureGraphSha(value: unknown): string {
+  const orderedJson = JSON.stringify(value, (_key, object: unknown) => {
+    if (!object || typeof object !== "object" || Array.isArray(object)) return object;
+    const record = object as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().map(key => [key, record[key]]));
+  });
+  return createHash("sha256").update(orderedJson).digest("hex");
+}
 
 /** Generated within this test: no private source material or real provider. */
 function syntheticTwoPagePdf(): Uint8Array {
@@ -95,7 +104,7 @@ async function createFixture(userId: string, workspaceId: string) {
     workspaceId, sourceDocumentId: doc.id, ingestionRunId: run.id,
     physicalPageIndex: 1, routingGeneration: 1,
     sourcePdfSha256: sourceSha, sourcePngSha256: digest("synthetic-second-page-png"),
-    candidateJson: graph, candidateSha256: pdfReviewCandidateFingerprint(graph),
+    candidateJson: graph, candidateSha256: fixtureGraphSha(graph),
     expiresAt: new Date(Date.now() + 3600_000),
   }});
   return { doc, candidate, bytes, key };
