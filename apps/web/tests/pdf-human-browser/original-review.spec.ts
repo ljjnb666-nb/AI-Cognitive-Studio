@@ -152,6 +152,36 @@ test("real Chromium: logged-in PDF original page, graph, confirm/withdraw/reject
     expect(result.headers()["content-type"]).toContain("application/pdf");
     expect(result.headers()["cache-control"]).toContain("no-store");
     expect(digest(await result.body())).toBe(digest(f.bytes));
+    // Browser sends native byte-range requests when seeking around a long PDF.
+    // These must be 206 with accurate Content-Range/Length, not full buffering.
+    const firstRange = await page.request.get(
+      "/api/studio/pdf-visual-review/" + f.doc.id + "/source-pdf",
+      { headers: { Range: "bytes=0-127" } },
+    );
+    expect(firstRange.status()).toBe(206);
+    expect(firstRange.headers()["content-range"]).toBe("bytes 0-127/" + f.bytes.length);
+    expect(firstRange.headers()["content-length"]).toBe("128");
+    expect(new Uint8Array(await firstRange.body()))
+      .toEqual(f.bytes.slice(0,128));
+    const tailRange = await page.request.get(
+      "/api/studio/pdf-visual-review/" + f.doc.id + "/source-pdf",
+      { headers: { Range: "bytes=-32" } },
+    );
+    expect(tailRange.status()).toBe(206);
+    expect(tailRange.headers()["content-range"])
+      .toBe("bytes " + (f.bytes.length-32) + "-" + (f.bytes.length-1) + "/" + f.bytes.length);
+    expect(new Uint8Array(await tailRange.body()))
+      .toEqual(f.bytes.slice(-32));
+    const invalidRange = await page.request.get(
+      "/api/studio/pdf-visual-review/" + f.doc.id + "/source-pdf",
+      { headers: { Range: "bytes=999999999-" } },
+    );
+    expect(invalidRange.status()).toBe(416);
+    const head = await page.request.head(
+      "/api/studio/pdf-visual-review/" + f.doc.id + "/source-pdf",
+    );
+    expect(head.status()).toBe(200);
+    expect(head.headers()["content-length"]).toBe(String(f.bytes.length));
 
     const anonymous = await browser.newContext();
     try {
