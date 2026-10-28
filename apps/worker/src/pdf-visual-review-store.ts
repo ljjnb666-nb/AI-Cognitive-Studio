@@ -107,22 +107,19 @@ export async function persistPdfVisualReviewCandidates(
           sourcePngSha256: row.sourcePngSha256,
         },
       };
-      const existing = await tx.pdfVisualReviewCandidate.findUnique({
+      const existing = await tx.pdfVisualReviewCandidate.upsert({
         where: key,
+        create: row,
+        update: {},
         select: { workspaceId: true, sourceDocumentId: true, sourcePdfSha256: true, candidateSha256: true, expiresAt: true },
       });
-      if (existing) {
-        // Replaying the same paid invocation must never rewrite first-seen evidence.
-        if (existing.workspaceId !== row.workspaceId ||
-            existing.sourceDocumentId !== row.sourceDocumentId ||
-            existing.sourcePdfSha256 !== row.sourcePdfSha256 ||
-            existing.candidateSha256 !== row.candidateSha256 ||
-            existing.expiresAt <= new Date())
-          throw new Error("PDF_VISUAL_CANDIDATE_REPLAY_CONFLICT");
-        stored++;
-        continue;
-      }
-      await tx.pdfVisualReviewCandidate.create({ data: row });
+      // Atomic unique-key insertion is replay-safe even under parallel calls.
+      if (existing.workspaceId !== row.workspaceId ||
+          existing.sourceDocumentId !== row.sourceDocumentId ||
+          existing.sourcePdfSha256 !== row.sourcePdfSha256 ||
+          existing.candidateSha256 !== row.candidateSha256 ||
+          existing.expiresAt <= new Date())
+        throw new Error("PDF_VISUAL_CANDIDATE_REPLAY_CONFLICT");
       stored++;
     }
     return stored;
