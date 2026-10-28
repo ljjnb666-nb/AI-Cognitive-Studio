@@ -22,6 +22,7 @@ let loadingTask;
 let fileRange;
 try {
   const { size } = await stat(input);
+  if (process.env.PDF_RANGE_DIAGNOSTIC === "1") process.stderr.write("PDF_RANGE_START size=" + size + "\n");
   const options = { disableWorker: true, isEvalSupported: false, useSystemFonts: false };
   if (size >= PDF_RANGE_THRESHOLD_BYTES) {
     fileRange = await openLocalPdfRange(input, () => {
@@ -49,6 +50,7 @@ try {
     });
   };
   const pdf = await loadingTask.promise;
+  if (process.env.PDF_RANGE_DIAGNOSTIC === "1") process.stderr.write("PDF_RANGE_LOADED pages=" + pdf.numPages + " requests=" + (fileRange?.diagnosticStats.requests ?? 0) + "\n");
   if (pdf.numPages > maxPages) {
     send({ type: "error", code: "SOURCE_TOO_LARGE" });
     process.exitCode = 2;
@@ -56,6 +58,7 @@ try {
     let total = 0;
     send({ type: "meta", pages: pdf.numPages });
     for (let number = 1; number <= pdf.numPages; number++) {
+      if (process.env.PDF_RANGE_DIAGNOSTIC === "1" && (number === 1 || number % 25 === 0)) process.stderr.write("PDF_RANGE_PAGE_BEGIN=" + number + " rss=" + process.memoryUsage().rss + " requests=" + (fileRange?.diagnosticStats.requests ?? 0) + "\n");
       const page = await pdf.getPage(number);
       const content = await page.getTextContent();
       const text = content.items.map((item) => ("str" in item ? item.str : "")).join("");
