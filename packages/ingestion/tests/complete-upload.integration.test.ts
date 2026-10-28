@@ -139,7 +139,7 @@ describe("B03 151.5MB PDF-only upload boundary", () => {
     });
     expect(intent.session).toMatchObject({
       workspaceId: workspace.id, declaredMediaType: "application/pdf",
-      declaredSizeBytes: BigInt(b03Bytes), status: "PENDING",
+      declaredSizeBytes: BigInt(b03Bytes), status: "CREATED",
     });
     expect(intent.upload.url).toContain("temporary/");
     await expect(service.createUploadIntent(ctx, {
