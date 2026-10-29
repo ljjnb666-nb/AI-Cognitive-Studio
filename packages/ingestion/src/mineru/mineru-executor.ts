@@ -73,17 +73,13 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
   const active = new Set<{ controller: AbortController; done: Promise<unknown> }>();
   let closing = false;
 
-  // Source-identity digest cache keyed by the exact bytes object: pdf-run
-  // passes the SAME Uint8Array for every page of a run, so the per-page
-  // runtime recheck hashes a large PDF exactly once per run.
-  const pdfHashCache = new WeakMap<object, { byteLength: number; sha256: string }>();
+  // A Uint8Array is mutable even when its identity and byteLength stay the
+  // same. Never cache a source hash solely by object identity: a later page
+  // could otherwise pass an out-of-date byte-identity check after mutation.
+  // Only standard proposals pay this hashing cost; default flash does not.
   function sourcePdfSha256(bytes: Uint8Array): string | null {
-    const cached = pdfHashCache.get(bytes);
-    if (cached && cached.byteLength === bytes.byteLength) return cached.sha256;
     try {
-      const digest = sha256Bytes(bytes);
-      pdfHashCache.set(bytes, { byteLength: bytes.byteLength, sha256: digest });
-      return digest;
+      return sha256Bytes(bytes);
     } catch {
       return null;
     }
@@ -160,7 +156,6 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
     if (sourceClaim !== null && !tierRecheck.admitted) {
       logger.warn("mineru.ocr.standard_refused", { ...logContext, reason: tierRecheck.reason, actualTier });
     }
-    const parseTimeoutMs = executionFacts.actualTier === MINERU_STANDARD_TIER && config.standard ? config.standard.timeoutMs : config.timeoutMs;
 
     // 1. Host capacity authority (OcrHostLease). No busy-wait and NO stored
     // future page time (RF01 P1-01): the capacity failure propagates as a
@@ -264,17 +259,16 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
           executionFacts.tierAdmission = "STANDARD_REFUSED";
           executionFacts.tierRefusalCode = "ENGINES_NOT_READY";
           executionFacts.actualTier = config.tier;
-          const demotedFacts = executionFacts;
-          const parseArgsFlash = buildMineruParseArgs({ inputPdfPath, tier: demotedFacts.actualTier, physicalPageIndex: request.physicalPageIndex, outputMarkdownPath });
-          const parseResultFlash = await spawnBounded(config.executable, [...config.executableArgs, ...parseArgsFlash], { env: childEnvBase, cwd: outputDir, timeoutMs: config.timeoutMs, maxOutputBytes: Math.min(config.maxOutputBytes, 1_048_576), abortSignal: signal });
-          const resultFlash = await resultForParseOutput(parseResultFlash, outputMarkdownPath, outputDir, config.maxOutputBytes);
-          return recordCall(request, resultFlash, startedAt, demotedFacts);
+          // Continue through the SAME bounded spawn and error classification
+          // as ordinary flash; timeout/abort/overflow must not be reclassified
+          // as generic parse failures by a special demotion code path.
         }
       }
 
       // 5. THE one bounded parse invocation per claim (one claim = one
       // invocation; retries belong to 04B-2's durable attempt budget).
-      const parseArgs = buildMineruParseArgs({ inputPdfPath, tier: actualTier, physicalPageIndex: request.physicalPageIndex, outputMarkdownPath });
+      const parseTimeoutMs = executionFacts.actualTier === MINERU_STANDARD_TIER && config.standard ? config.standard.timeoutMs : config.timeoutMs;
+      const parseArgs = buildMineruParseArgs({ inputPdfPath, tier: executionFacts.actualTier, physicalPageIndex: request.physicalPageIndex, outputMarkdownPath });
       const parseResult = await spawnBounded(config.executable, [...config.executableArgs, ...parseArgs], { env: childEnvBase, cwd: outputDir, timeoutMs: parseTimeoutMs, maxOutputBytes: Math.min(config.maxOutputBytes, 1_048_576), abortSignal: signal });
       let result: PdfOcrPageResult;
       if (parseResult.spawnErrorCode === "ENOENT") {
