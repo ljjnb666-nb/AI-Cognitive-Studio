@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { open, stat } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { OCR_STANDARD_MIN_AVAILABLE_MEMORY_BYTES } from "../ocr-step6-2a.js";
 import { MINERU_PINNED_VERSION } from "./mineru-commands.js";
@@ -190,6 +190,12 @@ async function sha256File(path: string): Promise<string> {
 export async function verifyMineruStandardModels(modelRoot: string, admission: MineruStandardAdmissionConfig): Promise<MineruStandardModelsVerification> {
   const failures: MineruStandardModelsFailure[] = [];
   let totalBytes = 0;
+  let physicalRoot: string;
+  try {
+    physicalRoot = await realpath(modelRoot);
+  } catch {
+    return { ok: false, failures: [{ path: "<model-root>", reason: "MODEL_ROOT_UNAVAILABLE" }] };
+  }
   for (const file of admission.manifest.files) {
     const candidate = resolve(modelRoot, ...file.path.split("/"));
     if (!pathWithinRoot(candidate, modelRoot)) {
@@ -197,10 +203,18 @@ export async function verifyMineruStandardModels(modelRoot: string, admission: M
       continue;
     }
     let info;
+    let physicalCandidate: string;
     try {
-      info = await stat(candidate);
+      // lstat rejects a symlink at the final file; realpath also detects
+      // symlinked ancestor directories escaping the verified model root.
+      info = await lstat(candidate);
+      physicalCandidate = await realpath(candidate);
     } catch {
       failures.push({ path: file.path, reason: "MISSING" });
+      continue;
+    }
+    if (info.isSymbolicLink() || !pathWithinRoot(physicalCandidate, physicalRoot)) {
+      failures.push({ path: file.path, reason: "SYMLINK_OR_ROOT_ESCAPE" });
       continue;
     }
     if (!info.isFile()) {
