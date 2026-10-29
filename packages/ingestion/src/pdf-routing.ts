@@ -199,10 +199,36 @@ export type PdfOcrExecutorDescriptor = { name: string; version: string; parserMo
  * never attribute a process to a superseded owner. 04B-2 routing authority is
  * untouched: the token is ownership lineage only, never a quality/routing input.
  */
-export type PdfOcrPageRequest = { ingestionRunId: string; workspaceId: string; sourceDocumentId: string; physicalPageIndex: number; routingGeneration: number; runExecutionToken: string; pdfBytes: Uint8Array };
+export type PdfOcrPageRequest = { ingestionRunId: string; workspaceId: string; sourceDocumentId: string; physicalPageIndex: number; routingGeneration: number; runExecutionToken: string; pdfBytes: Uint8Array;
+  /**
+   * STEP6-2B-1: page-level request to attempt the guarded standard tier
+   * (a CANDIDATE proposal, never authority). The executor independently
+   * re-verifies the claimed source hash against the exact pdfBytes it
+   * received; any recheck refusal demotes the page to the pinned flash tier
+   * and is recorded in the execution facts.
+   */
+  standardExecutionRequest?: { sourcePdfSha256: string } };
+
+/**
+ * Trusted execution facts constructed ONLY inside the real executor path
+ * (STEP6-2B-1): the tier that ACTUALLY ran, what was proposed, why a
+ * standard proposal was refused (if it was), and the verified model
+ * manifest identity. Callers can never fabricate these into the durable
+ * path — they do not exist on request objects.
+ */
+export type PdfOcrExecutionFacts = {
+  engine: string;
+  engineVersion: string;
+  proposedTier: string | null;
+  actualTier: string;
+  tierAdmission: "FLASH_DEFAULT" | "STANDARD_ADMITTED" | "STANDARD_REFUSED";
+  tierRefusalCode: string | null;
+  modelManifestSha256: string | null;
+};
+
 export type PdfOcrPageResult =
-  | { status: "SUCCEEDED"; text: string }
-  | { status: "FAILED"; errorCode: string; kind: "transient" | "terminal"; nextAttemptAt?: Date };
+  | { status: "SUCCEEDED"; text: string; execution?: PdfOcrExecutionFacts }
+  | { status: "FAILED"; errorCode: string; kind: "transient" | "terminal"; nextAttemptAt?: Date; execution?: PdfOcrExecutionFacts };
 
 export interface PdfOcrExecutor {
   readonly descriptor: PdfOcrExecutorDescriptor;

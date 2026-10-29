@@ -89,7 +89,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const bookWorker = bookEnabled ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY)) : undefined;
   const bookBootstrapWorker = createBookAnalysisBootstrapWorker(environment, { ...workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY), source });
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);
-  const ingestionWorker = createSourceIngestionWorker(environment, { ...workerOptions(environment.WORKER_INGESTION_CONCURRENCY), ...(sourceIngestionOcrRuntime ? { pdfOcrExecutor: sourceIngestionOcrRuntime.pdfOcrExecutor } : {}) });
+  const ingestionWorker = createSourceIngestionWorker(environment, { ...workerOptions(environment.WORKER_INGESTION_CONCURRENCY), ...(sourceIngestionOcrRuntime ? { pdfOcrExecutor: sourceIngestionOcrRuntime.pdfOcrExecutor, ...(sourceIngestionOcrRuntime.standardAdmissionEnabled ? { ocrStandardAdmissionEnabled: true } : {}) } : {}) });
   if (!bookWorker) logger.info("worker.book_analysis.disabled", { reason: "BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED" });
   const podcastWorker = podcastAdapter ? createPodcastGenerationWorker(environment, podcastAdapter, workerOptions(environment.WORKER_PODCAST_GENERATION_CONCURRENCY)) : undefined;
   const audioWorker = audioConfigured ? createPodcastAudioWorker(environment, audioAdapter, workerOptions(environment.WORKER_AUDIO_CONCURRENCY)) : undefined;

@@ -1,0 +1,128 @@
+import { MINERU_STANDARD_TIER } from "./mineru-standard-admission.js";
+
+/**
+ * STEP6-2B-1: claim-scoped managed parse-server bootstrap for the standard
+ * tier (per-claim home — never a shared daemon).
+ *
+ * MinerU 4.0.3 contract (verified against the local venv sources):
+ *  - the doclib reads `parse_server.local.mode` ONLY from its own SQLite
+ *    config service at BOOT (doclib/app.py startup); defaults ship "disabled";
+ *  - the managed engine server for a tier starts during that boot and the
+ *    engines report readiness through GET /api/v1/server/status
+ *    (parse_server.local.healthy / managed_running / supported_tiers);
+ *  - PUT /api/v1/configs/{key} persists an override in the claim's own DB.
+ *
+ * Therefore enabling standard engines for ONE claim = boot doclib (executor
+ * already does) -> PUT the managed override -> bounded controlled restart of
+ * the SAME claim home (the executor owns that process tree) -> poll readiness.
+ * No global/user-level state is touched; flash claims never enter this path.
+ */
+
+const API_PREFIX = "/api/v1";
+const MANAGED_MODE_KEY = "parse_server.local.mode";
+
+export type ManagedServerSetupFailure =
+  | { kind: "CONFIG_SET_FAILED"; detail: string }
+  | { kind: "STATUS_UNAVAILABLE"; detail: string }
+  | { kind: "READINESS_TIMEOUT"; detail: string };
+
+function transportsBaseUrl(transports: Array<Record<string, unknown>>): string | null {
+  for (const transport of transports) {
+    if (transport["type"] === "tcp" && typeof transport["base_url"] === "string" && transport["base_url"].length > 0) return transport["base_url"];
+  }
+  return null;
+}
+
+export function parseServerBaseUrl(transports: Array<Record<string, unknown>>): string | null {
+  return transportsBaseUrl(transports);
+}
+
+async function requestJson(url: string, init: RequestInit, timeoutMs: number, signal?: AbortSignal): Promise<{ ok: boolean; status: number; body: unknown }> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    return { ok: response.ok, status: response.status, body };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
+/** Persists the managed-mode override into the CLAIM doclib config service. */
+export async function setParseServerModeManaged(baseUrl: string, timeoutMs: number, signal?: AbortSignal): Promise<ManagedServerSetupFailure | null> {
+  try {
+    const result = await requestJson(`${baseUrl.replace(/\/$/, "")}${API_PREFIX}/configs/${encodeURIComponent(MANAGED_MODE_KEY)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "managed" }),
+    }, timeoutMs, signal);
+    if (!result.ok) return { kind: "CONFIG_SET_FAILED", detail: `HTTP ${result.status}` };
+    return null;
+  } catch (error) {
+    return { kind: "CONFIG_SET_FAILED", detail: error instanceof Error ? error.message.slice(0, 200) : "unknown" };
+  }
+}
+
+type LocalParseServerStatusView = {
+  healthy?: unknown;
+  managed_running?: unknown;
+  managed_tier?: unknown;
+  supported_tiers?: unknown;
+};
+
+function localParseServerView(statusBody: unknown): LocalParseServerStatusView | null {
+  if (!statusBody || typeof statusBody !== "object") return null;
+  const parseServer = (statusBody as Record<string, unknown>)["parse_server"];
+  if (!parseServer || typeof parseServer !== "object") return null;
+  const local = (parseServer as Record<string, unknown>)["local"];
+  return local && typeof local === "object" ? (local as LocalParseServerStatusView) : null;
+}
+
+function isStandardReady(local: LocalParseServerStatusView): boolean {
+  if (local.healthy !== true || local.managed_running !== true) return false;
+  if (local.managed_tier !== undefined && local.managed_tier !== null && local.managed_tier !== MINERU_STANDARD_TIER) return false;
+  const tiers = Array.isArray(local.supported_tiers) ? local.supported_tiers : [];
+  return tiers.length === 0 || tiers.includes(MINERU_STANDARD_TIER);
+}
+
+/**
+ * Bounded readiness poll for the claim's managed standard engines. Resolves
+ * null when ready; a failure kind otherwise. Every wait is abortable (host
+ * lease loss / cancellation) and bounded by the caller's server-start budget.
+ */
+export async function waitForStandardParseServerReady(
+  baseUrl: string,
+  readinessTimeoutMs: number,
+  options: { pollIntervalMs?: number; statusTimeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<ManagedServerSetupFailure | null> {
+  const deadline = Date.now() + readinessTimeoutMs;
+  const pollIntervalMs = options.pollIntervalMs ?? 2_000;
+  const statusTimeoutMs = options.statusTimeoutMs ?? 5_000;
+  let lastDetail = "no successful status probe";
+  while (Date.now() < deadline) {
+    if (options.signal?.aborted) return { kind: "STATUS_UNAVAILABLE", detail: "aborted" };
+    try {
+      const result = await requestJson(`${baseUrl.replace(/\/$/, "")}${API_PREFIX}/server/status`, { method: "GET" }, statusTimeoutMs, options.signal);
+      if (result.ok) {
+        const local = localParseServerView(result.body);
+        if (local && isStandardReady(local)) return null;
+        lastDetail = JSON.stringify(local ?? result.body).slice(0, 200);
+      } else {
+        lastDetail = `HTTP ${result.status}`;
+      }
+    } catch (error) {
+      lastDetail = error instanceof Error ? error.message.slice(0, 200) : "probe error";
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, pollIntervalMs));
+  }
+  return { kind: "READINESS_TIMEOUT", detail: lastDetail };
+}

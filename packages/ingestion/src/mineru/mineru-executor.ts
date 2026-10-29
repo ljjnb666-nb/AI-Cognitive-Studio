@@ -1,10 +1,13 @@
 import { mkdir, mkdtemp, open, lstat, rm, writeFile } from "node:fs/promises";
+import { freemem } from "node:os";
 import { join } from "node:path";
 import { logger } from "@ai-cognitive/shared";
 import { OCR_HOST_LEASE_TTL_MS, acquireOcrHostLease, createOcrServerInstance, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStopping, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease } from "../ocr-durability.js";
-import type { PdfOcrExecutor, PdfOcrExecutorDescriptor, PdfOcrPageRequest, PdfOcrPageResult } from "../pdf-routing.js";
+import type { PdfOcrExecutor, PdfOcrExecutorDescriptor, PdfOcrExecutionFacts, PdfOcrPageRequest, PdfOcrPageResult } from "../pdf-routing.js";
 import { SourceError } from "../source-errors.js";
 import { MINERU_EXECUTOR_NAME, buildMineruParseArgs, judgeMineruParseExit, mineruFailureForOutcome } from "./mineru-commands.js";
+import { MINERU_STANDARD_TIER, assessMineruStandardExecution, sha256Bytes } from "./mineru-standard-admission.js";
+import { parseServerBaseUrl, waitForStandardParseServerReady } from "./mineru-standard-server-setup.js";
 import { isWithinPath, type MineruExecutorConfig } from "./mineru-config.js";
 import { sleep, spawnBounded, type BoundedSpawnResult } from "./mineru-process.js";
 import { createMineruServerSession, type MineruServerSession } from "./mineru-server.js";
@@ -38,7 +41,7 @@ import { createMineruServerSession, type MineruServerSession } from "./mineru-se
  * never consulted for page identity.
  */
 
-export type MineruOcrCallRecord = { ingestionRunId: string; physicalPageIndex: number; routingGeneration: number; outcome: "SUCCEEDED" | "FAILED"; errorCode?: string; durationMs: number };
+export type MineruOcrCallRecord = { ingestionRunId: string; physicalPageIndex: number; routingGeneration: number; outcome: "SUCCEEDED" | "FAILED"; errorCode?: string; durationMs: number; execution?: PdfOcrExecutionFacts };
 
 export type MineruPdfOcrExecutorHandle = {
   executor: PdfOcrExecutor & { readonly calls: readonly MineruOcrCallRecord[] };
@@ -58,11 +61,33 @@ function mineruEgressDenialEnv(): Record<string, string> {
   return { ...denial, http_proxy: denial.HTTP_PROXY, https_proxy: denial.HTTPS_PROXY, all_proxy: denial.ALL_PROXY, no_proxy: "" };
 }
 
-export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): MineruPdfOcrExecutorHandle {
+export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options: { standardModelsVerified?: boolean } = {}): MineruPdfOcrExecutorHandle {
   if (config.modelSource !== "local") throw new Error(SourceError.OCR_MINERU_NOT_CONFIGURED);
-  const descriptor: PdfOcrExecutorDescriptor = { name: MINERU_EXECUTOR_NAME, version: config.version, parserMode: config.tier, modelRevision: null };
+  // STEP6-2B-1: standard admission exists in the config ONLY when both
+  // experiment switches are on and the manifest parsed; the factory
+  // additionally refuses to even hold standard capability without the
+  // startup model-verification proof (hashes verified against the manifest).
+  if (config.standard && options.standardModelsVerified !== true) throw new Error("OCR_STANDARD_MODELS_UNVERIFIED:STARTUP_MODEL_VERIFICATION_REQUIRED");
+  const standardModelsVerified = options.standardModelsVerified === true;
+  const descriptor: PdfOcrExecutorDescriptor = { name: MINERU_EXECUTOR_NAME, version: config.version, parserMode: config.tier, modelRevision: config.standard?.manifestSha256 ?? null };
   const active = new Set<{ controller: AbortController; done: Promise<unknown> }>();
   let closing = false;
+
+  // Source-identity digest cache keyed by the exact bytes object: pdf-run
+  // passes the SAME Uint8Array for every page of a run, so the per-page
+  // runtime recheck hashes a large PDF exactly once per run.
+  const pdfHashCache = new WeakMap<object, { byteLength: number; sha256: string }>();
+  function sourcePdfSha256(bytes: Uint8Array): string | null {
+    const cached = pdfHashCache.get(bytes);
+    if (cached && cached.byteLength === bytes.byteLength) return cached.sha256;
+    try {
+      const digest = sha256Bytes(bytes);
+      pdfHashCache.set(bytes, { byteLength: bytes.byteLength, sha256: digest });
+      return digest;
+    } catch {
+      return null;
+    }
+  }
 
   const executor: PdfOcrExecutor & { readonly calls: MineruOcrCallRecord[] } = {
     descriptor,
@@ -86,7 +111,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
   }
 
   /** Bounded in-memory invocation journal (observability / real-acceptance evidence). */
-  function recordCall(request: PdfOcrPageRequest, result: PdfOcrPageResult, startedAt: number): PdfOcrPageResult {
+  function recordCall(request: PdfOcrPageRequest, result: PdfOcrPageResult, startedAt: number, facts: PdfOcrExecutionFacts): PdfOcrPageResult {
     executor.calls.push({
       ingestionRunId: request.ingestionRunId,
       physicalPageIndex: request.physicalPageIndex,
@@ -94,9 +119,10 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
       outcome: result.status === "SUCCEEDED" ? "SUCCEEDED" : "FAILED",
       ...(result.status === "FAILED" ? { errorCode: result.errorCode } : {}),
       durationMs: Date.now() - startedAt,
+      execution: facts,
     });
     if (executor.calls.length > 1000) executor.calls.shift();
-    return result;
+    return { ...result, execution: facts };
   }
 
   async function runPage(request: PdfOcrPageRequest, controller: AbortController, startedAt: number): Promise<PdfOcrPageResult> {
@@ -104,15 +130,47 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
     if (closing) return failure(SourceError.OCR_PROCESS_FAILED, "transient");
     const logContext = { ingestionRunId: request.ingestionRunId, physicalPageIndex: request.physicalPageIndex, routingGeneration: request.routingGeneration, executor: MINERU_EXECUTOR_NAME };
 
+    // STEP6-2B-1 per-page guarded tier resolution (Candidate → Admission →
+    // the EXISTING claim/lease Authority below, unchanged). A standard
+    // proposal is re-verified here against facts the executor trusts itself:
+    // config presence (structurally implies both experiment switches), the
+    // startup model-verification proof, byte-identity of the received PDF
+    // against the claimed source hash, and the live memory floor. Any refusal
+    // demotes the page to the pinned flash tier — the exact pre-slice
+    // behaviour — and the refusal is recorded, never silently dropped.
+    const sourceClaim = request.standardExecutionRequest?.sourcePdfSha256 ?? null;
+    const actualSourceSha256 = sourceClaim !== null ? sourcePdfSha256(request.pdfBytes) : null;
+    const tierRecheck = assessMineruStandardExecution({
+      admissionConfig: config.standard ?? null,
+      modelsVerified: standardModelsVerified,
+      sourceClaim,
+      actualSourceSha256,
+      availableMemoryBytes: freemem(),
+    });
+    const actualTier = tierRecheck.admitted ? MINERU_STANDARD_TIER : config.tier;
+    const executionFacts: PdfOcrExecutionFacts = {
+      engine: MINERU_EXECUTOR_NAME,
+      engineVersion: config.version,
+      proposedTier: sourceClaim !== null ? MINERU_STANDARD_TIER : null,
+      actualTier,
+      tierAdmission: sourceClaim === null ? "FLASH_DEFAULT" : tierRecheck.admitted ? "STANDARD_ADMITTED" : "STANDARD_REFUSED",
+      tierRefusalCode: sourceClaim !== null && !tierRecheck.admitted ? tierRecheck.reason : null,
+      modelManifestSha256: tierRecheck.manifestSha256,
+    };
+    if (sourceClaim !== null && !tierRecheck.admitted) {
+      logger.warn("mineru.ocr.standard_refused", { ...logContext, reason: tierRecheck.reason, actualTier });
+    }
+    const parseTimeoutMs = executionFacts.actualTier === MINERU_STANDARD_TIER && config.standard ? config.standard.timeoutMs : config.timeoutMs;
+
     // 1. Host capacity authority (OcrHostLease). No busy-wait and NO stored
     // future page time (RF01 P1-01): the capacity failure propagates as a
     // run-retryable error through 04B-2's existing retryable execution
     // authority, leaving the page PENDING and immediately claimable — the
     // queue's retry cadence is the single retry clock.
-    const lease = await acquireOcrHostLease(config.hostId, OCR_HOST_LEASE_TTL_MS, { executable: config.executable, modelPath: config.modelPath, tier: config.tier, version: config.version }).catch(() => null);
+    const lease = await acquireOcrHostLease(config.hostId, OCR_HOST_LEASE_TTL_MS, { executable: config.executable, modelPath: config.modelPath, tier: actualTier, version: config.version }).catch(() => null);
     if (!lease) {
       logger.warn("mineru.ocr.host_capacity", { ...logContext, failureCode: SourceError.OCR_HOST_CAPACITY });
-      return await recordCall(request, failure(SourceError.OCR_HOST_CAPACITY, "transient"), startedAt);
+      return await recordCall(request, failure(SourceError.OCR_HOST_CAPACITY, "transient"), startedAt, executionFacts);
     }
     let leaseLost = false;
     const heartbeat = setInterval(() => {
@@ -181,17 +239,43 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
               ? failure(leaseLost ? SourceError.OCR_HOST_LEASE_LOST : SourceError.OCR_PROCESS_FAILED, "transient")
               : failure(SourceError.OCR_PROCESS_FAILED, "transient");
         logger.warn("mineru.ocr.server_start_failed", { ...logContext, kind: startFailure.kind, failureCode: mapped.status === "FAILED" ? mapped.errorCode : SourceError.OCR_PROCESS_FAILED, ...(startFailure.kind === "START_FAILED" ? { stderrTail: startFailure.stderrTail.slice(-300) } : {}) });
-        return recordCall(request, mapped, startedAt);
+        return recordCall(request, mapped, startedAt, executionFacts);
       }
       serverStarted = true;
       const endpoint = session.endpoint!;
       const endpointRecorded = await recordOcrServerEndpoint({ hostClaimToken: lease.claimToken, endpoint: { pid: endpoint.pid, serverId: endpoint.serverId, transports: endpoint.transports } }).catch(() => false);
       if (!endpointRecorded) throw new Error("OCR_SERVER_ENDPOINT_RECORDING_LOST");
 
+      // 4b. STEP6-2B-1: standard engines availability check. MinerU 4.0.3
+      // reads parse_server.local.mode only at doclib boot from the claim's own
+      // SQLite config service; a fresh claim home boots with engines disabled,
+      // and enabling them requires a doclib reboot that the 04B-3 one-instance-
+      // per-lease durable identity (hostClaimToken UNIQUE + closed state
+      // machine) does not permit within a claim. Until STEP6-2B-2 lands the
+      // executor-owned claim-scoped engine server (self-hosted mode probe,
+      // runtime-switchable per health cycle), an admitted standard proposal
+      // DEMOTES to flash with refusal code ENGINES_NOT_READY — never a doomed
+      // standard invocation, never a shared daemon.
+      if (actualTier === MINERU_STANDARD_TIER && config.standard) {
+        const baseUrl = parseServerBaseUrl(endpoint.transports);
+        const probe = baseUrl === null ? { kind: "STATUS_UNAVAILABLE" as const, detail: "no_tcp_transport" } : await waitForStandardParseServerReady(baseUrl, 1, { pollIntervalMs: 1, statusTimeoutMs: 5_000, signal });
+        if (probe !== null) {
+          logger.warn("mineru.ocr.standard_engines_not_ready", { ...logContext, detail: probe.detail });
+          executionFacts.tierAdmission = "STANDARD_REFUSED";
+          executionFacts.tierRefusalCode = "ENGINES_NOT_READY";
+          executionFacts.actualTier = config.tier;
+          const demotedFacts = executionFacts;
+          const parseArgsFlash = buildMineruParseArgs({ inputPdfPath, tier: demotedFacts.actualTier, physicalPageIndex: request.physicalPageIndex, outputMarkdownPath });
+          const parseResultFlash = await spawnBounded(config.executable, [...config.executableArgs, ...parseArgsFlash], { env: childEnvBase, cwd: outputDir, timeoutMs: config.timeoutMs, maxOutputBytes: Math.min(config.maxOutputBytes, 1_048_576), abortSignal: signal });
+          const resultFlash = await resultForParseOutput(parseResultFlash, outputMarkdownPath, outputDir, config.maxOutputBytes);
+          return recordCall(request, resultFlash, startedAt, demotedFacts);
+        }
+      }
+
       // 5. THE one bounded parse invocation per claim (one claim = one
       // invocation; retries belong to 04B-2's durable attempt budget).
-      const parseArgs = buildMineruParseArgs({ inputPdfPath, tier: config.tier, physicalPageIndex: request.physicalPageIndex, outputMarkdownPath });
-      const parseResult = await spawnBounded(config.executable, [...config.executableArgs, ...parseArgs], { env: childEnvBase, cwd: outputDir, timeoutMs: config.timeoutMs, maxOutputBytes: Math.min(config.maxOutputBytes, 1_048_576), abortSignal: signal });
+      const parseArgs = buildMineruParseArgs({ inputPdfPath, tier: actualTier, physicalPageIndex: request.physicalPageIndex, outputMarkdownPath });
+      const parseResult = await spawnBounded(config.executable, [...config.executableArgs, ...parseArgs], { env: childEnvBase, cwd: outputDir, timeoutMs: parseTimeoutMs, maxOutputBytes: Math.min(config.maxOutputBytes, 1_048_576), abortSignal: signal });
       let result: PdfOcrPageResult;
       if (parseResult.spawnErrorCode === "ENOENT") {
         result = failure(SourceError.OCR_MINERU_NOT_FOUND, "terminal");
@@ -204,14 +288,14 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig): Mineru
       } else {
         result = await resultForParseOutput(parseResult, outputMarkdownPath, outputDir, config.maxOutputBytes);
       }
-      return recordCall(request, result, startedAt);
+      return recordCall(request, result, startedAt, executionFacts);
     } catch (error) {
       // Claim-tree IO / durable-identity failures are infrastructure-class:
       // stable transient codes, never arbitrary exception text.
       const message = error instanceof Error ? error.message : "";
       const stable = message === "OCR_SERVER_INSTANCE_CONFLICT" || message === "OCR_SERVER_ENDPOINT_RECORDING_LOST" ? SourceError.OCR_PROCESS_FAILED : SourceError.OCR_TEMP_IO_ERROR;
       logger.warn("mineru.ocr.execution_error", { ...logContext, failureCode: stable });
-      return recordCall(request, failure(stable, "transient"), startedAt);
+      return recordCall(request, failure(stable, "transient"), startedAt, executionFacts);
     } finally {
       // 6. Bounded cleanup of everything this claim owned, in every outcome,
       // through the CLOSED server state machine (RF01 P1-07, RF02 P1-04/P1-05).
