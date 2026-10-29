@@ -137,6 +137,14 @@ describe("ocr tier policy: post-OCR chart classification over real engine output
     expect(classifyOcrOutput({ text: numbered }).postOcrPageType).toBe("SCANNED_TEXT");
   });
 
+  it("axis tokens WITHOUT the numeric-line ratio do not trigger the leakage heuristic either", () => {
+    const proseWithArrow = "我们可以把注意力从A→B转移。\n前进一步，后退半步。\n收益与成本之间的平衡。\n正文继续，这里是普通段落。\n又一普通段落内容。";
+    const result = classifyOcrOutput({ text: proseWithArrow });
+    expect(result.signals.axisTokensFound).toBe(true);
+    expect(result.signals.numericStandaloneLineRatio).toBe(0);
+    expect(result.postOcrPageType).toBe("SCANNED_TEXT");
+  });
+
   it("empty OCR output is UNCLASSIFIED, never guessed", () => {
     expect(classifyOcrOutput({ text: "  \n \n" }).postOcrPageType).toBe("UNCLASSIFIED_OCR_OUTPUT");
   });
