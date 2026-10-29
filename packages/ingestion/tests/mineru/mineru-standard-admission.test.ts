@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -119,6 +119,28 @@ describe("mineru standard model verification (real files)", () => {
     expect(verification).toEqual({ ok: true, filesChecked: 2, totalBytes: Buffer.byteLength("detection-model-bytes") + Buffer.byteLength("vlm-model-bytes") });
   });
 
+  it.skipIf(process.platform === "win32")("rejects an identical-hash symlinked model file outside the configured root", async () => {
+    const root = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "real.onnx"), "verified-model-bytes");
+    symlinkSync(join(outside, "real.onnx"), join(root, "linked.onnx"));
+    const admission = parseMineruStandardAdmissionConfig({ [MINERU_STANDARD_MANIFEST_ENV]: "m.json" }, () =>
+      manifestJson([{ path: "linked.onnx", sha256: hex64("verified-model-bytes"), sizeBytes: Buffer.byteLength("verified-model-bytes") }]))!;
+    const result = await verifyMineruStandardModels(root, admission);
+    expect(result).toEqual({ ok: false, failures: [{ path: "linked.onnx", reason: "SYMLINK_OR_ROOT_ESCAPE" }] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a symlinked intermediate directory escaping the model root", async () => {
+    const root = tempDir();
+    const outside = tempDir();
+    writeFileSync(join(outside, "real.onnx"), "verified-model-bytes");
+    symlinkSync(outside, join(root, "external"));
+    const admission = parseMineruStandardAdmissionConfig({ [MINERU_STANDARD_MANIFEST_ENV]: "m.json" }, () =>
+      manifestJson([{ path: "external/real.onnx", sha256: hex64("verified-model-bytes"), sizeBytes: Buffer.byteLength("verified-model-bytes") }]))!;
+    const result = await verifyMineruStandardModels(root, admission);
+    expect(result).toEqual({ ok: false, failures: [{ path: "external/real.onnx", reason: "SYMLINK_OR_ROOT_ESCAPE" }] });
+  });
+
   it("reports MISSING / SIZE_MISMATCH with paths", async () => {
     const { root, manifestText } = buildRoot();
     writeFileSync(join(root, "model.gguf"), "tampered");
@@ -143,6 +165,14 @@ describe("claim doclib base URL guard (SSRF)", () => {
       expect(parseServerBaseUrl([{ type: "tcp", base_url: evil }])).toBeNull();
     }
     expect(parseServerBaseUrl([{ type: "uds", base_url: "http://127.0.0.1:16580" }])).toBeNull();
+  });
+
+  it("revalidates arbitrary exported configuration/readiness callers at the network boundary", async () => {
+    const { setParseServerModeManaged, waitForStandardParseServerReady } = await import("../../src/mineru/mineru-standard-server-setup.js");
+    for (const url of ["http://169.254.169.254:80", "http://localhost:80", "http://127.0.0.1:99999", "http://127.0.0.1:5000@evil.example:80"]) {
+      expect(await setParseServerModeManaged(url, 500)).toMatchObject({ kind: "CONFIG_SET_FAILED", detail: "INVALID_LOOPBACK_ENDPOINT" });
+      expect(await waitForStandardParseServerReady(url, 500)).toMatchObject({ kind: "STATUS_UNAVAILABLE", detail: "INVALID_LOOPBACK_ENDPOINT" });
+    }
   });
 });
 
