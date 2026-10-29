@@ -197,7 +197,7 @@ export function assessOcrCandidateQuality(text: string): OcrStep62aQuality {
   });
   if (typeof text !== "string" || text.trim().length === 0) return result("REJECT_CANDIDATE", "OCR_OUTPUT_EMPTY");
   if (text.length > OCR_QUALITY_MAX_TEXT_CHARS) return result("REJECT_CANDIDATE", "OCR_OUTPUT_TOO_LARGE");
-  if (text.includes("\0") || /[\u0001-\u0008\u000B\u000C\u000E-\u001F]/.test(text)) {
+  if (hasDisallowedControlCharacter(text)) {
     return result("REJECT_CANDIDATE", "OCR_OUTPUT_INVALID");
   }
   const classified = classifyOcrOutput({ text });
@@ -208,4 +208,13 @@ export function assessOcrCandidateQuality(text: string): OcrStep62aQuality {
     return result("REVIEW_REQUIRED", "CHART_MARKER_NEEDS_STRUCTURAL_VERIFICATION", classified.signals);
   }
   return result("CANDIDATE_ONLY", "OCR_TEXT_PRESENT_UNVERIFIED", classified.signals);
+}
+
+/** Accept tab, LF and CR only; avoids regexp control-character lint hazards. */
+function hasDisallowedControlCharacter(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 32 && code !== 9 && code !== 10 && code !== 13) return true;
+  }
+  return false;
 }
