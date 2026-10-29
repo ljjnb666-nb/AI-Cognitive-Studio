@@ -167,6 +167,17 @@ describe("claim doclib base URL guard (SSRF)", () => {
     expect(parseServerBaseUrl([{ type: "uds", base_url: "http://127.0.0.1:16580" }])).toBeNull();
   });
 
+  it("requires a positive standard tier signal instead of treating absent metadata as ready", async () => {
+    const { isStandardReady } = await import("../../src/mineru/mineru-standard-server-setup.js");
+    const healthy = { healthy: true, managed_running: true };
+    expect(isStandardReady(healthy)).toBe(false);
+    expect(isStandardReady({ ...healthy, supported_tiers: ["flash"] })).toBe(false);
+    expect(isStandardReady({ ...healthy, managed_tier: "flash", supported_tiers: ["standard"] })).toBe(false);
+    expect(isStandardReady({ ...healthy, managed_tier: "standard" })).toBe(true);
+    expect(isStandardReady({ ...healthy, supported_tiers: ["standard"] })).toBe(true);
+    expect(isStandardReady({ ...healthy, managed_tier: "standard", healthy: false })).toBe(false);
+  });
+
   it("revalidates arbitrary exported configuration/readiness callers at the network boundary", async () => {
     const { setParseServerModeManaged, waitForStandardParseServerReady } = await import("../../src/mineru/mineru-standard-server-setup.js");
     for (const url of ["http://169.254.169.254:80", "http://localhost:80", "http://127.0.0.1:99999", "http://127.0.0.1:5000@evil.example:80"]) {
