@@ -26,9 +26,21 @@ export type ManagedServerSetupFailure =
   | { kind: "STATUS_UNAVAILABLE"; detail: string }
   | { kind: "READINESS_TIMEOUT"; detail: string };
 
+/**
+ * The claim doclib's endpoint file is UNTRUSTED external-process output; the
+ * executor must never fetch an attacker-chosen URL from it. The claim-scoped
+ * doclib only ever serves plain HTTP on IPv4 loopback, so anything else is
+ * rejected before any network contact (SSRF guard, Mimosa finding 2026-10-29).
+ */
+const LOOPBACK_BASE_URL_PATTERN = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/?$/;
+
 function transportsBaseUrl(transports: Array<Record<string, unknown>>): string | null {
   for (const transport of transports) {
-    if (transport["type"] === "tcp" && typeof transport["base_url"] === "string" && transport["base_url"].length > 0) return transport["base_url"];
+    if (transport["type"] !== "tcp" || typeof transport["base_url"] !== "string") continue;
+    const match = LOOPBACK_BASE_URL_PATTERN.exec(transport["base_url"]);
+    if (match === null) continue;
+    const port = Number(match[1]);
+    if (port >= 1 && port <= 65_535) return transport["base_url"];
   }
   return null;
 }

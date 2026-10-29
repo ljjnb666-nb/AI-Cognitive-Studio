@@ -134,6 +134,18 @@ describe("mineru standard model verification (real files)", () => {
   });
 });
 
+describe("claim doclib base URL guard (SSRF)", () => {
+  it("accepts only plain-http IPv4 loopback transport URLs", async () => {
+    const { parseServerBaseUrl } = await import("../../src/mineru/mineru-standard-server-setup.js");
+    expect(parseServerBaseUrl([{ type: "tcp", base_url: "http://127.0.0.1:16580" }])).toBe("http://127.0.0.1:16580");
+    expect(parseServerBaseUrl([{ type: "tcp", base_url: "http://127.0.0.1:16580/" }])).toBe("http://127.0.0.1:16580/");
+    for (const evil of ["http://169.254.169.254:80", "http://localhost:16580", "https://127.0.0.1:16580", "http://127.0.0.1:99999", "http://127.0.0.1", "file:///etc/passwd", "http://mineru.example:80"]) {
+      expect(parseServerBaseUrl([{ type: "tcp", base_url: evil }])).toBeNull();
+    }
+    expect(parseServerBaseUrl([{ type: "uds", base_url: "http://127.0.0.1:16580" }])).toBeNull();
+  });
+});
+
 describe("per-page runtime admission recheck", () => {
   const base = { modelsVerified: true, availableMemoryBytes: 8_589_934_592 };
   const validClaim = hex64("source");
