@@ -34,13 +34,18 @@ export type ManagedServerSetupFailure =
  */
 const LOOPBACK_BASE_URL_PATTERN = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/?$/;
 
+/** Every exported network operation repeats the SSRF boundary check. */
+function validLoopbackBaseUrl(baseUrl: string): boolean {
+  const match = LOOPBACK_BASE_URL_PATTERN.exec(baseUrl);
+  if (!match) return false;
+  const port = Number(match[1]);
+  return Number.isSafeInteger(port) && port >= 1 && port <= 65_535;
+}
+
 function transportsBaseUrl(transports: Array<Record<string, unknown>>): string | null {
   for (const transport of transports) {
     if (transport["type"] !== "tcp" || typeof transport["base_url"] !== "string") continue;
-    const match = LOOPBACK_BASE_URL_PATTERN.exec(transport["base_url"]);
-    if (match === null) continue;
-    const port = Number(match[1]);
-    if (port >= 1 && port <= 65_535) return transport["base_url"];
+    if (validLoopbackBaseUrl(transport["base_url"])) return transport["base_url"];
   }
   return null;
 }
@@ -71,6 +76,7 @@ async function requestJson(url: string, init: RequestInit, timeoutMs: number, si
 
 /** Persists the managed-mode override into the CLAIM doclib config service. */
 export async function setParseServerModeManaged(baseUrl: string, timeoutMs: number, signal?: AbortSignal): Promise<ManagedServerSetupFailure | null> {
+  if (!validLoopbackBaseUrl(baseUrl)) return { kind: "CONFIG_SET_FAILED", detail: "INVALID_LOOPBACK_ENDPOINT" };
   try {
     const result = await requestJson(`${baseUrl.replace(/\/$/, "")}${API_PREFIX}/configs/${encodeURIComponent(MANAGED_MODE_KEY)}`, {
       method: "PUT",
@@ -116,6 +122,7 @@ export async function waitForStandardParseServerReady(
   readinessTimeoutMs: number,
   options: { pollIntervalMs?: number; statusTimeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<ManagedServerSetupFailure | null> {
+  if (!validLoopbackBaseUrl(baseUrl)) return { kind: "STATUS_UNAVAILABLE", detail: "INVALID_LOOPBACK_ENDPOINT" };
   const deadline = Date.now() + readinessTimeoutMs;
   const pollIntervalMs = options.pollIntervalMs ?? 2_000;
   const statusTimeoutMs = options.statusTimeoutMs ?? 5_000;
