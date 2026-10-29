@@ -83,7 +83,7 @@ async function buildManifestFromRoot(root: string): Promise<string> {
 }
 
 async function realStandardConfig(overrides: Record<string, string> = {}): Promise<MineruExecutorConfig> {
-  const tempRoot = mkdtempSync(join(tmpdir(), "mineru-std-real-"));
+  const tempRoot = mkdtempSync(join(process.env.MINERU_REAL_PRIVATE_ROOT ?? tmpdir(), "mineru-std-real-"));
   tempRoots.push(tempRoot);
   const manifestPath = await buildManifestFromRoot(realModelPath!);
   const environment = {
@@ -161,7 +161,7 @@ describeReal("mineru real standard execution gate (STEP6-2B-1)", () => {
     if (verification.ok) expect(verification.filesChecked).toBeGreaterThanOrEqual(1);
   }, 600_000);
 
-  it("admits standard, then demotes with ENGINES_NOT_READY until the claim-scoped engine bootstrap lands (STEP6-2B-2)", async () => {
+  it("executes a real scanned page with standard through the claim-scoped supervisor", async () => {
     if (!realStandardPdf) return; // private fixture absent -> skip silently, never fake
     const config = await realStandardConfig();
     const handle = createMineruPdfOcrExecutor(config, { standardModelsVerified: true });
@@ -178,22 +178,17 @@ describeReal("mineru real standard execution gate (STEP6-2B-1)", () => {
         pdfBytes,
         standardExecutionRequest: { sourcePdfSha256: sha256Bytes(pdfBytes) },
       });
-      // 2B-1 boundary: admission fully succeeds (receipt proves proposed
-      // standard + ADMITTED + verified manifest digest), the claim doclib has
-      // no engines by MinerU 4.0.3 boot semantics, so the same invocation
-      // demotes to flash with the typed refusal. Real standard PARSE output is
-      // deliberately NOT asserted here — that is STEP6-2B-2 acceptance.
       expect(result.status).toBe("SUCCEEDED");
       if (result.status !== "SUCCEEDED") return;
       expect(result.execution).toMatchObject({
         engine: "mineru",
         engineVersion: "4.0.3",
         proposedTier: "standard",
-        tierAdmission: "STANDARD_REFUSED",
-        tierRefusalCode: "ENGINES_NOT_READY",
+        tierAdmission: "STANDARD_ADMITTED",
+        tierRefusalCode: null,
         modelManifestSha256: config.standard!.manifestSha256,
       });
-      expect(["flash"]).toContain(result.execution!.actualTier);
+      expect(result.execution!.actualTier).toBe("standard");
       expect(result.text.trim().length).toBeGreaterThan(0);
     } finally {
       await handle.close();

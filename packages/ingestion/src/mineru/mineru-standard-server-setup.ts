@@ -1,22 +1,8 @@
 import { MINERU_STANDARD_TIER } from "./mineru-standard-admission.js";
 
-/**
- * STEP6-2B-1: claim-scoped managed parse-server bootstrap for the standard
- * tier (per-claim home — never a shared daemon).
- *
- * MinerU 4.0.3 contract (verified against the local venv sources):
- *  - the doclib reads `parse_server.local.mode` ONLY from its own SQLite
- *    config service at BOOT (doclib/app.py startup); defaults ship "disabled";
- *  - the managed engine server for a tier starts during that boot and the
- *    engines report readiness through GET /api/v1/server/status
- *    (parse_server.local.healthy / managed_running / supported_tiers);
- *  - PUT /api/v1/configs/{key} persists an override in the claim's own DB.
- *
- * Therefore enabling standard engines for ONE claim = boot doclib (executor
- * already does) -> PUT the managed override -> bounded controlled restart of
- * the SAME claim home (the executor owns that process tree) -> poll readiness.
- * No global/user-level state is touched; flash claims never enter this path.
- */
+/** Claim-scoped managed engine bootstrap. MinerU 4.0.3's health loop reads
+ * mode on every cycle and starts the supervised engine without rebooting
+ * doclib. Its existing owner/stop identity stays authoritative. */
 
 const API_PREFIX = "/api/v1";
 const MANAGED_MODE_KEY = "parse_server.local.mode";
@@ -58,9 +44,10 @@ async function requestJson(url: string, init: RequestInit, timeoutMs: number, si
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) controller.abort();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, redirect: "error", signal: controller.signal });
     let body: unknown = null;
     try {
       body = await response.json();
@@ -133,7 +120,7 @@ export async function waitForStandardParseServerReady(
   while (Date.now() < deadline) {
     if (options.signal?.aborted) return { kind: "STATUS_UNAVAILABLE", detail: "aborted" };
     try {
-      const result = await requestJson(`${baseUrl.replace(/\/$/, "")}${API_PREFIX}/server/status`, { method: "GET" }, statusTimeoutMs, options.signal);
+      const result = await requestJson(`${baseUrl.replace(/\/$/, "")}${API_PREFIX}/server/status`, { method: "GET" }, Math.min(statusTimeoutMs, Math.max(1, deadline - Date.now())), options.signal);
       if (result.ok) {
         const local = localParseServerView(result.body);
         if (local && isStandardReady(local)) return null;
@@ -144,7 +131,12 @@ export async function waitForStandardParseServerReady(
     } catch (error) {
       lastDetail = error instanceof Error ? error.message.slice(0, 200) : "probe error";
     }
-    await new Promise((resolveSleep) => setTimeout(resolveSleep, pollIntervalMs));
+    await new Promise<void>((resolveSleep) => {
+      const done = () => { clearTimeout(timer); options.signal?.removeEventListener("abort", done); resolveSleep(); };
+      const timer = setTimeout(done, Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+      options.signal?.addEventListener("abort", done, { once: true });
+      if (options.signal?.aborted) done();
+    });
   }
   return { kind: "READINESS_TIMEOUT", detail: lastDetail };
 }

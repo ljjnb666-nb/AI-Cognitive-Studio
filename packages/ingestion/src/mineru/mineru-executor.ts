@@ -7,9 +7,9 @@ import type { PdfOcrExecutor, PdfOcrExecutorDescriptor, PdfOcrExecutionFacts, Pd
 import { SourceError } from "../source-errors.js";
 import { MINERU_EXECUTOR_NAME, buildMineruParseArgs, judgeMineruParseExit, mineruFailureForOutcome } from "./mineru-commands.js";
 import { MINERU_STANDARD_TIER, assessMineruStandardExecution, sha256Bytes } from "./mineru-standard-admission.js";
-import { parseServerBaseUrl, waitForStandardParseServerReady } from "./mineru-standard-server-setup.js";
+import { parseServerBaseUrl, setParseServerModeManaged, waitForStandardParseServerReady } from "./mineru-standard-server-setup.js";
 import { isWithinPath, type MineruExecutorConfig } from "./mineru-config.js";
-import { sleep, spawnBounded, type BoundedSpawnResult } from "./mineru-process.js";
+import { probeFreeTcpPort, sleep, spawnBounded, type BoundedSpawnResult } from "./mineru-process.js";
 import { createMineruServerSession, type MineruServerSession } from "./mineru-server.js";
 
 /**
@@ -223,6 +223,11 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
         MINERU_MODEL_BASE_DIR: config.modelPath,
         TMP: outputDir,
         TEMP: outputDir,
+        ...(actualTier === MINERU_STANDARD_TIER ? {
+          MINERU_DOCLIB_MANAGED_PARSE_SERVER_HOST: "127.0.0.1",
+          MINERU_DOCLIB_MANAGED_PARSE_SERVER_PORT: String(await probeFreeTcpPort()),
+          MINERU_DOCLIB_MANAGED_PARSE_SERVER_STRICT_PORT: "true",
+        } : {}),
       };
       session = await createMineruServerSession({ executable: config.executable, executableArgs: config.executableArgs, homeDir, childEnvBase, startTimeoutMs: config.serverStartTimeoutMs, stopTimeoutMs: config.serverStopTimeoutMs, maxOutputBytes: Math.min(config.maxOutputBytes, 1_048_576), abortSignal: signal, ...(config.processImagePattern ? { processImagePattern: config.processImagePattern } : {}) });
       const startFailure = await session.start();
@@ -245,19 +250,13 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
       const endpointRecorded = await recordOcrServerEndpoint({ hostClaimToken: lease.claimToken, endpoint: { pid: endpoint.pid, serverId: endpoint.serverId, transports: endpoint.transports } }).catch(() => false);
       if (!endpointRecorded) throw new Error("OCR_SERVER_ENDPOINT_RECORDING_LOST");
 
-      // 4b. STEP6-2B-1: standard engines availability check. MinerU 4.0.3
-      // reads parse_server.local.mode only at doclib boot from the claim's own
-      // SQLite config service; a fresh claim home boots with engines disabled,
-      // and enabling them requires a doclib reboot that the 04B-3 one-instance-
-      // per-lease durable identity (hostClaimToken UNIQUE + closed state
-      // machine) does not permit within a claim. Until STEP6-2B-2 lands the
-      // executor-owned claim-scoped engine server (self-hosted mode probe,
-      // runtime-switchable per health cycle), an admitted standard proposal
-      // DEMOTES to flash with refusal code ENGINES_NOT_READY — never a doomed
-      // standard invocation, never a shared daemon.
+      // MinerU 4.0.3 health.run refreshes managed mode on every cycle and
+      // starts its supervised engine when managed_proc is absent. The doclib
+      // identity is never restarted or replaced; its stop owns engine cleanup.
       if (actualTier === MINERU_STANDARD_TIER && config.standard) {
         const baseUrl = parseServerBaseUrl(endpoint.transports);
-        const probe = baseUrl === null ? { kind: "STATUS_UNAVAILABLE" as const, detail: "no_tcp_transport" } : await waitForStandardParseServerReady(baseUrl, 1, { pollIntervalMs: 1, statusTimeoutMs: 5_000, signal });
+        const setup = baseUrl === null ? { kind: "STATUS_UNAVAILABLE" as const, detail: "no_tcp_transport" } : await setParseServerModeManaged(baseUrl, 5_000, signal);
+        const probe = setup ?? await waitForStandardParseServerReady(baseUrl!, config.serverStartTimeoutMs, { signal });
         if (probe !== null) {
           logger.warn("mineru.ocr.standard_engines_not_ready", { ...logContext, detail: probe.detail });
           executionFacts.tierAdmission = "STANDARD_REFUSED";
