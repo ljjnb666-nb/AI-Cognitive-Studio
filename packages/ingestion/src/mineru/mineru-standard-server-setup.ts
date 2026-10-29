@@ -105,11 +105,14 @@ function localParseServerView(statusBody: unknown): LocalParseServerStatusView |
   return local && typeof local === "object" ? (local as LocalParseServerStatusView) : null;
 }
 
-function isStandardReady(local: LocalParseServerStatusView): boolean {
+/** Positive evidence of standard availability is mandatory; missing tier
+ * metadata cannot be interpreted as standard-ready. */
+export function isStandardReady(local: LocalParseServerStatusView): boolean {
   if (local.healthy !== true || local.managed_running !== true) return false;
   if (local.managed_tier !== undefined && local.managed_tier !== null && local.managed_tier !== MINERU_STANDARD_TIER) return false;
-  const tiers = Array.isArray(local.supported_tiers) ? local.supported_tiers : [];
-  return tiers.length === 0 || tiers.includes(MINERU_STANDARD_TIER);
+  const reportedByMode = local.managed_tier === MINERU_STANDARD_TIER;
+  const reportedBySupportedTiers = Array.isArray(local.supported_tiers) && local.supported_tiers.includes(MINERU_STANDARD_TIER);
+  return reportedByMode || reportedBySupportedTiers;
 }
 
 /**
