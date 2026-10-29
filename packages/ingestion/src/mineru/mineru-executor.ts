@@ -69,7 +69,11 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
   // startup model-verification proof (hashes verified against the manifest).
   if (config.standard && options.standardModelsVerified !== true) throw new Error("OCR_STANDARD_MODELS_UNVERIFIED:STARTUP_MODEL_VERIFICATION_REQUIRED");
   const standardModelsVerified = options.standardModelsVerified === true;
-  const descriptor: PdfOcrExecutorDescriptor = { name: MINERU_EXECUTOR_NAME, version: config.version, parserMode: config.tier, modelRevision: config.standard?.manifestSha256 ?? null };
+  // The descriptor is persisted for EVERY page attempt. Its modelRevision
+  // must not advertise a standard manifest for flash attempts, including
+  // ENGINES_NOT_READY demotions. Per-page verified model provenance requires
+  // a separately fenced durable attempt extension in STEP6-2B-2.
+  const descriptor: PdfOcrExecutorDescriptor = { name: MINERU_EXECUTOR_NAME, version: config.version, parserMode: config.tier, modelRevision: null };
   const active = new Set<{ controller: AbortController; done: Promise<unknown> }>();
   let closing = false;
 
