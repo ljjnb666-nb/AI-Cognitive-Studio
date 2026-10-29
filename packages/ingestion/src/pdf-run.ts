@@ -1,3 +1,5 @@
+import { verifyOcrCheckpointSource } from "./ocr-source-authority.js";
+import { classifyOcrQuality } from "./ocr-quality.js";
 import { createHash } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
 import { sha256Utf8 } from "@ai-cognitive/domain";
@@ -106,6 +108,13 @@ export async function runPdfExtraction(input: PdfRunExtractionInput): Promise<Pd
   // persisted — an outcome label can never manufacture usable content (RF01).
   const usableBlockCounts = new Map(pages.map((page) => [page.physicalPageIndex, page.blocks.length]));
   const decision = evaluatePdfExtractionQuality(plan, outcomes, usableBlockCounts);
+  const triaged=await prisma.ocrPageAttempt.findMany({where:{ingestionRunId:input.runId,workspaceId:input.workspaceId,routingGeneration:generation,qualityStatus:{in:["REVIEW_REQUIRED","REJECTED"]}},select:{physicalPageIndex:true,qualityStatus:true}});
+  if(triaged.some(page=>page.qualityStatus==="REVIEW_REQUIRED")) {
+    decision.status="REQUIRES_FALLBACK";
+    decision.reasonCodes.push("OCR_MANUAL_REVIEW_REQUIRED");
+    decision.reviewRequiredPhysicalPageIndexes=triaged.filter(page=>page.qualityStatus==="REVIEW_REQUIRED").map(page=>page.physicalPageIndex);
+  }
+
   const factsField = ocrExecutionFacts.length > 0 ? { ocrExecutionFacts } : {};
   if (decision.status === "REQUIRES_FALLBACK") return { kind: "OCR_REQUIRED", routingPlan: plan, routingGeneration: generation, decision, ...factsField };
   if (decision.status === "REJECTED") return { kind: "REJECTED", routingPlan: plan, routingGeneration: generation, decision, ...factsField };
@@ -170,7 +179,7 @@ async function executeOcrPage(
     const startedAt = Date.now();
     let result: PdfOcrPageResult;
     try {
-      result = await executor.extractPage({ ...key, runExecutionToken: input.runExecutionToken, pdfBytes: input.pdfBytes, ...(proposeStandard ? { standardExecutionRequest: { sourcePdfSha256: sourceDigestOf() } } : {}) });
+      result = await executor.extractPage({ ...key, pageClaimToken: claim.claimToken, runExecutionToken: input.runExecutionToken, pdfBytes: input.pdfBytes, ...(proposeStandard ? { standardExecutionRequest: { sourcePdfSha256: sourceDigestOf() } } : {}) });
     } catch {
       result = { status: "FAILED", errorCode: SourceError.PARSE, kind: "transient" };
     }
@@ -188,7 +197,7 @@ async function executeOcrPage(
       // identical key; there is no mutable per-page object anywhere.
       const authoritativeArtifactKey = `workspaces/${input.workspaceId}/extractions/${input.runId}/ocr-pages/${physicalPageIndex}/${textSha256}.txt`;
       await input.storage.putObject({ key: authoritativeArtifactKey, body: Buffer.from(result.text, "utf8"), contentType: "text/plain; charset=utf-8" });
-      if (!await completeOcrPageAttempt({ ...key, claimToken: claim.claimToken, authoritativeArtifactKey, textSha256, durationMs: Date.now() - startedAt })) return null;
+      if (!await completeOcrPageAttempt({ ...key, claimToken: claim.claimToken, sourceAuthority: result.execution?.sourceAuthority, qualityStatus: result.execution?.qualityDecision?.status, authoritativeArtifactKey, textSha256, durationMs: Date.now() - startedAt })) return null;
       return await loadAuthoritativeOcrPage(input, physicalPageIndex, generation);
     }
     // RF04 P1-02: HOST CAPACITY unavailable is a DEFERRAL, not a processing
@@ -213,10 +222,20 @@ async function executeOcrPage(
  */
 async function loadAuthoritativeOcrPage(input: PdfRunExtractionInput, physicalPageIndex: number, generation: number): Promise<{ text: string; parserName: string; parserVersion: string } | null> {
   const row = await prisma.ocrPageAttempt.findUnique({ where: { ingestionRunId_physicalPageIndex_routingGeneration: { ingestionRunId: input.runId, physicalPageIndex, routingGeneration: generation } } });
+  if (row?.qualityStatus === "REVIEW_REQUIRED" || row?.qualityStatus === "REJECTED") return null;
   if (!row || row.status !== "SUCCEEDED" || !row.authoritativeArtifactKey || !row.textSha256 || !row.parserName || !row.parserVersion) return null;
+  if (input.ocrStandardAdmissionEnabled && !row.sourceIdentity) return null;
+  if(row.sourceIdentity) {
+    const source=row.sourceIdentity as {sourceBlobId:string;sourceDocumentId:string;sourceSha256:string;sourceSizeBytes:number;storageKey:string;planSha256:string};
+    const key={workspaceId:input.workspaceId,sourceDocumentId:input.sourceDocumentId,ingestionRunId:input.runId,physicalPageIndex,routingGeneration:generation,runExecutionToken:input.runExecutionToken,pageClaimToken:row.claimToken??"",sourceSha256:createHash("sha256").update(input.pdfBytes).digest("hex"),sourceSizeBytes:input.pdfBytes.byteLength};
+    if(!await verifyOcrCheckpointSource(key,{...key,...source})) return null;
+    const receipt=await prisma.ocrPageExecution.findUnique({where:{pageClaimToken:row.claimToken??""}});
+    if(!receipt || receipt.executionStatus!=="SUCCEEDED" || receipt.resultTextSha256!==row.textSha256) return null;
+  }
   const bytes = await input.storage.getObjectBytes(row.authoritativeArtifactKey);
   const text = new TextDecoder().decode(bytes);
   if (sha256Utf8(text) !== row.textSha256) throw new Error(SourceError.STORAGE);
+  if (classifyOcrQuality(text,physicalPageIndex,row.proposedTier==="standard").status!=="ACCEPTED") return null;
   if (usableOcrBlocks(text, physicalPageIndex, row.parserName, row.parserVersion).length < 1) return null;
   return { text, parserName: row.parserName, parserVersion: row.parserVersion };
 }

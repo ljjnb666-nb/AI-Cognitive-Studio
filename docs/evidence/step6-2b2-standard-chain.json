@@ -1,0 +1,28 @@
+{
+  "case": "private-scanned-page",
+  "actualTier": "standard",
+  "executionStatus": "SUCCEEDED",
+  "manifestDigest": "3382d142ef28eeeda138fd13786ec41e591007c852aca1487b424850f8c179ad",
+  "modelRevision": "mineru-4.0.3-onnx-llamacpp-q8-v1",
+  "qualityDecision": { "status": "REVIEW_REQUIRED", "reasons": ["STRUCTURE_UNATTESTED"] },
+  "runStatus": "OCR_REQUIRED",
+  "resultBytes": 2084,
+  "publicationCount": 0,
+  "realTests": { "passed": 5, "failed": 0, "skipped": 0 },
+  "serviceMs": 72058,
+  "timingsMs": { "snapshot": 4024, "doclibStart": 2739, "engineReady": 44200, "parse": 12116 },
+  "resourceSampling": {
+    "rssSampleSeconds": 0.5,
+    "samples": 360,
+    "maxAggregateProcessRssBytes": 3614621696,
+    "minSystemAvailableBytes": 1820577792,
+    "baselineGlobalVramMiB": 321,
+    "maxGlobalVramMiB": 2236,
+    "availableAfterExitBytes": 5446496256
+  },
+  "limitations": [
+    "Engine readiness includes startup and polling; parse includes CLI and scheduler work.",
+    "RSS can double-count shared pages. VRAM is global device sampling, not per-process attribution.",
+    "Loaded-engine hot reuse and failure/recovery matrix remain pending."
+  ]
+}

@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { lockOcrPublicationSources } from "./ocr-source-authority.js";
+import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
 import { buildEpubProductIdentityCandidate, CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
 import type { EpubExtractionMetadata } from "@ai-cognitive/domain";
@@ -232,7 +233,7 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
             // that first verifies live claim ownership in PostgreSQL — a
             // superseded owner (stale in-memory ownershipLost or not) changes
             // ZERO durable state. Ownership loss writes nothing.
-            const errorCode = extraction.kind === "OCR_REQUIRED" ? SourceError.OCR_REQUIRED : SourceError.QUALITY_REJECTED;
+            const errorCode = extraction.decision.reasonCodes.includes("OCR_MANUAL_REVIEW_REQUIRED") ? "SOURCE_OCR_REVIEW_REQUIRED" : extraction.kind === "OCR_REQUIRED" ? SourceError.OCR_REQUIRED : SourceError.QUALITY_REJECTED;
             const status: IngestionTerminalStatus = extraction.kind === "OCR_REQUIRED" ? "OCR_REQUIRED" : "REJECTED";
             if (!await terminalizeRunWithRoutingOutcome(run.id, claim.token, status, errorCode, extraction.routingGeneration, pdfRoutingOutcome(extraction.decision, false))) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
             nonPublishTerminalized = true;
@@ -269,6 +270,7 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
           // assert live claim ownership BEFORE any extraction data is written.
           // The row lock holds the run against reclaim until this transaction ends.
           if (ownershipLost || !(await lockRunForPublication(tx, run.id, claim.token))) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
+          if(pdfRouting && !await lockOcrPublicationSources(tx,{workspaceId:run.workspaceId,sourceDocumentId:run.sourceDocumentId,ingestionRunId:run.id,runExecutionToken:claim.token,routingGeneration:pdfRouting.routingGeneration,sourceSha256:createHash("sha256").update(bytes).digest("hex"),sourceSizeBytes:bytes.byteLength})) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
           // Publication hard gate (04B-2): a PDF may persist an extraction only
           // with a quality decision, and only an ACCEPTED/DEGRADED decision may
           // publish. The pipeline never returns forbidden decisions — reaching

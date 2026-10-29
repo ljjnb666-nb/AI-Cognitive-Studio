@@ -17,6 +17,7 @@ import {
   parseMineruStandardAdmissionConfig,
   parseMineruStandardManifest,
   sha256Bytes,
+  verifyMineruModelFiles,
   verifyMineruStandardModels,
   type MineruStandardAdmissionConfig,
 } from "../../src/mineru/mineru-standard-admission.js";
@@ -115,7 +116,7 @@ describe("mineru standard model verification (real files)", () => {
   it("verifies containment, size, and full sha256 for every file", async () => {
     const { root, manifestText } = buildRoot();
     const admission = parseMineruStandardAdmissionConfig({ [MINERU_STANDARD_MANIFEST_ENV]: "m.json" }, () => manifestText)!;
-    const verification = await verifyMineruStandardModels(root, admission);
+    const verification = await verifyMineruModelFiles(root, admission);
     expect(verification).toEqual({ ok: true, filesChecked: 2, totalBytes: Buffer.byteLength("detection-model-bytes") + Buffer.byteLength("vlm-model-bytes") });
   });
 
@@ -126,7 +127,7 @@ describe("mineru standard model verification (real files)", () => {
     symlinkSync(join(outside, "real.onnx"), join(root, "linked.onnx"));
     const admission = parseMineruStandardAdmissionConfig({ [MINERU_STANDARD_MANIFEST_ENV]: "m.json" }, () =>
       manifestJson([{ path: "linked.onnx", sha256: hex64("verified-model-bytes"), sizeBytes: Buffer.byteLength("verified-model-bytes") }]))!;
-    const result = await verifyMineruStandardModels(root, admission);
+    const result = await verifyMineruModelFiles(root, admission);
     expect(result).toEqual({ ok: false, failures: [{ path: "linked.onnx", reason: "SYMLINK_OR_ROOT_ESCAPE" }] });
   });
 
@@ -137,7 +138,7 @@ describe("mineru standard model verification (real files)", () => {
     symlinkSync(outside, join(root, "external"));
     const admission = parseMineruStandardAdmissionConfig({ [MINERU_STANDARD_MANIFEST_ENV]: "m.json" }, () =>
       manifestJson([{ path: "external/real.onnx", sha256: hex64("verified-model-bytes"), sizeBytes: Buffer.byteLength("verified-model-bytes") }]))!;
-    const result = await verifyMineruStandardModels(root, admission);
+    const result = await verifyMineruModelFiles(root, admission);
     expect(result).toEqual({ ok: false, failures: [{ path: "external/real.onnx", reason: "SYMLINK_OR_ROOT_ESCAPE" }] });
   });
 
@@ -145,13 +146,13 @@ describe("mineru standard model verification (real files)", () => {
     const { root, manifestText } = buildRoot();
     writeFileSync(join(root, "model.gguf"), "tampered");
     const admission = parseMineruStandardAdmissionConfig({ [MINERU_STANDARD_MANIFEST_ENV]: "m.json" }, () => manifestText)!;
-    const verification = await verifyMineruStandardModels(root, admission);
+    const verification = await verifyMineruModelFiles(root, admission);
     expect(verification.ok).toBe(false);
     if (!verification.ok) {
       expect(verification.failures.map((failure) => failure.reason)).toEqual([`SIZE_MISMATCH:8!=${Buffer.byteLength("vlm-model-bytes")}`]);
     }
     const missingAdmission = parseMineruStandardAdmissionConfig({ [MINERU_STANDARD_MANIFEST_ENV]: "m.json" }, () => manifestJson([{ path: "gone.onnx" }]))!;
-    const missing = await verifyMineruStandardModels(root, missingAdmission);
+    const missing = await verifyMineruModelFiles(root, missingAdmission);
     expect(missing.ok).toBe(false);
   });
 });
@@ -285,7 +286,8 @@ describe("executor config integration: default-off equivalence and conflict hand
     };
     expect(() => createMineruPdfOcrExecutor(config)).toThrowError(/OCR_STANDARD_MODELS_UNVERIFIED/);
     expect(() => createMineruPdfOcrExecutor(config, { standardModelsVerified: false })).toThrowError(/OCR_STANDARD_MODELS_UNVERIFIED/);
-    const handle = createMineruPdfOcrExecutor(config, { standardModelsVerified: true });
+    expect(() => createMineruPdfOcrExecutor(config, { standardModelsVerified: true })).toThrowError(/UNAPPROVED_MODEL_INVENTORY/);
+    const handle = createMineruPdfOcrExecutor({ ...config, standard: undefined });
     // Descriptor is persisted for flash attempts too; standard manifest cannot
     // masquerade as actual per-page model provenance before 2B-2.
     expect(handle.executor.descriptor.modelRevision).toBeNull();
@@ -293,4 +295,9 @@ describe("executor config integration: default-off equivalence and conflict hand
     const plain = createMineruPdfOcrExecutor({ ...config, standard: undefined });
     expect(plain.executor.descriptor.parserMode).toBe("flash");
   });
+});
+
+it("rejects a self-consistent but unapproved model inventory before any disk access",async()=>{
+ const admission=parseMineruStandardAdmissionConfig({[MINERU_STANDARD_MANIFEST_ENV]:"m.json"},()=>manifestJson([{path:"a.onnx"}]))!;
+ expect(await verifyMineruStandardModels("unused-root",admission)).toEqual({ok:false,failures:[{path:"<manifest>",reason:"UNAPPROVED_MODEL_INVENTORY"}]});
 });

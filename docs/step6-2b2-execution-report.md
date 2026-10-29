@@ -1,4 +1,40 @@
-# STEP6-2B-2 执行记录（未完成验收）
+# STEP6-2B-2 持续开发验收记录
+
+当前目标仍为 active，尚未通过全部验收。以下是 2026-10-30 的最新实现进度；后附上一轮历史记录，不把历史未完成状态当作本轮最终结论。
+
+## 本轮已经接入的处理链
+
+- 来源授权：执行前、结果返回前、checkpoint 提交事务内核验 SourceBlob / SourceDocument / run / Job / plan / page claim 与有效租约。提交事务持有权威行锁，租约使用 clock_timestamp()；完成 checkpoint 的恢复也重新核验当前 run 与源身份。
+- 模型库存：项目固定的 4.0.3 ONNX + llama-cpp 清单含 15 个模型/配置资源及必需的空 VLM completion sentinel，共 16 项。批准摘要 `3382d142ef28eeeda138fd13786ec41e591007c852aca1487b424850f8c179ad`。该摘要是本项目的版本准入基线，不是上游签名或全供应链安全证明。
+- 实际加载隔离：standard 读取 claim 内复制并校验过的模型副本，不读取运行期间可变的模型缓存；固定 onnx/llama-cpp 后端并清除继承的 MinerU 配置覆盖。复制前后和识别后检查模型文件。权重未进入 Git。
+- 执行事实：新增 OcrPageExecution 历史表和 checkpoint 的 proposed/admitted/actual tier、模型与清单、源身份、claim、执行状态和质量状态字段。未启动解析时 actualTier=NULL；flash 不拥有 standard 模型身份。失败与重试历史分别保留。数据库触发器拒绝改写历史回执。
+- 质量拦截：空输出、控制字符、乱码、重复块、页码不符和结构风险分为 ACCEPTED / REVIEW_REQUIRED / REJECTED。Markdown 没有独立结构证明，因此所有 standard 提案的结果需人工复核；不将非空文本视为结构准确。待复核 checkpoint 不进入正式 extraction 或 current extraction。
+- Prisma 增量迁移：`20261030010000_ocr_execution_receipts`、`20261030011000_ocr_receipt_immutability`。历史字段保留 NULL，表示未知；回滚脚本在 `docs/operations/step6-2b2-rollback.sql`，应停新 worker、先导出回执证据，再由操作员决定执行。测试事务回滚演练结果待补。
+
+## 最新真实证据（本地，不等于新 HEAD CI）
+
+- PostgreSQL / MinIO / MinerU 真实门 **5 PASS / 0 FAIL / 0 SKIP**，201.97s 测试耗时。包含真实私有 B03 PDF 经服务处理到 standard 回执、fenced 持久化、REVIEW_REQUIRED 状态及正式发布计数=0；重复调用不重新执行 OCR。
+- 私有 MinIO 仅绑定 127.0.0.1:19000，数据绑定到指定私有数据目录，不写公共 Docker 数据卷。实际源对象、识别对象及 proof 均保留私有；公共报告不含正文。
+- 来源授权 / checkpoint / routing 组合测试最近 **50 PASS / 0 FAIL**；新增 checkpoint 恢复来源替换用例尚待本轮复跑。
+- 单测最近 **307 PASS / 2 SKIP / 0 FAIL**。两个旧 symlink 专项在 Windows 跳过；另新增 Windows junction 逃逸测试已通过。
+- ingestion typecheck/lint 已通过。整链新增分段计时及资源采样正在复跑，最终数字待补，不能把先前 RAM/显存快照当峰值。
+- 保留失败证据：首次真实授权门因低内存降级造成 1 FAIL；固定模型副本首次遗漏 MinerU 必需 completion sentinel，导致 managed 配置被 HTTP 400 拒绝，整链门 2 FAIL。已根据实际 registry/download 源码补齐固定 sentinel，之后真实门 5/5 通过；不是跳过引擎门禁。
+
+最新补充：来源/checkpoint/routing 组合测试已达 **52 PASS / 0 FAIL**，覆盖恢复 checkpoint 和最终 canonical 发布时的源替换拦截。ingestion build、worker/shared typecheck 通过。迁移已在独立测试库进行 BEGIN/ROLLBACK 演练：事务内移除新增结构，回滚后恢复，未改写迁移历史。
+
+带资源采样的整链复跑 **5 PASS / 0 FAIL / 0 SKIP**，186.91s 测试时间。服务总时间 72.058s，snapshot 4.024s、doclib start 2.739s、engine-ready 44.200s、parse 12.116s。engine-ready 含进程启动和轮询，parse 含 CLI/调度，不作为纯模型耗时。RSS 合计采样峰值 3,614,621,696 字节（共享页可能重复计数）；全设备 VRAM 采样峰值 2236 MiB、基线 321 MiB；退出后系统可用内存 5,446,496,256 字节。热引擎复用尚未验证。
+
+公共脱敏证明见 `docs/evidence/step6-2b2-standard-chain.json`；不包含原文、私有路径、source fingerprint 或 claim token。
+
+## 仍需完成的完整目标
+
+managed engine 的真实取消、超时、父进程崩溃、恢复和资源回收矩阵；HTTP/端口与进程身份绑定的独立验证；冷启动及热运行与峰值 RAM/VRAM 的明确测量；全仓相关回归、真实 Worker、准确新 HEAD 的 CI；统一代码复核及最终验收报告。
+
+PR #216 保持 Draft，base 仍为未合并的 #215。未经授权不合并、部署或开启生产 standard。旧 HEAD `8f537d9` 的 CI `40912790553` 现已六项 SUCCESS；这不证明未提交的新改动通过 CI。
+
+---
+
+## 上一轮历史记录（截至 8f537d9）
 
 状态：`STEP6-2B-2_BLOCKED_WITH_EVIDENCE`。本分支打通真实 standard 调用，但没有完成用户要求的安全生产链路；不可合并、部署或开启生产 standard。
 
