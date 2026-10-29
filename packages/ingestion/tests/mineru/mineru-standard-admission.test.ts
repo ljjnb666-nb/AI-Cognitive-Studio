@@ -286,7 +286,9 @@ describe("executor config integration: default-off equivalence and conflict hand
     expect(() => createMineruPdfOcrExecutor(config)).toThrowError(/OCR_STANDARD_MODELS_UNVERIFIED/);
     expect(() => createMineruPdfOcrExecutor(config, { standardModelsVerified: false })).toThrowError(/OCR_STANDARD_MODELS_UNVERIFIED/);
     const handle = createMineruPdfOcrExecutor(config, { standardModelsVerified: true });
-    expect(handle.executor.descriptor.modelRevision).toBe(hex64("m"));
+    // Descriptor is persisted for flash attempts too; standard manifest cannot
+    // masquerade as actual per-page model provenance before 2B-2.
+    expect(handle.executor.descriptor.modelRevision).toBeNull();
     // Default path (no standard block): proof flag is irrelevant, factory succeeds.
     const plain = createMineruPdfOcrExecutor({ ...config, standard: undefined });
     expect(plain.executor.descriptor.parserMode).toBe("flash");
