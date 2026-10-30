@@ -16,7 +16,7 @@
     ,"test:phase9": "vitest run tests/phase9-model-manifest.test.ts"
     ,"test:beta-repair:provider-ux": "vitest run tests/beta-provider-catalog.test.ts"
     ,"test:phase8c:podcast-query": "vitest run tests/phase8c-podcast-query-recovery.integration.test.ts"
-    ,"test:phase8c:speech": "vitest run tests/phase8c-speech.unit.test.ts tests/phase8c-speech.integration.test.ts"
+    ,"test:phase8c:speech": "vitest run tests/phase8c-speech.unit.test.ts tests/phase8c-speech.integration.test.ts tests/zhipu-speech.test.ts"
   },
   "dependencies": {
     "@ai-cognitive/db": "workspace:*",

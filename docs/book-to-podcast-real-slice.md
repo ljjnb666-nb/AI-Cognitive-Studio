@@ -1,0 +1,69 @@
+# 真实电子书到播客：执行记录
+
+本轮目标 active；尚未生成真实音频，不宣称完整成功。禁止回到 OCR 基础设施扩展。
+
+## 2026-10-30 当前事实
+
+- 当前工作区原本干净；从 #217 HEAD ea65676a5aac1ad4fe34156dc441b1b575d13b74 创建 codex/book-to-podcast-real-slice 分支，复用原 managed worktree，没有新建 worktree。
+- GitHub 重新核验 #217 Draft/Open，CI 41016216322 六项 SUCCESS；#215/#216 及 #209～#212 均仍 Draft/Open。
+- 已读取 #217 工程报告及现有播客 services/pipeline/audio、Gateway text/speech、Worker runtime、Web 新建播客页。已有双主持人、逐段脚本/人性化、证据绑定、逐句 TTS、WAV 组装、持久化、幂等和加密回执消费能力，不需要另造引擎。
+- 最短路径是可靠原生文本 → 正式提取 → ChunkSet/Book Intelligence → CurrentBookIntelligence → 现有播客多阶段生成 → CurrentPodcastScript → 已绑定的双音色 TTS → CurrentPodcastAudio → Web 播放。
+- 当前私有验收工作区仅有 ACTIVE 智谱连接及 PDF_VISUAL_STRUCTURE/glm-4.6v；尚无本轮所需内容理解/Embedding/脚本/TTS 路由。内置真实语音适配器为 OpenAI speech，支持 WAV；不将模拟 provider 当真实语音。
+- books 目录目前仅有 B03 扫描原书。fixtures 是合成测试材料，不冒充真实电子书。其他历史单页 Benchmark 也不能替代连续章节及原书来源授权。
+- 已向用户询问具体书籍的内容使用授权；后续付费调用必须在明确样本、模型、次数与预算后另行授权。没有沿用上轮已消耗的两次视觉调用授权。
+
+## 最小集成计划（只读评估，没有执行 merge）
+
+| PR | 准确 HEAD | 当前 base | 处理 |
+| --- | --- | --- | --- |
+| #215 | 4f9d975af11ea144fd9eaa169c061b13863db193 | main | 获得明确合并授权后先集成并验证 |
+| #216 | 43a55ecfca01b2a63261bc82a500d60cf3b9ff31 | #215 分支 | 依赖 #215，随后集成并验证 |
+| #217 | ea65676a5aac1ad4fe34156dc441b1b575d13b74 | #216 分支 | 依赖 #216，随后集成并验证 |
+| #209 | 8f4d44561a0bbed8d5271927293d172fa4faeca3 | 更早的来源 review packet 分支 | 只读审核页已被 #217 部分复用，不能整 PR 重复套用 |
+| #210 | 152492c758bc01597bed5183a5ede698afb6cf38 | #209 分支 | 视觉候选读模型与独立 OCR 判定不等价，未认定全被替代 |
+| #211 | 978452c0c5f166cd06baa33b5eca418748b9a6f7 | #210 分支 | 显式候选请求机制与 #217 Job 存在语义重叠，不能并行建立第二授权权威 |
+| #212 | 51493aeb1f4ac47eeec54f76d0dff431e24eceac | #211 分支 | 原书 Range/磁盘解析/Gateway 视觉部分已复用；人工事件和侧车能力未整体搬入 |
+
+#209～#212 链相对 main 含五个独立迁移（Docling sidecar、layout task、visual candidate、explicit request、human review）；#217 新增的是独立 OCR model review 事件迁移。没有相同迁移文件名，但表/任务/来源状态语义有重叠，不能据此认定无冲突或全部过时。
+
+可执行顺序：先取得合并授权 → 逐个处理 #215 → #216 → #217，每次核验最新 main/head、准确 HEAD CI 与迁移可部署性 → 再处理本轮播客 PR。#209～#212 保持原状，不盲目 merge/cherry-pick；仅对确实未覆盖且仍需要的人工/候选能力逐项做差异移植。未经用户授权，不关闭旧 PR、不删表、不改写历史。
+
+必须保留：standard 默认关闭、源 SHA/claim/lease fence、质量阻断、UNKNOWN 结构边界、模型/人工事件分离、Gateway 幂等/实报用量、运行中结果隔离、付费结果回收及原始数据私有性。现有单元/真实 PG/MinIO/Worker/浏览器/准确 HEAD CI 不得降低。
+
+## 下一步
+
+先确定合法正向原书及连续 3～5 页/小章节；本地提取并检查顺序/缺失/重复，计算实际字符/分块数，再给出具体调用上限与费用授权请求。B03 继续作为 REJECTED 负例，不进入正式提取或播客链。最小音频实际播放前不扩展到整书，不以测试数量代替成品。
+
+## 正向样本已完成非付费准备
+
+用户已明确授权权利条件满足的内容用于私有研发、必要模型/TTS 传输；费用必须另行授权。私有原书权利记录不足，换用 Project Gutenberg #1342《Pride and Prejudice》第一章，原站说明 Public domain in the USA、作者 Jane Austen (1775–1817)。只使用原作第一章，不发送现代导言/注释。来源：https://www.gutenberg.org/ebooks/1342 。
+
+- 原始 EPUB SHA256：2172db6a64d45b02f239cc7b46b50d7117fcd527e2a7a1386694f5eeccd26381。
+- 私有摘录 EPUB SHA256：41fef531a3e6347cfcd0a6f3b15208173fbe9efbe6fb7952933227af16f8e776；明确为派生摘录，未冒充原书字节。
+- 第一章跨两个原始 spine 文档，从 pgepubid00022 到下一章标题之前；已拼齐，4573 字符。原书和 license 保留，逐段原始文本 SHA 及范围留在私有 provenance 清单。
+- 经现有 createUploadIntent/completeUpload/processIngestionRun 正式导入，SUCCEEDED；39 个 SourceBlock，规范化文本与源章节完全相同（仅忽略空白），没有额外 OCR。
+- 原有 materializeChunkSet 生成 5 块，状态 SUCCEEDED，内容估算 1151 token；来源范围引用已持久化。零外部调用。
+- 私有证据目录 D:\ai-cognitive-pdf-benchmark-data\private\book-to-podcast-real-slice，native-ingestion.private.json、chapter-provenance.private.json、trusted-text-and-chunks.private.json；书籍内容不进入本报告或 Git。
+- 项目主库也无 ACTIVE Provider，不能假定另有可用 TTS 密钥。已询问用户可用凭据，未要求在聊天中发送。
+- 官方当前文档说明现有 gpt-4o-mini-tts 进入弃用期、计划 2027-01-06 下线；本轮若使用它需明确这一运行窗口，不为了本次验收重写语音架构。现有适配器仅记录本地输入字符数，后续不得冒充实报计费 token。
+
+真实 Book Intelligence、脚本、音频及 Edge 播放尚未完成。待核算具体预算并得到有效费用授权后继续。
+
+## 智谱真实双音色试音已验收（章节播客仍未完成）
+
+用户明确选择智谱官方 glm-tts、tongtong/xiaochen、WAV；先完成约 30 秒试音，再推进章节。已复用既有加密智谱凭据为 PODCAST_TTS 单独配置官方 speech 连接，未输出密钥。没有新建 OCR、Gateway 或播客引擎。
+
+- 官方契约：https://docs.bigmodel.cn/api-reference/模型-api/文本转语音 。非流式二进制 WAV，1024 字符上限、speed [0.5,2]，保留水印；不发送 OpenAI instructions/pitch/SSML。
+- 官方价格：https://docs.bigmodel.cn/cn/guide/start/pricing ，GLM-TTS 2 元/万字符。用量字符数为本地确定性计数，明确不冒充 provider 实报计费数据，响应未提供账户扣费。
+- 用户分别授权：132 字符、最多4次、0.10元上限；失败后另行授权33字符单句诊断、最多1次、0.01元上限；最后授权剩余99字符、最多3次、0.03元上限。任一失败停止，无自动重试；没有据此调用文本模型、Embedding 或整章 TTS。
+- 实际首次请求失败后未发剩余3次。诊断请求得到真实有效音频，但同样被校验拒绝；原始响应留在私有目录。发现官方带 AIGC 水印 WAV 的 RIFF 总长度少4字节，AIGC JSON 还含 NUL 终止符；fmt/data/PCM 全部完整，ffprobe 读出9.428秒、24000Hz、单声道PCM16。
+- 精准修复：仅当所有 RIFF 块完整、AIGC Label=1 且总长度恰少4字节时校正总长度，音频数据和水印逐字节保持；其他错长、截断、非法格式继续拒绝。用保存响应离线验证并恢复第一句，没有追加云端调用。原 FAILED Job/invocation 未改写为成功，另有本地恢复证据。
+- 后续获得独立授权的3句全部通过真实 Gateway，加密回执消费、Job持久化及用量账本成功。合成顺序 tongtong/xiaochen/tongtong/xiaochen，每句之间0.3秒停顿。
+- 成品 glm-tts-audition.private.wav：**35.452秒、1,701,774字节、24000Hz单声道PCM16**；SHA256 `55b3c3953d20f81baeff461de6e0631314dfc7d2aaeb6780a7165d5e0149457b`，私有MinIO存储并回读摘要一致。
+- Windows Edge156.0.4314.50真实播放：currentTime推进，paused=false、muted=false、volume=1，最终ended=true，无媒体错误/pageerror。先独立验证9.428秒片段，再验证完整双人试音。已提供成品播放器供用户听感反馈，不把媒体事件当完整章节内容质量证明。
+- 实际远程调用为5次（首次失败1、诊断1、补齐3），均来自各次明确授权。可用132字符按标价估算0.0264元；补齐99字符估算0.0198元；最初失败调用是否收费仍未知。没有账户实报总扣费，不将本地估算写成实报账单。
+- 语音单元/真实PG模拟transport集成29 PASS；目录及manifest回归13 PASS；provider-gateway typecheck、Lint通过。模拟HTTP测试与上述真实调用分开记录。新的准确HEAD CI、章节Book Intelligence/脚本、正式章节播客及Draft PR尚未完成。
+
+私有证据：tts-audition-result.private.json（首次失败）、tts-diagnostic-result.private.json、offline-recovery.private.json、tts-completion-result.private.json、edge-dual-voice-playback.private.json、edge-dual-voice-played.private.png。所有实际音频、试音稿、响应和原书仅在私有目录，不入Git。
+
+B03入口重新实测：Book请求因无正式提取被拒绝，播客入口返回 CURRENT_BOOK_INTELLIGENCE_REQUIRED；actualTier=standard、REJECTED、正式提取/ChunkSet/BookAnalysis/播客运行均0，新增远程调用0。正向章节已创建双主持人、zh-CN、2分钟的私有节目配置，尚未排队生成。

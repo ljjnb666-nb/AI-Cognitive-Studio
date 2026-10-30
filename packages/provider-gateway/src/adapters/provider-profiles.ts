@@ -28,6 +28,7 @@ export const builtInProviderProfiles: readonly ProviderProfile[] = [
   { providerKey: "gemini", family: "EMBEDDING", protocol: "GEMINI_EMBEDDINGS", endpoint: "https://generativelanguage.googleapis.com/v1beta", authScheme: "X_GOOG_API_KEY" },
   { providerKey: "deepseek", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.deepseek.com/chat/completions", authScheme: "BEARER" },
   { providerKey: "zhipu", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions", authScheme: "BEARER" },
+  { providerKey: "zhipu", family: "SPEECH", protocol: "CUSTOM_SPEECH", endpoint: "https://open.bigmodel.cn/api/paas/v4/audio/speech", authScheme: "BEARER" },
   { providerKey: "qwen", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", authScheme: "BEARER" },
   { providerKey: "minimax", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.minimax.io/v1/text/chatcompletion_v2", authScheme: "BEARER" },
   { providerKey: "cohere", family: "EMBEDDING", protocol: "COHERE_EMBEDDINGS_V2", endpoint: "https://api.cohere.com/v2/embed", authScheme: "BEARER" },
