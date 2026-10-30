@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { createChapterBudget, maximumPricedCny } from "../../../tools/book-to-podcast/chapter-budget.js";
+import { createChapterBudget, maximumPricedCny, maximumPaidPricedCny } from "../../../tools/book-to-podcast/chapter-budget.js";
 import { builtInProviderCatalog, DeterministicProviderHttpTransport, type ProviderAdapter } from "../src/index.js";
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true }); });
@@ -72,4 +72,35 @@ it("requires a separate one-use grant to resume the observed free-model 429 and 
   const ledger = JSON.parse(await readFile(join(path, "chapter-call-reservations.private.json"), "utf8"));
   expect(ledger.reservations).toHaveLength(2); expect(upstream.calls).toHaveLength(2);
   await expect(createChapterBudget(path, "CHAPTER_I_RESUME_429_ONCE_SAME_0.50_CNY", upstream)).rejects.toThrow("CHAPTER_429_RESUME_SCOPE_MISMATCH");
+});
+it("reserves the full published FlashX context and bounds its paid grant to twenty calls", async () => {
+  const path = await root(), input = wire();
+  Object.assign(input.snapshot, { routeSlot: "BOOK_CHUNK_ANALYSIS", protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.7-flashx", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions", capability: { modelId: "glm-4.7-flashx", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" } });
+  const upstream = new DeterministicProviderHttpTransport(request => {
+    expect(JSON.parse(request.body)).toMatchObject({ model: "glm-4.7-flashx", max_tokens: 8000, thinking: { type: "disabled" } });
+    return { status: 200, headers: {}, body: JSON.stringify({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: "stop" }] }) };
+  });
+  const selection = { providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE" as const, modelId: "glm-4.7-flashx", family: "TEXT_GENERATION" as const };
+  input.request.text = { messages: [{ role: "user", content: "initial" }], structuredOutput: { mode: "JSON_MODE" } };
+  const free = await createChapterBudget(await root(), "CHAPTER_I_0.50_CNY_ONCE", upstream);
+  await expect(free.adapterResolver(selection)!.execute(input)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" }); expect(upstream.calls).toHaveLength(0);
+  const paid = await createChapterBudget(path, "CHAPTER_I_FLASHX_3.00_CNY_ONCE", upstream);
+  for (let i = 0; i < 20; i++) { input.request.text.messages = [{ role: "user", content: `item-${i}` }]; await paid.adapterResolver(selection)!.execute(input); }
+  input.request.text.messages = [{ role: "user", content: "over-limit" }];
+  await expect(paid.adapterResolver(selection)!.execute(input)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", retryable: false });
+  expect(upstream.calls).toHaveLength(20);
+  const ledger = JSON.parse(await readFile(join(path, "chapter-call-reservations.private.json"), "utf8"));
+  expect(ledger.limits.approvedCny).toBe(3); expect(ledger.reservations.every((r: { reservedCny: number }) => r.reservedCny === 0.124)).toBe(true);
+  expect(maximumPaidPricedCny).toBeCloseTo(2.927456); expect(maximumPaidPricedCny).toBeLessThan(3);
+});
+it("retains all three prior paid reservations when separately authorized after the timeout", async () => {
+  const path = await root(), initial = await createChapterBudget(path, "CHAPTER_I_FLASHX_3.00_CNY_ONCE"); await initial.stop();
+  const ledgerPath = join(path, "chapter-call-reservations.private.json"), ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+  ledger.reservations = Array.from({ length: 3 }, (_, i) => ({ ordinal: i + 1, model: "glm-4.7-flashx", bodySha256: `prior-${i}`, characters: 0, embeddingItems: 0, reservedCny: 0.124 }));
+  await writeFile(ledgerPath, JSON.stringify(ledger));
+  for (const ordinal of [1, 2]) await writeFile(join(path, `chapter-response-${ordinal}.meta.private.json`), '{"httpStatus":200}');
+  const resumed = await createChapterBudget(path, "CHAPTER_I_FLASHX_RESUME_TIMEOUT_ONCE_SAME_3.00_CNY"); await resumed.stop();
+  const result = JSON.parse(await readFile(ledgerPath, "utf8"));
+  expect(result.reservations).toEqual(ledger.reservations); expect(result.limits.approvedCny).toBe(3);
+  await expect(createChapterBudget(path, "CHAPTER_I_FLASHX_RESUME_TIMEOUT_ONCE_SAME_3.00_CNY")).rejects.toMatchObject({ code: "EEXIST" });
 });

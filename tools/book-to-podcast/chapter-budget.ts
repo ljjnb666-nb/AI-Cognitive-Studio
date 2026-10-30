@@ -8,27 +8,46 @@ import { createProviderAdapterResolver, FetchProviderHttpTransport, ProviderAdap
 
 export const chapterLimits = Object.freeze({ approvedCny: 0.50, textRequests: 32, textOutputTokens: 8000, embeddingRequests: 16, embeddingItems: 96, embeddingTokensPerItem: 3072, speechRequests: 24, speechCharacters: 1500 });
 export const maximumPricedCny = chapterLimits.speechCharacters * 2 / 10000 + chapterLimits.embeddingItems * chapterLimits.embeddingTokensPerItem * 0.5 / 1_000_000;
+// The paid alternative reserves the entire published input context per call,
+// not an optimistic tokenizer estimate. Failure/missing usage never refunds it.
+export const paidChapterLimits = Object.freeze({ ...chapterLimits, approvedCny: 3, textRequests: 20, textInputTokens: 200_000 });
+export const maximumPaidPricedCny = maximumPricedCny + paidChapterLimits.textRequests * (paidChapterLimits.textInputTokens * 0.5 + paidChapterLimits.textOutputTokens * 3) / 1_000_000;
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 type Reservation = { ordinal: number; model: string; bodySha256: string; characters: number; embeddingItems: number; reservedCny: number };
 
 export async function createChapterBudget(root: string, authorization: string | undefined, upstream: ProviderHttpTransport = new FetchProviderHttpTransport()): Promise<{ adapterResolver: ProviderAdapterResolver; stop(): Promise<void> }> {
   const resume = authorization === "CHAPTER_I_RESUME_429_ONCE_SAME_0.50_CNY";
-  if ((!resume && authorization !== "CHAPTER_I_0.50_CNY_ONCE") || maximumPricedCny > chapterLimits.approvedCny) throw new Error("CHAPTER_EXPLICIT_BUDGET_AUTHORIZATION_REQUIRED");
+  const resumePaidLater = authorization === "CHAPTER_I_FLASHX_RESUME_SECOND_TIMEOUT_ONCE_SAME_3.00_CNY";
+  const resumePaid = resumePaidLater || authorization === "CHAPTER_I_FLASHX_RESUME_TIMEOUT_ONCE_SAME_3.00_CNY";
+  const paid = resumePaid || authorization === "CHAPTER_I_FLASHX_3.00_CNY_ONCE";
+  const limits = paid ? paidChapterLimits : chapterLimits;
+  if ((!resume && !paid && authorization !== "CHAPTER_I_0.50_CNY_ONCE") || (paid ? maximumPaidPricedCny : maximumPricedCny) > limits.approvedCny) throw new Error("CHAPTER_EXPLICIT_BUDGET_AUTHORIZATION_REQUIRED");
   await mkdir(root, { recursive: true });
   const ledger = join(root, "chapter-call-reservations.private.json");
   // Exclusive creation makes restarting this operator require reconciliation,
   // including after a process crash between reservation and response capture.
   const reservations: Reservation[] = [];
-  if (resume) {
+  if (resumePaid) {
+    const prior = JSON.parse(await readFile(ledger, "utf8"));
+    const expected = resumePaidLater ? 7 : 3;
+    if (prior.stopped !== true || prior.limits?.approvedCny !== 3 || prior.reservations?.length !== expected || prior.reservations.some((r: Reservation) => r.model !== "glm-4.7-flashx" || r.reservedCny !== 0.124)) throw Error("CHAPTER_PAID_RESUME_SCOPE_MISMATCH");
+    for (const ordinal of resumePaidLater ? [1, 2, 4, 5, 6] : [1, 2]) {
+      const metadata = JSON.parse(await readFile(join(root, `chapter-response-${ordinal}.meta.private.json`), "utf8"));
+      if (metadata.httpStatus !== 200) throw Error("CHAPTER_PAID_RESUME_SCOPE_MISMATCH");
+    }
+    await writeFile(join(root, resumePaidLater ? "chapter-paid-resume2-authorization.private.json" : "chapter-paid-resume-authorization.private.json"), JSON.stringify({ authorization, previousReservationsRetained: expected, previousTimedOutChargeUnknown: true, gatewayMaxAttempts: 1, timeoutMs: 90000, newPromptVersion: "chapter-source-evidence-v2" }), { flag: "wx" });
+    await writeFile(join(root, resumePaidLater ? "chapter-call-reservations.second-attempt.private.json" : "chapter-call-reservations.first-attempt.private.json"), JSON.stringify(prior, null, 2), { flag: "wx" });
+    reservations.push(...prior.reservations);
+  } else if (resume) {
     const prior = JSON.parse(await readFile(ledger, "utf8")), metadata = JSON.parse(await readFile(join(root, "chapter-response-1.meta.private.json"), "utf8")), response = JSON.parse(await readFile(join(root, "chapter-response-1.private.json"), "utf8"));
     if (prior.stopped !== true || prior.reservations?.length !== 1 || prior.reservations[0].model !== "glm-4.7-flash" || prior.reservations[0].reservedCny !== 0 || metadata.httpStatus !== 429 || response.error?.code !== "1305") throw Error("CHAPTER_429_RESUME_SCOPE_MISMATCH");
     await writeFile(join(root, "chapter-resume-authorization.private.json"), JSON.stringify({ authorization, originalRequestId: metadata.requestId, limitsIncludeOriginalRequest: true }), { flag: "wx" });
     await writeFile(join(root, "chapter-call-reservations.first-attempt.private.json"), JSON.stringify(prior, null, 2), { flag: "wx" });
     reservations.push(...prior.reservations);
-  } else await writeFile(ledger, JSON.stringify({ limits: chapterLimits, reservations: [], stopped: false }), { flag: "wx" });
+  } else await writeFile(ledger, JSON.stringify({ limits, reservations: [], stopped: false }), { flag: "wx" });
   let stopped = false;
   let halted = false;
-  const persist = () => writeFile(ledger, JSON.stringify({ limits: chapterLimits, reservations, stopped }, null, 2));
+  const persist = () => writeFile(ledger, JSON.stringify({ limits, reservations, stopped }, null, 2));
   const stop = async () => { halted = true; stopped = true; await persist(); };
   const reserve = async (request: ProviderHttpRequest) => {
     // The operator executes sequentially. Reject overlapping reservations too,
@@ -37,27 +56,30 @@ export async function createChapterBudget(root: string, authorization: string | 
     stopped = true;
     const body = JSON.parse(request.body) as Record<string, unknown>;
     const model = body.model, digest = hash(request.body);
+    if (typeof model !== "string") throw new ProviderGatewayError("BUDGET_EXCEEDED");
     const counts = (m: string) => reservations.filter(r => r.model === m).length;
     let characters = 0, embeddingItems = 0, reservedCny = 0;
-    if (reservations.some(r => r.bodySha256 === digest) && !(resume && reservations.length === 1 && reservations[0]!.model === "glm-4.7-flash" && body.model === "glm-4.7-flash")) throw new ProviderGatewayError("BUDGET_EXCEEDED");
-    if (model === "glm-4.7-flash" && request.url === "https://open.bigmodel.cn/api/paas/v4/chat/completions") {
-      if (counts(model) >= chapterLimits.textRequests || Buffer.byteLength(request.body) > 100_000) throw new ProviderGatewayError("BUDGET_EXCEEDED");
-      body.max_tokens = Math.min(typeof body.max_tokens === "number" ? body.max_tokens : chapterLimits.textOutputTokens, chapterLimits.textOutputTokens);
+    const explicitlyApprovedTimeoutReplay = resumePaidLater && reservations.length === 7 && reservations[6]!.bodySha256 === digest && model === "glm-4.7-flashx";
+    if (reservations.some(r => r.bodySha256 === digest) && !explicitlyApprovedTimeoutReplay && !(resume && reservations.length === 1 && reservations[0]!.model === "glm-4.7-flash" && body.model === "glm-4.7-flash")) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+    if (model === (paid ? "glm-4.7-flashx" : "glm-4.7-flash") && request.url === "https://open.bigmodel.cn/api/paas/v4/chat/completions") {
+      if (counts(model) >= limits.textRequests || Buffer.byteLength(request.body) > 100_000) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+      body.max_tokens = Math.min(typeof body.max_tokens === "number" ? body.max_tokens : limits.textOutputTokens, limits.textOutputTokens);
       body.thinking = { type: "disabled" };
+      if (paid) reservedCny = (paidChapterLimits.textInputTokens * 0.5 + limits.textOutputTokens * 3) / 1_000_000;
     } else if (model === "embedding-3" && request.url === "https://open.bigmodel.cn/api/paas/v4/embeddings") {
       const texts = body.input;
-      if (!Array.isArray(texts) || texts.length < 1 || texts.length > 64 || texts.some(t => typeof t !== "string" || !t.trim() || Buffer.byteLength(t) > 3072) || counts(model) >= chapterLimits.embeddingRequests) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+      if (!Array.isArray(texts) || texts.length < 1 || texts.length > 64 || texts.some(t => typeof t !== "string" || !t.trim() || Buffer.byteLength(t) > 3072) || counts(model) >= limits.embeddingRequests) throw new ProviderGatewayError("BUDGET_EXCEEDED");
       embeddingItems = texts.length;
-      if (embeddingItems + reservations.reduce((n, r) => n + r.embeddingItems, 0) > chapterLimits.embeddingItems) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+      if (embeddingItems + reservations.reduce((n, r) => n + r.embeddingItems, 0) > limits.embeddingItems) throw new ProviderGatewayError("BUDGET_EXCEEDED");
       // Reserve the documented MAX input tokens, including failed requests.
-      reservedCny = embeddingItems * chapterLimits.embeddingTokensPerItem * 0.5 / 1_000_000;
+      reservedCny = embeddingItems * limits.embeddingTokensPerItem * 0.5 / 1_000_000;
     } else if (model === "glm-tts" && request.url === "https://open.bigmodel.cn/api/paas/v4/audio/speech") {
-      if (typeof body.input !== "string" || !["tongtong", "xiaochen"].includes(String(body.voice)) || body.speed !== 1 || body.response_format !== "wav" || counts(model) >= chapterLimits.speechRequests) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+      if (typeof body.input !== "string" || !["tongtong", "xiaochen"].includes(String(body.voice)) || body.speed !== 1 || body.response_format !== "wav" || counts(model) >= limits.speechRequests) throw new ProviderGatewayError("BUDGET_EXCEEDED");
       characters = body.input.length;
-      if (characters < 1 || characters > 1024 || characters + reservations.reduce((n, r) => n + r.characters, 0) > chapterLimits.speechCharacters) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+      if (characters < 1 || characters > 1024 || characters + reservations.reduce((n, r) => n + r.characters, 0) > limits.speechCharacters) throw new ProviderGatewayError("BUDGET_EXCEEDED");
       reservedCny = characters * 2 / 10000;
     } else throw new ProviderGatewayError("BUDGET_EXCEEDED");
-    if (reservedCny + reservations.reduce((n, r) => n + r.reservedCny, 0) > chapterLimits.approvedCny) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+    if (reservedCny + reservations.reduce((n, r) => n + r.reservedCny, 0) > limits.approvedCny) throw new ProviderGatewayError("BUDGET_EXCEEDED");
     const reservation = { ordinal: reservations.length + 1, model, bodySha256: digest, characters, embeddingItems, reservedCny };
     reservations.push(reservation);
     await persist();
