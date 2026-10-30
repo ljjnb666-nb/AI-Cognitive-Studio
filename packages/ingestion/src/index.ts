@@ -485,3 +485,4 @@ function parserProvenance(mediaType: string): { name: string; version: string } 
   if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v2" };
   return { name: "unsupported", version: "unsupported-v1" };
 }
+export * from "./ocr-structure-review-evidence.js";
