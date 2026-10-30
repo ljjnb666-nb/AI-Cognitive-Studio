@@ -27,7 +27,7 @@ describe("Phase 8C Podcast strict provider schemas", () => {
       gateway: { resolveSnapshot: async () => ({ providerKey: "zhipu", modelId: "glm-4.7-flash" }), execute: async (request: typeof requests[number]) => { requests.push(request); return { status: "SUCCEEDED", invocationId: "i", snapshot: { id: "s" }, response: { type: "STRUCTURED", structured: output } }; } },
     } as unknown as Runtime;
     const provider = new GatewayPodcastGenerationProvider(runtime);
-    const input = { metadata: { stage: "EPISODE_PLANNING", correlationId: "c" }, style: {}, hosts: [], context: [] } as Parameters<typeof provider.plan>[0];
+    const input: Parameters<typeof provider.plan>[0] = { metadata: { stage: "EPISODE_PLANNING", episodeId: "episode", provider: "zhipu", model: "glm-4.7-flash", tokenBudget: 8000, correlationId: "c" }, style: {}, hosts: [], context: [] };
     expect(await provider.plan(input)).toEqual(output);
     expect(requests[0]!.capability).toEqual({ family: "TEXT_GENERATION", structuredOutput: mode });
     expect(requests[0]!.text.structuredOutput.mode).toBe(mode);
