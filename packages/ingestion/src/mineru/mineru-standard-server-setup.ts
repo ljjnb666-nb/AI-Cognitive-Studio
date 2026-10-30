@@ -50,7 +50,12 @@ async function requestJson(url: string, init: RequestInit, timeoutMs: number, si
     const response = await fetch(url, { ...init, redirect: "error", signal: controller.signal });
     let body: unknown = null;
     try {
-      body = await response.json();
+      const reader=response.body?.getReader();
+      if(reader){
+        const chunks:Uint8Array[]=[];let length=0;
+        for(;;){const next=await reader.read();if(next.done)break;length+=next.value.byteLength;if(length>262144){await reader.cancel();throw new Error("STATUS_RESPONSE_TOO_LARGE");}chunks.push(next.value);}
+        body=JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+      }
     } catch {
       body = null;
     }
@@ -61,10 +66,21 @@ async function requestJson(url: string, init: RequestInit, timeoutMs: number, si
   }
 }
 
+export type ClaimServerIdentity={pid:number;serverId:string};
+function matchesIdentity(body:unknown,expected:ClaimServerIdentity):boolean {
+  if(!body || typeof body!=="object")return false;
+  const status=body as Record<string,unknown>;
+  return status["running"]===true && status["pid"]===expected.pid && status["server_id"]===expected.serverId;
+}
+
 /** Persists the managed-mode override into the CLAIM doclib config service. */
-export async function setParseServerModeManaged(baseUrl: string, timeoutMs: number, signal?: AbortSignal): Promise<ManagedServerSetupFailure | null> {
+export async function setParseServerModeManaged(baseUrl: string, timeoutMs: number, signal?: AbortSignal, expectedIdentity?:ClaimServerIdentity): Promise<ManagedServerSetupFailure | null> {
   if (!validLoopbackBaseUrl(baseUrl)) return { kind: "CONFIG_SET_FAILED", detail: "INVALID_LOOPBACK_ENDPOINT" };
   try {
+    if(expectedIdentity){
+      const status=await requestJson(`${baseUrl.replace(/\/$/, "")}${API_PREFIX}/server/status`,{method:"GET"},timeoutMs,signal);
+      if(!status.ok || !matchesIdentity(status.body,expectedIdentity))return {kind:"CONFIG_SET_FAILED",detail:"CLAIM_SERVER_IDENTITY_MISMATCH"};
+    }
     const result = await requestJson(`${baseUrl.replace(/\/$/, "")}${API_PREFIX}/configs/${encodeURIComponent(MANAGED_MODE_KEY)}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -78,6 +94,9 @@ export async function setParseServerModeManaged(baseUrl: string, timeoutMs: numb
 }
 
 type LocalParseServerStatusView = {
+  port?:unknown;
+  url?:unknown;
+  managed_pid?:unknown;
   healthy?: unknown;
   managed_running?: unknown;
   managed_tier?: unknown;
@@ -110,7 +129,7 @@ export function isStandardReady(local: LocalParseServerStatusView): boolean {
 export async function waitForStandardParseServerReady(
   baseUrl: string,
   readinessTimeoutMs: number,
-  options: { pollIntervalMs?: number; statusTimeoutMs?: number; signal?: AbortSignal } = {},
+  options: { pollIntervalMs?: number; statusTimeoutMs?: number; signal?: AbortSignal; expectedIdentity?:ClaimServerIdentity; expectedManagedPort?:number; onReady?:(local:LocalParseServerStatusView)=>void } = {},
 ): Promise<ManagedServerSetupFailure | null> {
   if (!validLoopbackBaseUrl(baseUrl)) return { kind: "STATUS_UNAVAILABLE", detail: "INVALID_LOOPBACK_ENDPOINT" };
   const deadline = Date.now() + readinessTimeoutMs;
@@ -122,8 +141,10 @@ export async function waitForStandardParseServerReady(
     try {
       const result = await requestJson(`${baseUrl.replace(/\/$/, "")}${API_PREFIX}/server/status`, { method: "GET" }, Math.min(statusTimeoutMs, Math.max(1, deadline - Date.now())), options.signal);
       if (result.ok) {
+        if(options.expectedIdentity && !matchesIdentity(result.body,options.expectedIdentity)) return {kind:"STATUS_UNAVAILABLE",detail:"CLAIM_SERVER_IDENTITY_MISMATCH"};
         const local = localParseServerView(result.body);
-        if (local && isStandardReady(local)) return null;
+        const portMatches=options.expectedManagedPort===undefined || (local?.port===options.expectedManagedPort && local?.url===`http://127.0.0.1:${options.expectedManagedPort}` && Number.isSafeInteger(local?.managed_pid) && Number(local?.managed_pid)>0);
+        if (local && isStandardReady(local) && portMatches) {options.onReady?.(local);return null;}
         lastDetail = JSON.stringify(local ?? result.body).slice(0, 200);
       } else {
         lastDetail = `HTTP ${result.status}`;

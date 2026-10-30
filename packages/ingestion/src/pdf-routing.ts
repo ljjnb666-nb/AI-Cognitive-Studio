@@ -228,7 +228,7 @@ export type PdfOcrExecutionFacts = {
   timings?: {snapshotMs?:number;doclibStartMs?:number;engineReadyMs?:number;parseMs?:number;beforeCleanupMs?:number};
   hostId?: string;
   hostClaimToken?: string;
-  serverIdentity?: {pid:number;serverId:string};
+  serverIdentity?: {pid:number;serverId:string;enginePid?:number;enginePort?:number};
   qualityDecision?: {status:"ACCEPTED"|"REVIEW_REQUIRED"|"REJECTED";reasons:string[]};
   tierAdmission: "FLASH_DEFAULT" | "STANDARD_ADMITTED" | "STANDARD_REFUSED";
   tierRefusalCode: string | null;

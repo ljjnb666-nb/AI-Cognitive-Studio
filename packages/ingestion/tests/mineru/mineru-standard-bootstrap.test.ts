@@ -34,3 +34,22 @@ it("bounds unavailable readiness and responds to an already cancelled claim", as
   expect((await waitForStandardParseServerReady(base,1000,{signal:controller.signal}))?.detail).toBe("aborted");
   expect((await setParseServerModeManaged(base,500,controller.signal))?.kind).toBe("CONFIG_SET_FAILED");
 });
+it("refuses a different doclib identity before changing managed mode",async()=>{
+ let writes=0;
+ const base=await endpoint((req,res)=>{if(req.method==="PUT")writes++;res.setHeader("content-type","application/json");res.end(JSON.stringify({running:true,pid:123,server_id:"wrong"}));});
+ expect(await setParseServerModeManaged(base,500,undefined,{pid:123,serverId:"owned"})).toMatchObject({detail:"CLAIM_SERVER_IDENTITY_MISMATCH"});
+ expect(writes).toBe(0);
+ expect(await waitForStandardParseServerReady(base,500,{expectedIdentity:{pid:123,serverId:"owned"}})).toMatchObject({detail:"CLAIM_SERVER_IDENTITY_MISMATCH"});
+});
+it("binds ready status to the generated managed-engine port and captures its pid",async()=>{
+ let port=54321;let captured:unknown;
+ const base=await endpoint((_req,res)=>{res.setHeader("content-type","application/json");res.end(JSON.stringify({running:true,pid:123,server_id:"owned",parse_server:{local:{healthy:true,managed_running:true,managed_tier:"standard",managed_pid:456,port,url:`http://127.0.0.1:${port}`}}}));});
+ expect((await waitForStandardParseServerReady(base,20,{pollIntervalMs:2,expectedIdentity:{pid:123,serverId:"owned"},expectedManagedPort:54322}))?.kind).toBe("READINESS_TIMEOUT");
+ port=54322;
+ expect(await waitForStandardParseServerReady(base,500,{expectedIdentity:{pid:123,serverId:"owned"},expectedManagedPort:54322,onReady:local=>{captured=local.managed_pid;}})).toBeNull();
+ expect(captured).toBe(456);
+});
+it("bounds an oversized status response",async()=>{
+ const base=await endpoint((_req,res)=>{res.setHeader("content-type","application/json");res.end(JSON.stringify({padding:"x".repeat(300000)}));});
+ expect((await waitForStandardParseServerReady(base,30,{pollIntervalMs:2}))?.kind).toBe("READINESS_TIMEOUT");
+});

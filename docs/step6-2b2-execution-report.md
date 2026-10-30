@@ -26,6 +26,8 @@
 
 公共脱敏证明见 `docs/evidence/step6-2b2-standard-chain.json`；不包含原文、私有路径、source fingerprint 或 claim token。
 
+CI 修复记录：`a1f3600` 的 CI `40922239516` 失败。web/Next 的 ProcessEnv 合并声明要求 NODE_ENV，过滤环境对象后类型丢失；另有 CLI-double 夹具将 storage key 哈希误记为 PDF SHA，触发新增来源拒绝。已显式保留原 NODE_ENV，并让夹具记录实际字节 SHA；没有降低来源门禁或修改原断言。对应 17/17 回归及 web typecheck 在本地通过。新增 doclib PID/server_id、managed 端口绑定与 256 KiB 状态响应上限；HTTP/准入组合测试为 24 PASS / 2 SKIP，新真实门正在复核，不能提前算作通过。
+
 ## 仍需完成的完整目标
 
 managed engine 的真实取消、超时、父进程崩溃、恢复和资源回收矩阵；HTTP/端口与进程身份绑定的独立验证；冷启动及热运行与峰值 RAM/VRAM 的明确测量；全仓相关回归、真实 Worker、准确新 HEAD 的 CI；统一代码复核及最终验收报告。

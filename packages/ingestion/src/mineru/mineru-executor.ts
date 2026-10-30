@@ -248,8 +248,10 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
 
       // 4. Claim-scoped server session; children get local-only model config
       // and proxy-env egress denial (never "auto", never a network source).
+      const managedEnginePort=actualTier===MINERU_STANDARD_TIER ? await probeFreeTcpPort() : undefined;
       const childEnvBase: NodeJS.ProcessEnv = {
         ...(actualTier === MINERU_STANDARD_TIER ? Object.fromEntries(Object.entries(process.env).filter(([key])=>!key.startsWith("MINERU_"))) : process.env),
+        NODE_ENV: process.env.NODE_ENV,
         ...mineruEgressDenialEnv(),
         MINERU_HOME: homeDir,
         MINERU_MODEL_SOURCE: config.modelSource,
@@ -262,7 +264,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
           MINERU_MODEL_VLM_ENGINE: "llama-cpp",
           MINERU_MODEL_VLM_SERVER_URL: "",
           MINERU_DOCLIB_MANAGED_PARSE_SERVER_HOST: "127.0.0.1",
-          MINERU_DOCLIB_MANAGED_PARSE_SERVER_PORT: String(await probeFreeTcpPort()),
+          MINERU_DOCLIB_MANAGED_PARSE_SERVER_PORT: String(managedEnginePort),
           MINERU_DOCLIB_MANAGED_PARSE_SERVER_STRICT_PORT: "true",
         } : {}),
       };
@@ -296,9 +298,11 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
       if (actualTier === MINERU_STANDARD_TIER && config.standard) {
         const engineStarted=Date.now();
         const baseUrl = parseServerBaseUrl(endpoint.transports);
-        const setup = baseUrl === null ? { kind: "STATUS_UNAVAILABLE" as const, detail: "no_tcp_transport" } : await setParseServerModeManaged(baseUrl, 5_000, signal);
-        const probe = setup ?? await waitForStandardParseServerReady(baseUrl!, config.serverStartTimeoutMs, { signal });
+        const setup = baseUrl === null ? { kind: "STATUS_UNAVAILABLE" as const, detail: "no_tcp_transport" } : await setParseServerModeManaged(baseUrl, 5_000, signal, {pid:endpoint.pid,serverId:endpoint.serverId});
+        const probe = setup ?? await waitForStandardParseServerReady(baseUrl!, config.serverStartTimeoutMs, { signal, expectedIdentity:{pid:endpoint.pid,serverId:endpoint.serverId}, expectedManagedPort:managedEnginePort,
+          onReady:local=>{executionFacts.serverIdentity={pid:endpoint.pid,serverId:endpoint.serverId,enginePid:Number(local.managed_pid),enginePort:managedEnginePort};} });
         executionFacts.timings={...executionFacts.timings,engineReadyMs:Date.now()-engineStarted};
+        if (probe?.detail==="CLAIM_SERVER_IDENTITY_MISMATCH") return await recordCall(request,failure("SOURCE_OCR_ENDPOINT_IDENTITY_INVALID","terminal"),startedAt,executionFacts);
         if (probe !== null) {
           logger.warn("mineru.ocr.standard_engines_not_ready", { ...logContext, detail: probe.detail });
           executionFacts.tierAdmission = "STANDARD_REFUSED";
