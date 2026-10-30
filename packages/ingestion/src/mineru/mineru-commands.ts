@@ -72,7 +72,7 @@ export function buildMineruServerArgs(action: "start" | "stop"): string[] {
 }
 
 export type MineruParseEnvelope = {
-  parse?: { status?: unknown };
+  parse?: { status?: unknown; tier?: unknown };
   output?: { status?: unknown; path?: unknown };
   error?: { type?: unknown; code?: unknown; message?: unknown };
 };
@@ -112,10 +112,13 @@ const errorMessage = (envelope: MineruParseEnvelope): string => {
  *    process behavior → terminal)
  *  - everything else → PROCESS_FAILED (transient)
  */
-export function judgeMineruParseExit(input: { exitCode: number | null; stdout: string }): MineruParseOutcome {
+export function judgeMineruParseExit(input: { exitCode: number | null; stdout: string; expectedTier?: string }): MineruParseOutcome {
   const envelope = parseMineruParseEnvelope(input.stdout);
   if (input.exitCode === 0) {
     if (!envelope || !isStatus(envelope.parse?.status, "done")) return { kind: "PROCESS_FAILED" };
+    // A standard command/readiness signal alone does not attest the tier of
+    // the returned result. Never accept a flash or missing-tier receipt as it.
+    if (input.expectedTier !== undefined && envelope.parse?.tier !== input.expectedTier) return { kind: "PROCESS_FAILED" };
     if (isStatus(envelope.output?.status, "written") && typeof envelope.output?.path === "string" && envelope.output.path.length > 0) return { kind: "OUTPUT_WRITTEN", markdownPath: envelope.output.path };
     return { kind: "OUTPUT_NOT_WRITTEN" };
   }

@@ -354,7 +354,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
       } else if (parseResult.outputOverflow) {
         result = failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
       } else {
-        result = await resultForParseOutput(parseResult, outputMarkdownPath, outputDir, config.maxOutputBytes);
+        result = await resultForParseOutput(parseResult, outputMarkdownPath, outputDir, config.maxOutputBytes, executionFacts.actualTier === MINERU_STANDARD_TIER ? MINERU_STANDARD_TIER : undefined);
       }
       if (executionFacts.actualTier === MINERU_STANDARD_TIER && config.standard && !(await verifyMineruStandardModels(executionModelRoot,config.standard)).ok) {
         result=failure("SOURCE_OCR_MODEL_IDENTITY_CHANGED","terminal");
@@ -430,8 +430,8 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
      * lstat (regular file, symlink/reparse rejected), size cap, then a read
      * limited to the stat'd size that fails closed if the file grows.
      */
-    async function resultForParseOutput(parseResult: BoundedSpawnResult, expectedMarkdownPath: string, outputDir: string, maxOutputBytes: number): Promise<PdfOcrPageResult> {
-      const outcome = judgeMineruParseExit({ exitCode: parseResult.code, stdout: parseResult.stdout });
+    async function resultForParseOutput(parseResult: BoundedSpawnResult, expectedMarkdownPath: string, outputDir: string, maxOutputBytes: number, expectedTier?: string): Promise<PdfOcrPageResult> {
+      const outcome = judgeMineruParseExit({ exitCode: parseResult.code, stdout: parseResult.stdout, expectedTier });
       if (outcome.kind !== "OUTPUT_WRITTEN") {
         const mapped = mineruFailureForOutcome(outcome);
         return failure(mapped.errorCode, mapped.kind);
