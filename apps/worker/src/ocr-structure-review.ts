@@ -6,9 +6,9 @@ import type {StorageProvider} from "@ai-cognitive/storage";
 type Payload=OcrReviewPageKey & {receiptId:string;sourcePdfSha256:string;textSha256:string;consent:string;expiresAt:string;pinnedRoute:ResolvedRoute;claimToken?:string;maxAttempts:number;maxImageBytes:number;maxInputTokens:number;maxOutputTokens:number};
 const json=(value:unknown)=>JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 export async function processNextOcrStructureReview(deps:{gateway:ProviderGateway;repository:ProviderExecutionRepository;storage:StorageProvider;privateTempRoot:string},jobId?:string) {
- const job=await prisma.job.findFirst({where:{type:OCR_MODEL_REVIEW_JOB,status:"QUEUED",...(jobId?{id:jobId}:{})},orderBy:{createdAt:"asc"}});if(!job)return "IDLE";
+ const job=await prisma.job.findFirst({where:{type:OCR_MODEL_REVIEW_JOB,status:"QUEUED",attemptCount:0,...(jobId?{id:jobId}:{})},orderBy:{createdAt:"asc"}});if(!job)return "IDLE";
  const payload=job.payload as unknown as Payload,token=randomUUID();
- const claim=await prisma.job.updateMany({where:{id:job.id,type:OCR_MODEL_REVIEW_JOB,status:"QUEUED"},data:{status:"RUNNING",startedAt:new Date(),attemptCount:{increment:1},payload:json({...payload,claimToken:token})}});
+ const claim=await prisma.job.updateMany({where:{id:job.id,type:OCR_MODEL_REVIEW_JOB,status:"QUEUED",attemptCount:0},data:{status:"RUNNING",startedAt:new Date(),attemptCount:{increment:1},payload:json({...payload,claimToken:token})}});
  if(claim.count!==1)return "IDLE";
  const fence={id:job.id,status:"RUNNING" as const,payload:{path:["claimToken"],equals:token}};
  try {
