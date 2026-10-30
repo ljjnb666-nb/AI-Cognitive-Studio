@@ -15,6 +15,8 @@ import { createBookProductionGatewayRuntime, createPodcastAudioProductionGateway
 import { startProcessingHeartbeat } from "./processing-heartbeat.js";
 import { resolveCredentialKeyring, resolveProviderCatalog } from "@ai-cognitive/provider-gateway";
 import { DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE, scheduleDurableOperationReconciliation, reconcileDurableExpensiveOperationsSweep, type ReconciliationQueue, type ReconciliationQueues, type ReconciliationSweepState, type ReconciliationTopics } from "./durable-operation-reconciliation.js";
+import {processNextOcrStructureReview} from "./ocr-structure-review.js";
+import {S3CompatibleStorageProvider} from "@ai-cognitive/storage";
 
 export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider> };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
@@ -63,6 +65,10 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const gatewayConfigured = resolveBookWorkerCapability(source);
   const bookEnabled = Boolean(options.bookDependencies || bookConfigured || gatewayConfigured);
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
+  let ocrReviewGateway: BookGatewayRuntime | undefined;
+  let ocrReviewStorage:S3CompatibleStorageProvider|undefined;
+  const ocrReviewEnabled=source.PDF_VISUAL_REVIEW_ON_DEMAND_ENABLED==="true";
+  if(ocrReviewEnabled&&(!gatewayConfigured||!source.PDF_REVIEW_PRIVATE_TEMP_ROOT))throw new Error("OCR_REVIEW_RUNTIME_CONFIGURATION_REQUIRED");
   let sourceIngestionOcrRuntime: Awaited<ReturnType<typeof resolveSourceIngestionOcrExecutor>>;
   try {
   // Real OCR runtime (04B-3/RF01): resolved + version-verified FIRST, before
@@ -152,6 +158,11 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); }];
   initial.push(reconcileBookAnalysisStale);
   initial.push(reconcileIngestionDeliveriesSweep);
+  if(ocrReviewEnabled)initial.push(dispatch("ocr-structure-review",async()=>{
+    const runtime=ocrReviewGateway??=createBookProductionGatewayRuntime(source);
+    const storage=ocrReviewStorage??=new S3CompatibleStorageProvider({endpoint:environment.S3_ENDPOINT,region:environment.S3_REGION,bucket:environment.S3_BUCKET,accessKey:environment.S3_ACCESS_KEY,secretKey:environment.S3_SECRET_KEY,forcePathStyle:environment.S3_FORCE_PATH_STYLE});
+    return processNextOcrStructureReview({gateway:runtime.gateway,repository:runtime.repository,storage,privateTempRoot:source.PDF_REVIEW_PRIVATE_TEMP_ROOT!});
+  }));
   if (reconcileOcrServersSweep) initial.push(reconcileOcrServersSweep);
   if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (podcastQueue) initial.push(dispatch("podcast-generation", () => dispatchPodcastGenerationWithQueue(podcastQueue, { ...(options.outboxTopics?.podcastGeneration ? { topic: options.outboxTopics.podcastGeneration } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
@@ -192,8 +203,9 @@ export async function startWorkerRuntime(environment: Environment, options: Work
 // last waits for the interrupted job to finish its bounded unwind. No new OCR
 // claim can start after the executor entered closing, and no owned server,
 // host lease or claim temp tree survives the runtime close.
-const ingestionWorkerClose = ingestionWorker.close(); await sourceIngestionOcrRuntime?.close(); await ingestionWorkerClose; await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+const ingestionWorkerClose = ingestionWorker.close(); await sourceIngestionOcrRuntime?.close(); await ingestionWorkerClose; await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await ocrReviewGateway?.close(); ocrReviewStorage?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
+    await ocrReviewGateway?.close();ocrReviewStorage?.close();
     await sourceIngestionOcrRuntime?.close();
     await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close();
     throw error;

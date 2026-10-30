@@ -679,6 +679,7 @@ model ProviderExecutionSnapshot {
 }
 
 model ProviderInvocation {
+  ocrModelReviewEvents OcrModelReviewEvent[]
   id                     String                              @id @default(cuid())
   workspaceId            String
   snapshotId             String
@@ -3028,6 +3029,7 @@ model OutboxEvent {
 }
 
 model Job {
+  ocrModelReviewEvent OcrModelReviewEvent?
   id                      String                   @id @default(cuid())
   userId                  String?
   workspaceId             String?
@@ -3060,6 +3062,7 @@ model Job {
 }
 /// Immutable execution receipts; page checkpoint remains the sole retry authority.
 model OcrPageExecution {
+  modelReviewEvents OcrModelReviewEvent[]
   id                String @id @default(cuid())
   pageAttemptId     String
   pageClaimToken    String @unique
@@ -3080,4 +3083,32 @@ model OcrPageExecution {
   createdAt         DateTime @default(now())
   pageAttempt       OcrPageAttempt @relation(fields:[pageAttemptId], references:[id], onDelete:Cascade)
   @@index([pageAttemptId, createdAt])
+}
+
+/// Independent model judgement. Never referenced by canonical publication.
+model OcrModelReviewEvent {
+  id String @id @default(cuid())
+  jobId String @unique
+  workspaceId String
+  sourceDocumentId String
+  ingestionRunId String
+  physicalPageIndex Int
+  receiptId String
+  sourcePdfSha256 String
+  sourcePngSha256 String
+  ocrTextSha256 String
+  evidenceSha256 String
+  invocationId String @unique
+  snapshotId String
+  providerKey String
+  modelId String
+  reportedModelId String?
+  decision String
+  reasons Json
+  usage Json
+  createdAt DateTime @default(now())
+  job Job @relation(fields:[jobId],references:[id],onDelete:Cascade)
+  receipt OcrPageExecution @relation(fields:[receiptId],references:[id],onDelete:Cascade)
+  invocation ProviderInvocation @relation(fields:[invocationId,workspaceId],references:[id,workspaceId],onDelete:Restrict)
+  @@index([workspaceId,sourceDocumentId,ingestionRunId,physicalPageIndex],map:"OcrModelReviewEvent_scope_page_idx")
 }

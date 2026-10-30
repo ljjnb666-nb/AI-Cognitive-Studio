@@ -4,13 +4,15 @@ import type { StorageProvider } from "@ai-cognitive/storage";
 import { APPROVED_MINERU_MANIFEST_SHA256, MINERU_MODEL_REVISION } from "./mineru/mineru-approved-inventory.js";
 
 export type OcrReviewPageKey = { workspaceId:string; sourceDocumentId:string; ingestionRunId:string; physicalPageIndex:number };
+const identityOnly=(key:OcrReviewPageKey):OcrReviewPageKey=>({workspaceId:key.workspaceId,sourceDocumentId:key.sourceDocumentId,ingestionRunId:key.ingestionRunId,physicalPageIndex:key.physicalPageIndex});
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
 const reject=():never=>{throw new Error("OCR_REVIEW_EVIDENCE_STALE");};
 
 /** Read authority only. This does not revive an execution lease, publish a
  * SourceBlock, or grant model/billing permission. Latest run supersedes older
  * evidence even when no CurrentDocumentExtraction has ever existed. */
-async function snapshot(tx:Prisma.TransactionClient,key:OcrReviewPageKey) {
+export async function lockOcrReviewEvidence(tx:Prisma.TransactionClient,key:OcrReviewPageKey) {
+ key=identityOnly(key);
  if(!Number.isSafeInteger(key.physicalPageIndex)||key.physicalPageIndex<0)return reject();
  await tx.$queryRaw`SELECT "id" FROM "IngestionRun" WHERE "id"=${key.ingestionRunId} AND "workspaceId"=${key.workspaceId} FOR SHARE`;
  await tx.$queryRaw`SELECT "id" FROM "SourceDocument" WHERE "id"=${key.sourceDocumentId} AND "workspaceId"=${key.workspaceId} FOR SHARE`;
@@ -31,7 +33,8 @@ async function snapshot(tx:Prisma.TransactionClient,key:OcrReviewPageKey) {
 }
 
 export async function readOcrStructureReviewEvidence(key:OcrReviewPageKey,storage:Pick<StorageProvider,"getObjectStream">) {
- const before=await prisma.$transaction(tx=>snapshot(tx,key));
+ key=identityOnly(key);
+ const before=await prisma.$transaction(tx=>lockOcrReviewEvidence(tx,key));
  const chunks:Uint8Array[]=[];let size=0;
  for await(const chunk of await storage.getObjectStream(before.artifactKey)) {
   size+=chunk.byteLength;if(size>8_000_000)throw new Error("OCR_REVIEW_ARTIFACT_TOO_LARGE");chunks.push(chunk);
@@ -39,7 +42,7 @@ export async function readOcrStructureReviewEvidence(key:OcrReviewPageKey,storag
  const bytes=Buffer.concat(chunks);
  if(hash(bytes)!==before.textSha256)throw new Error("OCR_REVIEW_ARTIFACT_CHANGED");
  const text=new TextDecoder("utf-8",{fatal:true}).decode(bytes);
- const after=await prisma.$transaction(tx=>snapshot(tx,key));
+ const after=await prisma.$transaction(tx=>lockOcrReviewEvidence(tx,key));
  if(JSON.stringify(before)!==JSON.stringify(after))return reject();
  return {...key,...after,text,
   blocks:text.split(/\n\s*\n/u).filter(b=>b.trim()).map((text,ordinal)=>({ordinal,text,orderAuthority:"OCR_OUTPUT_SEQUENCE_UNVERIFIED" as const,bbox:null})),

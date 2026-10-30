@@ -6,6 +6,7 @@ import { projectBookDisplay } from "@/lib/book-display";
 import { projectPdfPageEvidence } from "@/lib/pdf-page-review";
 import { readOcrStructureReviewEvidence } from "@ai-cognitive/ingestion";
 import { storage } from "@/lib/storage";
+import {OcrModelReviewRequest} from "@/components/ocr-model-review-request";
 
 export default async function PdfSourceReviewPage({
   params, searchParams,
@@ -41,12 +42,16 @@ export default async function PdfSourceReviewPage({
   if(pending?.status==="OCR_REQUIRED" && pending.errorCode==="SOURCE_OCR_REVIEW_REQUIRED") {
     const evidence=await readOcrStructureReviewEvidence({workspaceId:source.workspaceId,sourceDocumentId:source.id,ingestionRunId:pending.id,physicalPageIndex},storage()).catch(()=>null);
     if(!evidence)notFound();
+    const modelReview=await prisma.ocrModelReviewEvent.findFirst({where:{workspaceId:source.workspaceId,receiptId:evidence.receiptId,sourcePdfSha256:evidence.sourcePdfSha256,ocrTextSha256:evidence.textSha256,physicalPageIndex},orderBy:{createdAt:"desc"}});
+    const reviewJob=await prisma.job.findFirst({where:{workspaceId:source.workspaceId,type:"pdf.ocr.structure-review",payload:{path:["receiptId"],equals:evidence.receiptId}},select:{status:true}});
     return <main className="container" style={{maxWidth:1150,margin:"0 auto",padding:24}}>
       <Link href={`/studio/library/${source.id}`}>返回书籍详情</Link>
       <h1>{title} · 来源与结构审核</h1>
       <p role="status">OCR 已完成 · 结构尚未独立审核 · 不得进入正式播客素材</p>
       <p>第 {physicalPageIndex+1} 物理页 · actualTier：{evidence.actualTier}</p>
       <p style={{overflowWrap:"anywhere"}}>原书 SHA256：{evidence.sourcePdfSha256}<br/>模型：{evidence.modelRevision}<br/>模型清单：{evidence.manifestDigest}</p>
+      <OcrModelReviewRequest sourceDocumentId={source.id} ingestionRunId={pending.id} physicalPageIndex={physicalPageIndex} receiptId={evidence.receiptId} textSha256={evidence.textSha256} sourcePdfSha256={evidence.sourcePdfSha256} enabled={process.env.PDF_VISUAL_REVIEW_ON_DEMAND_ENABLED==="true"} existingStatus={reviewJob?.status??null}/>
+      {modelReview?<section className="card-panel"><h2>模型独立判断：{modelReview.decision==="PASSED"?"通过（仍不可发布）":modelReview.decision==="REJECTED"?"拒绝":"仍需复核"}</h2><p>{modelReview.providerKey} / {modelReview.modelId} · {modelReview.createdAt.toISOString()}</p><pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{JSON.stringify(modelReview.reasons,null,2)}</pre><p>证据摘要：{modelReview.evidenceSha256}</p><p>费用：尚未定价；用量账本已关联调用 {modelReview.invocationId}。</p></section>:null}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,420px),1fr))",gap:20}}>
         <section><h2>原始 PDF 页面</h2><iframe title={`原始 PDF 第 ${physicalPageIndex+1} 物理页`} src={`/api/studio/pdf-visual-review/${source.id}/source-pdf?sha=${evidence.sourcePdfSha256}#page=${physicalPageIndex+1}`} style={{width:"100%",height:640}} /></section>
         <section><h2>OCR 输出及顺序</h2><p>按 OCR 输出顺序显示；阅读顺序未经独立验证。定位框、表格、图表、公式细节均未知。</p>

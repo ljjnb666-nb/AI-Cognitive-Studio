@@ -5,6 +5,7 @@ import { PDF_ROUTING_PLAN_SCHEMA_VERSION,PDF_INSPECTOR_VERSION } from "../src/pd
 import type { OcrSourceKey } from "../src/ocr-source-authority.js";
 import { APPROVED_MINERU_MANIFEST_SHA256,MINERU_MODEL_REVISION } from "../src/mineru/mineru-approved-inventory.js";
 import { readOcrStructureReviewEvidence } from "../src/ocr-structure-review-evidence.js";
+import {requestOcrModelReview,OCR_MODEL_REVIEW_CONSENT} from "../src/ocr-model-review-request.js";
 // Real PostgreSQL; storage stream and OCR receipt are synthetic test fixtures.
 const workspaces:string[]=[]; const users:string[]=[];
 async function fixture() {
@@ -22,6 +23,10 @@ async function fixture() {
   return {key,b,d,j,r,p,plan};
 }
 afterAll(async()=>{
+ await prisma.providerRouteBinding.deleteMany({where:{workspaceId:{in:workspaces}}});
+ await prisma.providerCredentialVersion.deleteMany({where:{workspaceId:{in:workspaces}}});
+ await prisma.providerConnection.deleteMany({where:{workspaceId:{in:workspaces}}});
+ await prisma.workspaceMember.deleteMany({where:{workspaceId:{in:workspaces}}});
  await prisma.ocrPageAttempt.deleteMany({where:{workspaceId:{in:workspaces}}});
  await prisma.ingestionRun.deleteMany({where:{workspaceId:{in:workspaces}}});
  await prisma.job.deleteMany({where:{workspaceId:{in:workspaces}}});
@@ -31,6 +36,33 @@ afterAll(async()=>{
  await prisma.workspace.deleteMany({where:{id:{in:workspaces}}});
  await prisma.user.deleteMany({where:{id:{in:users}}});
  await prisma.$disconnect();
+});
+async function consentFixture(){
+ const f=await pending();const userId=f.j.userId!;
+ await prisma.workspaceMember.create({data:{workspaceId:f.key.workspaceId,userId,role:"OWNER"}});
+ const connection=await prisma.providerConnection.create({data:{workspaceId:f.key.workspaceId,providerKey:"zhipu",protocol:"OPENAI_COMPATIBLE",displayName:"Synthetic consent route",endpoint:"https://open.bigmodel.cn/api/paas/v4/chat/completions"}});
+ await prisma.providerCredentialVersion.create({data:{workspaceId:f.key.workspaceId,connectionId:connection.id,credentialVersion:1,ciphertext:"synthetic-not-decrypted",iv:"synthetic",authTag:"synthetic",keyVersion:"test"}});
+ await prisma.providerRouteBinding.create({data:{workspaceId:f.key.workspaceId,connectionId:connection.id,routeSlot:"PDF_VISUAL_STRUCTURE",modelId:"glm-4.6v"}});
+ const receipt=await prisma.ocrPageExecution.findUniqueOrThrow({where:{pageClaimToken:f.p.claimToken!}});
+ return {...f,input:{...f.review,userId,receiptId:receipt.id,textSha256:hash(text),sourcePdfSha256:f.b.sha256,consent:OCR_MODEL_REVIEW_CONSENT}};
+}
+it("concurrent authorized clicks create exactly one one-time Job",async()=>{
+ const f=await consentFixture();const outcomes=await Promise.all([requestOcrModelReview(f.input),requestOcrModelReview(f.input),requestOcrModelReview(f.input)]);
+ expect(new Set(outcomes.map(r=>r.jobId)).size).toBe(1);
+ const job=await prisma.job.findUniqueOrThrow({where:{id:outcomes[0]!.jobId}});
+ expect(job.payload).toMatchObject({receiptId:f.input.receiptId,maxAttempts:1,maxOutputTokens:1600,pinnedRoute:{modelId:"glm-4.6v"}});
+ await prisma.job.update({where:{id:job.id},data:{status:"RUNNING"}});
+ expect((await requestOcrModelReview(f.input)).status).toBe("RUNNING");
+ expect(await prisma.documentExtraction.count({where:{ingestionRunId:f.r.id}})).toBe(0);
+});
+it("requires exact consent and rechecks revoked paid-action role",async()=>{
+ const f=await consentFixture();await expect(requestOcrModelReview({...f.input,consent:""})).rejects.toThrow("OCR_REVIEW_CONSENT_REQUIRED");
+ await prisma.workspaceMember.update({where:{workspaceId_userId:{workspaceId:f.key.workspaceId,userId:f.input.userId}},data:{role:"VIEWER"}});
+ await expect(requestOcrModelReview(f.input)).rejects.toThrow("OCR_REVIEW_FORBIDDEN");
+});
+it("cannot authorize the wrong page, text or receipt",async()=>{
+ const f=await consentFixture();
+ for(const input of [{...f.input,physicalPageIndex:1},{...f.input,textSha256:"a".repeat(64)},{...f.input,receiptId:randomUUID()}])await expect(requestOcrModelReview(input)).rejects.toThrow("OCR_REVIEW_EVIDENCE_STALE");
 });
 
 const text="OCR paragraph one.\n\nOCR paragraph two.";

@@ -486,3 +486,5 @@ function parserProvenance(mediaType: string): { name: string; version: string } 
   return { name: "unsupported", version: "unsupported-v1" };
 }
 export * from "./ocr-structure-review-evidence.js";
+export * from "./ocr-model-review-request.js";
+export * from "./ocr-review-page-image.js";

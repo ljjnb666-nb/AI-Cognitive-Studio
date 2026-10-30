@@ -34,3 +34,18 @@
 4. PostgreSQL/MinIO/Worker 和真实 Windows Edge 验收；全仓回归/构建/准确 HEAD CI；单个完整 Draft PR。
 
 保留生产 standard 默认关闭。不要把本记录或接口/字段当成交付完成；本轮结束条件仍是用户要求的完整产品闭环。尚未创建新 PR，避免提交仅有脚手架的独立 PR。
+
+## 后续执行进度（2026-10-30）
+
+- 已复用 Job 唯一 idempotencyKey 实现每 OCR receipt 一次显式授权请求，未另建任务调度系统。创建前校验 OWNER/EDITOR、receipt/原书/页/text SHA；固定一次调用和 15 分钟授权期限，并固定当时工作区视觉路由与 credential version。重复点击返回原 Job，不重置失败或不确定任务。
+- 新增 OcrModelReviewEvent 及 reportedModelId 增量迁移，关联 Job、OCR receipt、Gateway invocation/snapshot，用量账本与六维判定理由；模型事件 UPDATE 被数据库触发器拒绝。当前费用标为 UNPRICED，只保留真实用量关联，不编造人民币金额。
+- Worker 已接入现有 runtime dispatch/drain 生命周期，仅在 PDF_VISUAL_REVIEW_ON_DEMAND_ENABLED=true 且具有 Gateway keyring、私有临时目录时启动；默认关闭。角色/来源/期限前后重查，Job claim token fence；通过 consumeTextResult 事务消费加密回执并落库，不修改发布权威。RUNNING 不自动重试，失败/不确定结果需账本核对。
+- 同一审核路由已添加带明确发送页图+OCR文本同意框的按钮，POST 必须有真实会话、相同 Origin 和来源身份；支持展示通过/拒绝/仍需复核，均无播客发布权限。尚未完成真实浏览器验收。
+- 本机独立测试库已部署两个增量迁移，现共57迁移。相关 web/worker/ingestion/provider-gateway 类型检查、ingestion/worker/web lint通过。
+- PostgreSQL evidence/consent 合并门11 PASS/0 FAIL，覆盖并发一次任务、撤权、错误页/text/receipt、换源和后继run；Gateway判定门19 PASS/0 FAIL。新增测试曾因把完整请求对象展开到 ORM 导致2 FAIL，已改为只提取来源四元组，原断言保持。
+- 已确认完整 B03 原书在本地指定数据根，大小151,495,200字节，SHA与既有私有原书记录一致。复用 #212 的 pdf-local-range.mjs，以限定子进程内存与本地分段读取完成原书物理索引14的页图生成：715×1015、387844字节，原书SHA回执匹配；PNG仅留私有数据目录。不得把旧单页样本d844...的SHA或页号当作原书身份。
+- canvas 离线直接安装遇到陈旧 registry metadata（缓存声称最新0.1.96，而锁中已有1.0.5），没有改依赖/lockfile或降版；改用此 PDF.js 已安装依赖所解析的 canvas。已实测解析与真实原书页渲染成功。
+
+下一步最大集成问题：当前 #216 的普通导入/解析路径仍有旧的大 PDF 字节载入边界，需要精准复用 #212 已实现的 file-backed 解析/导入支持，保留现有 standard、来源 fence 和质量门禁，不能整文件覆盖不同开发链。随后完成真实原书目标页的 standard→模型审核闭环、Worker/MinIO与事件并发/重复测试、实际 Windows Edge 验收及统一CI。
+
+外部模型调用仍未执行；必须在页图/OCR证据及账户路由可审阅后取得具体授权，不能把本轮目标文字当作原书云端发送的无限授权。目标继续active，未创建脚手架PR，未合并/部署/启用生产standard。
