@@ -15,7 +15,9 @@ export async function lockOcrReviewEvidence(tx:Prisma.TransactionClient,key:OcrR
  key=identityOnly(key);
  if(!Number.isSafeInteger(key.physicalPageIndex)||key.physicalPageIndex<0)return reject();
  await tx.$queryRaw`SELECT "id" FROM "IngestionRun" WHERE "id"=${key.ingestionRunId} AND "workspaceId"=${key.workspaceId} FOR SHARE`;
- await tx.$queryRaw`SELECT "id" FROM "SourceDocument" WHERE "id"=${key.sourceDocumentId} AND "workspaceId"=${key.workspaceId} FOR SHARE`;
+ // Also fence a successor run insert (its FK takes KEY SHARE), not only
+ // document replacement. Recovery already serializes on this same row.
+ await tx.$queryRaw`SELECT "id" FROM "SourceDocument" WHERE "id"=${key.sourceDocumentId} AND "workspaceId"=${key.workspaceId} FOR UPDATE`;
  const doc=await tx.sourceDocument.findFirst({where:{id:key.sourceDocumentId,workspaceId:key.workspaceId},include:{sourceBlob:true,ingestionRuns:{orderBy:[{createdAt:"desc"},{id:"desc"}],take:1}}});
  const run=doc?.ingestionRuns[0];
  if(!doc||!run||run.id!==key.ingestionRunId||run.status!=="OCR_REQUIRED"||run.errorCode!=="SOURCE_OCR_REVIEW_REQUIRED"||doc.mediaType!=="application/pdf")return reject();
@@ -23,6 +25,7 @@ export async function lockOcrReviewEvidence(tx:Prisma.TransactionClient,key:OcrR
  await tx.$queryRaw`SELECT "id" FROM "SourceBlob" WHERE "id"=${blob.id} FOR SHARE`;
  const fresh=await tx.sourceBlob.findUniqueOrThrow({where:{id:blob.id}});
  if(fresh.workspaceId!==key.workspaceId||fresh.sha256!==doc.sha256||fresh.sizeBytes!==doc.sizeBytes||fresh.storageKey!==doc.storageKey||fresh.mediaType!==doc.mediaType)return reject();
+ await tx.$queryRaw`SELECT "id" FROM "OcrPageAttempt" WHERE "ingestionRunId"=${key.ingestionRunId} AND "physicalPageIndex"=${key.physicalPageIndex} AND "routingGeneration"=${run.routingGeneration??-1} FOR SHARE`;
  const page=await tx.ocrPageAttempt.findFirst({where:{...key,routingGeneration:run.routingGeneration??-1,status:"SUCCEEDED",actualTier:"standard",executionStatus:"SUCCEEDED",qualityStatus:"REVIEW_REQUIRED"},include:{executions:{where:{executionStatus:"SUCCEEDED"}}}});
  if(!page||!page.claimToken||!page.textSha256||!page.authoritativeArtifactKey)return reject();
  const receipt=page.executions.find(r=>r.pageClaimToken===page.claimToken);

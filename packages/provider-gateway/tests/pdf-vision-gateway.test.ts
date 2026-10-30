@@ -48,6 +48,7 @@ describe("PDF visual images through Workspace Provider Gateway",()=>{
     const user=body.messages.find((m:{role:string})=>m.role==="user");
     expect(user.content[1]).toEqual({type:"image_url",image_url:{url:"data:image/png;base64,"+png.toString("base64")}});
     expect(body.response_format).toEqual({type:"json_object"});
+    expect(body.thinking).toEqual({type:"disabled"});
     expect(JSON.stringify(body)).not.toContain("test-secret");
   });
 

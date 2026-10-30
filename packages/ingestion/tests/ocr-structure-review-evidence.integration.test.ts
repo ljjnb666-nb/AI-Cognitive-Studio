@@ -4,7 +4,7 @@ import { prisma } from "@ai-cognitive/db";
 import { PDF_ROUTING_PLAN_SCHEMA_VERSION,PDF_INSPECTOR_VERSION } from "../src/pdf-routing.js";
 import type { OcrSourceKey } from "../src/ocr-source-authority.js";
 import { APPROVED_MINERU_MANIFEST_SHA256,MINERU_MODEL_REVISION } from "../src/mineru/mineru-approved-inventory.js";
-import { readOcrStructureReviewEvidence } from "../src/ocr-structure-review-evidence.js";
+import { readOcrStructureReviewEvidence,lockOcrReviewEvidence } from "../src/ocr-structure-review-evidence.js";
 import {requestOcrModelReview,OCR_MODEL_REVIEW_CONSENT} from "../src/ocr-model-review-request.js";
 // Real PostgreSQL; storage stream and OCR receipt are synthetic test fixtures.
 const workspaces:string[]=[]; const users:string[]=[];
@@ -97,5 +97,19 @@ it("rejects source replacement across object IO",async()=>{
 it("rejects evidence superseded by a new run",async()=>{
  const f=await pending();const job=await prisma.job.create({data:{workspaceId:f.key.workspaceId,userId:f.j.userId,type:"source.ingest",status:"QUEUED",payload:{}}});
  await prisma.ingestionRun.create({data:{workspaceId:f.key.workspaceId,sourceDocumentId:f.d.id,jobId:job.id,parserVersion:"1",normalizationVersion:"1",status:"QUEUED",createdAt:new Date(Date.now()+1000)}});
+ await expect(readOcrStructureReviewEvidence(f.review,storage)).rejects.toThrow("OCR_REVIEW_EVIDENCE_STALE");
+});
+it.each(["successor-run","page-claim"])("serializes final evidence validation against concurrent %s mutation",async mutation=>{
+ const f=await pending();const newJob=await prisma.job.create({data:{workspaceId:f.key.workspaceId,userId:f.j.userId,type:"source.ingest",payload:{}}});
+ let release!:()=>void,held!:()=>void,writerReady!:()=>void;
+ const barrier=new Promise<void>(resolve=>{release=resolve;}),locked=new Promise<void>(resolve=>{held=resolve;}),ready=new Promise<void>(resolve=>{writerReady=resolve;});
+ const reader=prisma.$transaction(async tx=>{await lockOcrReviewEvidence(tx,f.review);held();await barrier;},{timeout:10000});await locked;
+ let writerPid=0;
+ const writer=prisma.$transaction(async tx=>{const rows=await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`;writerPid=rows[0]!.pid;writerReady();if(mutation==="successor-run")await tx.ingestionRun.create({data:{workspaceId:f.key.workspaceId,sourceDocumentId:f.d.id,jobId:newJob.id,parserVersion:"1",normalizationVersion:"1"}});else await tx.ocrPageAttempt.update({where:{id:f.p.id},data:{claimToken:randomUUID()}});},{timeout:10000});
+ try{
+ await ready;let waiting=false;const deadline=Date.now()+3000;
+ while(Date.now()<deadline){const rows=await prisma.$queryRaw<Array<{waiting:boolean}>>`SELECT wait_event_type='Lock' AS waiting FROM pg_stat_activity WHERE pid=${writerPid}`;if(rows[0]?.waiting){waiting=true;break;}await new Promise(resolve=>setTimeout(resolve,10));}
+ expect(waiting).toBe(true);
+ }finally{release();await Promise.all([reader,writer]);}
  await expect(readOcrStructureReviewEvidence(f.review,storage)).rejects.toThrow("OCR_REVIEW_EVIDENCE_STALE");
 });
