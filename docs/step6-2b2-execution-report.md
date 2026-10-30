@@ -30,6 +30,10 @@ CI 修复记录：`a1f3600` 的 CI `40922239516` 失败。web/Next 的 ProcessEn
 
 ## 仍需完成的完整目标
 
+生命周期补充：真实 managed standard 的 cancel / timeout / doclib parent-exit 定向门 **3 PASS / 0 FAIL**，其余 5 项由测试名过滤，不能计为本次通过。引擎就绪后取消、1ms 的专用 parse 超时预算、仅终止数据库绑定且刚核验创建时间的 doclib PID，均产生失败回执且没有成功 checkpoint；测试记录的引擎身份不再存活、host lease 释放。该超时预算只用于故障测试，不是生产默认或性能测量。父进程案例的 Node worker 仍在运行，不能代替 worker 自身崩溃后的 reconciler 恢复验收。
+
+取消记账修复：引擎 readiness 等待被取消时直接失败，不再将其记为 ENGINES_NOT_READY 后虚构一次 flash 调用。加强后的真实 cancel 专项 **1 PASS / 0 FAIL**（另 7 项按测试名过滤），断言 actualTier 只能是实际尝试的 standard 或尚未解析的 NULL，fallbackReason=NULL。类型检查和 lint 通过。
+
 managed engine 的真实取消、超时、父进程崩溃、恢复和资源回收矩阵；HTTP/端口与进程身份绑定的独立验证；冷启动及热运行与峰值 RAM/VRAM 的明确测量；全仓相关回归、真实 Worker、准确新 HEAD 的 CI；统一代码复核及最终验收报告。
 
 PR #216 保持 Draft，base 仍为未合并的 #215。未经授权不合并、部署或开启生产 standard。旧 HEAD `8f537d9` 的 CI `40912790553` 现已六项 SUCCESS；这不证明未提交的新改动通过 CI。

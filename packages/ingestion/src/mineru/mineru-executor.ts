@@ -302,6 +302,9 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
         const probe = setup ?? await waitForStandardParseServerReady(baseUrl!, config.serverStartTimeoutMs, { signal, expectedIdentity:{pid:endpoint.pid,serverId:endpoint.serverId}, expectedManagedPort:managedEnginePort,
           onReady:local=>{executionFacts.serverIdentity={pid:endpoint.pid,serverId:endpoint.serverId,enginePid:Number(local.managed_pid),enginePort:managedEnginePort};} });
         executionFacts.timings={...executionFacts.timings,engineReadyMs:Date.now()-engineStarted};
+        // Cancellation is not engine unavailability and must not manufacture
+        // a flash invocation that never happened.
+        if(signal.aborted) return await recordCall(request,failure(leaseLost ? SourceError.OCR_HOST_LEASE_LOST : SourceError.OCR_PROCESS_FAILED,"transient"),startedAt,executionFacts);
         if (probe?.detail==="CLAIM_SERVER_IDENTITY_MISMATCH") return await recordCall(request,failure("SOURCE_OCR_ENDPOINT_IDENTITY_INVALID","terminal"),startedAt,executionFacts);
         if (probe !== null) {
           logger.warn("mineru.ocr.standard_engines_not_ready", { ...logContext, detail: probe.detail });
@@ -317,6 +320,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
       // 5. THE one bounded parse invocation per claim (one claim = one
       // invocation; retries belong to 04B-2's durable attempt budget).
       const parseTimeoutMs = executionFacts.admittedTier === MINERU_STANDARD_TIER && config.standard ? config.standard.timeoutMs : config.timeoutMs;
+      if(signal.aborted) return await recordCall(request,failure(leaseLost ? SourceError.OCR_HOST_LEASE_LOST : SourceError.OCR_PROCESS_FAILED,"transient"),startedAt,executionFacts);
       executionFacts.actualTier=executionFacts.admittedTier ?? config.tier;
       const parseArgs = buildMineruParseArgs({ inputPdfPath, tier: executionFacts.actualTier, physicalPageIndex: request.physicalPageIndex, outputMarkdownPath });
       const parseStarted=Date.now();

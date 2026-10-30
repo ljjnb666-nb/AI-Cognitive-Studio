@@ -1,3 +1,5 @@
+import { processCreationTime, recordedProcessAlive } from "../../src/mineru/mineru-process.js";
+import { parseServerBaseUrl } from "../../src/mineru/mineru-standard-server-setup.js";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { APPROVED_MINERU_MANIFEST_SHA256, approvedManifestText } from "../../src/mineru/mineru-approved-inventory.js";
 import { PDF_ROUTING_PLAN_SCHEMA_VERSION, PDF_INSPECTOR_VERSION } from "../../src/pdf-routing.js";
@@ -91,6 +93,30 @@ async function createRunFixture(bytes: Uint8Array) {
   await prisma.ocrPageAttempt.create({data:{ingestionRunId:run.id,workspaceId:workspace.id,sourceDocumentId:document.id,physicalPageIndex:0,routingGeneration:PDF_ROUTING_GENERATION,status:"RUNNING",claimToken:pageClaimToken,leaseUntil:new Date(Date.now()+1200000)}});
   runIds.push(run.id);
   return { runId: run.id, workspaceId: workspace.id, sourceDocumentId: document.id, executionToken, pageClaimToken };
+}
+
+
+async function observeOwnedStandardEngine(runId:string) {
+  const deadline=Date.now()+180000;
+  while(Date.now()<deadline){
+    const instance=await prisma.ocrServerInstance.findFirst({where:{ingestionRunId:runId,status:"RUNNING"}});
+    if(instance?.pid && instance.serverId && Array.isArray(instance.transports)){
+      const base=parseServerBaseUrl(instance.transports as Array<Record<string,unknown>>);
+      if(!base) throw new Error("REAL_ENGINE_ENDPOINT_INVALID");
+      try {
+        const response=await fetch(`${base}/api/v1/server/status`,{redirect:"error",signal:AbortSignal.timeout(2000)});
+        const status=await response.json() as {pid:number;server_id:string;parse_server?:{local?:{healthy:boolean;managed_running:boolean;managed_pid:number;managed_tier:string}}};
+        const local=status.parse_server?.local;
+        if(status.pid===instance.pid && status.server_id===instance.serverId && local?.healthy && local.managed_running && local.managed_tier==="standard"){
+          const engineCreated=await processCreationTime(local.managed_pid);
+          const doclibCreated=await processCreationTime(instance.pid);
+          if(engineCreated && doclibCreated)return {instance,enginePid:local.managed_pid,engineCreated,doclibCreated};
+        }
+      } catch { /* transient startup probe; never an assertion of readiness */ }
+    }
+    await new Promise(r=>setTimeout(r,100));
+  }
+  throw new Error("REAL_STANDARD_ENGINE_OBSERVATION_TIMEOUT");
 }
 
 afterEach(async () => {
@@ -252,6 +278,54 @@ describeReal("mineru real standard execution gate (STEP6-2B-1)", () => {
       const proof={serviceMs,case:"B03-single-scan",sourceSha256:document.sha256,actualTier:page.actualTier,executionStatus:receipt.executionStatus,manifestDigest:receipt.manifestDigest,modelRevision:receipt.modelRevision,qualityDecision:receipt.qualityDecision,runStatus:run.status,routingOutcome:run.routingOutcome,resultBytes:resultBytes.length,resultSha256:page.textSha256,artifactKey:page.authoritativeArtifactKey,sourceKey:document.storageKey,publicationCount:0,calls:handle.executor.calls.map(c=>({outcome:c.outcome,durationMs:c.durationMs,timings:c.execution?.timings}))};
       writeFileSync(join(process.env.MINERU_REAL_PRIVATE_ROOT!,"full-chain-proof.private.json"),JSON.stringify(proof,null,2));
     } finally {await handle.close();}
+  },600000);
+
+  it.skipIf(!realStandardPdf).each(["cancel","timeout","parent-exit"] as const)("lifecycle: real managed standard %s leaves no successful checkpoint or owned engine",async scenario=>{
+    if(!realStandardPdf) throw new Error("REAL_STANDARD_PDF_REQUIRED");
+    const bytes=new Uint8Array(readFileSync(realStandardPdf));
+    const config=await realStandardConfig();
+    if(scenario==="timeout") config.standard={...config.standard!,timeoutMs:1};
+    const handle=createMineruPdfOcrExecutor(config,{standardModelsVerified:true});
+    const fixture=await createRunFixture(bytes);
+    const execution=handle.executor.extractPage({workspaceId:fixture.workspaceId,sourceDocumentId:fixture.sourceDocumentId,ingestionRunId:fixture.runId,physicalPageIndex:0,routingGeneration:PDF_ROUTING_GENERATION,runExecutionToken:fixture.executionToken,pageClaimToken:fixture.pageClaimToken,pdfBytes:bytes,standardExecutionRequest:{sourcePdfSha256:sha256Bytes(bytes)}});
+    // Mirror rejection immediately so observing a process cannot cause an unhandled rejection.
+    const settled=execution.then(result=>({result}),error=>({error}));
+    let observed:Awaited<ReturnType<typeof observeOwnedStandardEngine>>|undefined;
+    try {
+      if(scenario!=="timeout"){
+        observed=await observeOwnedStandardEngine(fixture.runId);
+        if(scenario==="cancel") await handle.close();
+        else {
+          expect(await processCreationTime(observed.instance.pid!)).toBe(observed.doclibCreated);
+          // Kill only the database-bound, freshly fingerprinted doclib pid.
+          // The engine must stop through its real managed-control EOF path.
+          process.kill(observed.instance.pid!,"SIGKILL");
+        }
+      }
+      const outcome=await settled;
+      if("error" in outcome) throw outcome.error;
+      expect(outcome.result.status).toBe("FAILED");
+      if(outcome.result.status!=="FAILED")return;
+      if(scenario==="timeout")expect(outcome.result.errorCode).toBe("SOURCE_OCR_TIMEOUT");
+      const receipt=await prisma.ocrPageExecution.findUniqueOrThrow({where:{pageClaimToken:fixture.pageClaimToken}});
+      expect(receipt.executionStatus).toBe("FAILED");
+      if(scenario==="cancel"){
+        expect(receipt.actualTier).not.toBe("flash");
+        expect(receipt.fallbackReason).toBeNull();
+        if(receipt.actualTier===null)expect(receipt.admittedTier).toBe("standard");
+      }
+      expect(receipt.resultTextSha256).toBeNull();
+      expect(await prisma.ocrPageAttempt.count({where:{ingestionRunId:fixture.runId,status:"SUCCEEDED"}})).toBe(0);
+      const server=await prisma.ocrServerInstance.findFirstOrThrow({where:{ingestionRunId:fixture.runId}});
+      expect(server.status).toBe("STOPPED");
+      expect((await prisma.ocrHostLease.findUniqueOrThrow({where:{hostId:config.hostId}})).claimToken).toBeNull();
+      if(observed)expect(await processCreationTime(observed.enginePid)).not.toBe(observed.engineCreated);
+      else {
+        const enginePid=outcome.result.execution?.serverIdentity?.enginePid;
+        expect(enginePid).toBeGreaterThan(0);
+        expect(await recordedProcessAlive(enginePid!)).toBe(false);
+      }
+    } finally {await handle.close();await settled;}
   },600000);
 
 });
