@@ -67,3 +67,30 @@
 私有证据：tts-audition-result.private.json（首次失败）、tts-diagnostic-result.private.json、offline-recovery.private.json、tts-completion-result.private.json、edge-dual-voice-playback.private.json、edge-dual-voice-played.private.png。所有实际音频、试音稿、响应和原书仅在私有目录，不入Git。
 
 B03入口重新实测：Book请求因无正式提取被拒绝，播客入口返回 CURRENT_BOOK_INTELLIGENCE_REQUIRED；actualTier=standard、REJECTED、正式提取/ChunkSet/BookAnalysis/播客运行均0，新增远程调用0。正向章节已创建双主持人、zh-CN、2分钟的私有节目配置，尚未排队生成。
+
+## 章节接线与真实执行：服务繁忙阻断，未完成成品
+
+用户已听过35秒试音，确认“可以，沿用当前音色与语速”。章节绑定 tongtong/xiaochen、语速1.0；没有以机器媒体事件代替人工听感确认。
+
+完成现有路径的三项小范围接线：目录声明免费 glm-4.7-flash 和 embedding-3；使用智谱官方 embedding 请求体（model/input/dimensions，不发送 encoding_format/task），复用严格向量索引/维度校验和实报 token 解析；Podcast Gateway 按已声明能力选择 STRICT_JSON_SCHEMA 或 JSON_MODE，后者携带完整 JSON Schema 提示，仍执行原有 Zod/来源/质量校验。旧严格输出及持久化回放保留。另修复短节目被提示为15分钟的问题，2分钟配置现在明确120秒、1～2段。
+
+官方依据：
+- https://docs.bigmodel.cn/cn/guide/models/free/glm-4.7-flash （JSON输出及思考模式）
+- https://docs.bigmodel.cn/api-reference/模型-api/文本嵌入 （embedding-3、每项3072 token、最多64项、256/512/1024/2048维）
+- https://docs.bigmodel.cn/cn/guide/start/pricing （GLM-4.7-Flash输入输出免费；Embedding-3每百万token0.5元；GLM-TTS每万字符2元）
+
+`tools/book-to-podcast/chapter-acceptance.ts prepare` 已通过现有服务绑定正式章节、语音档案和播放配置，外部调用0。`run` 复用正式Book、Podcast、Audio服务及生产Gateway，不制造已通过的脚本或绕过门禁。所有书文、模型响应和音频仍仅在私有目录。
+
+用户另行批准本轮总预算0.50元：文本最多32次、每次输出8000 token；Embedding最多16次、累计96条，每条按官方3072 token上限预留（≤0.147456元）；TTS最多24次、累计1500字符（≤0.30元）。按当前标价最大合计0.447456元。执行器请求前落盘预留，限制固定模型/官方端点、禁自动重试、失败停止；重启需核对既存记录。预估不是账户实报账单。
+
+实际执行：
+1. 首次glm-4.7-flash请求返回HTTP429、错误码1305“该模型当前访问量过大”，request ID `bd9c3b71-41e9-4fa9-b26f-41c3768cd711`。已停止，无后续Embedding/TTS。
+2. 用户明确批准额外恢复一次，沿用累计0.50元及原限额，失败请求计入32次文本上限。通过现有Book失败重试服务创建新Job，原失败Job保留；第二次仍HTTP429/1305，request ID `d3ff6089-14e6-4e3a-a2bb-c78e4c5064c7`。再次停止，没有第三次请求。
+
+两次请求均为当前标价免费的文本模型；未调用任何本轮付费Embedding/TTS，响应未提供实际账户账单。Book尚未产生可用理解，章节脚本、章节音频、正式页面章节播放均未完成，不能标记BOOK_TO_PODCAST_VERTICAL_SLICE_VERIFIED。旧35秒试音仍是独立验收成品，不能冒充书籍章节播客。
+
+私有记录：chapter-configuration.private.json、chapter-call-reservations.private.json、chapter-call-reservations.first-attempt.private.json、chapter-resume-authorization.private.json、chapter-response-{1,2}.private.json及meta、chapter-execution.private.json及first-attempt、两次运行日志。未公开书籍文本、密钥或供应商响应。
+
+本地验证：Provider Phase8C **115 PASS**（包含真实PG/迁移、HTTP为确定性transport，非真实供应商成功证明）；Podcast Gateway持久化/回放 **58 PASS**，新增短时长及JSON模式测试后的目标文件 **10 PASS**；Podcast质量/音频单元 **15 PASS**。三个相关包Lint、Worker/Podcast/Provider类型检查及operator严格TS检查通过。章节数据库复核：2个FAILED invocation、各1个REMOTE_FAILURE/RATE_LIMITED、dispatchGeneration=1、CurrentBookIntelligence=0。原失败记录与重试Job分别存在。此检查没有新增模型调用。
+
+尚未完成全仓回归、新HEAD CI及本轮Draft PR。不得把上述局部通过写成完整交付或真实章节成功；服务恢复后的任何新远程尝试需要用户重新明确授权，本次单次恢复入口已耗用。

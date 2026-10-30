@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { compileStrictJsonSchema } from "@ai-cognitive/provider-gateway";
-import { podcastGatewaySchemas } from "../src/gateway-provider.js";
+import { GatewayPodcastGenerationProvider, podcastGatewaySchemas } from "../src/gateway-provider.js";
 import { podcastConsumerFingerprint } from "../src/consumer-fingerprint.js";
 import { dialogueSchema, episodePlanSchema, humanizationSchema, narrativeSchema, segmentOutlineSchema } from "../src/types.js";
+import { buildPodcastSystemInstruction } from "../src/prompts.js";
 
 const cases = {
   EPISODE_PLANNING: { schema: episodePlanSchema, value: { centralQuestion: "Question", listenerStartingPoint: "Start", listenerTakeaway: "Takeaway", coreThesis: "Thesis", tensions: ["Tension"], surprisingIdeas: ["Idea"], misconceptions: ["Misconception"], keyConcepts: ["Concept"], candidateStories: ["Story"], candidateExamples: ["Example"], openQuestions: ["Open question"] } },
@@ -13,6 +14,27 @@ const cases = {
 } as const;
 
 describe("Phase 8C Podcast strict provider schemas", () => {
+  it("keeps a two-minute outline at its configured duration", () => {
+    const instruction = buildPodcastSystemInstruction("SEGMENT_OUTLINE", { targetDurationMinutes: 2 });
+    expect(instruction).toContain("2 minutes total"); expect(instruction).toContain("120 seconds"); expect(instruction).not.toContain("15 minutes");
+  });
+  it.each(["JSON_MODE", "STRICT_JSON_SCHEMA"] as const)("uses declared %s capability and keeps product validation", async mode => {
+    const requests: Array<{ capability: unknown; text: { system: string; structuredOutput: { mode: string } } }> = [];
+    let output: unknown = cases.EPISODE_PLANNING.value;
+    type Runtime = ConstructorParameters<typeof GatewayPodcastGenerationProvider>[0];
+    const runtime = { workspaceId: "w", userId: "u", podcastGenerationRunId: "r", provider: "zhipu", model: "glm-4.7-flash", pipelineVersion: "v1", promptVersion: "v1", structuredOutput: mode,
+      repository: { findExistingTextInvocationForRequest: async () => undefined },
+      gateway: { resolveSnapshot: async () => ({ providerKey: "zhipu", modelId: "glm-4.7-flash" }), execute: async (request: typeof requests[number]) => { requests.push(request); return { status: "SUCCEEDED", invocationId: "i", snapshot: { id: "s" }, response: { type: "STRUCTURED", structured: output } }; } },
+    } as unknown as Runtime;
+    const provider = new GatewayPodcastGenerationProvider(runtime);
+    const input = { metadata: { stage: "EPISODE_PLANNING", correlationId: "c" }, style: {}, hosts: [], context: [] } as Parameters<typeof provider.plan>[0];
+    expect(await provider.plan(input)).toEqual(output);
+    expect(requests[0]!.capability).toEqual({ family: "TEXT_GENERATION", structuredOutput: mode });
+    expect(requests[0]!.text.structuredOutput.mode).toBe(mode);
+    if (mode === "JSON_MODE") expect(requests[0]!.text.system).toContain(JSON.stringify(podcastGatewaySchemas.EPISODE_PLANNING));
+    output = { centralQuestion: "missing required fields" };
+    await expect(provider.plan(input)).rejects.toThrow();
+  });
   for (const [stage, testCase] of Object.entries(cases)) {
     it(`${stage} keeps Zod and strict provider schema in parity`, () => {
       const schema = podcastGatewaySchemas[stage as keyof typeof podcastGatewaySchemas];

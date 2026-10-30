@@ -137,7 +137,9 @@ export function createPodcastProductionGatewayRuntime(source: NodeJS.ProcessEnv,
   };
   return { close: () => base.close(), createProviderForRun: async input => {
     const run = await loadPrincipal(input);
-    return new GatewayPodcastGenerationProvider({ gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId!, podcastGenerationRunId: run.id, provider: input.provider, model: input.model, pipelineVersion: run.pipelineVersion, promptVersion: run.promptVersion });
+    const model = resolveProviderCatalog(source.PROVIDER_GATEWAY_MODEL_MANIFEST).providers.find(provider => provider.providerKey === input.provider)?.models.find(model => model.modelId === input.model);
+    if (model?.structuredOutput !== "STRICT_JSON_SCHEMA" && model?.structuredOutput !== "JSON_MODE") throw new Error("PODCAST_STRUCTURED_OUTPUT_UNSUPPORTED");
+    return new GatewayPodcastGenerationProvider({ structuredOutput: model.structuredOutput, gateway: base.gateway, repository: base.repository, workspaceId: run.workspaceId, userId: run.job.userId!, podcastGenerationRunId: run.id, provider: input.provider, model: input.model, pipelineVersion: run.pipelineVersion, promptVersion: run.promptVersion });
   }, createEmbeddingProviderForRun: async input => {
     const run = await loadPrincipal(input);
     const sources = await prisma.podcastGenerationSource.findMany({ where: { podcastGenerationRunId: run.id, workspaceId: run.workspaceId }, select: { analysisRunId: true } });
