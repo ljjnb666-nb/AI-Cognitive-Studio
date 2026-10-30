@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { PageHeader } from "./page-header";
 import { UploadPanel } from "./upload-panel";
 import { SourceCard } from "./source-card";
-import { statusLabel } from "@/lib/product-labels";
+import { sourceStatusLabel } from "@/lib/product-labels";
 import type { SourceSummary } from "@/lib/product";
 
 export function LibraryView({ items }: { items: SourceSummary[] }) {
@@ -29,7 +29,8 @@ export function LibraryView({ items }: { items: SourceSummary[] }) {
       }
       // Status filter
       if (statusFilter !== "ALL") {
-        const text = item.hasIntelligence ? "理解完成" : statusLabel(item.status, item.errorCode);
+        const text = sourceStatusLabel(item.status, item.hasIntelligence, item.errorCode);
+        if (statusFilter === "EXTRACTED" && text !== "正文已提取") return false;
         if (statusFilter === "SUCCEEDED" && text !== "理解完成") return false;
         if (statusFilter === "PROCESSING" && text !== "处理中") return false;
         if (statusFilter === "FAILED" && text !== "失败") return false;
@@ -73,6 +74,7 @@ export function LibraryView({ items }: { items: SourceSummary[] }) {
         <select className="select-control" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="ALL">所有状态</option>
           <option value="SUCCEEDED">理解完成</option>
+          <option value="EXTRACTED">正文已提取</option>
           <option value="PROCESSING">处理中</option>
           <option value="FAILED">失败</option>
         </select>
@@ -81,7 +83,7 @@ export function LibraryView({ items }: { items: SourceSummary[] }) {
       {/* Book Cards Grid (3 Columns) */}
       <div className="cards-grid-3">
         {filteredItems.map((x) => {
-          const statusText = x.hasIntelligence ? "理解完成" : statusLabel(x.status, x.errorCode);
+          const statusText = sourceStatusLabel(x.status, x.hasIntelligence, x.errorCode);
           return <SourceCard key={x.id} {...x} statusText={statusText} />;
         })}
       </div>

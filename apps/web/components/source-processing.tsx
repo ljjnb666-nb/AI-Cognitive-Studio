@@ -12,7 +12,7 @@ import { processingCopy, processingWaitLabel, type ProcessingStage, type Process
 
 type Props = { sourceDocumentId: string; ingestionStatus?: string | null; analysisStatus?: string | null; bootstrapStatus?: string | null; errorCode?: string | null; processingState: string; processingStage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; processingSince?: string | null };
 
-export function SourceProcessing({ sourceDocumentId, ingestionStatus: _ingestionStatus, analysisStatus: _analysisStatus, bootstrapStatus: _bootstrapStatus, errorCode, processingState, processingStage: _processingStage, recoveryAction, stageAvailability, workerAvailability: _workerAvailability, processingSince }: Props) {
+export function SourceProcessing({ sourceDocumentId, ingestionStatus: _ingestionStatus, analysisStatus: _analysisStatus, bootstrapStatus: _bootstrapStatus, errorCode, processingState, processingStage, recoveryAction, stageAvailability, workerAvailability: _workerAvailability, processingSince }: Props) {
   const router = useRouter();
   const [message, setMessage] = useState<string | null>(null);
   const terminal = processingState === "SUCCEEDED" || processingState.includes("FAILED");
@@ -33,7 +33,8 @@ export function SourceProcessing({ sourceDocumentId, ingestionStatus: _ingestion
   const recovery = recoveryAction !== "NONE" && recoveryAction !== "RECHECK";
   // This label is relative to the current clock, so its text can legitimately
   // differ by a second between SSR and hydration while durable state is equal.
-  const waiting = processingSince ? processingWaitLabel(new Date(processingSince)) : null;
+  const waitingForAnalysisWorker = processingStage === "BOOK_ANALYSIS" && stageAvailability === "DEGRADED" && ["ANALYSIS_QUEUED", "WAITING_FOR_ANALYSIS"].includes(state);
+  const waiting = !waitingForAnalysisWorker && processingSince ? processingWaitLabel(new Date(processingSince)) : null;
   const recoveryCopy = recoveryAction === "RETRY_INGESTION" ? (state === "NOT_STARTED" ? "开始处理" : "重新解析") : "恢复深度理解";
-  return <section className="panel"><p>{configurationError ? "书籍解析完成。配置 AI Provider 后开始深度理解。" : processingCopy[state] ?? "正在处理"}</p>{waiting && <p className="muted" suppressHydrationWarning>{waiting}</p>}<p className="muted">后台自动处理，无需保持页面打开。{stageAvailability === "DEGRADED" ? " 后台处理服务未运行或暂时不可用。" : ""}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 AI Provider</Link>}<button className="button secondary" onClick={() => router.refresh()}>重新检查状态</button>{recovery && <button className="button" disabled={recovering} onClick={() => void recover()}>{recovering ? "正在提交恢复…" : recoveryCopy}</button>}</div></section>;
+  return <section className="panel"><p>{configurationError ? "书籍解析完成。配置 AI Provider 后开始深度理解。" : waitingForAnalysisWorker ? "正文提取已完成。AI 深度理解等待后台服务启动。" : processingCopy[state] ?? "正在处理"}</p>{waiting && <p className="muted" suppressHydrationWarning>{waiting}</p>}<p className="muted">{stageAvailability === "DEGRADED" ? "后台处理服务未运行或暂时不可用，当前不会自动推进。" : "后台自动处理，无需保持页面打开。"}</p><div className="actions">{configurationError && <Link className="button" href="/studio/settings/providers">配置 AI Provider</Link>}<button className="button secondary" onClick={() => router.refresh()}>重新检查状态</button>{recovery && <button className="button" disabled={recovering} onClick={() => void recover()}>{recovering ? "正在提交恢复…" : recoveryCopy}</button>}</div></section>;
 }

@@ -49,6 +49,7 @@ type Props = {
     mediaType: string;
     version: number;
     hasIntelligence: boolean;
+    extractionSummary?: { pages: number; blocks: number; characters?: number | null } | null;
     ingestionStatus?: string | null;
     analysisStatus?: string | null;
     bootstrapStatus?: string | null;
@@ -62,9 +63,10 @@ type Props = {
   };
   memories: MemoryItemData[];
   structureNodes: StructureNodeData[];
+  textPreview?: { pageNumber: number; pageCount: number; physicalPageNumber: number | null; truncated: boolean; blocks: Array<{ id: string; ordinal: number; text: string }> } | null;
 };
 
-export function BookDetailView({ item, memories, structureNodes }: Props) {
+export function BookDetailView({ item, memories, structureNodes, textPreview }: Props) {
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
 
   // Flatten evidence items from memories for right pane display
@@ -120,12 +122,22 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
           </div>
         )}
 
+        {item.extractionSummary && (
+          <section className="card-panel" style={{ marginBottom: 20 }} aria-label="文本提取结果">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <span className="section-title">文本提取</span><StatusBadge value="提取完成" />
+            </div>
+            <p>正文已识别，可在右侧查看原文。</p>
+            <p className="muted">{item.extractionSummary.pages ? `${item.extractionSummary.pages} 页 · ` : ""}{item.extractionSummary.characters != null ? `${item.extractionSummary.characters.toLocaleString("zh-CN")} 个字符` : `${item.extractionSummary.blocks} 个文本区块`}</p>
+          </section>
+        )}
+
         {/* Processing State */}
         {!item.hasIntelligence && (
           <div className="card-panel" style={{ marginBottom: 32 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-              <span className="section-title">处理状态</span>
-              <StatusBadge value={item.processingState === "SUCCEEDED" ? "完成" : item.processingState.includes("FAILED") ? "失败" : item.processingState === "PROCESSING_DEGRADED" ? "需处理" : "处理中"} />
+              <span className="section-title">{item.extractionSummary ? "AI 深度理解" : "处理状态"}</span>
+              <StatusBadge value={item.extractionSummary && item.processingStage === "BOOK_ANALYSIS" && item.stageAvailability === "DEGRADED" && ["ANALYSIS_QUEUED", "WAITING_FOR_ANALYSIS"].includes(item.processingState) ? "等待服务" : item.processingState === "WAITING_FOR_PROVIDER" ? "待配置 AI" : item.processingState === "SUCCEEDED" ? "完成" : item.processingState.includes("FAILED") ? "失败" : item.processingState === "PROCESSING_DEGRADED" ? "需处理" : "处理中"} />
             </div>
             <SourceProcessing
               sourceDocumentId={item.id}
@@ -211,7 +223,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
       {/* Right Pane: Source Evidence (原文证据 - Parchment Surface) */}
       <div className="evidence-pane">
         <div className="evidence-header">
-          <h2 className="evidence-title">原文证据</h2>
+          <h2 className="evidence-title">{!allEvidence.length && textPreview ? "原文预览" : "原文证据"}</h2>
         </div>
 
         <div className="evidence-timeline">
@@ -243,7 +255,24 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
             );
           })}
 
-          {!allEvidence.length && (
+          {!allEvidence.length && textPreview && (
+            <section aria-label="已提取原文">
+              <p className="muted">物理页 {textPreview.physicalPageNumber ?? textPreview.pageNumber} / {textPreview.pageCount} · 来自已完成的正式提取</p>
+              <nav aria-label="原文翻页" style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 20 }}>
+                {textPreview.pageNumber > 1 && <Link prefetch={false} href={`/studio/library/${item.id}?textPage=${textPreview.pageNumber - 1}`} scroll={false} className="btn btn-secondary">上一页</Link>}
+                <form key={textPreview.pageNumber} method="get" action={`/studio/library/${item.id}`} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <label htmlFor="text-page">页码</label>
+                  <input id="text-page" name="textPage" type="number" min="1" max={textPreview.pageCount} defaultValue={textPreview.pageNumber} required style={{ width: 72, padding: 8 }} />
+                  <button className="btn btn-secondary" type="submit">跳转</button>
+                </form>
+                {textPreview.pageNumber < textPreview.pageCount && <Link prefetch={false} href={`/studio/library/${item.id}?textPage=${textPreview.pageNumber + 1}`} scroll={false} className="btn btn-secondary">下一页</Link>}
+              </nav>
+              {textPreview.blocks.map(block => <div key={block.id} style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.9, marginBottom: 20 }}>{block.text}</div>)}
+              {!textPreview.blocks.length && <p>本页没有提取到文字。</p>}
+              {textPreview.truncated && <p className="muted">本页内容较长，当前显示部分原文。</p>}
+            </section>
+          )}
+          {!allEvidence.length && !textPreview && (
             <div style={{ color: "#787774", fontSize: 14 }}>
               暂无可展示的原文证据。
             </div>
