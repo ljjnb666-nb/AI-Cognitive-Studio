@@ -14,6 +14,27 @@ const cases = {
 } as const;
 
 describe("Phase 8C Podcast strict provider schemas", () => {
+  it("distinguishes context-only summaries without laundering an invalid model citation", async () => {
+    const requests: Array<{ text: { messages: Array<{ content: string }>; system: string } }> = [];
+    const output = { utterances: cases.SEGMENT_DRAFTING.value.utterances.map(item => ({ ...item, evidence: [{ memoryItemId: "summary-no-evidence" }] })) };
+    type Runtime = ConstructorParameters<typeof GatewayPodcastGenerationProvider>[0];
+    const provider = new GatewayPodcastGenerationProvider({
+      workspaceId: "w", userId: "u", podcastGenerationRunId: "r", provider: "zhipu", model: "glm-4.5-air", pipelineVersion: "v1", promptVersion: "citation-contract-test",
+      repository: { findExistingTextInvocationForRequest: async () => undefined },
+      gateway: { resolveSnapshot: async () => ({ providerKey: "zhipu", modelId: "glm-4.5-air" }), execute: async (value: typeof requests[number]) => { requests.push(value); return { status: "SUCCEEDED", invocationId: "i", snapshot: { id: "s" }, response: { type: "STRUCTURED", structured: output } }; } },
+    } as unknown as Runtime);
+    const base = { sourceDocumentId: "source", extractionId: "extraction", chunkSetId: "chunks", analysisRunId: "analysis", artifactId: "artifact", content: "Context", score: 1, selectionReason: "retrieved", tokenEstimate: 10 };
+    const context = [
+      { ...base, memoryItemId: "summary-no-evidence", type: "SUMMARY", sourceBlockEvidenceSpans: [] },
+      { ...base, memoryItemId: "supported-person", type: "PERSON", sourceBlockEvidenceSpans: [{ sourceBlockId: "block", startOffset: 0, endOffset: 7 }] },
+    ];
+    const result = await provider.draftSegment({ metadata: { stage: "SEGMENT_DRAFTING", episodeId: "e", provider: "zhipu", model: "glm-4.5-air", tokenBudget: 8000, correlationId: "c" }, style: {}, hosts: [], plan: episodePlanSchema.parse(cases.EPISODE_PLANNING.value), narrative: narrativeSchema.parse(cases.NARRATIVE_DESIGN.value), segment: segmentOutlineSchema.parse(cases.SEGMENT_OUTLINE.value).segments[0]!, context });
+    const request = requests[0]!;
+    expect(JSON.parse(request.text.messages[0]!.content)).toMatchObject({ context, citationPolicy: { citableMemoryIds: ["supported-person"], contextOnlyMemoryIds: ["summary-no-evidence"] } });
+    expect(request.text.system).toContain("Only IDs in citationPolicy.citableMemoryIds may be cited");
+    // Domain grounding must still see and reject this citation; never strip or remap it.
+    expect(result).toEqual(output);
+  });
   it("keeps a two-minute outline at its configured duration", () => {
     const instruction = buildPodcastSystemInstruction("SEGMENT_OUTLINE", { targetDurationMinutes: 2 });
     expect(instruction).toContain("2 minutes total"); expect(instruction).toContain("120 seconds"); expect(instruction).not.toContain("15 minutes");

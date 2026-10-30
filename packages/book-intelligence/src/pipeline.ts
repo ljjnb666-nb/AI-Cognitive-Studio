@@ -159,7 +159,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
 async function loadStageContext(run: any, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<StageContext> {
   const [blocksRaw, chunks, nodes] = await Promise.all([
     db.sourceBlock.findMany({ where: { extractionId: run.extractionId }, orderBy: { ordinal: "asc" } }),
-    db.documentChunk.findMany({ where: { chunkSetId: run.chunkSetId }, include: { sourceSpans: true }, orderBy: { ordinal: "asc" } }),
+    db.documentChunk.findMany({ where: { chunkSetId: run.chunkSetId }, include: { sourceSpans: { orderBy: { ordinal: "asc" } } }, orderBy: { ordinal: "asc" } }),
     db.documentStructureNode.findMany({ where: { extractionId: run.extractionId }, orderBy: { ordinal: "asc" } }),
   ]);
   if (!chunks.length) throw new Error("ANALYSIS_LINEAGE_INVALID");

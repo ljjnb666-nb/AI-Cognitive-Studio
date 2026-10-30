@@ -166,6 +166,21 @@ afterEach(async () => { for (const workspaceId of workspaces.splice(0)) await cl
 afterAll(() => Promise.all([prisma.$disconnect(), observerPrisma.$disconnect()]));
 
 describe("durable Phase 3 generation", () => {
+  it("rejects a context-only memory citation atomically and preserves the failed run", async () => {
+    const data = await fixture();
+    const summary = await prisma.bookMemoryItem.findFirstOrThrow({ where: { workspaceId: data.workspace.id, type: "SUMMARY", evidence: { none: {} } } });
+    class UncitableSummaryProvider extends PodcastFixtureProvider {
+      override async draftSegment(input: Parameters<PodcastGenerationProvider["draftSegment"]>[0]) {
+        expect(input.context.some(item => item.memoryItemId === summary.id && item.sourceBlockEvidenceSpans.length === 0)).toBe(true);
+        const output = await super.draftSegment(input);
+        return { utterances: output.utterances.map((item, index) => index === 0 ? { ...item, isDirectQuote: false, evidence: [{ memoryItemId: summary.id }] } : item) };
+      }
+    }
+    await expect(processPodcastGenerationRun(data.requested.run.id, { provider: new UncitableSummaryProvider(), embeddingProvider: data.retrievalEmbeddings })).rejects.toThrow("PODCAST_EVIDENCE_REQUIRED");
+    expect(await prisma.podcastUtterance.count({ where: { podcastGenerationRunId: data.requested.run.id } })).toBe(0);
+    expect(await prisma.currentPodcastScript.count({ where: { episodeId: data.episode.id } })).toBe(0);
+    expect(await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } })).toMatchObject({ status: "FAILED" });
+  });
   describe("A2 claim/rearm authority races", () => {
     it("lets rearm N→N+1 win before a stale Podcast claim and gives the stale processor zero authority", async () => {
       const data = await fixture();

@@ -10,32 +10,43 @@ import { resolveBookAnalysisVersions, resolveBookProductExecution, requestBookAn
 import { createVoiceProfile, createEpisodeAudioConfig, requestPodcastGeneration, processPodcastGenerationRun, requestPodcastAudioGeneration, processPodcastAudioGenerationRun } from "../../packages/podcast-generation/src/index.js";
 import { createBookProductionGatewayRuntime, createPodcastProductionGatewayRuntime, createPodcastAudioProductionGatewayRuntime } from "../../apps/worker/src/provider-gateway-runtime.js";
 import { S3CompatibleStorageProvider } from "../../packages/storage/src/index.js";
-import { chapterLimits, paidChapterLimits, createChapterBudget, maximumPricedCny, maximumPaidPricedCny } from "./chapter-budget.js";
+import { chapterLimits, paidChapterLimits, resilientChapterLimits, createChapterBudget, maximumPricedCny, maximumPaidPricedCny, maximumResilientPricedCny, maximumAirPricedCny, airScriptLimits, citableChapterLimits, citableAirScriptLimits, maximumCitablePricedCny } from "./chapter-budget.js";
 
 const hash = (s: Uint8Array) => createHash("sha256").update(s).digest("hex");
 async function main() {
   const root = process.env.BOOK_PODCAST_PRIVATE_ROOT, mode = process.argv[2];
-  if (!root || !["prepare", "prepare-paid", "run"].includes(mode ?? "")) throw Error("CHAPTER_MODE_REQUIRED");
+  if (!root || !["prepare", "prepare-paid", "prepare-resilient", "prepare-air", "prepare-air-citable", "run"].includes(mode ?? "")) throw Error("CHAPTER_MODE_REQUIRED");
+  const citableResume = mode === "prepare-air-citable" || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_AIR_CITABLE_V5_ONCE_CUMULATIVE_6.50_CNY";
+  const airResume = process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_AIR_EVIDENCE_V4_ONCE_SAME_5.50_CNY";
+  const air = citableResume || airResume || mode === "prepare-air" || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_AIR_SCRIPT_ONCE_SAME_5.50_CNY";
+  const dataResume = air || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_FLASHX_DATA_V3_ONCE_SAME_5.50_CNY";
+  const jsonResume = dataResume || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_FLASHX_JSON_V2_ONCE_SAME_5.50_CNY";
+  const boundedRetry = jsonResume || mode === "prepare-resilient" || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_FLASHX_BOUNDED_RETRY_5.50_CNY_ONCE";
+  const podcastPromptVersion = citableResume ? "phase9-web-citable-v5" : airResume ? "phase9-web-evidence-v4" : dataResume ? "phase9-web-data-v3" : jsonResume ? "phase9-web-json-v2" : "phase9-web-v1";
   const paidResumeLater = process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_FLASHX_RESUME_SECOND_TIMEOUT_ONCE_SAME_3.00_CNY";
-  const paidResume = paidResumeLater || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_FLASHX_RESUME_TIMEOUT_ONCE_SAME_3.00_CNY";
-  const paid = mode === "prepare-paid" || paidResume || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_FLASHX_3.00_CNY_ONCE";
+  const paidResume = (boundedRetry && mode === "run") || paidResumeLater || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_FLASHX_RESUME_TIMEOUT_ONCE_SAME_3.00_CNY";
+  const paid = boundedRetry || mode === "prepare-paid" || paidResume || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_FLASHX_3.00_CNY_ONCE";
   if (paid) process.env.BOOK_ANALYSIS_PROMPT_VERSION = "chapter-source-evidence-v2";
   const textModel = paid ? "glm-4.7-flashx" : "glm-4.7-flash";
+  const podcastModel = air ? "glm-4.5-air" : textModel;
   const outputRoot = paid ? join(root, "paid-flashx-attempt-v1") : root;
   const identity = JSON.parse(await readFile(join(root, "podcast-product-preparation.private.json"), "utf8")) as { workspaceId: string; userId: string; episodeId: string; projectId: string; sourceDocumentId: string; extractionId: string; hostIds: string[] };
   const ctx = { workspaceId: identity.workspaceId, userId: identity.userId };
   if (hash(await readFile(join(root, "pg1342-chapter-01.private.epub"))) !== "41fef531a3e6347cfcd0a6f3b15208173fbe9efbe6fb7952933227af16f8e776") throw Error("CHAPTER_SOURCE_SHA_MISMATCH");
   const current = await prisma.currentDocumentExtraction.findFirstOrThrow({ where: { workspaceId: ctx.workspaceId, sourceDocumentId: identity.sourceDocumentId, extractionId: identity.extractionId } });
   if (current.extractionId !== identity.extractionId) throw Error("CHAPTER_EXTRACTION_CHANGED");
-  const configurationPath = join(root, paid ? "chapter-paid-configuration.private.json" : "chapter-configuration.private.json");
-  if (mode === "prepare" || mode === "prepare-paid") {
+  const configurationPath = join(root, citableResume ? "chapter-air-citable-configuration.private.json" : air ? "chapter-air-configuration.private.json" : boundedRetry ? "chapter-resilient-configuration.private.json" : paid ? "chapter-paid-configuration.private.json" : "chapter-configuration.private.json");
+  const limits = citableResume ? citableChapterLimits : boundedRetry ? resilientChapterLimits : paid ? paidChapterLimits : chapterLimits;
+  const maximum = citableResume ? maximumCitablePricedCny : air ? maximumAirPricedCny : boundedRetry ? maximumResilientPricedCny : paid ? maximumPaidPricedCny : maximumPricedCny;
+  const gatewayMaxAttempts = boundedRetry ? 2 : 1, timeoutMs = boundedRetry ? 50_000 : 90_000;
+  if (mode === "prepare" || mode === "prepare-paid" || mode === "prepare-resilient" || mode === "prepare-air" || mode === "prepare-air-citable") {
     const cipher = resolveCredentialKeyring(process.env); if (!cipher) throw Error("CREDENTIAL_VAULT_REQUIRED");
     const store = new ProviderGatewayRepository(prisma, cipher);
     const original = await prisma.providerRouteBinding.findUniqueOrThrow({ where: { workspaceId_routeSlot: { workspaceId: ctx.workspaceId, routeSlot: "PDF_VISUAL_STRUCTURE" } }, include: { connection: { include: { credentialVersions: { where: { status: "ACTIVE" }, orderBy: { credentialVersion: "desc" }, take: 1 } } } } });
     const credential = original.connection.credentialVersions[0];
     if (!credential || original.connection.providerKey !== "zhipu" || original.connection.status !== "ACTIVE") throw Error("ZHIPU_CREDENTIAL_REQUIRED");
     await store.setRoute(ctx, { routeSlot: "BOOK_CHUNK_ANALYSIS", connectionId: original.connectionId, modelId: textModel });
-    for (const routeSlot of ["BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "PODCAST_SCRIPT"] as const) await store.setRoute(ctx, { routeSlot, connectionId: original.connectionId, modelId: textModel });
+    for (const routeSlot of ["BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "PODCAST_SCRIPT"] as const) await store.setRoute(ctx, { routeSlot, connectionId: original.connectionId, modelId: routeSlot === "PODCAST_SCRIPT" ? podcastModel : textModel });
     let embedding = await prisma.providerConnection.findFirst({ where: { workspaceId: ctx.workspaceId, providerKey: "zhipu", protocol: "OPENAI_EMBEDDINGS", displayName: "Chapter I native embedding", status: "ACTIVE" } });
     if (!embedding) embedding = (await store.createConnectionWithCredential(ctx, { providerKey: "zhipu", protocol: "OPENAI_EMBEDDINGS", displayName: "Chapter I native embedding", endpoint: "https://open.bigmodel.cn/api/paas/v4/embeddings", secret: cipher.decrypt(credential, { workspaceId: ctx.workspaceId, connectionId: original.connectionId, credentialVersionId: credential.id, providerKey: "zhipu" }) })).connection;
     await store.setRoute(ctx, { routeSlot: "EMBEDDING", connectionId: embedding.id, modelId: "embedding-3", configuration: { embeddingDimensions: 1024 } });
@@ -49,18 +60,18 @@ async function main() {
     let audioConfig = await prisma.podcastEpisodeAudioConfig.findFirst({ where: { episodeId: identity.episodeId }, orderBy: { version: "desc" } });
     if (!audioConfig) audioConfig = await createEpisodeAudioConfig(ctx, { episodeId: identity.episodeId, outputFormat: "wav", sampleRate: 24000, channels: 1, defaultPauseMs: 300, speakingRateMultiplier: 1 });
     const routePlan = await resolveBookProductExecution(ctx.workspaceId);
-    await writeFile(configurationPath, JSON.stringify({ ...identity, hostVoiceProfileIds, audioConfigId: audioConfig.id, routePlan, limits: paid ? paidChapterLimits : chapterLimits, maximumPricedCny: paid ? maximumPaidPricedCny : maximumPricedCny, expectedCnyRange: paid ? [0.15, 0.40] : [0.10, 0.20], humanAuditionAcceptance: "可以，沿用当前音色与语速", externalCalls: 0, approvedForPaidExecution: false, publicationAuthorized: false }, null, 2));
-    console.log(JSON.stringify({ prepared: true, textModel, externalCalls: 0, maximumPricedCny: paid ? maximumPaidPricedCny : maximumPricedCny })); return;
+    await writeFile(configurationPath, JSON.stringify({ ...identity, hostVoiceProfileIds, audioConfigId: audioConfig.id, routePlan, podcastModel, limits, ...(air ? { airScriptLimits: citableResume ? citableAirScriptLimits : airScriptLimits } : {}), maximumPricedCny: maximum, gatewayMaxAttempts, timeoutMs, expectedCnyRange: paid ? [0.15, 0.40] : [0.10, 0.20], humanAuditionAcceptance: "可以，沿用当前音色与语速", externalCalls: 0, approvedForPaidExecution: false, publicationAuthorized: false }, null, 2));
+    console.log(JSON.stringify({ prepared: true, textModel, podcastModel, externalCalls: 0, maximumPricedCny: maximum })); return;
   }
   // No queued work, runtime or remote request is created before this guard.
   const budget = await createChapterBudget(outputRoot, process.env.CHAPTER_BUDGET_AUTHORIZATION);
-  if (paidResume) await writeFile(join(outputRoot, paidResumeLater ? "chapter-execution.second-attempt.private.json" : "chapter-execution.first-attempt.private.json"), await readFile(join(outputRoot, "chapter-execution.private.json")), { flag: "wx" });
+  if (paidResume) await writeFile(join(outputRoot, citableResume ? "chapter-execution.eighth-attempt.private.json" : airResume ? "chapter-execution.seventh-attempt.private.json" : air ? "chapter-execution.sixth-attempt.private.json" : dataResume ? "chapter-execution.fifth-attempt.private.json" : jsonResume ? "chapter-execution.fourth-attempt.private.json" : boundedRetry ? "chapter-execution.third-attempt.private.json" : paidResumeLater ? "chapter-execution.second-attempt.private.json" : "chapter-execution.first-attempt.private.json"), await readFile(join(outputRoot, "chapter-execution.private.json")), { flag: "wx" });
   if (process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_RESUME_429_ONCE_SAME_0.50_CNY") await writeFile(join(root, "chapter-execution.first-attempt.private.json"), await readFile(join(root, "chapter-execution.private.json")), { flag: "wx" });
   const config = JSON.parse(await readFile(configurationPath, "utf8")) as { audioConfigId: string; hostVoiceProfileIds: Record<string, string> };
-  const options = { adapterResolver: budget.adapterResolver, maxAttempts: 1, timeoutMs: 90_000 };
+  const options = { adapterResolver: budget.adapterResolver, maxAttempts: gatewayMaxAttempts, timeoutMs };
   const book = createBookProductionGatewayRuntime(process.env, options), podcast = createPodcastProductionGatewayRuntime(process.env, options), audio = createPodcastAudioProductionGatewayRuntime(process.env, options);
   const storage = new S3CompatibleStorageProvider({ endpoint: process.env.S3_ENDPOINT!, region: process.env.S3_REGION!, bucket: process.env.S3_BUCKET!, accessKey: process.env.S3_ACCESS_KEY!, secretKey: process.env.S3_SECRET_KEY!, forcePathStyle: true });
-  const evidence: Record<string, unknown> = { sourceDocumentId: identity.sourceDocumentId, extractionId: identity.extractionId, promptVersion: resolveBookAnalysisVersions().promptVersion, gatewayMaxAttempts: 1, timeoutMs: 90000, publicationAuthorized: false };
+  const evidence: Record<string, unknown> = { sourceDocumentId: identity.sourceDocumentId, extractionId: identity.extractionId, promptVersion: resolveBookAnalysisVersions().promptVersion, gatewayMaxAttempts, timeoutMs, publicationAuthorized: false };
   try {
     const execution = await resolveBookProductExecution(ctx.workspaceId);
     if (execution.provider !== "zhipu" || execution.model !== textModel) throw Error("CHAPTER_ROUTE_CHANGED");
@@ -69,7 +80,7 @@ async function main() {
     const analyzed = await processBookAnalysisRun(requested.run.id, { analysisProviderForRun: book.createAnalysisProvider, embeddingGatewayForRun: book.createEmbeddingGatewayForRun }, requested.run.dispatchGeneration);
     evidence.bookStatus = analyzed.status;
     if (analyzed.status !== "SUCCEEDED") throw Error("CHAPTER_BOOK_NOT_SUCCEEDED");
-    const generated = await requestPodcastGeneration(ctx, { episodeId: identity.episodeId, pipelineVersion: "phase9-web-v1", promptVersion: "phase9-web-v1", provider: "zhipu", model: textModel, outboxTopic: "private.chapter.acceptance.script" });
+    const generated = await requestPodcastGeneration(ctx, { episodeId: identity.episodeId, pipelineVersion: "phase9-web-v1", promptVersion: podcastPromptVersion, provider: "zhipu", model: podcastModel, outboxTopic: "private.chapter.acceptance.script" });
     evidence.podcastRunId = generated.run.id;
     const script = await processPodcastGenerationRun(generated.run.id, { providerForRun: podcast.createProviderForRun, embeddingProviderForRun: podcast.createEmbeddingProviderForRun });
     evidence.podcastStatus = script.status;

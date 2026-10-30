@@ -75,6 +75,19 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       expect(await prisma.bookMemoryEvidence.count({ where: { analysisRunId: requested.run.id } })).toBeGreaterThan(0);
     } finally { await r.close(); }
   });
+  it("allows the explicitly selected two-attempt deadline policy within the original business lease", async () => {
+    const f = await fixture(); await routes(f); let calls = 0;
+    const r = createBookProductionGatewayRuntime(source, { ...controls, maxAttempts: 2, timeoutMs: 20, adapterResolver: () => ({ execute: async ({ signal }) => {
+      if (++calls === 1) return new Promise((_, reject) => signal.addEventListener("abort", () => reject(new ProviderGatewayError("CANCELLED")), { once: true }));
+      return { response: { type: "STRUCTURED", structured: { summary: "recovered" } }, usage: { inputTokens: 1, outputTokens: 1 } };
+    } }) });
+    try {
+      expect(await r.gateway.execute(request(f.workspaceId, "BOOK_CHUNK_ANALYSIS", "bounded-two-attempts"), { userId: f.userId })).toMatchObject({ status: "SUCCEEDED", attempt: 2 });
+      expect(calls).toBe(2);
+      const invocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: f.workspaceId }, include: { attempts: { orderBy: { attemptNumber: "asc" } } } });
+      expect(invocation.attempts.map(attempt => attempt.status)).toEqual(["TIMEOUT", "SUCCEEDED"]);
+    } finally { await r.close(); }
+  });
   it("P02 missing keyring fails closed", () => expect(() => createBookProductionGatewayRuntime({ ...source, PROVIDER_GATEWAY_KEYRING: undefined, PROVIDER_GATEWAY_LOCAL_KEYRING_PATH: join(tmpdir(), `missing-keyring-${randomUUID()}`) })).toThrow("PROVIDER_GATEWAY_KEYRING_MISSING"));
   it("P03 malformed manifest fails closed", () => expect(() => createBookProductionGatewayRuntime({ ...source, PROVIDER_GATEWAY_MODEL_MANIFEST: "{" })).toThrow("PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID"));
   it("P04 missing BOOK_CHUNK_ANALYSIS route", async () => { const f = await fixture(), calls = { text: 0, embedding: 0 }; await expect(runtime(calls).gateway.execute(request(f.workspaceId, "BOOK_CHUNK_ANALYSIS", "p04"), { userId: f.userId })).rejects.toMatchObject({ code: "ROUTE_UNAVAILABLE" }); expect(calls.text).toBe(0); });

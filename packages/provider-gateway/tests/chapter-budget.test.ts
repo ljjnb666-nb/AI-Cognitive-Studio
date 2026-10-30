@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { createChapterBudget, maximumPricedCny, maximumPaidPricedCny } from "../../../tools/book-to-podcast/chapter-budget.js";
+import { createChapterBudget, maximumPricedCny, maximumPaidPricedCny, maximumResilientPricedCny, maximumAirPricedCny, maximumCitablePricedCny } from "../../../tools/book-to-podcast/chapter-budget.js";
 import { builtInProviderCatalog, DeterministicProviderHttpTransport, type ProviderAdapter } from "../src/index.js";
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true }); });
@@ -103,4 +103,108 @@ it("retains all three prior paid reservations when separately authorized after t
   const result = JSON.parse(await readFile(ledgerPath, "utf8"));
   expect(result.reservations).toEqual(ledger.reservations); expect(result.limits.approvedCny).toBe(3);
   await expect(createChapterBudget(path, "CHAPTER_I_FLASHX_RESUME_TIMEOUT_ONCE_SAME_3.00_CNY")).rejects.toMatchObject({ code: "EEXIST" });
+});
+it("allows only one explicitly approved transient retry, counting both physical calls", async () => {
+  const path = await root(), initial = await createChapterBudget(path, "CHAPTER_I_FLASHX_3.00_CNY_ONCE"); await initial.stop();
+  const ledgerPath = join(path, "chapter-call-reservations.private.json"), ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+  ledger.reservations = Array.from({ length: 9 }, (_, i) => ({ ordinal: i + 1, model: "glm-4.7-flashx", bodySha256: `prior-${i}`, characters: 0, embeddingItems: 0, reservedCny: 0.124 }));
+  await writeFile(ledgerPath, JSON.stringify(ledger));
+  for (const ordinal of [1, 2, 4, 5, 6, 8]) await writeFile(join(path, `chapter-response-${ordinal}.meta.private.json`), '{"httpStatus":200}');
+  const upstream: DeterministicProviderHttpTransport = new DeterministicProviderHttpTransport(() => upstream.calls.length === 1 ? { status: 500, headers: {}, body: "{}" } : { status: 200, headers: {}, body: JSON.stringify({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: "stop" }] }) });
+  const budget = await createChapterBudget(path, "CHAPTER_I_FLASHX_BOUNDED_RETRY_5.50_CNY_ONCE", upstream), input = wire();
+  Object.assign(input.snapshot, { routeSlot: "BOOK_CHUNK_ANALYSIS", protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.7-flashx", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions", capability: { modelId: "glm-4.7-flashx", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" } });
+  input.request.text = { messages: [{ role: "user", content: "bounded retry" }], structuredOutput: { mode: "JSON_MODE" } };
+  const adapter = budget.adapterResolver({ providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.7-flashx", family: "TEXT_GENERATION" })!;
+  await expect(adapter.execute(input)).rejects.toMatchObject({ code: "TRANSIENT_UPSTREAM", retryable: true });
+  await adapter.execute(input);
+  await expect(adapter.execute(input)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", retryable: false });
+  expect(upstream.calls).toHaveLength(2);
+  const result = JSON.parse(await readFile(ledgerPath, "utf8")); expect(result.reservations).toHaveLength(11); expect(result.stopped).toBe(true);
+  expect(result.reservations.reduce((sum: number, item: { reservedCny: number }) => sum + item.reservedCny, 0)).toBeCloseTo(11 * 0.124);
+  expect(maximumResilientPricedCny).toBeCloseTo(5.407456); expect(maximumResilientPricedCny).toBeLessThan(5.50);
+});
+it("preserves text and embedding charges for a separately approved JSON-contract regeneration", async () => {
+  const path = await root(), initial = await createChapterBudget(path, "CHAPTER_I_FLASHX_3.00_CNY_ONCE"); await initial.stop();
+  const ledgerPath = join(path, "chapter-call-reservations.private.json"), ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+  ledger.limits.approvedCny = 5.5;
+  ledger.reservations = Array.from({ length: 17 }, (_, i) => ({ ordinal: i + 1, model: i === 12 || i === 13 ? "embedding-3" : "glm-4.7-flashx", bodySha256: `prior-${i}`, characters: 0, embeddingItems: i === 12 ? 18 : i === 13 ? 1 : 0, reservedCny: i === 12 ? 18 * 3072 * 0.5 / 1_000_000 : i === 13 ? 3072 * 0.5 / 1_000_000 : 0.124 }));
+  await writeFile(ledgerPath, JSON.stringify(ledger));
+  for (const ordinal of [1, 2, 4, 5, 6, 8, 10, 12, 13, 14, 15, 16, 17]) await writeFile(join(path, `chapter-response-${ordinal}.meta.private.json`), '{"httpStatus":200}');
+  const resumed = await createChapterBudget(path, "CHAPTER_I_FLASHX_JSON_V2_ONCE_SAME_5.50_CNY"); await resumed.stop();
+  expect(JSON.parse(await readFile(ledgerPath, "utf8")).reservations).toEqual(ledger.reservations);
+  await expect(createChapterBudget(path, "CHAPTER_I_FLASHX_JSON_V2_ONCE_SAME_5.50_CNY")).rejects.toMatchObject({ code: "EEXIST" });
+});
+it("retries a schema echo only with the separate data-v3 grant and keeps all prior reservations", async () => {
+  const path = await root(), initial = await createChapterBudget(path, "CHAPTER_I_FLASHX_3.00_CNY_ONCE"); await initial.stop();
+  const ledgerPath = join(path, "chapter-call-reservations.private.json"), ledger = JSON.parse(await readFile(ledgerPath, "utf8")); ledger.limits.approvedCny = 5.5;
+  ledger.reservations = Array.from({ length: 24 }, (_, i) => { const items = i === 12 ? 18 : [13, 17, 21].includes(i) ? 1 : 0; return { ordinal: i + 1, model: items ? "embedding-3" : "glm-4.7-flashx", bodySha256: `prior-${i}`, characters: 0, embeddingItems: items, reservedCny: items ? items * 3072 * 0.5 / 1_000_000 : 0.124 }; });
+  await writeFile(ledgerPath, JSON.stringify(ledger));
+  for (const ordinal of [1, 2, 4, 5, 6, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24]) await writeFile(join(path, `chapter-response-${ordinal}.meta.private.json`), '{"httpStatus":200}');
+  const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false };
+  const upstream: DeterministicProviderHttpTransport = new DeterministicProviderHttpTransport(() => ({ status: 200, headers: {}, body: JSON.stringify({ choices: [{ message: { content: JSON.stringify(upstream.calls.length === 1 ? schema : { answer: "actual data" }) }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 3 } }) }));
+  const budget = await createChapterBudget(path, "CHAPTER_I_FLASHX_DATA_V3_ONCE_SAME_5.50_CNY", upstream), input = wire();
+  Object.assign(input.snapshot, { protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.7-flashx", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions" });
+  input.request.capability = { family: "TEXT_GENERATION", structuredOutput: "JSON_MODE" }; input.request.text = { messages: [{ role: "user", content: "generate data" }], structuredOutput: { mode: "JSON_MODE", schema } };
+  const adapter = budget.adapterResolver({ providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.7-flashx", family: "TEXT_GENERATION" })!;
+  await expect(adapter.execute(input)).rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE", retryable: true, usage: { inputTokens: 5, outputTokens: 3 } });
+  expect(await adapter.execute(input)).toMatchObject({ response: { structured: { answer: "actual data" } } });
+  expect(upstream.calls).toHaveLength(2); expect(JSON.parse(await readFile(ledgerPath, "utf8")).reservations).toHaveLength(26);
+});
+it("bounds the Air script alternative to ten actual requests and retains all old costs", async () => {
+  const path = await root(), initial = await createChapterBudget(path, "CHAPTER_I_FLASHX_3.00_CNY_ONCE"); await initial.stop();
+  const ledgerPath = join(path, "chapter-call-reservations.private.json"), ledger = JSON.parse(await readFile(ledgerPath, "utf8")); ledger.limits.approvedCny = 5.5;
+  ledger.reservations = Array.from({ length: 27 }, (_, i) => { const items = i === 12 ? 18 : [13, 17, 21, 24].includes(i) ? 1 : 0; return { ordinal: i + 1, model: items ? "embedding-3" : "glm-4.7-flashx", bodySha256: `prior-${i}`, characters: 0, embeddingItems: items, reservedCny: items ? items * 3072 * 0.5 / 1_000_000 : 0.124 }; });
+  await writeFile(ledgerPath, JSON.stringify(ledger));
+  for (const ordinal of [1, 2, 4, 5, 6, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25]) await writeFile(join(path, `chapter-response-${ordinal}.meta.private.json`), '{"httpStatus":200}');
+  const upstream = new DeterministicProviderHttpTransport(() => ({ status: 200, headers: {}, body: JSON.stringify({ choices: [{ message: { content: '{"answer":"data"}' }, finish_reason: "stop" }] }) }));
+  const budget = await createChapterBudget(path, "CHAPTER_I_AIR_SCRIPT_ONCE_SAME_5.50_CNY", upstream), input = wire();
+  Object.assign(input.snapshot, { routeSlot: "PODCAST_SCRIPT", protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.5-air", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions" });
+  input.request.routeSlot = "PODCAST_SCRIPT"; input.request.capability = { family: "TEXT_GENERATION", structuredOutput: "JSON_MODE" };
+  const adapter = budget.adapterResolver({ providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.5-air", family: "TEXT_GENERATION" })!;
+  for (let i = 0; i < 10; i++) { input.request.idempotencyKey = `air-${i}`; input.request.text = { messages: [{ role: "user", content: `data-${i}` }], structuredOutput: { mode: "JSON_MODE" } }; await adapter.execute(input); }
+  input.request.idempotencyKey = "air-over-limit";
+  await expect(adapter.execute(input)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", retryable: false }); expect(upstream.calls).toHaveLength(10);
+  const result = JSON.parse(await readFile(ledgerPath, "utf8")); expect(result.reservations).toHaveLength(37); expect(result.reservations[27].reservedCny).toBeCloseTo(0.2176);
+  expect(maximumAirPricedCny).toBeCloseTo(5.351456); expect(maximumAirPricedCny).toBeLessThan(5.50);
+});
+it("keeps four old Air calls counted when a rejected evidence draft is separately regenerated", async () => {
+  const path = await root(), initial = await createChapterBudget(path, "CHAPTER_I_FLASHX_3.00_CNY_ONCE"); await initial.stop();
+  const ledgerPath = join(path, "chapter-call-reservations.private.json"), ledger = JSON.parse(await readFile(ledgerPath, "utf8")); ledger.limits.approvedCny = 5.5;
+  ledger.reservations = Array.from({ length: 33 }, (_, i) => { const items = i === 12 ? 18 : [13, 17, 21, 24, 27, 31].includes(i) ? 1 : 0, air = [28, 29, 30, 32].includes(i); return { ordinal: i + 1, model: items ? "embedding-3" : air ? "glm-4.5-air" : "glm-4.7-flashx", bodySha256: `prior-${i}`, characters: 0, embeddingItems: items, reservedCny: items ? items * 3072 * 0.5 / 1_000_000 : air ? 0.2176 : 0.124 }; });
+  await writeFile(ledgerPath, JSON.stringify(ledger));
+  for (const ordinal of [1, 2, 4, 5, 6, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 28, 29, 30, 31, 32, 33]) await writeFile(join(path, `chapter-response-${ordinal}.meta.private.json`), '{"httpStatus":200}');
+  const upstream = new DeterministicProviderHttpTransport(() => ({ status: 200, headers: {}, body: JSON.stringify({ choices: [{ message: { content: '{"answer":"data"}' }, finish_reason: "stop" }] }) }));
+  const budget = await createChapterBudget(path, "CHAPTER_I_AIR_EVIDENCE_V4_ONCE_SAME_5.50_CNY", upstream), input = wire();
+  Object.assign(input.snapshot, { protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.5-air", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions" });
+  input.request.routeSlot = "PODCAST_SCRIPT"; input.request.capability = { family: "TEXT_GENERATION", structuredOutput: "JSON_MODE" };
+  const adapter = budget.adapterResolver({ providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.5-air", family: "TEXT_GENERATION" })!;
+  for (let i = 0; i < 6; i++) { input.request.idempotencyKey = `remaining-air-${i}`; input.request.text = { messages: [{ role: "user", content: `remaining-${i}` }], structuredOutput: { mode: "JSON_MODE" } }; await adapter.execute(input); }
+  input.request.idempotencyKey = "eleventh-air";
+  await expect(adapter.execute(input)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", retryable: false }); expect(upstream.calls).toHaveLength(6);
+  const result = JSON.parse(await readFile(ledgerPath, "utf8")); expect(result.reservations.slice(0, 33)).toEqual(ledger.reservations); expect(result.reservations).toHaveLength(39);
+});
+
+it("requires the distinct citable-contract grant and retains forty prior physical requests", async () => {
+  const path = await root(), initial = await createChapterBudget(path, "CHAPTER_I_FLASHX_3.00_CNY_ONCE"); await initial.stop();
+  const ledgerPath = join(path, "chapter-call-reservations.private.json"), ledger = JSON.parse(await readFile(ledgerPath, "utf8")); ledger.limits.approvedCny = 5.5;
+  ledger.reservations = Array.from({ length: 40 }, (_, i) => {
+    const ordinal = i + 1, items = ordinal === 13 ? 18 : [14, 18, 22, 25, 28, 32, 34, 38].includes(ordinal) ? 1 : 0;
+    const air = [29, 30, 31, 33, 35, 36, 37, 39, 40].includes(ordinal);
+    return { ordinal, model: items ? "embedding-3" : air ? "glm-4.5-air" : "glm-4.7-flashx", bodySha256: `prior-${i}`, characters: 0, embeddingItems: items, reservedCny: items ? items * 3072 * 0.5 / 1_000_000 : air ? 0.2176 : 0.124 };
+  });
+  await writeFile(ledgerPath, JSON.stringify(ledger));
+  for (let ordinal = 1; ordinal <= 40; ordinal++) if (![3, 7, 9, 11, 23, 26, 27].includes(ordinal)) await writeFile(join(path, `chapter-response-${ordinal}.meta.private.json`), '{"httpStatus":200}');
+  const upstream = new DeterministicProviderHttpTransport(() => ({ status: 200, headers: {}, body: JSON.stringify({ choices: [{ message: { content: '{"answer":"data"}' }, finish_reason: "stop" }] }) }));
+  await expect(createChapterBudget(path, "CHAPTER_I_AIR_EVIDENCE_V4_ONCE_SAME_5.50_CNY", upstream)).rejects.toThrow("CHAPTER_PAID_RESUME_SCOPE_MISMATCH");
+  const budget = await createChapterBudget(path, "CHAPTER_I_AIR_CITABLE_V5_ONCE_CUMULATIVE_6.50_CNY", upstream), input = wire();
+  Object.assign(input.snapshot, { protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.5-air", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions" });
+  input.request.routeSlot = "PODCAST_SCRIPT"; input.request.capability = { family: "TEXT_GENERATION", structuredOutput: "JSON_MODE" };
+  const adapter = budget.adapterResolver({ providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.5-air", family: "TEXT_GENERATION" })!;
+  for (let i = 0; i < 6; i++) { input.request.idempotencyKey = `citable-${i}`; input.request.text = { messages: [{ role: "user", content: `citable-${i}` }], structuredOutput: { mode: "JSON_MODE" } }; await adapter.execute(input); }
+  input.request.idempotencyKey = "sixteenth-air";
+  await expect(adapter.execute(input)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", retryable: false });
+  expect(upstream.calls).toHaveLength(6);
+  const result = JSON.parse(await readFile(ledgerPath, "utf8")); expect(result.reservations.slice(0, 40)).toEqual(ledger.reservations); expect(result.limits.approvedCny).toBe(6.5);
+  expect(maximumCitablePricedCny).toBeCloseTo(6.439456); expect(maximumCitablePricedCny).toBeLessThan(6.5);
+  await expect(createChapterBudget(path, "CHAPTER_I_AIR_CITABLE_V5_ONCE_CUMULATIVE_6.50_CNY", upstream)).rejects.toThrow();
 });

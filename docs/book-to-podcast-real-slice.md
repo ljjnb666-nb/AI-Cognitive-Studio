@@ -2,7 +2,42 @@
 
 本轮目标 active；尚未生成真实音频，不宣称完整成功。禁止回到 OCR 基础设施扩展。
 
-## 2026-10-30 当前事实
+## 2026-10-31 当前状态（以下旧记录按时间保留）
+
+**BOOK_TO_PODCAST_VERTICAL_SLICE_BLOCKED_WITH_EVIDENCE**。真实章节尚无 CurrentPodcastScript/CurrentPodcastAudio；35秒试音成功不能替代章节验收。本地修复及测试不能替代真实模型和浏览器成品。
+
+- 正向样本仍是已获内容处理授权的 Gutenberg #1342 原作第一章：4573字符、39个可信 SourceBlock、5个正式 DocumentChunk，源 SHA、段落范围与原生提取证据保留私有。没有新增 OCR。
+- 真实 FlashX Book Intelligence 已 SUCCEEDED（chapter-source-evidence-v2）；13条记忆、18条内容/记忆向量由真实供应商产生。12条记忆有存储证据，1条摘要无证据。模型记忆不是 Gold：已有个别人物归属和摘要语义风险，最终脚本仍须对照原文核验。
+- 最近真实 Air 脚本在 SEGMENT_DRAFTING 失败，PODCAST_EVIDENCE_REQUIRED；返回引用了无证据摘要。旧响应、失败 run 和用量保留。没有章节 TTS 请求，没有章节 WAV，也没有章节 Edge 播放证明。
+- 修复生产 Gateway 输入：从检索持久化证据快照明确提供 citableMemoryIds/contextOnlyMemoryIds，禁止引用后者；保留背景摘要。未替模型补写引用、删除错误引用或放宽域门禁。新增数据库回归证明错误引用导致整段物化事务回滚、无当前脚本且失败记录保留。
+- 真实调用还暴露 JSON 引号错误、schema 回显、错误 span 配对。当前 JSON_MODE 使用完整本地 schema 验证、明确要求数据实例和真实 memory ID；错误响应仍计用量，不在本地修补 JSON。人性化必须逐字保留不可编辑的实质性/证据语句。
+- CI ba0eb75 的 41049631704 曾失败：Book sourceSpans 无显式顺序；Phase9 fixture 仍将新 JSON 证据载荷当正文。现已分别按 ordinal 读取、严格验证正文和全部实际证据载荷，不降低断言。后续准确 HEAD CI 必须另验。
+
+### 累计用量与停止状态
+
+截至本次只读核对，付费账本 stopped=true：22次 FlashX、9次 Air、9次 Embedding（26条输入），章节 TTS 0次。31次付费文本请求包含全部失败和超时。7次旧超时没有可用实报用量，费用未知，完整预留保留。
+
+| 模型 | 有实报用量的响应 | 输入 token | 输出 token | 对已知用量按标价保守上估（元） |
+| --- | --- | --- | --- | --- |
+| glm-4.7-flashx | 15/22 | 31448 | 11985 | 0.051679 |
+| glm-4.5-air | 9/9 | 35812 | 8631 | 0.1120224 |
+| embedding-3 | 9/9 | 1998 | 0 | 0.000999 |
+
+这些标价计算不是账单。累计预留上界4.726336元；不能从已知响应估算中扣除7次超时预留。官方价格于本轮复核：https://docs.bigmodel.cn/cn/guide/start/pricing 。原独立试音及两次免费模型429不混入此付费账本。
+
+### 已准备但尚未授权的恢复方案
+
+新提示版本 phase9-web-citable-v5，完整复用成功 Book，仅重做播客。Air最多再6次实际请求（包含重试），累计Air上限15次、累计文本仍不超过40次；单次输出最多8000 token，输入按128K最坏档1.2元/百万token、输出8元/百万token预留，每次0.2176元。Embedding保持累计16次/96条，TTS保持24次/1500字符，双音色及语速1.0不变。
+
+拟申请累计预算6.50元（不是新增6.50元）：4.726336旧预留 + 6×0.2176新文本 + 70×3072×0.5/百万剩余Embedding + 0.30剩余TTS = 6.439456元。预计后续正常完成约0.15～0.40元，旧超时实扣仍未知。新授权标记有独立一次性文件并严格核验旧40条预留；重启不自动续跑。网络/超时/JSON结构错误每操作最多重试1次、每次≤50秒；权限/质量/预算错误或两次均失败即停。仅处理同一已授权章节，成功后私有持久化并验收Edge，不发布。
+
+prepare-air-citable 已本地执行，externalCalls=0，approvedForPaidExecution=false。这段方案及代码不是费用授权；收到用户单独批准前不得使用新标记启动。
+
+本地验证：Podcast Gateway/持久化四文件87 PASS，Podcast单元15 PASS；Provider Phase8C 123 PASS；Provider JSON/视觉/预算三文件66 PASS（与前组有重叠，不相加）；Worker生产Gateway30 PASS；Book集成88 PASS；相关lint/typecheck及operator tsc通过。数据库/HTTP fixture测试与真实供应商结果分开。没有本轮新增付费调用。
+
+B03 第15物理页仍为 standard/REJECTED，当前正式提取数和ChunkSet数均为0。未修改旧失败或解除门禁。#215/#216/#217准确HEAD与下表一致，仍Draft/Open/Unmerged。只读集成计划不变；本PR #218继续Draft，不合并、不部署、不公开内容。
+
+## 2026-10-30 初始事实（历史快照）
 
 - 当前工作区原本干净；从 #217 HEAD ea65676a5aac1ad4fe34156dc441b1b575d13b74 创建 codex/book-to-podcast-real-slice 分支，复用原 managed worktree，没有新建 worktree。
 - GitHub 重新核验 #217 Draft/Open，CI 41016216322 六项 SUCCESS；#215/#216 及 #209～#212 均仍 Draft/Open。

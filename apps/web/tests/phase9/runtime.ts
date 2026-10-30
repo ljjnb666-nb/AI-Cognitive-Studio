@@ -8,7 +8,7 @@ function wav(seed: number) { const rate = 8_000, samples = 20_000, bytes = new U
 
 async function bookResponse(request: any) {
   // GatewayAnalysisProvider carries run/job identity in every text operation key.
-  // sourceBlockIds/boundedChunk are not forwarded through the gateway transport.
+  // CHUNK user data carries the same real sourceEvidence contract as production.
   const identity = /^book-analysis-text:([^:]+):([^:]+):(CHUNK|SECTION|CHAPTER|BOOK):(.+)$/.exec(request.idempotencyKey ?? "");
   if (!identity) throw new Error("PHASE9_BOOK_REQUEST_LINEAGE_REQUIRED");
   const [, analysisRunId, jobId, stage, operation] = identity;
@@ -19,15 +19,18 @@ async function bookResponse(request: any) {
   if (!chunkIdentity) throw new Error("PHASE9_BOOK_CHUNK_LINEAGE_REQUIRED");
   const chunk = await prisma.documentChunk.findFirst({
     where: { id: chunkIdentity[1], contentHash: chunkIdentity[2], chunkSetId: run.chunkSetId, workspaceId: run.workspaceId },
-    include: { sourceSpans: { include: { sourceBlock: { include: { extraction: true } } }, orderBy: [{ sourceBlock: { ordinal: "asc" } }, { startOffset: "asc" }] } },
+    include: { sourceSpans: { include: { sourceBlock: { include: { extraction: true } } }, orderBy: { ordinal: "asc" } } },
   });
-  if (!chunk || chunk.content !== request.text?.messages?.[0]?.content || !chunk.sourceSpans.length)
+  const payload = JSON.parse(request.text?.messages?.[0]?.content ?? "null");
+  if (!chunk || chunk.content !== payload?.content || !chunk.sourceSpans.length)
     throw new Error("PHASE9_BOOK_CHUNK_LINEAGE_MISMATCH");
   for (const span of chunk.sourceSpans) {
     const block = span.sourceBlock;
     if (block.extractionId !== run.extractionId || block.extraction.sourceDocumentId !== run.sourceDocumentId || block.extraction.workspaceId !== run.workspaceId || span.startOffset < 0 || span.endOffset <= span.startOffset || span.endOffset > block.text.length)
       throw new Error("PHASE9_BOOK_BLOCK_LINEAGE_MISMATCH");
   }
+  const expectedEvidence = chunk.sourceSpans.map(span => ({ sourceBlockId: span.sourceBlockId, startOffset: span.startOffset, endOffset: span.endOffset, text: span.sourceBlock.text.slice(span.startOffset, span.endOffset) }));
+  if (JSON.stringify(payload.sourceEvidence) !== JSON.stringify(expectedEvidence)) throw new Error("PHASE9_BOOK_EVIDENCE_PAYLOAD_MISMATCH");
   // Keep the fixture's single evidence anchor per Book. Later bounded chunks
   // contribute claims, so retrieval input size does not grow with quote count.
   if (chunk.ordinal !== 0) return { summary: "Bounded intelligence from the workspace route.", memory: [{ type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence." }] };
