@@ -82,7 +82,7 @@ async function main() {
     if (analyzed.status !== "SUCCEEDED") throw Error("CHAPTER_BOOK_NOT_SUCCEEDED");
     const generated = await requestPodcastGeneration(ctx, { episodeId: identity.episodeId, pipelineVersion: "phase9-web-v1", promptVersion: podcastPromptVersion, provider: "zhipu", model: podcastModel, outboxTopic: "private.chapter.acceptance.script" });
     evidence.podcastRunId = generated.run.id;
-    const script = await processPodcastGenerationRun(generated.run.id, { providerForRun: podcast.createProviderForRun, embeddingProviderForRun: podcast.createEmbeddingProviderForRun });
+    const script = await processPodcastGenerationRun(generated.run.id, { providerForRun: podcast.createProviderForRun, embeddingProviderForRun: podcast.createEmbeddingProviderForRun, qualityFailurePolicy: "STOP" });
     evidence.podcastStatus = script.status;
     if (script.status !== "SUCCEEDED") throw Error("CHAPTER_SCRIPT_NOT_SUCCEEDED");
     const revision = await prisma.currentPodcastScript.findFirstOrThrow({ where: { episodeId: identity.episodeId, workspaceId: ctx.workspaceId }, include: { revision: true } });

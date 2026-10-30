@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma, PrismaClient } from "@ai-cognitive/db";
 import { type Environment } from "@ai-cognitive/shared/server";
 import { createPodcastGenerationQueue, createPodcastGenerationWorker } from "../../../apps/worker/src/podcast-generation.js";
-import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysis, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, estimateAnalysisTokens, processBookAnalysisRun, requestBookAnalysis, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "@ai-cognitive/book-intelligence";
 import { claimPodcastGenerationRun, createEpisode, createPodcastProject, dispatchPendingPodcastGeneration, evaluatePodcastScript, getEpisodeScript, getPodcastGenerationStatus, PODCAST_GENERATION_OWNERSHIP_LOST, processPodcastGenerationRun, rearmPodcastGenerationRunById, requestPodcastGeneration, type DialogueOutput, type EpisodePlanOutput, type HumanizationOutput, type NarrativeOutput, type PodcastGenerationProvider, type SegmentOutlineOutput } from "../src/index.js";
 import { clearBookAnalysisEmbeddingGatewayFixtureState, createBookAnalysisEmbeddingGatewayFixture } from "../../book-intelligence/tests/helpers/book-analysis-embedding-gateway.js";
 
@@ -166,6 +166,43 @@ afterEach(async () => { for (const workspaceId of workspaces.splice(0)) await cl
 afterAll(() => Promise.all([prisma.$disconnect(), observerPrisma.$disconnect()]));
 
 describe("durable Phase 3 generation", () => {
+  it("persists exact bounded source excerpts separately from quote status and accounts for their budget", async () => {
+    const data = await fixture(), provider = new PodcastFixtureProvider();
+    const person = await prisma.bookMemoryItem.findFirstOrThrow({ where: { workspaceId: data.workspace.id, type: "QUOTE", evidence: { some: {} } } });
+    await prisma.bookMemoryItem.update({ where: { id: person.id }, data: { type: "PERSON" } });
+    await prisma.bookMemoryEvidence.updateMany({ where: { memoryItemId: person.id }, data: { quoteText: null, quoteHash: null } });
+    await processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.retrievalEmbeddings });
+    const rows = await prisma.podcastPlanContextItem.findMany({ where: { podcastGenerationRunId: data.requested.run.id } });
+    let nonQuoteExcerpts = 0;
+    for (const row of rows) {
+      const spans = row.evidenceSpans as Array<{ sourceBlockId: string; startOffset: number; endOffset: number; sourceText?: string; quoteText: string | null }>;
+      for (const span of spans) {
+        const block = await prisma.sourceBlock.findUniqueOrThrow({ where: { id: span.sourceBlockId } });
+        expect(block.extractionId).toBe(row.extractionId);
+        expect(span.sourceText).toBe(block.text.slice(span.startOffset, span.endOffset));
+        if (span.quoteText === null) nonQuoteExcerpts++;
+      }
+      const memory = await prisma.bookMemoryItem.findUniqueOrThrow({ where: { id: row.memoryItemId } });
+      const text = spans.length ? [memory.content, ...spans.map(span => span.sourceText!)].join("\n") : memory.content;
+      expect(row.tokenEstimate).toBe(estimateAnalysisTokens(text));
+    }
+    // PERSON evidence gains an excerpt without acquiring exact-quote status.
+    // Uncited CLAIM/SUMMARY memories remain context-only.
+    expect(rows.length).toBeGreaterThan(0);
+    expect(nonQuoteExcerpts).toBeGreaterThan(0);
+    expect(rows.some(row => (row.evidenceSpans as unknown[]).length > 0)).toBe(true);
+  });
+
+  it("honors stop-on-quality policy before invoking the built-in paid redraft", async () => {
+    const data = await fixture(), provider = new RegeneratingPodcastProvider();
+    await expect(processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.retrievalEmbeddings, qualityFailurePolicy: "STOP" })).rejects.toThrow("PODCAST_GROUNDING_FAILED:UNSUPPORTED:");
+    expect([...provider.draftsBySegment.values()].every(attempts => attempts === 1)).toBe(true);
+    expect(provider.calls.filter(call => call.stage === "SEGMENT_DRAFTING").every(call => call.generationAttempt === 1)).toBe(true);
+    expect(await prisma.episodeSegment.count({ where: { podcastGenerationRunId: data.requested.run.id, generationAttemptCount: { gt: 1 } } })).toBe(0);
+    expect(await prisma.currentPodcastScript.count({ where: { episodeId: data.episode.id } })).toBe(0);
+    expect(await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } })).toMatchObject({ status: "FAILED", stage: "GROUNDING_VALIDATION" });
+  });
+
   it("rejects a context-only memory citation atomically and preserves the failed run", async () => {
     const data = await fixture();
     const summary = await prisma.bookMemoryItem.findFirstOrThrow({ where: { workspaceId: data.workspace.id, type: "SUMMARY", evidence: { none: {} } } });

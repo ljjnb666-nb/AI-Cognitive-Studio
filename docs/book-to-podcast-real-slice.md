@@ -2,7 +2,25 @@
 
 本轮目标 active；尚未生成真实音频，不宣称完整成功。禁止回到 OCR 基础设施扩展。
 
-## 2026-10-31 当前状态（以下旧记录按时间保留）
+## 2026-10-31 citable-v5 恢复的真实结果（最新）
+
+用户已单独批准累计6.50元方案，本次一次启动现已终止。真实 run 在 GROUNDING_VALIDATION 失败，最终执行错误 BUDGET_EXCEEDED；没有第7次新增文本POST，没有章节TTS、CurrentPodcastScript或CurrentPodcastAudio。累计48次物理请求为22次FlashX、15次Air、11次Embedding（28条输入），累计预留6.035008元；这不是实扣账单。旧7次超时预留继续保留。此次授权已经触发停止条件，不得重新启动。
+
+必须披露的执行遗漏：现有引擎默认在第一次来源/自然度校验失败后自动质量重写，本轮第6次新增Air调用用于该重写，随后humanization被15次Air上限在发网前拦截。虽然没有超总金额和次数上限，这次自动质量重写不符合本轮“质量错误即停”的约定。原调用、供应商响应和费用预留全部保留，不能退款式扣除或改写历史。
+
+现已在现有ProcessPodcastDependencies增加明确qualityFailurePolicy，默认保留产品原有一次重写；章节验收执行器明确选择STOP，在第一次质量判定失败后、重写调用前抛出原始质量错误。数据库回归证明没有generationAttempt>1、没有当前脚本，失败run保留。此修复未新增任何付费调用。
+
+对真实失败草稿的原文核查还发现：Book人物记忆将“和女儿一样漂亮、可能更受欢迎”的比较错误归给丈夫，实际对话指向妻子；脚本继续把妻子谈自己美貌的话归给丈夫，并把缺乏来源的社会/心理解读说成事实。存在合法ID/范围不等于语义正确，不能直接将成功Book当Gold或把这份草稿送TTS。
+
+根因补强：原Podcast上下文只给非引语记忆的概括与坐标，没有原文正文。现从绑定extraction内读取对应SourceBlock，只按真实起止范围附加sourceText，作为检索快照持久化；保持quoteText和原记忆不变，不把普通片段变成直接引语。新增正文计入原上下文预算，超预算候选不进入输入。模型被明确要求以原文片段核对记忆，缺证、矛盾或说话人不明确时不得补写事实。旧持久化上下文仍按其原快照读取，未补改历史响应。
+
+本地四文件回归91 PASS，包含无证据引用回滚、STOP阻止自动质量重写、PERSON原文片段与quote状态分离、精确范围和预算核验，以及原持久化/恢复测试。新测试首轮因手写token估算公式不符合已有估算器而失败，已改用正式estimateAnalysisTokens后完整重跑通过；未修改生产估算器或降低断言。相关lint/typecheck、operator tsc通过。下文87 PASS、6.50元“尚未授权”等均为恢复前历史快照，以本节为准。
+
+私有证据：paid-flashx-attempt-v1/chapter-execution.private.json、chapter-call-reservations.private.json、rejected-chapter-draft-citable-v5.private.json；旧40条预留及恢复前执行快照完整保留。该草稿明确标记FAILED_DRAFT_NOT_CURRENT_SCRIPT，不冒充完整合格脚本。所有原书/脚本/响应/音频仍不进入Git。新正文契约尚未真实模型验收，未来执行需要新版本和单独授权；本轮不再申请或启动付费恢复。
+
+状态仍为BOOK_TO_PODCAST_VERTICAL_SLICE_BLOCKED_WITH_EVIDENCE，不能宣称真实音频成功。
+
+## 2026-10-31 恢复前状态（历史快照）
 
 **BOOK_TO_PODCAST_VERTICAL_SLICE_BLOCKED_WITH_EVIDENCE**。真实章节尚无 CurrentPodcastScript/CurrentPodcastAudio；35秒试音成功不能替代章节验收。本地修复及测试不能替代真实模型和浏览器成品。
 
