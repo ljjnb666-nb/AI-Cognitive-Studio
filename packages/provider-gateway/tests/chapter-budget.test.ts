@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { createChapterBudget, maximumPricedCny, maximumPaidPricedCny, maximumResilientPricedCny, maximumAirPricedCny, maximumCitablePricedCny } from "../../../tools/book-to-podcast/chapter-budget.js";
+import { createChapterBudget, maximumPricedCny, maximumPaidPricedCny, maximumResilientPricedCny, maximumAirPricedCny, maximumCitablePricedCny, maximumSourcePricedCny } from "../../../tools/book-to-podcast/chapter-budget.js";
 import { builtInProviderCatalog, DeterministicProviderHttpTransport, type ProviderAdapter } from "../src/index.js";
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true }); });
@@ -207,4 +207,29 @@ it("requires the distinct citable-contract grant and retains forty prior physica
   const result = JSON.parse(await readFile(ledgerPath, "utf8")); expect(result.reservations.slice(0, 40)).toEqual(ledger.reservations); expect(result.limits.approvedCny).toBe(6.5);
   expect(maximumCitablePricedCny).toBeCloseTo(6.439456); expect(maximumCitablePricedCny).toBeLessThan(6.5);
   await expect(createChapterBudget(path, "CHAPTER_I_AIR_CITABLE_V5_ONCE_CUMULATIVE_6.50_CNY", upstream)).rejects.toThrow();
+});
+
+it("keeps all forty-eight reservations and caps the source-v6 recovery at six more Air calls", async () => {
+  const path = await root(), initial = await createChapterBudget(path, "CHAPTER_I_FLASHX_3.00_CNY_ONCE"); await initial.stop();
+  const ledgerPath = join(path, "chapter-call-reservations.private.json"), ledger = JSON.parse(await readFile(ledgerPath, "utf8")); ledger.limits.approvedCny = 6.5;
+  ledger.reservations = Array.from({ length: 48 }, (_, i) => {
+    const ordinal = i + 1, items = ordinal === 13 ? 18 : [14, 18, 22, 25, 28, 32, 34, 38, 41, 45].includes(ordinal) ? 1 : 0;
+    const air = [29, 30, 31, 33, 35, 36, 37, 39, 40, 42, 43, 44, 46, 47, 48].includes(ordinal);
+    return { ordinal, model: items ? "embedding-3" : air ? "glm-4.5-air" : "glm-4.7-flashx", bodySha256: `prior-${i}`, characters: 0, embeddingItems: items, reservedCny: items ? items * 3072 * 0.5 / 1_000_000 : air ? 0.2176 : 0.124 };
+  });
+  await writeFile(ledgerPath, JSON.stringify(ledger));
+  for (let ordinal = 1; ordinal <= 48; ordinal++) if (![3, 7, 9, 11, 23, 26, 27].includes(ordinal)) await writeFile(join(path, `chapter-response-${ordinal}.meta.private.json`), '{"httpStatus":200}');
+  const upstream = new DeterministicProviderHttpTransport(() => ({ status: 200, headers: {}, body: JSON.stringify({ choices: [{ message: { content: '{"answer":"data"}' }, finish_reason: "stop" }] }) }));
+  await expect(createChapterBudget(path, "CHAPTER_I_AIR_CITABLE_V5_ONCE_CUMULATIVE_6.50_CNY", upstream)).rejects.toThrow("CHAPTER_PAID_RESUME_SCOPE_MISMATCH");
+  const budget = await createChapterBudget(path, "CHAPTER_I_AIR_SOURCE_V6_ONCE_CUMULATIVE_8.00_CNY", upstream), input = wire();
+  Object.assign(input.snapshot, { protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.5-air", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions" });
+  input.request.routeSlot = "PODCAST_SCRIPT"; input.request.capability = { family: "TEXT_GENERATION", structuredOutput: "JSON_MODE" };
+  const adapter = budget.adapterResolver({ providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE", modelId: "glm-4.5-air", family: "TEXT_GENERATION" })!;
+  for (let i = 0; i < 6; i++) { input.request.idempotencyKey = `source-${i}`; input.request.text = { messages: [{ role: "user", content: `source-${i}` }], structuredOutput: { mode: "JSON_MODE" } }; await adapter.execute(input); }
+  input.request.idempotencyKey = "twenty-second-air";
+  await expect(adapter.execute(input)).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", retryable: false });
+  expect(upstream.calls).toHaveLength(6);
+  const result = JSON.parse(await readFile(ledgerPath, "utf8")); expect(result.reservations.slice(0, 48)).toEqual(ledger.reservations); expect(result.limits).toMatchObject({ approvedCny: 8, textRequests: 43 });
+  expect(maximumSourcePricedCny).toBeCloseTo(7.745056); expect(maximumSourcePricedCny).toBeLessThan(8);
+  await expect(createChapterBudget(path, "CHAPTER_I_AIR_SOURCE_V6_ONCE_CUMULATIVE_8.00_CNY", upstream)).rejects.toThrow();
 });

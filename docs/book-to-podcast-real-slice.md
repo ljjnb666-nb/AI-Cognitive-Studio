@@ -2,7 +2,17 @@
 
 本轮目标 active；尚未生成真实音频，不宣称完整成功。禁止回到 OCR 基础设施扩展。
 
-## 2026-10-31 citable-v5 恢复的真实结果（最新）
+## 2026-10-31 source-v6 离线准备（尚未付费执行）
+
+在旧失败上下文上只读核验新输入：原书摘录SHA不变，13条记忆中12条可引用、1条仅供背景，逐项绑定同一extraction的精确原文范围；包含新增正文后估算1811 token，低于既有14000限额。旧首稿有6条substantive=true但无引用的发言、总1335字符。未修补旧稿或改写历史。离线Gateway请求捕获使用禁止HTTP的替身，仅验证序列化契约，不冒充真实模型验收；报告在私有chapter-source-v6-input-preflight-final.private.json，externalCalls=0、databaseWrites=0。
+
+新增提示约束：所有阶段把Book记忆视为待原文核对的模型解释；实质性发言（包括复述事实的提问）必须有合法引用，不允许将事实断言标为非实质性来规避门禁。两分钟中文单段明确总spoken text≤420字符（含标点/空白）。其他语言不套用中文字数规则。STOP策略保持。
+
+当前HEAD的上一CI 41090069143在Phase15的Phase3 E2E失败：旧断言只按记忆正文估算token，未包含新增sourceText。已更新为对正文和全部原文片段精确重算，并额外逐项核对数据库extraction/来源/范围，不改预算和生产估算器。真实PG/MinIO/Redis/BullMQ/Worker的Phase3 E2E本地1 PASS；Provider预算16 PASS、Podcast契约12 PASS/单元15 PASS、相关lint/typecheck和operator tsc通过。最新提交需重新CI，旧失败保留。
+
+已准备、尚未授权的一次source-v6方案：继续复用成功Book，重做脚本5阶段，最多再6次Air物理请求（含网络/JSON重试），累计Air≤21、全部付费文本≤43。拟将累计预算从6.50提高到8.00元，不是新增8.00元：6.035008旧预留 + 6×0.2176文本 + 68×3072×0.5/百万剩余Embedding + 0.30剩余TTS = 7.745056元。Embedding累计仍≤16次/96条，TTS仍≤24次/1500字符。每操作最多2次、每次≤50秒，质量/权限/预算失败立即停，不自动质量重写、不自动续跑。预计后续正常完成约0.15～0.40元，旧7次超时实扣未知；旧48条记录和完整预留不可扣除。prepare-air-source仅本地配置，externalCalls=0、approvedForPaidExecution=false。新方案必须先取得单独授权才能启动。
+
+## 2026-10-31 citable-v5 恢复的真实结果（历史停止记录）
 
 用户已单独批准累计6.50元方案，本次一次启动现已终止。真实 run 在 GROUNDING_VALIDATION 失败，最终执行错误 BUDGET_EXCEEDED；没有第7次新增文本POST，没有章节TTS、CurrentPodcastScript或CurrentPodcastAudio。累计48次物理请求为22次FlashX、15次Air、11次Embedding（28条输入），累计预留6.035008元；这不是实扣账单。旧7次超时预留继续保留。此次授权已经触发停止条件，不得重新启动。
 

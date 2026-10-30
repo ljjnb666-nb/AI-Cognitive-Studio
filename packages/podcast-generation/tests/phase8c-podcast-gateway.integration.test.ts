@@ -14,6 +14,15 @@ const cases = {
 } as const;
 
 describe("Phase 8C Podcast strict provider schemas", () => {
+  it("makes short Chinese duration and substantive citation obligations explicit", () => {
+    const instruction = buildPodcastSystemInstruction("SEGMENT_DRAFTING", { language: "zh-CN", segmentDurationSeconds: 120 });
+    expect(instruction).toContain("at most 420 characters across ALL utterance.text values combined");
+    expect(instruction).toContain("Every utterance with substantive=true must have at least one evidence reference");
+    expect(instruction).toContain("never label a factual assertion non-substantive to hide missing evidence");
+    expect(buildPodcastSystemInstruction("SEGMENT_DRAFTING", { language: "en", segmentDurationSeconds: 120 })).not.toContain("Spoken text limit:");
+    expect(buildPodcastSystemInstruction("EPISODE_PLANNING")).toContain("fallible model interpretation, not ground truth");
+  });
+
   it("distinguishes context-only summaries without laundering an invalid model citation", async () => {
     const requests: Array<{ text: { messages: Array<{ content: string }>; system: string } }> = [];
     const output = { utterances: cases.SEGMENT_DRAFTING.value.utterances.map(item => ({ ...item, evidence: [{ memoryItemId: "summary-no-evidence" }] })) };

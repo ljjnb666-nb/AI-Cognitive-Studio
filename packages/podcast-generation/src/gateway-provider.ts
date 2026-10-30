@@ -18,11 +18,11 @@ export class GatewayPodcastGenerationProvider implements DurablePodcastGeneratio
   readonly identity;
   private readonly receipts = new Map<string, Receipt>();
   constructor(private readonly runtime: Runtime) { this.identity = { provider: runtime.provider, model: runtime.model }; }
-  private async invoke(stage: PodcastGatewayStage, input: { metadata: { segmentId?: string; correlationId: string; generationAttempt?: number }; style?: Record<string, unknown>; hosts?: PodcastHostPersona[]; repairReasons?: string[]; qualityHints?: string[]; context?: PodcastContextItem[] }): Promise<unknown> {
+  private async invoke(stage: PodcastGatewayStage, input: { metadata: { segmentId?: string; correlationId: string; generationAttempt?: number }; style?: Record<string, unknown>; hosts?: PodcastHostPersona[]; repairReasons?: string[]; qualityHints?: string[]; context?: PodcastContextItem[]; segment?: { targetDurationSeconds: number } }): Promise<unknown> {
     const attempt = input.metadata.generationAttempt ? `:attempt:${input.metadata.generationAttempt}` : "";
     const operationKey = `${this.runtime.podcastGenerationRunId}:${stage}${input.metadata.segmentId ? `:${input.metadata.segmentId}` : ""}${attempt}`;
     const mode = this.runtime.structuredOutput ?? "STRICT_JSON_SCHEMA";
-    const instruction = buildPodcastSystemInstruction(stage, { hosts: input.hosts, repairReasons: input.repairReasons ?? input.qualityHints, targetDurationMinutes: typeof input.style?.targetDurationMinutes === "number" ? input.style.targetDurationMinutes : undefined });
+    const instruction = buildPodcastSystemInstruction(stage, { hosts: input.hosts, repairReasons: input.repairReasons ?? input.qualityHints, segmentDurationSeconds: input.segment?.targetDurationSeconds, language: typeof input.style?.language === "string" ? input.style.language : undefined, targetDurationMinutes: typeof input.style?.targetDurationMinutes === "number" ? input.style.targetDurationMinutes : undefined });
     // Retrieval snapshots carry the stored Book memory evidence. Context-only
     // summaries remain useful for planning, but cannot become utterance citations.
     const providerInput = input.context ? { ...input, citationPolicy: {
