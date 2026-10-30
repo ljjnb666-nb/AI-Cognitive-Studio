@@ -101,6 +101,8 @@ export type MineruStandardAdmissionConfig = {
   manifest: MineruStandardManifest;
   /** SHA-256 of the exact manifest bytes — the model identity recorded per execution. */
   manifestSha256: string;
+  /** Runtime safety reserve may only be raised above the fixed 1 GiB floor. */
+  minRuntimeFreeMemoryBytes?: number;
   minFreeMemoryBytes: number;
   timeoutMs: number;
 };

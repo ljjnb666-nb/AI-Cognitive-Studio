@@ -1,3 +1,7 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { acquireOcrHostLease, releaseOcrHostLease } from "../../src/ocr-durability.js";
+import { reconcileOcrServerInstances } from "../../src/mineru/mineru-reconciler.js";
 import { processCreationTime, recordedProcessAlive } from "../../src/mineru/mineru-process.js";
 import { parseServerBaseUrl } from "../../src/mineru/mineru-standard-server-setup.js";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
@@ -96,9 +100,10 @@ async function createRunFixture(bytes: Uint8Array) {
 }
 
 
-async function observeOwnedStandardEngine(runId:string) {
+async function observeOwnedStandardEngine(runId:string,ownerAlive?:()=>boolean) {
   const deadline=Date.now()+180000;
   while(Date.now()<deadline){
+    if(ownerAlive && !ownerAlive())throw new Error("REAL_EXECUTOR_OWNER_EXITED_BEFORE_ENGINE_OBSERVATION");
     const instance=await prisma.ocrServerInstance.findFirst({where:{ingestionRunId:runId,status:"RUNNING"}});
     if(instance?.pid && instance.serverId && Array.isArray(instance.transports)){
       const base=parseServerBaseUrl(instance.transports as Array<Record<string,unknown>>);
@@ -280,7 +285,7 @@ describeReal("mineru real standard execution gate (STEP6-2B-1)", () => {
     } finally {await handle.close();}
   },600000);
 
-  it.skipIf(!realStandardPdf).each(["cancel","timeout","parent-exit"] as const)("lifecycle: real managed standard %s leaves no successful checkpoint or owned engine",async scenario=>{
+  it.skipIf(!realStandardPdf).each(["cancel","timeout","parent-exit","memory-pressure"] as const)("lifecycle: real managed standard %s leaves no successful checkpoint or owned engine",async scenario=>{
     if(!realStandardPdf) throw new Error("REAL_STANDARD_PDF_REQUIRED");
     const bytes=new Uint8Array(readFileSync(realStandardPdf));
     const config=await realStandardConfig();
@@ -290,12 +295,17 @@ describeReal("mineru real standard execution gate (STEP6-2B-1)", () => {
     const execution=handle.executor.extractPage({workspaceId:fixture.workspaceId,sourceDocumentId:fixture.sourceDocumentId,ingestionRunId:fixture.runId,physicalPageIndex:0,routingGeneration:PDF_ROUTING_GENERATION,runExecutionToken:fixture.executionToken,pageClaimToken:fixture.pageClaimToken,pdfBytes:bytes,standardExecutionRequest:{sourcePdfSha256:sha256Bytes(bytes)}});
     // Mirror rejection immediately so observing a process cannot cause an unhandled rejection.
     const settled=execution.then(result=>({result}),error=>({error}));
+    let finished=false;void settled.then(()=>{finished=true;});
     let observed:Awaited<ReturnType<typeof observeOwnedStandardEngine>>|undefined;
     try {
       if(scenario!=="timeout"){
-        observed=await observeOwnedStandardEngine(fixture.runId);
+        observed=await observeOwnedStandardEngine(fixture.runId,()=>!finished);
         if(scenario==="cancel") await handle.close();
-        else {
+        else if(scenario==="memory-pressure") {
+          // Tighten the reserve only after real engines exist. Do not allocate
+          // RAM or weaken the production floor to simulate pressure.
+          config.standard!.minRuntimeFreeMemoryBytes=68719476736;
+        } else {
           expect(await processCreationTime(observed.instance.pid!)).toBe(observed.doclibCreated);
           // Kill only the database-bound, freshly fingerprinted doclib pid.
           // The engine must stop through its real managed-control EOF path.
@@ -307,6 +317,7 @@ describeReal("mineru real standard execution gate (STEP6-2B-1)", () => {
       expect(outcome.result.status).toBe("FAILED");
       if(outcome.result.status!=="FAILED")return;
       if(scenario==="timeout")expect(outcome.result.errorCode).toBe("SOURCE_OCR_TIMEOUT");
+      if(scenario==="memory-pressure")expect(outcome.result.errorCode).toBe("SOURCE_OCR_MEMORY_PRESSURE");
       const receipt=await prisma.ocrPageExecution.findUniqueOrThrow({where:{pageClaimToken:fixture.pageClaimToken}});
       expect(receipt.executionStatus).toBe("FAILED");
       if(scenario==="cancel"){
@@ -326,6 +337,49 @@ describeReal("mineru real standard execution gate (STEP6-2B-1)", () => {
         expect(await recordedProcessAlive(enginePid!)).toBe(false);
       }
     } finally {await handle.close();await settled;}
+  },600000);
+
+  it.skipIf(!realStandardPdf)("reconciles real managed engines after the Node executor owner is killed",async()=>{
+    if(!realStandardPdf)throw new Error("REAL_STANDARD_PDF_REQUIRED");
+    const bytes=new Uint8Array(readFileSync(realStandardPdf));
+    const config=await realStandardConfig();
+    const fixture=await createRunFixture(bytes);
+    const child=spawn(process.execPath,["--import","tsx",join(import.meta.dirname,"../helpers/mineru/real-standard-worker.ts")],{env:process.env,windowsHide:true,stdio:["ignore","pipe","pipe","ipc"]});
+    let diagnostic="";
+    const capture=(chunk:Buffer)=>{if(diagnostic.length<65536)diagnostic+=chunk.toString("utf8");};
+    child.stdout!.on("data",capture);child.stderr!.on("data",capture);
+    const exited=new Promise<void>((resolve,reject)=>{child.once("exit",()=>resolve());child.once("error",reject);});
+    void exited.catch(()=>undefined);
+    child.send({config,pdfPath:realStandardPdf,request:{workspaceId:fixture.workspaceId,sourceDocumentId:fixture.sourceDocumentId,ingestionRunId:fixture.runId,physicalPageIndex:0,routingGeneration:PDF_ROUTING_GENERATION,runExecutionToken:fixture.executionToken,pageClaimToken:fixture.pageClaimToken}});
+    const recovery={hostId:config.hostId,executable:config.executable,executableArgs:config.executableArgs,stopTimeoutMs:config.serverStopTimeoutMs,homeRoot:config.homeRoot};
+    try {
+      const observed=await observeOwnedStandardEngine(fixture.runId,()=>child.exitCode===null && child.signalCode===null);
+      child.kill("SIGKILL");await exited;
+      expect(await processCreationTime(observed.instance.pid!)).toBe(observed.doclibCreated);
+      // Expire only this dead owner's host lease first. A still-live run must
+      // protect it from a premature reconciler stop, even after owner exit.
+      await prisma.ocrHostLease.update({where:{hostId:config.hostId},data:{leaseUntil:new Date(0)}});
+      expect((await reconcileOcrServerInstances(recovery)).skipped).toBe(1);
+      await prisma.ingestionRun.update({where:{id:fixture.runId},data:{executionLeaseUntil:new Date(0)}});
+      await prisma.ocrPageAttempt.updateMany({where:{ingestionRunId:fixture.runId},data:{leaseUntil:new Date(0)}});
+      const sweep=await reconcileOcrServerInstances(recovery);
+      expect(sweep).toMatchObject({stopped:1,orphaned:0});
+      expect((await prisma.ocrServerInstance.findUniqueOrThrow({where:{id:observed.instance.id}})).status).toBe("STOPPED");
+      expect(await processCreationTime(observed.enginePid)).not.toBe(observed.engineCreated);
+      expect(existsSync(observed.instance.mineruHome)).toBe(false);
+      expect(await prisma.ocrPageAttempt.count({where:{ingestionRunId:fixture.runId,status:"SUCCEEDED"}})).toBe(0);
+      expect(await prisma.ocrPageExecution.count({where:{pageClaimToken:fixture.pageClaimToken,executionStatus:"SUCCEEDED"}})).toBe(0);
+      const second=await reconcileOcrServerInstances(recovery);expect(second.examined).toBe(0);
+      const next=await acquireOcrHostLease(config.hostId);expect(next).not.toBeNull();
+      if(next)await releaseOcrHostLease(config.hostId,next.claimToken);
+    } finally {
+      if(child.exitCode===null && child.signalCode===null)child.kill("SIGKILL");
+      await exited;
+      await prisma.ocrHostLease.updateMany({where:{hostId:config.hostId},data:{leaseUntil:new Date(0)}});
+      await prisma.ingestionRun.updateMany({where:{id:fixture.runId},data:{executionLeaseUntil:new Date(0)}});
+      await reconcileOcrServerInstances(recovery);
+      if(process.env.MINERU_REAL_PRIVATE_ROOT)writeFileSync(join(process.env.MINERU_REAL_PRIVATE_ROOT,"worker-crash-child.private.log"),diagnostic);
+    }
   },600000);
 
 });

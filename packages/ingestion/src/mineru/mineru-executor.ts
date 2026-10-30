@@ -194,6 +194,18 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
     executionFacts.hostId=config.hostId;
     executionFacts.hostClaimToken=lease.claimToken;
     let leaseLost = false;
+    let memoryPressure = false;
+    const interruptionCode=()=>memoryPressure ? SourceError.OCR_MEMORY_PRESSURE : leaseLost ? SourceError.OCR_HOST_LEASE_LOST : SourceError.OCR_PROCESS_FAILED;
+    // Startup admission cannot protect against a different host workload
+    // consuming RAM during model loading/inference. Stop this owned claim
+    // before the fixed emergency reserve is exhausted; never weaken the floor.
+    const memoryMonitor=actualTier===MINERU_STANDARD_TIER ? setInterval(()=>{
+      if(signal.aborted)return;
+      const configured=config.standard?.minRuntimeFreeMemoryBytes;
+      const reserve=Math.max(1073741824,Number.isSafeInteger(configured) ? configured! : 1073741824);
+      const available=freemem();
+      if(available<reserve){memoryPressure=true;logger.warn("mineru.ocr.memory_pressure",{...logContext,availableMemoryBytes:available,reserveBytes:reserve});controller.abort();}
+    },250) : null;
     const heartbeat = setInterval(() => {
       void renewOcrHostLease(config.hostId, lease.claimToken).then((renewed) => { if (!renewed) { leaseLost = true; controller.abort(); } else if (sourceAuthority) { void renewOcrSourcePageLease(sourceAuthority).then(ok=>{ if(!ok) controller.abort(); }).catch(()=>controller.abort()); } }).catch(() => { leaseLost = true; controller.abort(); });
     }, config.heartbeatIntervalMs ?? Math.max(1_000, Math.floor(OCR_HOST_LEASE_TTL_MS / 3)));
@@ -263,6 +275,11 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
           MINERU_MODEL_SMALL_BACKEND: "onnx",
           MINERU_MODEL_VLM_ENGINE: "llama-cpp",
           MINERU_MODEL_VLM_SERVER_URL: "",
+          // One page per claim: do not provision competing document tasks or
+          // concurrent VLM requests inside this already serialized claim.
+          MINERU_DOCLIB_PARSE_WORKERS: "1",
+          MINERU_DOCLIB_INGEST_WORKERS: "1",
+          MINERU_MODEL_VLM_MAX_CONCURRENCY: "1",
           MINERU_DOCLIB_MANAGED_PARSE_SERVER_HOST: "127.0.0.1",
           MINERU_DOCLIB_MANAGED_PARSE_SERVER_PORT: String(managedEnginePort),
           MINERU_DOCLIB_MANAGED_PARSE_SERVER_STRICT_PORT: "true",
@@ -281,7 +298,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
           : startFailure.kind === "START_TIMEOUT"
             ? failure(SourceError.OCR_TIMEOUT, "transient")
             : startFailure.kind === "ABORTED"
-              ? failure(leaseLost ? SourceError.OCR_HOST_LEASE_LOST : SourceError.OCR_PROCESS_FAILED, "transient")
+              ? failure(interruptionCode(), "transient")
               : failure(SourceError.OCR_PROCESS_FAILED, "transient");
         logger.warn("mineru.ocr.server_start_failed", { ...logContext, kind: startFailure.kind, failureCode: mapped.status === "FAILED" ? mapped.errorCode : SourceError.OCR_PROCESS_FAILED, ...(startFailure.kind === "START_FAILED" ? { stderrTail: startFailure.stderrTail.slice(-300) } : {}) });
         return await recordCall(request, mapped, startedAt, executionFacts);
@@ -304,7 +321,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
         executionFacts.timings={...executionFacts.timings,engineReadyMs:Date.now()-engineStarted};
         // Cancellation is not engine unavailability and must not manufacture
         // a flash invocation that never happened.
-        if(signal.aborted) return await recordCall(request,failure(leaseLost ? SourceError.OCR_HOST_LEASE_LOST : SourceError.OCR_PROCESS_FAILED,"transient"),startedAt,executionFacts);
+        if(signal.aborted) return await recordCall(request,failure(interruptionCode(),"transient"),startedAt,executionFacts);
         if (probe?.detail==="CLAIM_SERVER_IDENTITY_MISMATCH") return await recordCall(request,failure("SOURCE_OCR_ENDPOINT_IDENTITY_INVALID","terminal"),startedAt,executionFacts);
         if (probe !== null) {
           logger.warn("mineru.ocr.standard_engines_not_ready", { ...logContext, detail: probe.detail });
@@ -320,7 +337,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
       // 5. THE one bounded parse invocation per claim (one claim = one
       // invocation; retries belong to 04B-2's durable attempt budget).
       const parseTimeoutMs = executionFacts.admittedTier === MINERU_STANDARD_TIER && config.standard ? config.standard.timeoutMs : config.timeoutMs;
-      if(signal.aborted) return await recordCall(request,failure(leaseLost ? SourceError.OCR_HOST_LEASE_LOST : SourceError.OCR_PROCESS_FAILED,"transient"),startedAt,executionFacts);
+      if(signal.aborted) return await recordCall(request,failure(interruptionCode(),"transient"),startedAt,executionFacts);
       executionFacts.actualTier=executionFacts.admittedTier ?? config.tier;
       const parseArgs = buildMineruParseArgs({ inputPdfPath, tier: executionFacts.actualTier, physicalPageIndex: request.physicalPageIndex, outputMarkdownPath });
       const parseStarted=Date.now();
@@ -333,7 +350,7 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
       } else if (parseResult.timedOut) {
         result = failure(SourceError.OCR_TIMEOUT, "transient");
       } else if (parseResult.aborted) {
-        result = failure(leaseLost ? SourceError.OCR_HOST_LEASE_LOST : SourceError.OCR_PROCESS_FAILED, "transient");
+        result = failure(interruptionCode(), "transient");
       } else if (parseResult.outputOverflow) {
         result = failure(SourceError.OCR_OUTPUT_INVALID, "terminal");
       } else {
@@ -345,18 +362,22 @@ export function createMineruPdfOcrExecutor(config: MineruExecutorConfig, options
       if (sourceAuthority && !await verifyOcrSourceAuthority(sourceAuthority, sourceAuthority)) {
         return await recordCall(request, failure(OCR_SOURCE_AUTHORITY_INVALID, "terminal"), startedAt, executionFacts);
       }
+      // Closing/lease loss during the asynchronous output/model checks must
+      // not turn a cancelled invocation into a successful execution receipt.
+      if (signal.aborted) result=failure(interruptionCode(),"transient");
       return await recordCall(request, result, startedAt, executionFacts);
     } catch (error) {
       // Claim-tree IO / durable-identity failures are infrastructure-class:
       // stable transient codes, never arbitrary exception text.
       const message = error instanceof Error ? error.message : "";
-      const stable = message === "OCR_STANDARD_MODEL_SNAPSHOT_REJECTED" ? SourceError.OCR_MODEL_NOT_FOUND : message === "OCR_SERVER_INSTANCE_CONFLICT" || message === "OCR_SERVER_ENDPOINT_RECORDING_LOST" ? SourceError.OCR_PROCESS_FAILED : SourceError.OCR_TEMP_IO_ERROR;
+      const stable = signal.aborted ? interruptionCode() : message === "OCR_STANDARD_MODEL_SNAPSHOT_REJECTED" ? SourceError.OCR_MODEL_NOT_FOUND : message === "OCR_SERVER_INSTANCE_CONFLICT" || message === "OCR_SERVER_ENDPOINT_RECORDING_LOST" ? SourceError.OCR_PROCESS_FAILED : SourceError.OCR_TEMP_IO_ERROR;
       logger.warn("mineru.ocr.execution_error", { ...logContext, failureCode: stable });
       return await recordCall(request, failure(stable, message === "OCR_STANDARD_MODEL_SNAPSHOT_REJECTED" ? "terminal" : "transient"), startedAt, executionFacts);
     } finally {
       // 6. Bounded cleanup of everything this claim owned, in every outcome,
       // through the CLOSED server state machine (RF01 P1-07, RF02 P1-04/P1-05).
       clearInterval(heartbeat);
+      if(memoryMonitor)clearInterval(memoryMonitor);
       let serverTerminated = session === null;
       if (session) {
         if (serverStarted) await markOcrServerStopping(lease.claimToken).catch(() => false);
