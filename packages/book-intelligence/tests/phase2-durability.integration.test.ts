@@ -12,6 +12,7 @@ import {
   estimateAnalysisTokens,
   materializeChunkSet,
   processBookAnalysisRun,
+  recoverSettledDeferredBookEmbeddings,
   rearmBookAnalysisRunById,
   recoverBookAnalysisForUser,
   requestBookAnalysis,
@@ -760,6 +761,92 @@ describe("durable Phase 2 orchestration", () => {
     expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status)
       .toBe("SUCCEEDED");
   }, 35_000);
+
+  it("auto-rearms one settled paid deferred run exactly once without another remote charge", async () => {
+    const data = await fixture();
+    await expect(processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks), {
+      faultInjector: (point) => { if (point === "afterEmbeddingGatewayPersist") throw new Error("EMBEDDING_RECEIPT_CRASH"); },
+    }))).rejects.toThrow("EMBEDDING_RECEIPT_CRASH");
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: {
+      errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+    } });
+    const early = await recoverSettledDeferredBookEmbeddings({ now: new Date() });
+    expect(early.recovered).toBe(0);
+    const now = new Date(Date.now() + 60_000);
+    const [left, right] = await Promise.all([
+      recoverSettledDeferredBookEmbeddings({ now }),
+      recoverSettledDeferredBookEmbeddings({ now }),
+    ]);
+    expect(left.recovered + right.recovered).toBe(1);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).dispatchGeneration).toBe(1);
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })).toBe(2);
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)), 1);
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status).toBe("SUCCEEDED");
+    expect((await recoverSettledDeferredBookEmbeddings({ now })).recovered).toBe(0);
+  });
+
+  it("auto-recovery keyset visits paid receipts behind quarantined older rows", async () => {
+    const quarantined = await fixture();
+    await prisma.$transaction([
+      prisma.bookAnalysisRun.update({ where: { id: quarantined.run.id }, data: {
+        status: "FAILED", analysisStage: "EMBEDDINGS",
+        errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+        completedAt: new Date(Date.now() - 5_000),
+      } }),
+      prisma.job.update({ where: { id: quarantined.job.id }, data: { status: "FAILED", completedAt: new Date() } }),
+    ]);
+    const eligible = await fixture();
+    await expect(processBookAnalysisRun(eligible.run.id, deps(eligible, new DurableProvider(eligible.blocks), {
+      faultInjector: (point) => { if (point === "afterEmbeddingGatewayPersist") throw new Error("EMBEDDING_RECEIPT_CRASH"); },
+    }))).rejects.toThrow("EMBEDDING_RECEIPT_CRASH");
+    await prisma.bookAnalysisRun.update({ where: { id: eligible.run.id }, data: {
+      errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+    } });
+    const now = new Date(Date.now() + 60_000);
+    const first = await recoverSettledDeferredBookEmbeddings({ now, limit: 1 });
+    expect([first.discovered, first.recovered, first.skipped]).toEqual([1, 0, 1]);
+    expect(first.nextCursor?.id).toBe(quarantined.run.id);
+    const second = await recoverSettledDeferredBookEmbeddings({ now, limit: 1, cursor: first.nextCursor });
+    expect([second.discovered, second.recovered]).toEqual([1, 1]);
+    expect(second.nextCursor?.id).toBe(eligible.run.id);
+    const frontier = await recoverSettledDeferredBookEmbeddings({ now, limit: 1, cursor: second.nextCursor });
+    expect([frontier.discovered, frontier.nextCursor]).toEqual([0, null]);
+    await processBookAnalysisRun(eligible.run.id, deps(eligible, new DurableProvider(eligible.blocks)), 1);
+    expect(eligible.gateway.remoteCallCount()).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: eligible.workspace.id } })).toBe(1);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: eligible.run.id } })).status).toBe("SUCCEEDED");
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: quarantined.run.id } })).dispatchGeneration).toBe(0);
+  });
+
+  it("auto-recovery quarantines missing or ambiguous gateway receipts", async () => {
+    const missing = await fixture();
+    await prisma.$transaction([
+      prisma.bookAnalysisRun.update({ where: { id: missing.run.id }, data: {
+        status: "FAILED", analysisStage: "EMBEDDINGS",
+        errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED", completedAt: new Date(),
+      } }),
+      prisma.job.update({ where: { id: missing.job.id }, data: { status: "FAILED", completedAt: new Date() } }),
+    ]);
+    const ambiguous = await fixture();
+    await expect(processBookAnalysisRun(ambiguous.run.id, deps(ambiguous, new DurableProvider(ambiguous.blocks), {
+      faultInjector: (point) => { if (point === "afterEmbeddingGatewayPersist") throw new Error("EMBEDDING_RECEIPT_CRASH"); },
+    }))).rejects.toThrow("EMBEDDING_RECEIPT_CRASH");
+    await prisma.bookAnalysisRun.update({ where: { id: ambiguous.run.id }, data: {
+      errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+    } });
+    const invocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: ambiguous.workspace.id } });
+    await prisma.providerInvocation.update({ where: { id: invocation.id }, data: { status: "RECONCILIATION_REQUIRED" } });
+    const result = await recoverSettledDeferredBookEmbeddings({ now: new Date(Date.now() + 60_000) });
+    expect(result.recovered).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(2);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: missing.run.id } })).dispatchGeneration).toBe(0);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: ambiguous.run.id } })).dispatchGeneration).toBe(0);
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: missing.run.id } })).toBe(1);
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: ambiguous.run.id } })).toBe(1);
+  });
 
   it("rejects vectors returned by an embedding call whose owner became stale", async () => {
     const data = await fixture(undefined, { pauseRemote: true });
