@@ -26,7 +26,9 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.waitForLoadState("networkidle");
   await page.locator('input[type="file"]').setInputFiles({ name: "phase6-book.md", mimeType: "text/markdown", buffer: Buffer.from(fixture) });
   await expect(page).toHaveURL(/\/studio\/library\//, { timeout: 30_000 });
-  await expect(page.getByText("处理状态")).toBeVisible();
+  // The transient processing card can disappear before a fast worker finishes.
+  // Verify the durable extraction result, independent of analysis progress.
+  await expect(page.getByRole("region", { name: "文本提取结果", exact: true }).getByText("提取完成", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 90_000 });
   await expect(page.getByText(excerpt).first()).toBeVisible();
   await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
