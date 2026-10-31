@@ -34,6 +34,8 @@ describe("source ingestion OCR runtime resolution", () => {
   it("resolves a live executor runtime whose provenance is the verified pinned version", async () => {
     const runtime = (await resolveSourceIngestionOcrExecutor(configuredEnvironment()))!;
     expect(runtime.pdfOcrExecutor.descriptor).toMatchObject({ name: "mineru", version: "4.0.3", parserMode: "flash", modelRevision: null });
+    expect(runtime.kind).toBe("mineru");
+    if (runtime.kind !== "mineru") throw new Error("EXPECTED_MINERU_RUNTIME");
     expect(runtime.config.version).toBe("4.0.3");
     expect(typeof runtime.close).toBe("function");
     void runtime.close();
@@ -46,6 +48,44 @@ describe("source ingestion OCR runtime resolution", () => {
     } finally {
       delete process.env.MINERU_FAKE_VERSION;
     }
+  });
+
+  it("rapidocr mode rejects MinerU server config before any Python probe", async () => {
+    await expect(resolveSourceIngestionOcrExecutor({
+      REDIS_URL: "redis://localhost:6379",
+      OCR_PROVIDER: "rapidocr",
+      RAPIDOCR_PYTHON_PATH: process.execPath,
+      WORKER_INGESTION_CONCURRENCY: 1,
+      MINERU_EXECUTABLE: process.execPath,
+    } as unknown as Environment)).rejects.toThrow("OCR_MIXED_PROVIDER_CONFIGURATION");
+  });
+
+  it("rapidocr mode rejects non-existent Python executable before OCR runtime admission", async () => {
+    await expect(resolveSourceIngestionOcrExecutor({
+      REDIS_URL: "redis://localhost:6379",
+      OCR_PROVIDER: "rapidocr",
+      RAPIDOCR_PYTHON_PATH: "/this/path/is/not/a/python",
+      WORKER_INGESTION_CONCURRENCY: 1,
+    } as unknown as Environment)).rejects.toThrow("OCR_RAPIDOCR_PYTHON_INVALID");
+  });
+
+  it("rapidocr mode rejects concurrent OCR processes before invoking a provider", async () => {
+    await expect(resolveSourceIngestionOcrExecutor({
+      REDIS_URL: "redis://localhost:6379",
+      OCR_PROVIDER: "rapidocr",
+      RAPIDOCR_PYTHON_PATH: process.execPath,
+      WORKER_INGESTION_CONCURRENCY: 2,
+    } as unknown as Environment)).rejects.toThrow("OCR_RAPIDOCR_CONCURRENCY_UNSUPPORTED");
+  });
+
+  it("rejects orphan rapidocr config while preserving the existing default disabled OCR", async () => {
+    await expect(resolveSourceIngestionOcrExecutor({
+      REDIS_URL: "redis://localhost:6379",
+      RAPIDOCR_PYTHON_PATH: process.execPath,
+    } as unknown as Environment)).rejects.toThrow("OCR_RAPIDOCR_PROVIDER_REQUIRED");
+    expect(await resolveSourceIngestionOcrExecutor({
+      REDIS_URL: "redis://localhost:6379",
+    } as unknown as Environment)).toBeUndefined();
   });
 
   it("fails fast on malformed explicit configuration", async () => {
