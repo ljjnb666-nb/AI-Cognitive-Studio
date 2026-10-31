@@ -34,6 +34,9 @@ export type PdfRunExtractionInput = {
    * demote any page to flash. Default absent = no proposal is ever made.
    */
   ocrStandardAdmissionEnabled?: boolean;
+  /** Explicit single-page review slice; every unprocessed OCR page stays
+   * unresolved. This never promotes a partial book to canonical content. */
+  reviewPhysicalPageIndex?: number;
   /** Observed execution-lease loss — checked before every durable write. */
   ownershipLost: () => boolean;
 };
@@ -70,6 +73,8 @@ export async function runPdfExtraction(input: PdfRunExtractionInput): Promise<Pd
   }
 
   const ocrPages = plan.pages.filter((page) => page.route === "OCR_REQUIRED");
+  if(input.reviewPhysicalPageIndex!==undefined &&
+    (!input.ocrStandardAdmissionEnabled||!input.executor||!Number.isSafeInteger(input.reviewPhysicalPageIndex)||!ocrPages.some(p=>p.physicalPageIndex===input.reviewPhysicalPageIndex)))throw new Error("OCR_REVIEW_PAGE_NOT_ELIGIBLE");
   const ocrExecutionFacts: Array<{ physicalPageIndex: number; facts: PdfOcrExecutionFacts }> = [];
   // Source identity digest of the exact bytes flowing to the executor: hashed
   // at most once per run (the same Uint8Array is shared by every page request).
@@ -83,6 +88,7 @@ export async function runPdfExtraction(input: PdfRunExtractionInput): Promise<Pd
     // executor is available, so the OCR work is never silently lost.
     await createOcrPageIntents({ workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, ingestionRunId: input.runId, routingGeneration: generation, pages: ocrPages.map((page) => ({ physicalPageIndex: page.physicalPageIndex })) });
     for (const page of ocrPages) {
+      if(input.reviewPhysicalPageIndex!==undefined&&page.physicalPageIndex!==input.reviewPhysicalPageIndex){outcomes.set(page.physicalPageIndex,"UNRESOLVED_FALLBACK");continue;}
       if (input.ownershipLost()) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
       const resolved = input.executor ? await executeOcrPage(input, generation, page, sourceDigestOf, ocrExecutionFacts) : null;
       if (resolved) {
@@ -108,6 +114,13 @@ export async function runPdfExtraction(input: PdfRunExtractionInput): Promise<Pd
   // persisted — an outcome label can never manufacture usable content (RF01).
   const usableBlockCounts = new Map(pages.map((page) => [page.physicalPageIndex, page.blocks.length]));
   const decision = evaluatePdfExtractionQuality(plan, outcomes, usableBlockCounts);
+  // Explicit review execution is evidence-only even if a supplied executor
+  // returns usable text. It never grants partial-book publication authority.
+  if(input.reviewPhysicalPageIndex!==undefined&&decision.status!=="REJECTED"){
+    decision.status="REQUIRES_FALLBACK";
+    decision.reasonCodes.push("OCR_MANUAL_REVIEW_REQUIRED");
+    decision.reviewRequiredPhysicalPageIndexes=[input.reviewPhysicalPageIndex];
+  }
   const triaged=await prisma.ocrPageAttempt.findMany({where:{ingestionRunId:input.runId,workspaceId:input.workspaceId,routingGeneration:generation,qualityStatus:{in:["REVIEW_REQUIRED","REJECTED"]}},select:{physicalPageIndex:true,qualityStatus:true}});
   if(triaged.some(page=>page.qualityStatus==="REVIEW_REQUIRED")) {
     decision.status="REQUIRES_FALLBACK";

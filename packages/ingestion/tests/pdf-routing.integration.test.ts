@@ -532,3 +532,17 @@ describe("RF01 zero-usable-text OCR results (real PostgreSQL)", () => {
 function healthyArtifactReadable(storage: FakeStorageProvider, key: string | null): boolean {
   return key !== null && storage.objects.has(key);
 }
+
+it("selected-page review executes only the requested page and rejects a partial book without checkpoint provenance",async()=>{
+ const bytes=await buildPdf([d=>d.image(png1x1,50,50,{width:60}),d=>d.image(png1x1,50,50,{width:60})]);
+ const storage=new FakeStorageProvider();const f=await createPdfRunFixture(bytes,storage);const executor=new FakePdfOcrExecutor();
+ const service=createIngestionService(storage,{maxUploadBytes:100*1024*1024,uploadTtlSeconds:900,maxPdfPages:2000,completionLeaseMs:900000,processMaxAttempts:3,pdfOcrExecutor:executor,ocrStandardAdmissionEnabled:true});
+ // This legacy fake has no source receipt. Review mode must retain the
+ // stronger rejection, rather than inventing trusted review evidence.
+ await expect(service.processIngestionRun(f.run.id,{physicalPageIndex:1})).rejects.toThrow("SOURCE_QUALITY_REJECTED");
+ expect(executor.calls.map(c=>c.physicalPageIndex)).toEqual([1]);
+ const attempts=await prisma.ocrPageAttempt.findMany({where:{ingestionRunId:f.run.id},orderBy:{physicalPageIndex:"asc"}});
+ expect(attempts.map(p=>p.status)).toEqual(["PENDING","SUCCEEDED"]);
+ expect(await prisma.documentExtraction.count({where:{ingestionRunId:f.run.id}})).toBe(0);
+ expect(await prisma.currentDocumentExtraction.count({where:{sourceDocumentId:f.document.id}})).toBe(0);
+});

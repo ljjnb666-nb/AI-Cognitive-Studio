@@ -188,7 +188,8 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
         throw error;
       }
     },
-    async processIngestionRun(runId: string) {
+    async processIngestionRun(runId: string, review?:{physicalPageIndex:number}) {
+      if(review&&(!options.ocrStandardAdmissionEnabled||!options.pdfOcrExecutor))throw new Error("OCR_REVIEW_EXECUTION_DISABLED");
       const run = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runId }, include: { sourceDocument: { include: { source: true } }, job: true } });
       if (["SUCCEEDED", "REJECTED", "OCR_REQUIRED", "PASSWORD_REQUIRED"].includes(run.status)) return;
       // Durable execution claim: run + Job transition atomically, attempt-guarded
@@ -225,6 +226,7 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
             storage,
             executor: options.pdfOcrExecutor,
             ...(options.ocrStandardAdmissionEnabled === true ? { ocrStandardAdmissionEnabled: true } : {}),
+            ...(review?{reviewPhysicalPageIndex:review.physicalPageIndex}:{}),
             ownershipLost: () => ownershipLost,
           });
           if (extraction.kind !== "PUBLISH") {
@@ -485,3 +487,6 @@ function parserProvenance(mediaType: string): { name: string; version: string } 
   if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v2" };
   return { name: "unsupported", version: "unsupported-v1" };
 }
+export * from "./ocr-structure-review-evidence.js";
+export * from "./ocr-model-review-request.js";
+export * from "./ocr-review-page-image.js";
