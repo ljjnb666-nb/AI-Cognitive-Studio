@@ -35,6 +35,7 @@ export { classifyIngestionFailure, ingestionStatusForTerminalFailure, type Inges
 export { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStoppedProcessGone, markOcrServerStopping, OCR_HOST_LEASE_TTL_MS, OCR_PAGE_LEASE_TTL_MS, OCR_PAGE_MAX_ATTEMPTS, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, writeRoutingOutcome, writeRoutingPlan } from "./ocr-durability.js";
 export { INGESTION_RECONCILIATION_BATCH_SIZE, reconcileIngestionDeliveries, type IngestionDeliveryState, type IngestionReconciliationQueuePort, type IngestionReconciliationResult } from "./ingestion-reconciliation.js";
 export { MINERU_EXECUTOR_NAME, MINERU_PINNED_TIER, MINERU_PINNED_VERSION, buildMineruParseArgs, buildMineruServerArgs, judgeMineruParseExit, mineruFailureForOutcome, mineruPageSelector, parseMineruEndpoint, parseMineruParseEnvelope, type MineruEndpoint, type MineruParseOutcome } from "./mineru/mineru-commands.js";
+export { assessMineruStandardExecution, MINERU_STANDARD_EXECUTION_REASONS, MINERU_STANDARD_MANIFEST_ENV, MINERU_STANDARD_MANIFEST_SCHEMA, MINERU_STANDARD_MIN_FREE_MEMORY_BYTES_ENV, MINERU_STANDARD_TIMEOUT_MS_ENV, MINERU_STANDARD_TIER, MINERU_STANDARD_DEFAULT_MIN_FREE_MEMORY_BYTES, MINERU_STANDARD_DEFAULT_TIMEOUT_MS, parseMineruStandardAdmissionConfig, parseMineruStandardManifest, sha256Bytes, verifyMineruStandardModels, type MineruStandardAdmissionConfig, type MineruStandardExecutionReason, type MineruStandardExecutionRecheck, type MineruStandardManifest, type MineruStandardManifestFile, type MineruStandardModelsFailure, type MineruStandardModelsVerification } from "./mineru/mineru-standard-admission.js";
 export { resolveMineruExecutorConfig, verifyMineruRuntime, isWithinPath, type MineruExecutorConfig, type MineruRuntimeVerification } from "./mineru/mineru-config.js";
 export { createMineruPdfOcrExecutor, type MineruOcrCallRecord, type MineruPdfOcrExecutorHandle } from "./mineru/mineru-executor.js";
 export { reconcileOcrServerInstances, type OcrServerReconciliationResult } from "./mineru/mineru-reconciler.js";
@@ -55,7 +56,7 @@ const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").m
 const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
 
 /** Service options; pdfOcrExecutor is a test seam until 04B-2's production cutover (none in 04B-2). */
-export type IngestionServiceOptions = { maxUploadBytes: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor };
+export type IngestionServiceOptions = { maxUploadBytes: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor; /** STEP6-2B-1: guarded standard admission verified at worker startup; when true, image-only OCR pages carry a standard tier proposal (the executor still rechecks every page). */ ocrStandardAdmissionEnabled?: boolean };
 
 /**
  * Canonical v1 write gate for SourceBlock.metadata, keyed on the authoritative
@@ -222,6 +223,7 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
             limits,
             storage,
             executor: options.pdfOcrExecutor,
+            ...(options.ocrStandardAdmissionEnabled === true ? { ocrStandardAdmissionEnabled: true } : {}),
             ownershipLost: () => ownershipLost,
           });
           if (extraction.kind !== "PUBLISH") {

@@ -57,6 +57,15 @@ export const environmentSchema = z.object({
   // Capacity deferral consumes ZERO processing attempts; this only shapes
   // WHEN the deferred delivery returns.
   MINERU_CAPACITY_DEFERRAL_DELAY_MS: z.coerce.number().int().positive().optional(),
+  // STEP6-2B-1 guarded MinerU standard execution (default off). Both tier
+  // experiment switches must be explicitly "true" AND a verified local model
+  // manifest must exist before any page may execute standard; see
+  // packages/ingestion/src/mineru/mineru-standard-admission.ts.
+  OCR_TIER_STANDARD_EXPERIMENTAL_ENABLED: z.string().optional(),
+  OCR_TIER_STANDARD_EXECUTION_ADMISSION_ENABLED: z.string().optional(),
+  MINERU_STANDARD_MODEL_MANIFEST: z.string().min(1).optional(),
+  MINERU_STANDARD_MIN_FREE_MEMORY_BYTES: z.string().optional(),
+  MINERU_STANDARD_TIMEOUT_MS: z.string().optional(),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   BETA_ACCESS_MODE: z.enum(["OFF", "ENFORCED"]).default("OFF"),
   WORKSPACE_EXPENSIVE_OPERATION_LIMIT: z.coerce.number().int().min(1).max(16).default(2),

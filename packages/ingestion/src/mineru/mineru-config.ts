@@ -1,9 +1,12 @@
-import { statSync } from "node:fs";
+import { statSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { delimiter, isAbsolute, join, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import type { Environment } from "@ai-cognitive/shared/server";
+import { parseStep62aConfig } from "../ocr-step6-2a.js";
+import { parseOcrTierPolicyConfig } from "../ocr-tier-policy.js";
 import { MINERU_EXECUTOR_NAME, MINERU_PINNED_TIER, MINERU_PINNED_VERSION } from "./mineru-commands.js";
+import { parseMineruStandardAdmissionConfig, type MineruStandardAdmissionConfig } from "./mineru-standard-admission.js";
 
 /**
  * Explicit production runtime configuration for the real MinerU OCR executor
@@ -62,6 +65,13 @@ export type MineruExecutorConfig = {
   /** Host-lease heartbeat cadence override (tests only; default OCR_HOST_LEASE_TTL_MS/3). */
   heartbeatIntervalMs?: number;
   /**
+   * STEP6-2B-1 guarded standard admission (default absent). Present ONLY when
+   * both experiment switches are explicitly "true" and the manifest parses;
+   * the executor factory additionally requires a startup model-verification
+   * proof before any standard execution is possible.
+   */
+  standard?: MineruStandardAdmissionConfig;
+  /**
    * Live-image guard pattern for the recorded-endpoint pid (a NECESSARY
    * condition only; production pins the python interpreter, tests substitute
    * their double's runtime). RF01 P1-05: the image match alone is explicitly
@@ -70,8 +80,8 @@ export type MineruExecutorConfig = {
   processImagePattern?: RegExp;
 };
 
-/** Recognized OCR/MinerU variables: set WITHOUT OCR_PROVIDER they fail fast (RF01 P2: includes args/host id; MINERU_VERSION is recognized but never alters provenance). */
-const OCR_VARIABLES = ["OCR_HOST_ID", "MINERU_EXECUTABLE", "MINERU_EXECUTABLE_ARGS", "MINERU_MODEL_SOURCE", "MINERU_MODEL_PATH", "MINERU_TIER", "MINERU_VERSION", "MINERU_TIMEOUT_MS", "MINERU_SERVER_START_TIMEOUT_MS", "MINERU_SERVER_STOP_TIMEOUT_MS", "MINERU_HOME_ROOT", "MINERU_MAX_OUTPUT_BYTES", "MINERU_CAPACITY_DEFERRAL_DELAY_MS"] as const;
+/** Recognized OCR/MinerU variables: set WITHOUT OCR_PROVIDER they fail fast (RF01 P2: includes args/host id; MINERU_VERSION is recognized but never alters provenance; the STEP6-2B-1 standard variables get the same no-orphan treatment). */
+const OCR_VARIABLES = ["OCR_HOST_ID", "MINERU_EXECUTABLE", "MINERU_EXECUTABLE_ARGS", "MINERU_MODEL_SOURCE", "MINERU_MODEL_PATH", "MINERU_TIER", "MINERU_VERSION", "MINERU_TIMEOUT_MS", "MINERU_SERVER_START_TIMEOUT_MS", "MINERU_SERVER_STOP_TIMEOUT_MS", "MINERU_HOME_ROOT", "MINERU_MAX_OUTPUT_BYTES", "MINERU_CAPACITY_DEFERRAL_DELAY_MS", "OCR_TIER_STANDARD_EXPERIMENTAL_ENABLED", "OCR_TIER_STANDARD_EXECUTION_ADMISSION_ENABLED", "MINERU_STANDARD_MODEL_MANIFEST", "MINERU_STANDARD_MIN_FREE_MEMORY_BYTES", "MINERU_STANDARD_TIMEOUT_MS"] as const;
 
 export type ResolveMineruConfigOptions = {
   /** Injectable PATH search root list (defaults to the process PATH). */
@@ -79,6 +89,8 @@ export type ResolveMineruConfigOptions = {
   /** Injectable filesystem predicates for tests. */
   fileExists?: (path: string) => boolean;
   directoryExists?: (path: string) => boolean;
+  /** Injectable manifest reader for tests (STEP6-2B-1). */
+  readFile?: (path: string) => string;
 };
 
 const defaultFileExists = (path: string): boolean => {
@@ -169,6 +181,18 @@ export function resolveMineruExecutorConfig(environment: Environment, options: R
   // supposedly immutable model tree.
   if (isWithinPath(modelPath, homeRoot) || isWithinPath(homeRoot, modelPath)) throw new Error("OCR_PATH_OVERLAP:MODEL_ROOT_AND_CLAIM_TEMP_ROOT_MUST_BE_DISJOINT");
 
+  // STEP6-2B-1: guarded standard admission. The double experiment switch is
+  // the STRUCTURAL precondition (strict parsers throw on malformed values),
+  // and both-on without a verifiable manifest is a half-configuration that
+  // fails fast — never a standard run on unverified model identity.
+  const environmentRecord = environment as unknown as Readonly<Record<string, string | undefined>>;
+  const tierPolicy = parseOcrTierPolicyConfig(environmentRecord);
+  const step62a = parseStep62aConfig(environmentRecord, tierPolicy);
+  const standardAdmission = parseMineruStandardAdmissionConfig(environmentRecord, options.readFile ?? ((path: string) => readFileSync(path, "utf8")));
+  const standardEnabled = step62a.standardExperimentalEnabled && step62a.executionAdmissionEnabled;
+  if (standardAdmission !== null && !standardEnabled) throw new Error("OCR_STANDARD_MANIFEST_WITHOUT_ADMISSION:BOTH_EXPERIMENT_SWITCHES_REQUIRED");
+  if (standardAdmission === null && standardEnabled) throw new Error("OCR_STANDARD_MANIFEST_REQUIRED:MINERU_STANDARD_MODEL_MANIFEST");
+
   return {
     executable,
     executableArgs,
@@ -183,6 +207,7 @@ export function resolveMineruExecutorConfig(environment: Environment, options: R
     serverStopTimeoutMs: environment.MINERU_SERVER_STOP_TIMEOUT_MS ?? 60_000,
     maxOutputBytes: environment.MINERU_MAX_OUTPUT_BYTES ?? 4_000_000,
     capacityDeferralDelayMs: environment.MINERU_CAPACITY_DEFERRAL_DELAY_MS ?? 30_000,
+    ...(standardAdmission !== null ? { standard: standardAdmission } : {}),
   };
 }
 
