@@ -20,6 +20,8 @@ describe("OCR and mixed-graph PDF review API coexistence", () => {
     expect(graph).toContain("PDF_MIXED_GRAPH_REVIEW_REQUEST_ENABLED");
     expect(graph).toContain("auth.api.getSession(");
     expect(graph).toContain("disableCookieCache: true");
+    expect(graph).toContain("isTrustedPdfVisualRequestOrigin(");
+    expect(graph).toContain("process.env.BETTER_AUTH_URL");
     expect(graph).toContain("isAuthenticatedPdfVisualRequest(");
     expect(graph).toContain("sourceDetail(sourceDocumentId, identity)");
     expect(graph).not.toContain("requestOcrModelReview");

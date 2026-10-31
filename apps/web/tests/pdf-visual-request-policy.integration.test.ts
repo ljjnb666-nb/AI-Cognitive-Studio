@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAuthenticatedPdfVisualRequest, isSameOriginPdfVisualRequest, pdfVisualRequestConsentSchema } from "../lib/pdf-visual-request-policy";
+import { isAuthenticatedPdfVisualRequest, isSameOriginPdfVisualRequest, isTrustedPdfVisualRequestOrigin, pdfVisualRequestConsentSchema } from "../lib/pdf-visual-request-policy";
 
 const valid={
   mode:"FIRST_MIXED_PAGE",
@@ -25,6 +25,15 @@ describe("paid PDF vision consent and CSRF policy",()=>{
   it("rejects fabricated/legacy extra fields and implicit body consent",()=>{
     expect(pdfVisualRequestConsentSchema.safeParse({...valid,force:true}).success).toBe(false);
     expect(pdfVisualRequestConsentSchema.safeParse({...valid,consentToProviderCharges:"true"}).success).toBe(false);
+  });
+  it("rejects DNS rebinding and wrong canonical origin for cost-bearing requests",()=>{
+    const request = "https://studio.example/api/studio/pdf-visual-review/d/mixed-graph";
+    expect(isTrustedPdfVisualRequestOrigin(request,"https://studio.example","https://studio.example")).toBe(true);
+    expect(isTrustedPdfVisualRequestOrigin(request,"https://studio.example",undefined)).toBe(false);
+    expect(isTrustedPdfVisualRequestOrigin(request,"https://studio.example","https://other.example")).toBe(false);
+    expect(isTrustedPdfVisualRequestOrigin("https://attacker.example/route","https://attacker.example","https://studio.example")).toBe(false);
+    expect(isTrustedPdfVisualRequestOrigin("http://studio.example/route","http://studio.example","http://studio.example")).toBe(false);
+    expect(isTrustedPdfVisualRequestOrigin("http://localhost:3001/api","http://localhost:3001","http://localhost:3001")).toBe(true);
   });
   it("requires exact same origin for a cost-sensitive POST",()=>{
     expect(isSameOriginPdfVisualRequest("https://studio.example/api/studio/pdf-visual-review/x","https://studio.example")).toBe(true);

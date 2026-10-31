@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "@ai-cognitive/db";
 import { sourceDetail } from "@/lib/product";
 import { auth } from "@/lib/auth";
-import { isAuthenticatedPdfVisualRequest, isSameOriginPdfVisualRequest, pdfVisualRequestConsentSchema } from "@/lib/pdf-visual-request-policy";
+import { isAuthenticatedPdfVisualRequest, isTrustedPdfVisualRequestOrigin, pdfVisualRequestConsentSchema } from "@/lib/pdf-visual-request-policy";
 import { resolveWebIdentity, type WebIdentityContext } from "@/lib/identity";
 
 type Params = { params: Promise<{ sourceDocumentId: string }> };
@@ -86,7 +86,7 @@ export async function POST(request: Request, { params }: Params) {
   // Same-origin POST + strict content contract; never use a cookie-only cross-site
   // request to purchase external model calls.
   const origin = request.headers.get("origin");
-  if (!isSameOriginPdfVisualRequest(request.url, origin))
+  if (!isTrustedPdfVisualRequestOrigin(request.url, origin, process.env.BETTER_AUTH_URL))
     return statusResponse({ error: "PDF_VISUAL_REQUEST_ORIGIN_DENIED" }, 403);
   if (!enabled()) return statusResponse({ error: "PDF_VISUAL_REQUEST_DISABLED" }, 503);
   const identity = await authenticatedIdentity(request).catch(() => null);
