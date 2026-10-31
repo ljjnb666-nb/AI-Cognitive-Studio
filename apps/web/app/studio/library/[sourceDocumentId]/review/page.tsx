@@ -124,6 +124,7 @@ export default async function PdfSourceReviewPage({
     visualInvalid = true;
   }
   const pageHref = (page: number) => `/studio/library/${source.id}/review?page=${page}`;
+  const originalPdfHref = `/api/studio/pdf-visual-review/${source.id}/source-pdf?sha=${source.sha256}#page=${physicalPageIndex+1}`;
   return (
     <main className="container" style={{ maxWidth: 1150, margin: "0 auto", padding: "28px 20px 60px" }}>
       <Link href={`/studio/library/${source.id}`} className="btn btn-secondary" style={{ marginBottom: 20 }}>
@@ -157,6 +158,7 @@ export default async function PdfSourceReviewPage({
             gap: 12, marginBottom: 20,
           }}>
             <span>第 <strong>{physicalPageIndex + 1}</strong> 物理页 · 当前提取记录共 {pages} 页</span>
+            <a href={originalPdfHref} target="_blank" rel="noopener noreferrer" className="btn btn-secondary" aria-label={`打开受保护的原始 PDF 第 ${physicalPageIndex+1} 物理页`}>打开原始 PDF 对照</a>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               {physicalPageIndex > 0 ? <Link href={pageHref(physicalPageIndex - 1)} className="btn btn-secondary">上一页</Link> : null}
               {physicalPageIndex + 1 < pages ? <Link href={pageHref(physicalPageIndex + 1)} className="btn btn-secondary">下一页</Link> : null}
@@ -194,10 +196,10 @@ export default async function PdfSourceReviewPage({
               )}
             </section>
             <section className="card-panel" aria-labelledby="pdf-visual-review-heading">
-              <h2 id="pdf-visual-review-heading" style={{ fontSize: 20, marginTop: 0 }}>图表与关系 · 模型候选（未人工核验）</h2>
+              <h2 id="pdf-visual-review-heading" style={{ fontSize: 20, marginTop: 0 }}>图表与关系 · 模型候选（未经独立核验）</h2>
               {visual ? (
                 <>
-                  <p role="status">存在 {visual.figures.length} 个待核验图表候选；不代表原图准确、完整或可发布。</p>
+                  <p role="status">存在 {visual.figures.length} 个待核验图表候选。可打开受保护原始 PDF 对照；尚无独立模型审定，不能认定准确、完整或可发布。</p>
                   <p style={{ overflowWrap: "anywhere", fontSize: 12, color: "var(--text-secondary)" }}>
                     来源 PNG SHA256：<code>{visual.sourcePngSha256}</code> · 候选过期时间：{visual.expiresAt}
                   </p>
@@ -221,8 +223,8 @@ export default async function PdfSourceReviewPage({
                     : "此页没有可读取的有效候选：可能尚未执行获授权的视觉任务、未检测到图表，或记录已经过期。"}
                 </p>
               )}
-              <div role="status" style={{ fontWeight: 600 }}>未审核 · 不得作为播客事实依据</div>
-              <p style={{ marginBottom: 0, color: "var(--text-secondary)" }}>需与原始 PDF 图像人工对照。此页面没有“批准”按钮，不会修改提取记录或播客素材。</p>
+              <div role="status" style={{ fontWeight: 600 }}>未经独立核验 · 不得作为播客事实依据</div>
+              <p style={{ marginBottom: 0, color: "var(--text-secondary)" }}>原始 PDF 可供复核，后续需建立独立模型核验与质量门禁。此页面没有“批准”按钮，不会修改提取记录或播客素材。</p>
             </section>
           </div>
         </>
