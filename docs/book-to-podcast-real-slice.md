@@ -2,6 +2,18 @@
 
 本轮目标 active；已真实生成章节草稿语音，但正式成品与 Edge 播放验收尚未通过，不宣称完整成功。禁止回到 OCR 基础设施扩展。
 
+## 2026-10-31 校订与仅语音执行提案（待用户确认，未执行）
+
+原模型稿存在语义错误，不能使用其合法引用编号冒充事实正确。已准备420字符、五轮中文对话的独立USER_EDIT子修订提案，逐句引用同章三条真实QUOTE记忆及原文范围，未注册正式修订、未调用供应商。需要用户明确批准采用人工校订路径；不能将此提案称为完全由模型生成的最终脚本。原模型响应、父修订和失败音频完整保留。
+
+复用既有PodcastRevisionSource.USER_EDIT、CurrentPodcastScript与音频管线，新增受成员权限、Episode行锁及当前修订CAS约束的校订服务。新子修订保留生成来源和主持人，重新解析真实Book证据及范围，拒绝改写直接引语、无证据实质性发言、跨工作区或过期提交；并发/重复提交不创建重复修订。无schema迁移、无本地JSON响应修补。
+
+`chapter-acceptance.ts run-editorial`仅接受固定私有稿件SHA及独立一次性授权；不运行Book/文本模型/Embedding。最多五次glm-tts、每次一次尝试/50秒，内容与双音色逐句精确匹配；累计新增字符不超过500、新增预留不超过0.10元且累计预算仍不超过8元，旧60条7.21068元预留全部保留。预计420字符0.084元；实际扣费仍以供应商账单为准。重启不能自动续跑，失败即停。当前无授权启动已被CHAPTER_EDITORIAL_AUTHORIZATION_REQUIRED阻断，没有创建校订/Job或新增请求。
+
+非付费验证：Podcast持久化集成30 PASS，含来源/权限/直接引语拒绝、并发幂等及原快照保留；随后新增无修改提交断言，相关2例重跑PASS。预算测试19 PASS，含未授权、逐句不符预网络拒绝、第五次后阻断和失败停止。相关typecheck/lint通过。仅此类测试使用替身供应商，不冒充真实音频验收。
+
+此前准确HEAD 699390a9的CI 41157284268：static/core-tests/quality-performance/stability-beta成功，product-acceptance失败（文本定位器“深度理解失败”同时匹配状态和说明）。测试现以exact定位状态标签，不减弱失败恢复数据库/浏览器断言；新HEAD CI尚待执行确认。最终状态仍BOOK_TO_PODCAST_VERTICAL_SLICE_BLOCKED_WITH_EVIDENCE。
+
 ## 2026-10-31 source-v6 真实执行结果（最新）
 
 用户已授权累计8.00元方案，暂停期间未启动；用户恢复目标后核验旧48条预留、stopped=true及一次性授权文件未使用，再启动一次。真实Book全部复用，新增5次Air、2次Embedding、5次glm-tts（423字符）。脚本生成已SUCCEEDED并创建正式脚本修订；音频合成/组装/持久化真实完成，但QUALITY_VALIDATION拒绝标准化输出，原run/Job均FAILED，没有CurrentPodcastAudio。费用授权已经触发停止条件，不得自动恢复或新增调用。

@@ -4,6 +4,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { runChapterEditorial } from "./chapter-editorial.js";
 import { prisma } from "../../packages/db/src/index.js";
 import { ProviderGatewayRepository, resolveCredentialKeyring } from "../../packages/provider-gateway/src/index.js";
 import { resolveBookAnalysisVersions, resolveBookProductExecution, requestBookAnalysisForUser, processBookAnalysisRun } from "../../packages/book-intelligence/src/index.js";
@@ -15,6 +16,7 @@ import { chapterLimits, paidChapterLimits, resilientChapterLimits, createChapter
 const hash = (s: Uint8Array) => createHash("sha256").update(s).digest("hex");
 async function main() {
   const root = process.env.BOOK_PODCAST_PRIVATE_ROOT, mode = process.argv[2];
+  if (root && mode === "run-editorial") return runChapterEditorial(root);
   if (!root || !["prepare", "prepare-paid", "prepare-resilient", "prepare-air", "prepare-air-citable", "prepare-air-source", "run"].includes(mode ?? "")) throw Error("CHAPTER_MODE_REQUIRED");
   const sourceResume = mode === "prepare-air-source" || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_AIR_SOURCE_V6_ONCE_CUMULATIVE_8.00_CNY";
   const citableResume = mode === "prepare-air-citable" || process.env.CHAPTER_BUDGET_AUTHORIZATION === "CHAPTER_I_AIR_CITABLE_V5_ONCE_CUMULATIVE_6.50_CNY";

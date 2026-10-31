@@ -26,6 +26,59 @@ export const maximumSourcePricedCny = 6.035008 + 6 * 0.2176 + (96 - 28) * 3072 *
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 type Reservation = { ordinal: number; model: string; bodySha256: string; characters: number; embeddingItems: number; reservedCny: number };
 
+/** A new, separately approved five-turn TTS grant after editorial acceptance. */
+export async function createEditorialSpeechBudget(root: string, authorization: string | undefined, turns: Array<{ text: string; voice: string }>, upstream: ProviderHttpTransport = new FetchProviderHttpTransport()) {
+  if (authorization !== "CHAPTER_I_EDITORIAL_TTS_ONCE_SAME_8.00_CNY" || turns.length !== 5 || turns.reduce((sum, turn) => sum + turn.text.length, 0) !== 420 || turns.some((turn, index) => turn.voice !== (index % 2 === 0 ? "tongtong" : "xiaochen"))) throw Error("CHAPTER_EDITORIAL_AUTHORIZATION_REQUIRED");
+  const path = join(root, "chapter-call-reservations.private.json");
+  const prior = JSON.parse(await readFile(path, "utf8")) as { stopped: boolean; limits: { approvedCny: number }; reservations: Reservation[] };
+  const reservations = prior.reservations;
+  if (!prior.stopped || prior.limits.approvedCny !== 8 || reservations.length !== 60 || reservations.filter(r => r.model === "glm-tts").length !== 5 || reservations.reduce((sum, r) => sum + r.characters, 0) !== 423 || Math.abs(reservations.reduce((sum, r) => sum + r.reservedCny, 0) - 7.21068) > 1e-9) throw Error("CHAPTER_EDITORIAL_SCOPE_MISMATCH");
+  for (let ordinal = 1; ordinal <= 60; ordinal++) if (![3, 7, 9, 11, 23, 26, 27].includes(ordinal)) {
+    const metadata = JSON.parse(await readFile(join(root, `chapter-response-${ordinal}.meta.private.json`), "utf8"));
+    if (metadata.httpStatus !== 200) throw Error("CHAPTER_EDITORIAL_SCOPE_MISMATCH");
+  }
+  await writeFile(join(root, "chapter-editorial-tts-authorization.private.json"), JSON.stringify({ authorization, turnsSha256: hash(JSON.stringify(turns)), previousReservationsRetained: 60, cumulativeApprovedCny: 8, maxNewCalls: 5, maxNewCharacters: 500, maxNewCny: 0.10, maxAttempts: 1, timeoutMs: 50000 }), { flag: "wx" });
+  await writeFile(join(root, "chapter-call-reservations.before-editorial.private.json"), JSON.stringify(prior, null, 2), { flag: "wx" });
+  let stopped = false, inFlight = false;
+  const persist = () => writeFile(path, JSON.stringify({ ...prior, reservations, stopped }, null, 2));
+  const stop = async () => { stopped = true; await persist(); };
+  const transport: ProviderHttpTransport = {
+    execute: async () => { await stop(); throw new ProviderGatewayError("BUDGET_EXCEEDED"); },
+    executeBinary: async request => {
+      if (stopped || inFlight) { await stop(); throw new ProviderGatewayError("BUDGET_EXCEEDED"); }
+      inFlight = true;
+      try {
+        const index = reservations.length - 60, expected = turns[index], body = JSON.parse(request.body);
+        if (!expected || request.url !== "https://open.bigmodel.cn/api/paas/v4/audio/speech" || body.model !== "glm-tts" || body.input !== expected.text || body.voice !== expected.voice || body.speed !== 1 || body.response_format !== "wav" || expected.text.length > 1024) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+        const reservedCny = expected.text.length * 2 / 10000;
+        if (reservations.reduce((sum, r) => sum + r.reservedCny, 0) + reservedCny > 8 || reservations.slice(60).reduce((sum, r) => sum + r.characters, 0) + expected.text.length > 500) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+        const reservation = { ordinal: reservations.length + 1, model: "glm-tts", bodySha256: hash(request.body), characters: expected.text.length, embeddingItems: 0, reservedCny };
+        reservations.push(reservation);
+        await persist();
+        const response = await upstream.executeBinary(request);
+        await writeFile(join(root, `chapter-response-${reservation.ordinal}.private.bin`), response.bytes);
+        const header = (name: string) => response.headers instanceof Headers ? response.headers.get(name) : Object.entries(response.headers).find(([key]) => key.toLowerCase() === name)?.[1];
+        await writeFile(join(root, `chapter-response-${reservation.ordinal}.meta.private.json`), JSON.stringify({ httpStatus: response.status, contentType: header("content-type"), requestId: header("x-request-id") }));
+        return response;
+      } catch (error) { await stop(); throw error; }
+      finally { inFlight = false; }
+    },
+  };
+  const resolve = createProviderAdapterResolver(transport);
+  return { stop, adapterResolver: ((selection) => {
+    const adapter = resolve(selection);
+    return adapter && { execute: async wire => {
+      try {
+        if (selection.providerKey !== "zhipu" || selection.family !== "SPEECH" || selection.modelId !== "glm-tts") throw new ProviderGatewayError("BUDGET_EXCEEDED");
+        return await adapter.execute(wire);
+      } catch (error) {
+        await stop();
+        throw new ProviderAdapterFailure(error instanceof ProviderGatewayError ? error.code : "INVALID_PROVIDER_RESPONSE", { retryable: false, remoteRequestId: error instanceof ProviderGatewayError ? error.remoteRequestId : undefined, usage: error instanceof ProviderAdapterFailure ? error.usage : undefined });
+      }
+    } };
+  }) satisfies ProviderAdapterResolver };
+}
+
 export async function createChapterBudget(root: string, authorization: string | undefined, upstream: ProviderHttpTransport = new FetchProviderHttpTransport()): Promise<{ adapterResolver: ProviderAdapterResolver; stop(): Promise<void> }> {
   const resume = authorization === "CHAPTER_I_RESUME_429_ONCE_SAME_0.50_CNY";
   const resumePaidLater = authorization === "CHAPTER_I_FLASHX_RESUME_SECOND_TIMEOUT_ONCE_SAME_3.00_CNY";

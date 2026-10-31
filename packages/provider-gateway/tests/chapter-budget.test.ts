@@ -2,9 +2,53 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { createChapterBudget, maximumPricedCny, maximumPaidPricedCny, maximumResilientPricedCny, maximumAirPricedCny, maximumCitablePricedCny, maximumSourcePricedCny } from "../../../tools/book-to-podcast/chapter-budget.js";
+import { createEditorialSpeechBudget, createChapterBudget, maximumPricedCny, maximumPaidPricedCny, maximumResilientPricedCny, maximumAirPricedCny, maximumCitablePricedCny, maximumSourcePricedCny } from "../../../tools/book-to-podcast/chapter-budget.js";
 import { builtInProviderCatalog, DeterministicProviderHttpTransport, type ProviderAdapter } from "../src/index.js";
 const roots: string[] = [];
+const editorialTurns = Array.from({ length: 5 }, (_, i) => ({ text: String(i).repeat(84), voice: i % 2 === 0 ? "tongtong" : "xiaochen" }));
+async function editorialFixture() {
+  const path = await root();
+  const reservations = Array.from({ length: 60 }, (_, i) => ({ ordinal: i + 1, model: i >= 55 ? "glm-tts" : "glm-4.5-air", bodySha256: `prior-${i}`, characters: i === 55 ? 423 : 0, embeddingItems: 0, reservedCny: i === 0 ? 7.21068 : 0 }));
+  const prior = { stopped: true, limits: { approvedCny: 8 }, reservations };
+  await writeFile(join(path, "chapter-call-reservations.private.json"), JSON.stringify(prior));
+  for (let i = 1; i <= 60; i++) await writeFile(join(path, `chapter-response-${i}.meta.private.json`), '{"httpStatus":200}');
+  return { path, prior };
+}
+function speechWire(text: string, voice: string) {
+  const input = wire();
+  Object.assign(input.snapshot, { routeSlot: "PODCAST_TTS", protocol: "CUSTOM_SPEECH", modelId: "glm-tts", endpoint: "https://open.bigmodel.cn/api/paas/v4/audio/speech", capability: { modelId: "glm-tts", families: ["SPEECH"], confidence: "DECLARED", speechFormats: ["wav"] } });
+  input.request.speech = { text, language: "zh-CN", voice: { providerVoiceId: voice, voiceVersion: "1", speakingRate: 1, pitch: 0 }, outputFormat: "wav" };
+  return input;
+}
+it("editorial speech requires a separate grant, preserves all old reservations, and rejects a sixth POST", async () => {
+  const { path, prior } = await editorialFixture();
+  await expect(createEditorialSpeechBudget(path, undefined, editorialTurns)).rejects.toThrow("AUTHORIZATION_REQUIRED");
+  const wav = Buffer.alloc(4844); wav.write("RIFF"); wav.writeUInt32LE(4836, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(24000, 24); wav.writeUInt32LE(48000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(4800, 40);
+  const upstream = new DeterministicProviderHttpTransport(() => { throw Error("NO_TEXT_ALLOWED"); }, async () => {
+    const ledger = JSON.parse(await readFile(join(path, "chapter-call-reservations.private.json"), "utf8"));
+    expect(ledger.reservations.length).toBe(60 + upstream.calls.length);
+    return { status: 200, headers: {}, bytes: wav };
+  });
+  const budget = await createEditorialSpeechBudget(path, "CHAPTER_I_EDITORIAL_TTS_ONCE_SAME_8.00_CNY", editorialTurns, upstream);
+  const adapter = budget.adapterResolver({ providerKey: "zhipu", protocol: "CUSTOM_SPEECH", modelId: "glm-tts", family: "SPEECH" })!;
+  for (const turn of editorialTurns) await adapter.execute(speechWire(turn.text, turn.voice));
+  await expect(adapter.execute(speechWire(editorialTurns[0]!.text, "tongtong"))).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", retryable: false });
+  expect(upstream.calls).toHaveLength(5);
+  const ledger = JSON.parse(await readFile(join(path, "chapter-call-reservations.private.json"), "utf8"));
+  expect(ledger.reservations.slice(0, 60)).toEqual(prior.reservations);
+  expect(ledger.reservations.reduce((sum: number, r: { reservedCny: number }) => sum + r.reservedCny, 0)).toBeCloseTo(7.29468);
+  await expect(createEditorialSpeechBudget(path, "CHAPTER_I_EDITORIAL_TTS_ONCE_SAME_8.00_CNY", editorialTurns)).rejects.toThrow();
+});
+it.each(["content", "upstream"])("editorial %s failure stops without a second remote attempt", async fault => {
+  const { path } = await editorialFixture();
+  const upstream = new DeterministicProviderHttpTransport(() => { throw Error("NO_TEXT_ALLOWED"); }, () => ({ status: 500, headers: {}, bytes: Buffer.from("temporary failure") }));
+  const budget = await createEditorialSpeechBudget(path, "CHAPTER_I_EDITORIAL_TTS_ONCE_SAME_8.00_CNY", editorialTurns, upstream);
+  const adapter = budget.adapterResolver({ providerKey: "zhipu", protocol: "CUSTOM_SPEECH", modelId: "glm-tts", family: "SPEECH" })!;
+  await expect(adapter.execute(speechWire(fault === "content" ? "unapproved" : editorialTurns[0]!.text, "tongtong"))).rejects.toMatchObject({ retryable: false });
+  await expect(adapter.execute(speechWire(editorialTurns[0]!.text, "tongtong"))).rejects.toMatchObject({ retryable: false });
+  expect(upstream.calls).toHaveLength(fault === "content" ? 0 : 1);
+  expect(JSON.parse(await readFile(join(path, "chapter-call-reservations.private.json"), "utf8")).stopped).toBe(true);
+});
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true }); });
 async function root() { const value = await mkdtemp(join(tmpdir(), "chapter-budget-")); roots.push(value); return value; }
 const wire = (): Parameters<ProviderAdapter["execute"]>[0] => ({ snapshot: { id: "s", workspaceId: "w", routeSlot: "EMBEDDING", correlationId: "c", source: "WORKSPACE", providerKey: "zhipu", protocol: "OPENAI_EMBEDDINGS", endpoint: "https://open.bigmodel.cn/api/paas/v4/embeddings", modelId: "embedding-3", adapterVersion: "builtin-v1", capability: builtInProviderCatalog.providers.find(p => p.providerKey === "zhipu")!.models.find(m => m.modelId === "embedding-3")!, configuration: { embeddingDimensions: 256 }, configurationHash: "h", createdAt: new Date() }, request: { workspaceId: "w", routeSlot: "EMBEDDING", correlationId: "c", idempotencyKey: "i", inputHash: "h", requestFingerprint: "f", capability: { family: "EMBEDDING" }, embedding: { texts: ["first"], purpose: "DOCUMENT" } }, signal: new AbortController().signal, credential: "synthetic-secret" });
