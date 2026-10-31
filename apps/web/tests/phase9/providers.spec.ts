@@ -260,7 +260,7 @@ test("a real failed Book analysis exposes an explicit browser retry without re-u
   await expect.poll(async () => (await prisma.ingestionRun.findFirst({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 90_000 }).toBe("SUCCEEDED");
   await page.reload();
   await expect.poll(async () => (await prisma.bookAnalysisRun.findFirst({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 120_000 }).toBe("FAILED");
-  await expect(page.getByText("AI 深度理解失败", { exact: true })).toBeVisible();
+  await expect(page.getByRole("paragraph").filter({ hasText: /^AI 深度理解失败$/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
   const runA = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" } });
   expect(runA.status).toBe("FAILED");
