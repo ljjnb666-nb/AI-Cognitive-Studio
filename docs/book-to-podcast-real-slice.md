@@ -1,8 +1,24 @@
 # 真实电子书到播客：执行记录
 
-本轮目标 active；尚未生成真实音频，不宣称完整成功。禁止回到 OCR 基础设施扩展。
+本轮目标 active；已真实生成章节草稿语音，但正式成品与 Edge 播放验收尚未通过，不宣称完整成功。禁止回到 OCR 基础设施扩展。
 
-## 2026-10-31 source-v6 离线准备（尚未付费执行）
+## 2026-10-31 source-v6 真实执行结果（最新）
+
+用户已授权累计8.00元方案，暂停期间未启动；用户恢复目标后核验旧48条预留、stopped=true及一次性授权文件未使用，再启动一次。真实Book全部复用，新增5次Air、2次Embedding、5次glm-tts（423字符）。脚本生成已SUCCEEDED并创建正式脚本修订；音频合成/组装/持久化真实完成，但QUALITY_VALIDATION拒绝标准化输出，原run/Job均FAILED，没有CurrentPodcastAudio。费用授权已经触发停止条件，不得自动恢复或新增调用。
+
+累计60次物理请求：22次FlashX、20次Air、13次Embedding（30条输入）、5次TTS。累计预留7.21068元，低于8.00元；旧7次超时费用仍未知。已知供应商实报：FlashX15个响应31448输入/11985输出token；Air20个响应79674输入/18144输出token；Embedding13个响应2147输入token。TTS没有供应商实报usage，423字符是本地确定性计数，按2元/万字符标价估0.0846元，不冒充账单。全部旧预留及原响应保留。
+
+真实音频暴露标准化错误：原始WAV为93870ms/4505804字节，原NORMALIZED仅140ms/6786字节。现有silenceremove的正stop_periods=1在首个满足条件的停顿后停止复制，误当作仅裁尾静音；原时长漂移门禁正确拒绝，未降低阈值。修复为首端裁静音，尾端反向后仅裁首端、再反向复原，保留内部停顿。FFmpeg反向滤镜缓存整段音频，本轮约94秒有界样本可用，不能据此宣称整书音频性能可接受。
+
+实际保存的RAW对象经SHA读回验证后，在不调用供应商、不写数据库、不覆盖旧失败文件的条件下离线重新标准化。诊断WAV为92577.875ms、24000Hz单声道、4443816字节，SHA256=862fcb870e184d2e820504f53abec621f60594ad3bf0c73ef647edc59c32f02d；响度-16.79LUFS、truePeak=-1dB。诊断文件与报告保留私有，明确OFFLINE_DIAGNOSTIC_NOT_CURRENT_PODCAST_AUDIO。未将其注册为正式音频修订。播放工具阻断file协议，本轮没有据此宣称Edge播放成功。
+
+来源ID/范围通过仍不等于内容正确：人工对照发现新脚本仍把妻子的话归给丈夫，部分译文引用了另一句原文，外推了章节没有建立的社会历史断言。因此SEMANTIC_ACCEPTANCE_REJECTED，不能把这份脚本/草稿音频当合格成品。原模型响应及脚本修订不被本地修补，私有chapter-source-v6-semantic-audit.private.json记录逐句问题。最终状态仍BOOK_TO_PODCAST_VERTICAL_SLICE_BLOCKED_WITH_EVIDENCE。
+
+验证：音频边界单元7 PASS（含4种裁边组合，验证内部长停顿和尾段语音保留），Podcast单元19 PASS，真实PG/MinIO音频持久化/来源/Gateway集成34 PASS；相关lint/typecheck通过。源码修复与真实恢复文件分别记录，不用测试数量替代成品。
+
+同轮按用户独立请求优化PDF前端：无需AI理解即可查看当前正式提取；目录条目与书内页码分列，正文按句分组，支持切换未重排的提取原文。该显示层不写提取文本/坐标，不为目录印刷页码猜测PDF跳转目标，部分匹配不丢弃原文。用户私有PDF只作本地导入/渲染，未发送供应商。Web相关39 PASS，实际第3/4页各29行、原文切换/翻页、桌面及390px窄屏验证通过，页面无相关控制台错误，构建通过；书籍正文和截图不入Git。
+
+## 2026-10-31 source-v6 离线准备（历史授权前快照）
 
 在旧失败上下文上只读核验新输入：原书摘录SHA不变，13条记忆中12条可引用、1条仅供背景，逐项绑定同一extraction的精确原文范围；包含新增正文后估算1811 token，低于既有14000限额。旧首稿有6条substantive=true但无引用的发言、总1335字符。未修补旧稿或改写历史。离线Gateway请求捕获使用禁止HTTP的替身，仅验证序列化契约，不冒充真实模型验收；报告在私有chapter-source-v6-input-preflight-final.private.json，externalCalls=0、databaseWrites=0。
 
