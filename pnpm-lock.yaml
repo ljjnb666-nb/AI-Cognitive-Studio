@@ -271,6 +271,9 @@ importers:
       '@ai-cognitive/storage':
         specifier: workspace:*
         version: link:../storage
+      '@napi-rs/canvas':
+        specifier: 1.0.5
+        version: 1.0.5
       '@xmldom/xmldom':
         specifier: 0.9.12
         version: 0.9.12
