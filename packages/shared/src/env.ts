@@ -35,6 +35,11 @@ export const environmentSchema = z.object({
   // root; tier pinned to flash) lives in the ingestion MinerU config resolver,
   // which fails fast at worker startup.
   OCR_PROVIDER: z.enum(["mineru", "rapidocr"]).optional(),
+  // Independent post-publication Docling layout candidate; no publication authority.
+  // Explicitly disabled by default; must have preinstalled offline models.
+  DOCLING_LAYOUT_ENABLED: z.enum(["true", "false"]).default("false").transform(v => v === "true"),
+  DOCLING_LAYOUT_PYTHON_PATH: z.string().min(1).optional(),
+  DOCLING_LAYOUT_ARTIFACTS_PATH: z.string().min(1).optional(),
   // Explicit offline RapidOCR candidate; no automatic engine fallback.
   RAPIDOCR_PYTHON_PATH: z.string().min(1).optional(),
   RAPIDOCR_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600000).optional(),
