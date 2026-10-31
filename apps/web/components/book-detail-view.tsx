@@ -5,6 +5,7 @@ import { useState } from "react";
 import { StatusBadge } from "./status-badge";
 import { ProductIdentityPanel } from "./product-identity-panel";
 import { SourceProcessing } from "./source-processing";
+import { SourceTextReader, type SourceTextPreview } from "./source-text-reader";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
 import { cognitionTypeLabels } from "@/lib/cognitions";
 
@@ -63,7 +64,7 @@ type Props = {
   };
   memories: MemoryItemData[];
   structureNodes: StructureNodeData[];
-  textPreview?: { pageNumber: number; pageCount: number; physicalPageNumber: number | null; truncated: boolean; blocks: Array<{ id: string; ordinal: number; text: string }> } | null;
+  textPreview?: SourceTextPreview | null;
 };
 
 export function BookDetailView({ item, memories, structureNodes, textPreview }: Props) {
@@ -256,21 +257,7 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
           })}
 
           {!allEvidence.length && textPreview && (
-            <section aria-label="已提取原文">
-              <p className="muted">物理页 {textPreview.physicalPageNumber ?? textPreview.pageNumber} / {textPreview.pageCount} · 来自已完成的正式提取</p>
-              <nav aria-label="原文翻页" style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 20 }}>
-                {textPreview.pageNumber > 1 && <Link prefetch={false} href={`/studio/library/${item.id}?textPage=${textPreview.pageNumber - 1}`} scroll={false} className="btn btn-secondary">上一页</Link>}
-                <form key={textPreview.pageNumber} method="get" action={`/studio/library/${item.id}`} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <label htmlFor="text-page">页码</label>
-                  <input id="text-page" name="textPage" type="number" min="1" max={textPreview.pageCount} defaultValue={textPreview.pageNumber} required style={{ width: 72, padding: 8 }} />
-                  <button className="btn btn-secondary" type="submit">跳转</button>
-                </form>
-                {textPreview.pageNumber < textPreview.pageCount && <Link prefetch={false} href={`/studio/library/${item.id}?textPage=${textPreview.pageNumber + 1}`} scroll={false} className="btn btn-secondary">下一页</Link>}
-              </nav>
-              {textPreview.blocks.map(block => <div key={block.id} style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.9, marginBottom: 20 }}>{block.text}</div>)}
-              {!textPreview.blocks.length && <p>本页没有提取到文字。</p>}
-              {textPreview.truncated && <p className="muted">本页内容较长，当前显示部分原文。</p>}
-            </section>
+            <SourceTextReader key={`${item.id}:${textPreview.pageNumber}`} sourceDocumentId={item.id} preview={textPreview} />
           )}
           {!allEvidence.length && !textPreview && (
             <div style={{ color: "#787774", fontSize: 14 }}>
