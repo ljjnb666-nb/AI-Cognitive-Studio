@@ -3,6 +3,8 @@ import { classifyOcrQuality } from "./ocr-quality.js";
 import { createHash } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
 import { sha256Utf8 } from "@ai-cognitive/domain";
+import { logger } from "@ai-cognitive/shared";
+import { inspectPdfMixedContentShadow } from "./pdf-mixed-content-shadow.js";
 import type { StorageProvider } from "@ai-cognitive/storage";
 import { extractNativePdf, pdfTextToBlocks, type Parsed, type ParsedBlock, type ParserLimits } from "./document-parsers.js";
 import { INGESTION_EXECUTION_OWNERSHIP_LOST } from "./ingestion-run-claim.js";
@@ -64,6 +66,21 @@ export async function runPdfExtraction(input: PdfRunExtractionInput): Promise<Pd
       plan = parseRoutingPlan(row.routingPlan);
       assertRoutingPlanReplay(plan, native.routingPlan);
     }
+  }
+
+  // Shadow-only diagnostics; do not modify the durable routing authority, OCR
+  // execution or publication. Never log page indices or source text/hashes.
+  const mixedShadow = inspectPdfMixedContentShadow(native.inspections);
+  if (mixedShadow.mixedPageCount > 0) {
+    logger.info("ingestion.pdf_mixed_content_shadow_observed", {
+      schemaVersion: mixedShadow.schemaVersion,
+      pageCount: mixedShadow.pageCount,
+      mixedPageCount: mixedShadow.mixedPageCount,
+      imagePageCount: mixedShadow.imagePageCount,
+      vectorPageCount: mixedShadow.vectorPageCount,
+      annotationPageCount: mixedShadow.annotationPageCount,
+      figureSemantics: "UNVERIFIED",
+    });
   }
 
   const outcomes = new Map<number, PdfPageExtractionOutcome>();
