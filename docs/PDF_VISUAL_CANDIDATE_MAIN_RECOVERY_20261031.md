@@ -24,3 +24,6 @@
 - 资源管理新增单飞运行与停止时 drain，避免关闭 Gateway 时尚有付费在途。
 - 新增实际 PostgreSQL/MinIO 加模拟 Gateway 加密回执与付费幂等的集成证明；不消耗任何真实供应商额度。
 - 图结构候选仍然非 Gold，不能进入 Book Intelligence/正式播客。
+
+## 独立审计 P0 修复：API 路径隔离
+CI 曾在覆盖主干原有 `POST /api/studio/pdf-visual-review/[sourceDocumentId]`（OCR 结构审核）的情况下全绿。正式集成前必须恢复该 OCR 原路由到主干完全相同的 blob，并把双重同意的图结构申请迁移到独立的 `POST/GET /api/studio/pdf-visual-review/[sourceDocumentId]/mixed-graph`。该隔离由回归测试锁定；生产开关保持独立且默认 OFF。这说明静态/现有 CI 不能替代 API 合约审计与真实浏览器验收。

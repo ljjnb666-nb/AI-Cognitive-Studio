@@ -25,7 +25,7 @@ export function PdfVisualReviewRequestForm({ sourceDocumentId, serverEnabled }: 
   const [state, setState] = useState<State|null>(null);
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState<string|null>(null);
-  const url = "/api/studio/pdf-visual-review/" + sourceDocumentId;
+  const url = "/api/studio/pdf-visual-review/" + sourceDocumentId + "/mixed-graph";
   const refresh = useCallback(async () => {
     const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) throw new Error("STATUS_UNAVAILABLE");
