@@ -48,7 +48,7 @@ export function validatePdfGraphModelReview(
     if (!own(item) || !exact(item, ["status", "reason"]) ||
         (item.status !== "CLEAR" && item.status !== "ISSUE" && item.status !== "UNKNOWN") ||
         typeof item.reason !== "string" || !item.reason.trim() ||
-        item.reason.length > 280 || /[\u0000-\u001f\u007f]/.test(item.reason)) return fail();
+        item.reason.length > 280 || Array.from(item.reason).some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return fail();
     axes[key] = { status: item.status, reason: item.reason };
   }
   const states = PDF_GRAPH_REVIEW_AXES.map(key => axes[key].status);
