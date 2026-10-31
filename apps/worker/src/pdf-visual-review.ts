@@ -133,9 +133,41 @@ export async function executeOnDemandPdfVisualReview(
   };
 }
 
+/**
+ * Explicit visual runtime accepts only one running request; shutdown fences
+ * admission synchronously and drains the active operation before closing S3
+ * and Gateway. Never drop a paid in-flight invocation on normal shutdown.
+ */
+export function createManagedPdfVisualReviewRuntime<TTask, TResult>(
+  run:(task:TTask)=>Promise<TResult>,
+  release:()=>Promise<void>|void,
+){
+  let accepting=true;
+  let closePromise:Promise<void>|undefined;
+  const pending=new Set<Promise<TResult>>();
+  return {
+    execute(task:TTask):Promise<TResult>{
+      if(!accepting)return Promise.reject(new Error("PDF_VISUAL_WORKER_CLOSING"));
+      if(pending.size!==0)return Promise.reject(new Error("PDF_VISUAL_WORKER_BUSY"));
+      const operation=Promise.resolve().then(()=>run(task));
+      pending.add(operation);
+      void operation.then(()=>{pending.delete(operation);},()=>{pending.delete(operation);});
+      return operation;
+    },
+    close():Promise<void>{
+      if(closePromise)return closePromise;
+      accepting=false;
+      closePromise=(async()=>{
+        await Promise.allSettled([...pending]);
+        await release();
+      })();
+      return closePromise;
+    },
+  };
+}
+
 /** Resource-complete composition, deliberately not wired to startWorkerRuntime. */
 export function createOnDemandPdfVisualWorkerRuntime(environment:Environment,source:NodeJS.ProcessEnv){
-  const gatewayRuntime=createBookProductionGatewayRuntime(source);
   const storage=new S3CompatibleStorageProvider({
     endpoint:environment.S3_ENDPOINT,
     region:environment.S3_REGION,
@@ -144,27 +176,25 @@ export function createOnDemandPdfVisualWorkerRuntime(environment:Environment,sou
     secretKey:environment.S3_SECRET_KEY,
     forcePathStyle:environment.S3_FORCE_PATH_STYLE,
   });
+  let gatewayRuntime:ReturnType<typeof createBookProductionGatewayRuntime>;
+  try {
+    gatewayRuntime=createBookProductionGatewayRuntime(source);
+  } catch (error) {
+    storage.close();
+    throw error;
+  }
   const authorizer=new WorkspaceMembershipExecutionAuthorizer();
   const deps:PdfVisualReviewWorkerDeps={
     authorize:(userId,workspaceId)=>authorizer.authorizeExecution({userId},workspaceId),
-    loadRun:async identity=>{
-      const run=await prisma.ingestionRun.findFirst({
-        where:{id:identity.ingestionRunId,workspaceId:identity.workspaceId},
-        include:{sourceDocument:true},
-      });
-      return run;
-    },
+    loadRun:async identity=>prisma.ingestionRun.findFirst({
+      where:{id:identity.ingestionRunId,workspaceId:identity.workspaceId},
+      include:{sourceDocument:true},
+    }),
     storage,gateway:gatewayRuntime.gateway,
     persistReviewCandidate:persistPdfVisualReviewCandidates,
   };
-  let closed=false;
-  return {
-    execute:(task:PdfVisualReviewWorkerTask)=>executeOnDemandPdfVisualReview(task,deps),
-    async close(){
-      if(closed)return;
-      closed=true;
-      storage.close();
-      await gatewayRuntime.close();
-    },
-  };
+  return createManagedPdfVisualReviewRuntime(
+    (task:PdfVisualReviewWorkerTask)=>executeOnDemandPdfVisualReview(task,deps),
+    async()=>{try{storage.close();}finally{await gatewayRuntime.close();}},
+  );
 }

@@ -15,3 +15,12 @@
 
 ## 下一步
 在既有 Studio 上传流程接入可审核的**用户显式同意申请**，受控 Worker 领取后生成候选；然后实现独立模型结构核验和 B03/B15 Gold/质量门禁。不能因为只是打开页面就调用视觉模型。
+
+## 显式用户申请与受控执行回收
+- 增加独立开关 `PDF_MIXED_GRAPH_REVIEW_REQUEST_ENABLED=false`，不复用最新主线已经用于 OCR 结构复核的 `PDF_VISUAL_REVIEW_ON_DEMAND_ENABLED`。默认无扫表、无模型调用、无自动授权。
+- 前端两个独立同意：私有原书混合页图片发送至 Workspace 视觉 Provider，及可能发生 API 费用；一次申请只处理本书最前一张混排页，非当前任意页。
+- POST 需要同源 Origin、OWNER/EDITOR 身份、当前 PDF 提取与视觉路由；以 PostgreSQL 唯一键和 15 分钟窗口拒绝重复申请。GET 只读取当前授权书籍对应的申请状态。
+- Worker 默认不启动图表模型扫表；独立开关显式启用后，5s 有界扫描、CAS 领取与权限二次确认；一次性执行、失败或崩溃绝不自动重试未知付费结果。复用 #227 已验收的无像素候选持久化与 Gateway 账本。
+- 资源管理新增单飞运行与停止时 drain，避免关闭 Gateway 时尚有付费在途。
+- 新增实际 PostgreSQL/MinIO 加模拟 Gateway 加密回执与付费幂等的集成证明；不消耗任何真实供应商额度。
+- 图结构候选仍然非 Gold，不能进入 Book Intelligence/正式播客。

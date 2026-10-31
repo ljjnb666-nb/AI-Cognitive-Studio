@@ -4,7 +4,7 @@ import PDFDocument from "pdfkit";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_PARSER_LIMITS, extractNativePdf } from "@ai-cognitive/ingestion";
 import type { ProviderGateway } from "@ai-cognitive/provider-gateway";
-import { executeOnDemandPdfVisualReview, type PdfVisualReviewWorkerDeps } from "../src/pdf-visual-review.js";
+import { executeOnDemandPdfVisualReview, createManagedPdfVisualReviewRuntime, type PdfVisualReviewWorkerDeps } from "../src/pdf-visual-review.js";
 
 const pixel=Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==","base64");
 const sha=(bytes:Uint8Array)=>createHash("sha256").update(bytes).digest("hex");
@@ -55,6 +55,25 @@ async function fixture(mixed=true) {
 }
 
 describe("Worker on-demand PDF visual candidate task",()=>{
+  it("single-flights visual tasks and close waits for the admitted invocation",async()=>{
+    let resolve!: (n:number)=>void;
+    const gate=new Promise<number>(r=>{resolve=r;});
+    const run=vi.fn(async (...args:string[])=>{expect(args).toEqual(["first"]);return gate;});
+    const release=vi.fn(async()=>undefined);
+    const runtime=createManagedPdfVisualReviewRuntime(run,release);
+    const first=runtime.execute("first");
+    await expect(runtime.execute("second")).rejects.toThrow("PDF_VISUAL_WORKER_BUSY");
+    const closing=runtime.close();
+    await expect(runtime.execute("third")).rejects.toThrow("PDF_VISUAL_WORKER_CLOSING");
+    expect(release).not.toHaveBeenCalled();
+    resolve(1);
+    await expect(first).resolves.toBe(1);
+    await closing;
+    await runtime.close();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
   it("authenticates first, reads real private PDF, replay-checks and sends one mixed page through gateway",async()=>{
     const f=await fixture();
     const out=await executeOnDemandPdfVisualReview(task,f.deps);

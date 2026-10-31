@@ -1138,6 +1138,7 @@ model IngestionRun {
   doclingLayoutSnapshots DoclingLayoutSnapshot[]
   doclingLayoutTasks     DoclingLayoutTask[]
   pdfVisualReviewCandidates PdfVisualReviewCandidate[]
+  pdfVisualReviewRequests   PdfVisualReviewRequest[]
 
   @@unique([id, sourceDocumentId, workspaceId])
   @@index([executionLeaseUntil])
@@ -1161,6 +1162,28 @@ model PdfVisualReviewCandidate {
   @@unique([ingestionRunId, physicalPageIndex, routingGeneration, sourcePngSha256], map: "PdfVisualReviewCandidate_identity_uq")
   @@index([workspaceId, sourceDocumentId, physicalPageIndex, expiresAt], map: "PdfVisualReviewCandidate_read_idx")
   @@index([expiresAt], map: "PdfVisualReviewCandidate_expiry_idx")
+}
+
+model PdfVisualReviewRequest {
+  id                String       @id @default(cuid())
+  workspaceId       String
+  userId            String
+  sourceDocumentId  String
+  ingestionRunId    String
+  routingGeneration Int
+  sourcePdfSha256   String
+  status            String       @default("PENDING")
+  failureCode       String?
+  claimToken        String?
+  createdAt         DateTime     @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  expiresAt         DateTime
+  ingestionRun      IngestionRun @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@unique([ingestionRunId, routingGeneration], map: "PdfVisualReviewRequest_single_attempt_uq")
+  @@index([status, expiresAt, createdAt], map: "PdfVisualReviewRequest_pending_idx")
+  @@index([workspaceId, sourceDocumentId], map: "PdfVisualReviewRequest_read_idx")
 }
 
 /// Current per-host OCR machine-capacity authority (fenced lease). Deliberately

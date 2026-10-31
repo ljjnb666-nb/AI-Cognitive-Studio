@@ -9,6 +9,7 @@ import { projectStoredPdfVisualCandidate } from "@/lib/pdf-visual-candidate";
 import { readOcrStructureReviewEvidence } from "@ai-cognitive/ingestion";
 import { storage } from "@/lib/storage";
 import {OcrModelReviewRequest} from "@/components/ocr-model-review-request";
+import { PdfVisualReviewRequestForm } from "@/components/pdf-visual-review-request";
 
 export default async function PdfSourceReviewPage({
   params, searchParams,
@@ -161,6 +162,7 @@ export default async function PdfSourceReviewPage({
               {physicalPageIndex + 1 < pages ? <Link href={pageHref(physicalPageIndex + 1)} className="btn btn-secondary">下一页</Link> : null}
             </div>
           </nav>
+          <PdfVisualReviewRequestForm sourceDocumentId={source.id} serverEnabled={process.env.PDF_MIXED_GRAPH_REVIEW_REQUEST_ENABLED==="true"}/>
           <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr)", gap: 20 }}>
             <section className="card-panel" aria-labelledby="pdf-source-text-heading">
               <h2 id="pdf-source-text-heading" style={{ fontSize: 20, marginTop: 0 }}>原文区块 · 未独立核准</h2>
