@@ -122,12 +122,19 @@ async function waitForBlockedPodcastUpdates(blockerPid: number, expectedCount: n
   throw new Error(`A2_PODCAST_EXPECTED_${expectedCount}_BLOCKED_RUN_UPDATES`);
 }
 
-async function waitForSignal(signal: () => boolean, message: string) {
-  for (let attempt = 0; attempt < 10_000; attempt++) {
-    if (signal()) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
+// Bound by wall-clock time rather than event-loop spins. After a PostgreSQL
+// lock releases, the worker still needs DB and Prisma scheduling time.
+async function waitForSignal(
+  signal: () => boolean,
+  message: string,
+  workerSettled: () => boolean,
+) {
+  const deadline = Date.now() + 10_000;
+  while (!signal()) {
+    if (workerSettled()) throw new Error(`${message}:WORKER_SETTLED_BEFORE_PROVIDER`);
+    if (Date.now() >= deadline) throw new Error(`${message}:WALL_CLOCK_TIMEOUT`);
+    await sleep(10);
   }
-  throw new Error(message);
 }
 
 async function cleanupWorkspace(workspaceId: string) {
@@ -379,17 +386,28 @@ describe("durable Phase 3 generation", () => {
       let providerDidEnter = false;
       let rearm: ReturnType<typeof rearmPodcastGenerationRunById> | undefined;
       let worker: ReturnType<typeof processPodcastGenerationRun> | undefined;
+      let workerSettledBeforeProvider = false;
       try {
         worker = processPodcastGenerationRun(runId, {
           providerForRun: async () => { providerDidEnter = true; await providerGate; throw new Error("A2_STOP_AFTER_PODCAST_CLAIM"); },
           embeddingProviderForRun: async () => data.embeddings,
         }, 0);
+        // A worker that settles without reaching the provider is a state failure,
+        // not an arbitrary timeout. Do not mask the original worker result.
+        void worker.then(
+          () => { workerSettledBeforeProvider = true; },
+          () => { workerSettledBeforeProvider = true; },
+        );
         await waitForBlockedPodcastUpdates(blocker.pid, 1);
         rearm = rearmPodcastGenerationRunById(runId, 0);
         await waitForBlockedPodcastUpdates(blocker.pid, 2);
         blocker.release();
         await blocker.done;
-        await waitForSignal(() => providerDidEnter, "A2_PODCAST_CLAIM_DID_NOT_REACH_PROVIDER_RESOLVER");
+        await waitForSignal(
+          () => providerDidEnter,
+          "A2_PODCAST_CLAIM_DID_NOT_REACH_PROVIDER_RESOLVER",
+          () => workerSettledBeforeProvider,
+        );
         const beforeRearm = await Promise.all([
           prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: runId } }),
           prisma.job.findUniqueOrThrow({ where: { id: data.requested.job.id } }),
