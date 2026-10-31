@@ -677,9 +677,9 @@ test("desktop navigation keeps one clear active destination", async ({
     owner.memberships[0]!.workspaceId,
     owner.id,
   );
-  // A durable pending source renders WAITING_FOR_ANALYSIS on load; the generic
-  // failure copy may appear only after the user-initiated recovery request
-  // fails, and the raw backend sentinel must never reach the page.
+  // With no analysis worker, the published extraction must truthfully show
+  // that analysis waits for the service. Generic failure copy appears only
+  // after explicit recovery fails; backend sentinels must remain private.
   await page.route(
     `**/api/studio/processing/${pendingSource.document.id}/recover`,
     async (route) => {
@@ -691,7 +691,7 @@ test("desktop navigation keeps one clear active destination", async ({
     },
   );
   await page.goto(`/studio/library/${pendingSource.document.id}`);
-  await expect(page.getByText("解析完成，准备进行 AI 深度理解")).toBeVisible();
+  await expect(page.getByRole("paragraph").filter({ hasText: /^正文提取已完成。AI 深度理解等待后台服务启动。$/ })).toBeVisible();
   const recoverButton = page.getByRole("button", { name: "恢复深度理解" });
   await expect(recoverButton).toBeVisible();
   const recoverResponse = page.waitForResponse(
@@ -713,7 +713,7 @@ test("desktop navigation keeps one clear active destination", async ({
     sentinels[1]!,
   );
   await page.goto(`/studio/library/${terminalFailure}`);
-  await expect(page.getByText("AI 深度理解失败")).toBeVisible();
+  await expect(page.getByRole("paragraph").filter({ hasText: /^AI 深度理解失败$/ })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(sentinels[1]!);
 
   const providerFailure = await failedBookAnalysis(
