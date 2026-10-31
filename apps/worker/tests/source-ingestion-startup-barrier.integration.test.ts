@@ -109,7 +109,7 @@ describe("startup OCR reconciliation barrier (RF03 P1-01)", () => {
     const { S3CompatibleStorageProvider } = await import("@ai-cognitive/storage");
     const storage = new S3CompatibleStorageProvider({ endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000", region: "us-east-1", bucket: process.env.S3_BUCKET ?? "ai-cognitive-studio-dev", accessKey: process.env.S3_ACCESS_KEY ?? "local-development-only", secretKey: process.env.S3_SECRET_KEY ?? "local-development-only", forcePathStyle: true });
     await storage.putObject({ key: storageKey, body: bytes, contentType: "application/pdf" });
-    const blob2 = await prisma.sourceBlob.create({ data: { workspaceId: workspace.id, sha256: sha256(storageKey), sizeBytes: bytes.length, mediaType: "application/pdf", storageKey } });
+    const blob2 = await prisma.sourceBlob.create({ data: { workspaceId: workspace.id, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length, mediaType: "application/pdf", storageKey } });
     const source2 = await prisma.source.create({ data: { workspaceId: workspace.id, kind: "FILE", displayName: "barrier-ocr.pdf" } });
     const document2 = await prisma.sourceDocument.create({ data: { sourceId: source2.id, sourceBlobId: blob2.id, workspaceId: workspace.id, version: 1, sha256: blob2.sha256, sizeBytes: bytes.length, mediaType: "application/pdf", storageKey } });
     const job2 = await prisma.job.create({ data: { userId: user.id, workspaceId: workspace.id, type: "source.ingest", payload: { sourceDocumentId: document2.id } } });

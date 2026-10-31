@@ -1183,6 +1183,17 @@ model OcrPageAttempt {
   @@index([ingestionRunId, routingGeneration])
   @@index([status, nextAttemptAt])
   @@index([workspaceId])
+  proposedTier             String?
+  admittedTier             String?
+  actualTier               String?
+  manifestDigest           String?
+  executionStatus          String?
+  fallbackReason           String?
+  sourceIdentity           Json?
+  claimIdentity            Json?
+  qualityStatus            String?
+  executions               OcrPageExecution[]
+
 }
 
 /// Durable identity/history for detached MinerU server instances. One row
@@ -3046,4 +3057,27 @@ model Job {
   @@index([status])
   @@index([correlationId])
   @@index([workspaceId, status])
+}
+/// Immutable execution receipts; page checkpoint remains the sole retry authority.
+model OcrPageExecution {
+  id                String @id @default(cuid())
+  pageAttemptId     String
+  pageClaimToken    String @unique
+  runExecutionToken String
+  hostClaimToken    String?
+  serverIdentity    Json?
+  proposedTier      String?
+  admittedTier      String?
+  actualTier        String?
+  modelRevision     String?
+  manifestDigest    String?
+  executionStatus   String
+  fallbackReason    String?
+  errorCode         String?
+  resultTextSha256  String?
+  sourceIdentity    Json
+  qualityDecision   Json?
+  createdAt         DateTime @default(now())
+  pageAttempt       OcrPageAttempt @relation(fields:[pageAttemptId], references:[id], onDelete:Cascade)
+  @@index([pageAttemptId, createdAt])
 }

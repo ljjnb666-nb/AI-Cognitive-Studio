@@ -1,3 +1,4 @@
+import { isApprovedMineruManifest } from "./mineru-approved-inventory.js";
 import { createHash } from "node:crypto";
 import { lstat, open, realpath } from "node:fs/promises";
 import { resolve, sep } from "node:path";
@@ -85,7 +86,7 @@ export function parseMineruStandardManifest(raw: string): MineruStandardManifest
     if (!entry || typeof entry !== "object") return null;
     if (typeof entry.path !== "string" || !isSafeManifestPath(entry.path)) return null;
     if (!isSha256(entry.sha256)) return null;
-    if (typeof entry.sizeBytes !== "number" || !Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 1 || entry.sizeBytes > MINERU_STANDARD_MANIFEST_MAX_FILE_BYTES) return null;
+    if (typeof entry.sizeBytes !== "number" || !Number.isSafeInteger(entry.sizeBytes) || (entry.sizeBytes < 0 || (entry.sizeBytes === 0 && !entry.path.endsWith("/.mineru_complete"))) || entry.sizeBytes > MINERU_STANDARD_MANIFEST_MAX_FILE_BYTES) return null;
     if (seen.has(entry.path)) return null;
     seen.add(entry.path);
     totalBytes += entry.sizeBytes;
@@ -100,6 +101,8 @@ export type MineruStandardAdmissionConfig = {
   manifest: MineruStandardManifest;
   /** SHA-256 of the exact manifest bytes — the model identity recorded per execution. */
   manifestSha256: string;
+  /** Runtime safety reserve may only be raised above the fixed 1 GiB floor. */
+  minRuntimeFreeMemoryBytes?: number;
   minFreeMemoryBytes: number;
   timeoutMs: number;
 };
@@ -188,6 +191,12 @@ async function sha256File(path: string): Promise<string> {
  * proof). Model files are never modified by this check.
  */
 export async function verifyMineruStandardModels(modelRoot: string, admission: MineruStandardAdmissionConfig): Promise<MineruStandardModelsVerification> {
+  if (!isApprovedMineruManifest(admission.manifest)) return { ok:false, failures:[{path:"<manifest>",reason:"UNAPPROVED_MODEL_INVENTORY"}] };
+  return verifyMineruModelFiles(modelRoot, admission);
+}
+
+/** File verifier only. This does not grant production model approval. */
+export async function verifyMineruModelFiles(modelRoot: string, admission: MineruStandardAdmissionConfig): Promise<MineruStandardModelsVerification> {
   const failures: MineruStandardModelsFailure[] = [];
   let totalBytes = 0;
   let physicalRoot: string;

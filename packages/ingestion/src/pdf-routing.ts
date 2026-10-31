@@ -1,3 +1,4 @@
+import type { OcrSourceAuthority } from "./ocr-source-authority.js";
 /**
  * Deterministic PDF page inspection, routing, and extraction quality
  * (BOOK-INGESTION-04B-2).
@@ -207,6 +208,7 @@ export type PdfOcrPageRequest = { ingestionRunId: string; workspaceId: string; s
    * received; any recheck refusal demotes the page to the pinned flash tier
    * and is recorded in the execution facts.
    */
+  pageClaimToken?: string;
   standardExecutionRequest?: { sourcePdfSha256: string } };
 
 /**
@@ -217,10 +219,17 @@ export type PdfOcrPageRequest = { ingestionRunId: string; workspaceId: string; s
  * path — they do not exist on request objects.
  */
 export type PdfOcrExecutionFacts = {
+  sourceAuthority?: OcrSourceAuthority;
   engine: string;
   engineVersion: string;
   proposedTier: string | null;
-  actualTier: string;
+  admittedTier?: string;
+  actualTier: string | null;
+  timings?: {snapshotMs?:number;doclibStartMs?:number;engineReadyMs?:number;parseMs?:number;beforeCleanupMs?:number};
+  hostId?: string;
+  hostClaimToken?: string;
+  serverIdentity?: {pid:number;serverId:string;enginePid?:number;enginePort?:number};
+  qualityDecision?: {status:"ACCEPTED"|"REVIEW_REQUIRED"|"REJECTED";reasons:string[]};
   tierAdmission: "FLASH_DEFAULT" | "STANDARD_ADMITTED" | "STANDARD_REFUSED";
   tierRefusalCode: string | null;
   modelManifestSha256: string | null;
@@ -241,7 +250,7 @@ export interface PdfOcrExecutor {
 
 export type PdfPageExtractionOutcome = "NATIVE_TEXT" | "OCR_FALLBACK" | "EMPTY" | "UNRESOLVED_FALLBACK";
 
-export const PDF_QUALITY_REASON_CODES = ["OCR_FALLBACK_USED", "UNRESOLVED_FALLBACK_PAGE", "NO_USABLE_CONTENT"] as const;
+export const PDF_QUALITY_REASON_CODES = ["OCR_FALLBACK_USED", "UNRESOLVED_FALLBACK_PAGE", "NO_USABLE_CONTENT", "OCR_MANUAL_REVIEW_REQUIRED"] as const;
 export type PdfQualityReasonCode = (typeof PDF_QUALITY_REASON_CODES)[number];
 
 export type PdfExtractionQualityStatus = "ACCEPTED" | "DEGRADED" | "REQUIRES_FALLBACK" | "REJECTED";
@@ -249,6 +258,7 @@ export type PdfExtractionQualityStatus = "ACCEPTED" | "DEGRADED" | "REQUIRES_FAL
 export type PdfPageQualityDecision = { physicalPageIndex: number; route: PdfPageRoute; outcome: PdfPageExtractionOutcome; reasonCodes: PdfRoutingReasonCode[] };
 
 export type PdfExtractionQualityDecision = {
+  reviewRequiredPhysicalPageIndexes?: number[];
   status: PdfExtractionQualityStatus;
   reasonCodes: PdfQualityReasonCode[];
   pageDecisions: PdfPageQualityDecision[];
@@ -291,6 +301,7 @@ export function evaluatePdfExtractionQuality(plan: PdfRoutingPlan, outcomes: Map
 // ---------------------------------------------------------------------------
 
 export type PdfRoutingOutcome = {
+  reviewRequiredPhysicalPageIndexes?: number[];
   schemaVersion: typeof PDF_ROUTING_OUTCOME_SCHEMA_VERSION;
   outcome: "PUBLISHED" | "REQUIRES_FALLBACK" | "REJECTED";
   qualityStatus: PdfExtractionQualityStatus;
@@ -299,6 +310,7 @@ export type PdfRoutingOutcome = {
 
 export function pdfRoutingOutcome(decision: PdfExtractionQualityDecision, published: boolean): PdfRoutingOutcome {
   const outcome: PdfRoutingOutcome = {
+    ...(decision.reviewRequiredPhysicalPageIndexes ? {reviewRequiredPhysicalPageIndexes:decision.reviewRequiredPhysicalPageIndexes} : {}),
     schemaVersion: PDF_ROUTING_OUTCOME_SCHEMA_VERSION,
     outcome: published ? "PUBLISHED" : decision.status === "REJECTED" ? "REJECTED" : "REQUIRES_FALLBACK",
     qualityStatus: decision.status,

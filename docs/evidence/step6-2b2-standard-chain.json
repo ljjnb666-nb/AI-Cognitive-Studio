@@ -1,0 +1,65 @@
+{
+  "case": "private-scanned-page",
+  "actualTier": "standard",
+  "executionStatus": "SUCCEEDED",
+  "manifestDigest": "3382d142ef28eeeda138fd13786ec41e591007c852aca1487b424850f8c179ad",
+  "modelRevision": "mineru-4.0.3-onnx-llamacpp-q8-v1",
+  "qualityDecision": {
+    "status": "REVIEW_REQUIRED",
+    "reasons": [
+      "STRUCTURE_UNATTESTED"
+    ]
+  },
+  "runStatus": "OCR_REQUIRED",
+  "resultBytes": 2084,
+  "publicationCount": 0,
+  "realTests": {
+    "passed": 10,
+    "failed": 0,
+    "skipped": 0
+  },
+  "serviceMs": 70433,
+  "timingsMs": {
+    "snapshot": 2794,
+    "doclibStart": 3050,
+    "engineReady": 44370,
+    "parse": 10168
+  },
+  "resourceSampling": {
+    "rssSampleSeconds": 0.5,
+    "samples": 925,
+    "maxAggregateProcessRssBytes": 3302576128,
+    "minSystemAvailableBytes": 905515008,
+    "baselineGlobalVramMiB": 165,
+    "maxGlobalVramMiB": 2077,
+    "availableAfterExitBytes": 4361854976
+  },
+  "isolatedColdWarmBenchmark": {
+    "tests": {
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    "sameEngineIdentity": true,
+    "snapshotMs": 2865,
+    "engineReadyMs": 44099,
+    "firstParseMs": 14359,
+    "warmForcedParseMs": 6208,
+    "bothCacheMisses": true,
+    "maxAggregateProcessRssBytes": 3740000256,
+    "minSystemAvailableBytes": 1703464960,
+    "baselineGlobalVramMiB": 108,
+    "maxGlobalVramMiB": 2020,
+    "availableAfterExitBytes": 5237493760,
+    "engineGoneAfterStop": true
+  },
+  "limitations": [
+    "Readiness includes startup, model loading and polling; parse includes CLI, scheduler and postprocessing. Pure model times are not instrumented.",
+    "Cold means a new engine process; OS file caches were not purged. Production continues to reload for each claim.",
+    "RSS can double-count shared pages. VRAM is global device sampling, not per-process attribution or a continuous maximum.",
+    "Quality is conservative triage, not Gold accuracy. All standard proposals require review.",
+    "The 1 GiB runtime abort threshold is a safety signal, not a guarantee that available RAM never falls below it during process termination."
+  ],
+  "verifiedCodeRevision": "716152aa9d99fabb44c0c5a689cf33c181aaf426",
+  "verifiedCodeCiRun": "41004510867"
+}

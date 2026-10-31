@@ -56,6 +56,13 @@ describe("MinerU parse outcome judgment (evidence-based classification)", () => 
     expect(judgeMineruParseExit({ exitCode: 0, stdout: successStdout })).toEqual({ kind: "OUTPUT_WRITTEN", markdownPath: "C:\\claim\\out\\result.md" });
   });
 
+  it.each(["flash", "standard", null, undefined])("requires a matching actual standard receipt, received %s", (tier) => {
+    const stdout = JSON.stringify({ parse: { status: "done", tier }, output: { status: "written", path: "p" } });
+    expect(judgeMineruParseExit({ exitCode: 0, stdout, expectedTier: "standard" })).toEqual(
+      tier === "standard" ? { kind: "OUTPUT_WRITTEN", markdownPath: "p" } : { kind: "PROCESS_FAILED" },
+    );
+  });
+
   it("classifies the deterministic missing-local-model error as MODEL_NOT_FOUND", () => {
     const stdout = JSON.stringify({ error: { type: "engine_error", code: "parse_failed", message: "Model repo MinerU-4_models_onnx is not ready under C:\\models\\MinerU-4_models_onnx; missing: OCR/paddleocr/ch_PP-OCRv6_tiny_det_infer.onnx", param: null } });
     expect(judgeMineruParseExit({ exitCode: 1, stdout })).toEqual({ kind: "MODEL_NOT_FOUND" });

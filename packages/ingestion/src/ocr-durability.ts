@@ -1,3 +1,4 @@
+import { lockOcrSourceAuthority, type OcrSourceAuthority } from "./ocr-source-authority.js";
 import { randomUUID } from "node:crypto";
 import { prisma, Prisma } from "@ai-cognitive/db";
 
@@ -119,7 +120,10 @@ export async function claimOcrPageAttempt(input: { workspaceId: string; sourceDo
       "status" = 'RUNNING', "claimToken" = ${claimToken}, "claimedAt" = NOW(), "leaseUntil" = NOW() + (${leaseMs} * INTERVAL '1 millisecond'),
       "attemptCount" = "attemptCount" + 1,
       "parserName" = ${input.parserName}, "parserVersion" = ${input.parserVersion}, "parserMode" = ${input.parserMode ?? null}, "modelRevision" = ${input.modelRevision ?? null},
-      "errorCode" = NULL
+      "errorCode" = NULL,
+      "proposedTier"=NULL, "admittedTier"=NULL, "actualTier"=NULL,
+      "manifestDigest"=NULL, "executionStatus"=NULL, "fallbackReason"=NULL,
+      "sourceIdentity"=NULL, "claimIdentity"=NULL, "qualityStatus"=NULL
     WHERE "workspaceId" = ${input.workspaceId} AND "sourceDocumentId" = ${input.sourceDocumentId}
       AND "ingestionRunId" = ${input.ingestionRunId} AND "physicalPageIndex" = ${input.physicalPageIndex} AND "routingGeneration" = ${input.routingGeneration}
       AND "attemptCount" < ${maxAttempts}
@@ -143,13 +147,29 @@ export async function claimOcrPageAttempt(input: { workspaceId: string; sourceDo
 }
 
 /** Owner-only success commit; stale/expired completions fail closed (0 rows). */
-export async function completeOcrPageAttempt(input: { workspaceId: string; ingestionRunId: string; physicalPageIndex: number; routingGeneration: number; claimToken: string; authoritativeArtifactKey: string; textSha256: string; durationMs: number }): Promise<boolean> {
-  const changed = await prisma.$executeRaw`
-    UPDATE "OcrPageAttempt" SET "status" = 'SUCCEEDED', "authoritativeArtifactKey" = ${input.authoritativeArtifactKey}, "textSha256" = ${input.textSha256}, "durationMs" = ${input.durationMs}, "errorCode" = NULL, "updatedAt" = NOW()
+export async function completeOcrPageAttempt(input: { workspaceId: string; ingestionRunId: string; physicalPageIndex: number; routingGeneration: number; claimToken: string; sourceAuthority?: OcrSourceAuthority; qualityStatus?: "ACCEPTED"|"REVIEW_REQUIRED"|"REJECTED"; authoritativeArtifactKey: string; textSha256: string; durationMs: number }): Promise<boolean> {
+  return prisma.$transaction(async tx => {
+    if (input.sourceAuthority && (!await lockOcrSourceAuthority(tx, input.sourceAuthority, input.sourceAuthority)
+      || input.sourceAuthority.pageClaimToken !== input.claimToken
+      || input.sourceAuthority.ingestionRunId !== input.ingestionRunId
+      || input.sourceAuthority.workspaceId !== input.workspaceId
+      || input.sourceAuthority.physicalPageIndex !== input.physicalPageIndex
+      || input.sourceAuthority.routingGeneration !== input.routingGeneration)) return false;
+    if (input.sourceAuthority) {
+      const receipt=await tx.ocrPageExecution.findUnique({where:{pageClaimToken:input.claimToken}});
+      if(!receipt || receipt.executionStatus!=="SUCCEEDED" || (receipt.qualityDecision as {status?:string}|null)?.status!==input.qualityStatus || receipt.resultTextSha256!==input.textSha256 || receipt.pageAttemptId!==(await tx.ocrPageAttempt.findUnique({where:{ingestionRunId_physicalPageIndex_routingGeneration:{ingestionRunId:input.ingestionRunId,physicalPageIndex:input.physicalPageIndex,routingGeneration:input.routingGeneration}}}))?.id) return false;
+    }
+  const changed = await tx.$executeRaw`
+    UPDATE "OcrPageAttempt" SET "status" = 'SUCCEEDED', "qualityStatus" = ${input.qualityStatus ?? null}, "authoritativeArtifactKey" = ${input.authoritativeArtifactKey}, "textSha256" = ${input.textSha256}, "durationMs" = ${input.durationMs}, "errorCode" = NULL, "updatedAt" = NOW()
     WHERE "workspaceId" = ${input.workspaceId} AND "ingestionRunId" = ${input.ingestionRunId}
       AND "physicalPageIndex" = ${input.physicalPageIndex} AND "routingGeneration" = ${input.routingGeneration}
-      AND "status" = 'RUNNING' AND "claimToken" = ${input.claimToken} AND "leaseUntil" > NOW()`;
+      AND "status" = 'RUNNING' AND "claimToken" = ${input.claimToken} AND "leaseUntil" > clock_timestamp()
+      AND (${input.sourceAuthority?.runExecutionToken ?? null}::text IS NULL OR EXISTS (
+        SELECT 1 FROM "IngestionRun" r WHERE r."id" = "OcrPageAttempt"."ingestionRunId"
+          AND r."status"='RUNNING' AND r."executionClaimToken"=${input.sourceAuthority?.runExecutionToken ?? null}
+          AND r."executionLeaseUntil">clock_timestamp()))`;
   return changed === 1;
+  });
 }
 
 export type OcrPageFailureKind = "transient" | "terminal";
