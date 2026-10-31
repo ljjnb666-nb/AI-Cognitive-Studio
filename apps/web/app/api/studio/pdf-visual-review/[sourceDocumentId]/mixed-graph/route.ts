@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@ai-cognitive/db";
 import { sourceDetail } from "@/lib/product";
-import { isSameOriginPdfVisualRequest, pdfVisualRequestConsentSchema } from "@/lib/pdf-visual-request-policy";
-import { resolveWebIdentity } from "@/lib/identity";
+import { auth } from "@/lib/auth";
+import { isAuthenticatedPdfVisualRequest, isSameOriginPdfVisualRequest, pdfVisualRequestConsentSchema } from "@/lib/pdf-visual-request-policy";
+import { resolveWebIdentity, type WebIdentityContext } from "@/lib/identity";
 
 type Params = { params: Promise<{ sourceDocumentId: string }> };
 const statusResponse = (data: object, status = 200) =>
@@ -11,9 +12,18 @@ const statusResponse = (data: object, status = 200) =>
 const enabled = () => process.env.PDF_MIXED_GRAPH_REVIEW_REQUEST_ENABLED === "true";
 const validId = (s: string) => /^[a-z0-9]{10,32}$/.test(s);
 
-async function scopedSource(sourceDocumentId: string) {
+/** Every private read and chargeable POST requires a fresh, uncached browser session.
+ * Never treat the development/bootstrap identity as paid external-model consent. */
+async function authenticatedIdentity(request: Request): Promise<WebIdentityContext | null> {
+  const session = await auth.api.getSession({ headers: request.headers, query: { disableCookieCache: true } }).catch(() => null);
+  if (!session?.user?.id) return null;
+  const identity = await resolveWebIdentity();
+  return isAuthenticatedPdfVisualRequest(session.user.id, identity.userId) ? identity : null;
+}
+
+async function scopedSource(sourceDocumentId: string, identity: WebIdentityContext) {
   if (!validId(sourceDocumentId)) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
-  const source = await sourceDetail(sourceDocumentId);
+  const source = await sourceDetail(sourceDocumentId, identity);
   if (source.mediaType !== "application/pdf" ||
       !source.currentExtraction?.extraction.ingestionRunId)
     throw new Error("PDF_VISUAL_SOURCE_NOT_READY");
@@ -32,10 +42,12 @@ async function scopedSource(sourceDocumentId: string) {
   return { source, run };
 }
 
-export async function GET(_request: Request, { params }: Params) {
+export async function GET(request: Request, { params }: Params) {
+  const identity = await authenticatedIdentity(request).catch(() => null);
+  if (!identity) return statusResponse({ error: "WEB_IDENTITY_REQUIRED" }, 401);
   try {
     const { sourceDocumentId } = await params;
-    const { source, run } = await scopedSource(sourceDocumentId);
+    const { source, run } = await scopedSource(sourceDocumentId, identity);
     const record = await prisma.pdfVisualReviewRequest.findUnique({
       where: { ingestionRunId_routingGeneration: {
         ingestionRunId: run.id, routingGeneration: run.routingGeneration!,
@@ -77,12 +89,13 @@ export async function POST(request: Request, { params }: Params) {
   if (!isSameOriginPdfVisualRequest(request.url, origin))
     return statusResponse({ error: "PDF_VISUAL_REQUEST_ORIGIN_DENIED" }, 403);
   if (!enabled()) return statusResponse({ error: "PDF_VISUAL_REQUEST_DISABLED" }, 503);
+  const identity = await authenticatedIdentity(request).catch(() => null);
+  if (!identity) return statusResponse({ error: "WEB_IDENTITY_REQUIRED" }, 401);
   try {
     const raw: unknown = await request.json();
     pdfVisualRequestConsentSchema.parse(raw);
     const { sourceDocumentId } = await params;
-    const { source, run } = await scopedSource(sourceDocumentId);
-    const identity = await resolveWebIdentity();
+    const { source, run } = await scopedSource(sourceDocumentId, identity);
     // A VIEWER can inspect authorized source evidence, but cannot authorize
     // third-party image processing or incur workspace provider charges.
     if (identity.workspaceId !== source.workspaceId) {

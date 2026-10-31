@@ -18,6 +18,10 @@ describe("OCR and mixed-graph PDF review API coexistence", () => {
     const graph = read("../app/api/studio/pdf-visual-review/[sourceDocumentId]/mixed-graph/route.ts");
     expect(graph).toContain("pdfVisualRequestConsentSchema.parse(raw)");
     expect(graph).toContain("PDF_MIXED_GRAPH_REVIEW_REQUEST_ENABLED");
+    expect(graph).toContain("auth.api.getSession(");
+    expect(graph).toContain("disableCookieCache: true");
+    expect(graph).toContain("isAuthenticatedPdfVisualRequest(");
+    expect(graph).toContain("sourceDetail(sourceDocumentId, identity)");
     expect(graph).not.toContain("requestOcrModelReview");
     const policy = read("../lib/pdf-visual-request-policy.ts");
     expect(policy).toContain("consentToExternalImageProcessing: z.literal(true)");

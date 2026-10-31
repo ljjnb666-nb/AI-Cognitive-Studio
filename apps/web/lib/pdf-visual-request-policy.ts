@@ -15,3 +15,8 @@ export function isSameOriginPdfVisualRequest(requestUrl: string, headerOrigin: s
       headerOrigin === new URL(headerOrigin).origin;
   } catch { return false; }
 }
+
+/** A bootstrap/fallback workspace identity is never enough for a billed model request. */
+export function isAuthenticatedPdfVisualRequest(sessionUserId: string | null | undefined, identityUserId: string): boolean {
+  return typeof sessionUserId === "string" && sessionUserId.length > 0 && sessionUserId === identityUserId;
+}

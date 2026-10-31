@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSameOriginPdfVisualRequest, pdfVisualRequestConsentSchema } from "../lib/pdf-visual-request-policy";
+import { isAuthenticatedPdfVisualRequest, isSameOriginPdfVisualRequest, pdfVisualRequestConsentSchema } from "../lib/pdf-visual-request-policy";
 
 const valid={
   mode:"FIRST_MIXED_PAGE",
@@ -8,6 +8,13 @@ const valid={
 };
 
 describe("paid PDF vision consent and CSRF policy",()=>{
+  it("requires live session identity matching the resolved workspace identity",()=>{
+    expect(isAuthenticatedPdfVisualRequest("real-user","real-user")).toBe(true);
+    expect(isAuthenticatedPdfVisualRequest("real-user","dev-user-01")).toBe(false);
+    expect(isAuthenticatedPdfVisualRequest(null,"dev-user-01")).toBe(false);
+    expect(isAuthenticatedPdfVisualRequest(undefined,"real-user")).toBe(false);
+    expect(isAuthenticatedPdfVisualRequest("","")).toBe(false);
+  });
   it("only accepts explicit image AND provider-charge consents",()=>{
     expect(pdfVisualRequestConsentSchema.parse(valid)).toEqual(valid);
     expect(pdfVisualRequestConsentSchema.safeParse({...valid,consentToProviderCharges:false}).success).toBe(false);

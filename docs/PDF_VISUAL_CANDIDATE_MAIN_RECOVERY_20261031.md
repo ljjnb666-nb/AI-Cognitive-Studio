@@ -27,3 +27,6 @@
 
 ## 独立审计 P0 修复：API 路径隔离
 CI 曾在覆盖主干原有 `POST /api/studio/pdf-visual-review/[sourceDocumentId]`（OCR 结构审核）的情况下全绿。正式集成前必须恢复该 OCR 原路由到主干完全相同的 blob，并把双重同意的图结构申请迁移到独立的 `POST/GET /api/studio/pdf-visual-review/[sourceDocumentId]/mixed-graph`。该隔离由回归测试锁定；生产开关保持独立且默认 OFF。这说明静态/现有 CI 不能替代 API 合约审计与真实浏览器验收。
+
+## 认证门禁修复
+混合图表图片会发送第三方模型且可能产生费用，因此用户显式勾选仍然**不能替代实时登录认证**。`/mixed-graph` 的 GET 和 POST 都先向 Better Auth 获取禁用 Cookie 缓存的真实会话，并核验 session.user.id 与工作区身份解析结果相同；没有会话、身份回退或二者不一致时以 401 拒绝，绝不读取私有 PDF 候选或写入付费申请。原 OCR 路由保持原状。增加纯身份判定测试与接口合约隔离回归。
