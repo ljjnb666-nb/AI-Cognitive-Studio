@@ -20,3 +20,10 @@
 
 ## 下一切片
 真正的“独立模型审核”需要在该包基础上新增独立的视觉来源比较、结果状态机、用量账本与自动发布禁止门禁；在真实来源和可度量质量没有证据前不允许把这个包送入 Book Intelligence 或播客。
+
+## 独立视觉模型第二次判定执行器（仅开发集成，尚未启用）
+- `packages/provider-gateway/src/vision/pdf-graph-model-review.ts` 提供 `createGatewayPdfGraphModelReviewer`，独立于生成图候选的请求。只有 **单独的第二次付费图像处理授权、独立 reviewRequestId、已校验原图 PNG/PDF 来源 SHA 和 graph candidate SHA** 齐全时才允许发送 Gateway。
+- 仍复用受信的 `PDF_VISUAL_STRUCTURE` workspace 视觉路由以及模型/预算/成员鉴权；一次调用、8MB 图像、1800 输出 token，不私接 API Key，不自动 retry。输入为有界正文摘录与源图上的图结构；一旦正文被裁剪、图像关系无法判断或模型返回 UNKNOWN，就只能 `REVIEW_REQUIRED`。
+- 模型仅能返回七个固定轴的 CLEAR/ISSUE/UNKNOWN，综合判定 PASSED/REJECTED/REVIEW_REQUIRED；通过不授权 Book Intelligence、播客、Gold 或发布，模型返回的越权字段直接拒绝。
+- **重要**：本版只是实际可调用、已接入已有 Gateway 类型的第二次模型判定执行器；没有持久化第二次授权/模型审核决策、没有自动队列或生产 UI 按钮，不能用第一次图结构生成的同意暗中触发第二次付费。继续后续集成前保持无调用、不可发布。
+- 新增 `pdf-graph-model-review.test.ts`，由现有 `test:phase8b` CI 脚本运行，模拟网关结果测试来源、预算、同意、未知、截断、模型自宣称批准拒绝等。

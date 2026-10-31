@@ -49,6 +49,7 @@ describe("bounded PDF source+graph review packet for independent model input", (
     });
     expect(packet.text.parsedBlocks[0]?.excerpt).toBe("same physical page text");
     expect(packet.visual?.figures[0]?.edges[0]?.direction).toBe("DIRECTED");
+    expect(packet.visual?.candidateSha256).toBe(pdfReviewCandidateFingerprint(graph));
     expect(JSON.stringify(packet)).not.toContain("storageKey");
   });
   it("does not mistake an absent graph for an empty authenticated figure", () => {

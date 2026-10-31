@@ -38,6 +38,7 @@ export function buildPdfSourceGraphReviewPacket(input: PdfSourceGraphPacketInput
         visual.approvedForBookIntelligence !== false ||
         visual.approvedForPodcast !== false ||
         !/^[0-9a-f]{64}$/.test(visual.sourcePngSha256) ||
+        !/^[0-9a-f]{64}$/.test(visual.candidateSha256) ||
         visual.figures.length < 1
       ))) {
     throw new Error("PDF_SOURCE_GRAPH_PACKET_AUTHORITY_INVALID");
@@ -73,6 +74,7 @@ export function buildPdfSourceGraphReviewPacket(input: PdfSourceGraphPacketInput
     visual: visual === null ? null : {
       status: "UNVERIFIED_CANDIDATE" as const,
       expiresAt: visual.expiresAt,
+      candidateSha256: visual.candidateSha256,
       figures: visual.figures,
     },
     independentModelReviewStatus: "NOT_REVIEWED" as const,
