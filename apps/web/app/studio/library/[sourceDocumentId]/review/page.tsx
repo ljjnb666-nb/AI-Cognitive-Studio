@@ -5,6 +5,7 @@ import { prisma } from "@ai-cognitive/db";
 import { sourceDetail } from "@/lib/product";
 import { projectBookDisplay } from "@/lib/book-display";
 import { projectPdfPageEvidence } from "@/lib/pdf-page-review";
+import { projectStoredPdfVisualCandidate } from "@/lib/pdf-visual-candidate";
 import { readOcrStructureReviewEvidence } from "@ai-cognitive/ingestion";
 import { storage } from "@/lib/storage";
 import {OcrModelReviewRequest} from "@/components/ocr-model-review-request";
@@ -91,6 +92,36 @@ export default async function PdfSourceReviewPage({
       sourceBlockCount,
       blocks,
     }) : null;
+  // No user-supplied candidate ID or model invocation can be reached here.
+  // Bind the candidate to the current extraction/run, exact source SHA and page.
+  const matchingRun = current ? await prisma.ingestionRun.findFirst({
+    where: { id: current.extraction.ingestionRunId, sourceDocumentId: source.id,
+      workspaceId: source.workspaceId, status: "SUCCEEDED" },
+    select: { routingGeneration: true },
+  }) : null;
+  const row = matchingRun?.routingGeneration ? await prisma.pdfVisualReviewCandidate.findFirst({
+    where: {
+      workspaceId: source.workspaceId, sourceDocumentId: source.id,
+      ingestionRunId: current!.extraction.ingestionRunId,
+      routingGeneration: matchingRun.routingGeneration,
+      physicalPageIndex, sourcePdfSha256: source.sha256,
+      expiresAt: { gt: new Date() },
+    },
+    select: {
+      physicalPageIndex: true, sourcePdfSha256: true, sourcePngSha256: true,
+      routingGeneration: true, candidateJson: true, candidateSha256: true, expiresAt: true,
+    },
+    orderBy: { createdAt: "desc" },
+  }) : null;
+  let visual: ReturnType<typeof projectStoredPdfVisualCandidate> = null;
+  let visualInvalid = false;
+  try {
+    visual = projectStoredPdfVisualCandidate(row,
+      { physicalPageIndex, sourcePdfSha256: source.sha256, routingGeneration: matchingRun?.routingGeneration ?? 0 });
+  } catch {
+    // Corrupt or stale model evidence must never become a reviewed fact.
+    visualInvalid = true;
+  }
   const pageHref = (page: number) => `/studio/library/${source.id}/review?page=${page}`;
   return (
     <main className="container" style={{ maxWidth: 1150, margin: "0 auto", padding: "28px 20px 60px" }}>
@@ -107,7 +138,7 @@ export default async function PdfSourceReviewPage({
       <div className="card-panel" style={{ marginBottom: 20 }}>
         <h2 style={{ fontSize: 18, margin: "0 0 12px" }}>审核权限边界</h2>
         <p>此页面读取当前已存档的 PDF 解析区块，仅供核对原文来源。<strong>解析成功不等于人工核准，更不等于独立 Gold。</strong></p>
-        <p>视觉 Worker 的图表候选目前尚未有可供网页读取的持久化审核记录，因此这里不会虚构图表、批准状态或模型置信度。</p>
+        <p>只有明确授权后保存、与当前解析版本和物理页绑定、且未过期的图表候选可以只读展示。图结构仍未经独立审核，不代表已获准引用或发布。</p>
         <p style={{ fontSize: 13, marginBottom: 0 }}>
           解析器：{current?.extraction.parserName ?? "尚无结果"} / {current?.extraction.parserVersion ?? "—"} ·
           原书 SHA256：<code style={{ overflowWrap: "anywhere" }}>{source.sha256}</code>
@@ -161,10 +192,35 @@ export default async function PdfSourceReviewPage({
               )}
             </section>
             <section className="card-panel" aria-labelledby="pdf-visual-review-heading">
-              <h2 id="pdf-visual-review-heading" style={{ fontSize: 20, marginTop: 0 }}>图表与关系 · 待接入审核</h2>
-              <p>当前未找到带有可复核来源、可通过网页读取的图表候选。这里不会根据正文自行猜测图表节点或箭头方向。</p>
+              <h2 id="pdf-visual-review-heading" style={{ fontSize: 20, marginTop: 0 }}>图表与关系 · 模型候选（未人工核验）</h2>
+              {visual ? (
+                <>
+                  <p role="status">存在 {visual.figures.length} 个待核验图表候选；不代表原图准确、完整或可发布。</p>
+                  <p style={{ overflowWrap: "anywhere", fontSize: 12, color: "var(--text-secondary)" }}>
+                    来源 PNG SHA256：<code>{visual.sourcePngSha256}</code> · 候选过期时间：{visual.expiresAt}
+                  </p>
+                  {visual.figures.map(figure => (
+                    <article key={figure.id} style={{ padding: "15px 0", borderTop: "1px solid var(--outline-variant, #d4d4d4)" }}>
+                      <h3 style={{ fontSize: 17, margin: "0 0 8px" }}>{figure.kind} · {figure.id}</h3>
+                      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>模型识别说明（未经核验）：{figure.caption || "无"}</p>
+                      <p style={{ fontSize: 12, color: "var(--text-secondary)" }}>页面定位框（千分比）：[{figure.bbox.join(", ")}]</p>
+                      <h4 style={{ fontSize: 14 }}>识别的节点</h4>
+                      <ul>{figure.nodes.map(node => <li key={node.id}>{node.id}：{node.label}</li>)}</ul>
+                      <h4 style={{ fontSize: 14 }}>识别的关系</h4>
+                      <ul>{figure.edges.map((edge, index) =>
+                        <li key={index}>{edge.from} → {edge.to}（{edge.direction}）：{edge.label || "无文字标签"}</li>)}</ul>
+                    </article>
+                  ))}
+                </>
+              ) : (
+                <p role="status">
+                  {visualInvalid
+                    ? "该候选的来源或完整性校验未通过，已禁止展示。"
+                    : "此页没有可读取的有效候选：可能尚未执行获授权的视觉任务、未检测到图表，或记录已经过期。"}
+                </p>
+              )}
               <div role="status" style={{ fontWeight: 600 }}>未审核 · 不得作为播客事实依据</div>
-              <p style={{ marginBottom: 0, color: "var(--text-secondary)" }}>下一项单独接入经授权的视觉候选回执和审核提交。此页面没有“批准”按钮，不会修改提取记录或播客素材。</p>
+              <p style={{ marginBottom: 0, color: "var(--text-secondary)" }}>需与原始 PDF 图像人工对照。此页面没有“批准”按钮，不会修改提取记录或播客素材。</p>
             </section>
           </div>
         </>

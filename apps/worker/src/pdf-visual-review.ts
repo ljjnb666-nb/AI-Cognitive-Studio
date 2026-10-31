@@ -6,6 +6,8 @@ import { createGatewayPdfVisualExecutor, WorkspaceMembershipExecutionAuthorizer,
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
 import type { Environment } from "@ai-cognitive/shared/server";
 import { createBookProductionGatewayRuntime } from "./provider-gateway-runtime.js";
+import { persistPdfVisualReviewCandidates, type StorePdfVisualCandidateIdentity } from "./pdf-visual-review-store.js";
+import type { PdfVisualStructureResult } from "@ai-cognitive/ingestion";
 
 const MAX_PDF_BYTES=110_000_000;
 const sha256=(bytes:Uint8Array)=>createHash("sha256").update(bytes).digest("hex");
@@ -19,6 +21,8 @@ export type PdfVisualReviewWorkerTask={
   sourceDocumentId:string;
   ingestionRunId:string;
   maxReviewPages?:1|2;
+  /** Separate explicit consent for storing only structured unverified graph for 24h. */
+  persistReviewCandidate?:true;
 };
 export type PdfVisualSourceRecord={
   id:string;
@@ -38,6 +42,7 @@ export type PdfVisualReviewWorkerDeps={
   storage:Pick<StorageProvider,"headObject"|"getObjectStream">;
   gateway:ProviderGateway;
   parserLimits?:ParserLimits;
+  persistReviewCandidate?:(identity:StorePdfVisualCandidateIdentity, output:PdfVisualStructureResult)=>Promise<number>;
 };
 
 /**
@@ -53,6 +58,8 @@ export async function executeOnDemandPdfVisualReview(
      !task.workspaceId||!task.userId||!task.ingestionRunId||!task.sourceDocumentId||
      (task.maxReviewPages!==undefined&&task.maxReviewPages!==1&&task.maxReviewPages!==2))
     throw new Error("PDF_VISUAL_WORKER_OPT_IN_REQUIRED");
+  if(task.persistReviewCandidate===true && !deps.persistReviewCandidate)
+    throw new Error("PDF_VISUAL_REVIEW_STORAGE_UNAVAILABLE");
   // Access check precedes run existence and private storage read.
   await deps.authorize(task.userId,task.workspaceId);
   const run=await deps.loadRun({workspaceId:task.workspaceId,ingestionRunId:task.ingestionRunId});
@@ -108,6 +115,13 @@ export async function executeOnDemandPdfVisualReview(
   if(output.pageCount!==plan.pages.length||
      output.pages.some(p=>!plan.pages.some(x=>x.physicalPageIndex===p.physicalPageIndex&&x.route==="NATIVE_TEXT")))
     throw new Error("PDF_VISUAL_WORKER_ROUTE_PLAN_MISMATCH");
+  const stored=task.persistReviewCandidate===true
+    ? await deps.persistReviewCandidate!({
+      workspaceId:task.workspaceId,sourceDocumentId:task.sourceDocumentId,
+      ingestionRunId:task.ingestionRunId,routingGeneration:run.routingGeneration,
+      sourcePdfSha256:run.sourceDocument.sha256,
+    },output)
+    : 0;
   return {
     ...output,
     taskMode:"ON_DEMAND_REVIEW_ONLY" as const,
@@ -115,7 +129,7 @@ export async function executeOnDemandPdfVisualReview(
     ingestionRunId:task.ingestionRunId,
     reviewRequired:true as const,
     canonicalTextUpdated:false as const,
-    persistedVisualContent:false as const,
+    persistedVisualContent:stored>0,
   };
 }
 
@@ -141,6 +155,7 @@ export function createOnDemandPdfVisualWorkerRuntime(environment:Environment,sou
       return run;
     },
     storage,gateway:gatewayRuntime.gateway,
+    persistReviewCandidate:persistPdfVisualReviewCandidates,
   };
   let closed=false;
   return {

@@ -71,6 +71,28 @@ describe("Worker on-demand PDF visual candidate task",()=>{
     expect(out.pages[0]?.status).toBe("CANDIDATE_AVAILABLE");
   },90_000);
 
+  it("persists only on independent explicit consent after authenticated source and gateway checks",async()=>{
+    const f=await fixture();
+    const persist=vi.fn(async (_identity:unknown,_output:unknown)=>1);
+    f.deps.persistReviewCandidate=persist;
+    const out=await executeOnDemandPdfVisualReview({...task,persistReviewCandidate:true},f.deps);
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist.mock.calls[0]![0]).toMatchObject({workspaceId:"ws-a",sourceDocumentId:"doc-a",sourcePdfSha256:sha(f.bytes)});
+    expect(out.persistedVisualContent).toBe(true);
+    const noConsent=await executeOnDemandPdfVisualReview(task,f.deps);
+    expect(noConsent.persistedVisualContent).toBe(false);
+    expect(persist).toHaveBeenCalledTimes(1);
+  },90_000);
+
+  it("refuses missing durable store before private source lookup or model call",async()=>{
+    const f=await fixture();
+    await expect(executeOnDemandPdfVisualReview({...task,persistReviewCandidate:true},f.deps))
+      .rejects.toThrow("PDF_VISUAL_REVIEW_STORAGE_UNAVAILABLE");
+    expect(f.authorize).not.toHaveBeenCalled();
+    expect(f.loadRun).not.toHaveBeenCalled();
+    expect(f.execute).not.toHaveBeenCalled();
+  });
+
   it("rejects missing express image-to-provider consent before reading any record",async()=>{
     const f=await fixture();
     await expect(executeOnDemandPdfVisualReview({...task,allowExternalVisualModel:false as true},f.deps))
