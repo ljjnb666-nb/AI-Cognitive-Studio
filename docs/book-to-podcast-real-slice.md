@@ -1,8 +1,26 @@
 # 真实电子书到播客：执行记录
 
-本轮目标 active；已真实生成章节草稿语音，但正式成品与 Edge 播放验收尚未通过，不宣称完整成功。禁止回到 OCR 基础设施扩展。
+本轮正式章节音频已生成、持久化并由用户接受听感；完整播放及准确HEAD CI证据按最新交付核验。禁止回到 OCR 基础设施扩展。以下保留全部失败历史，不能将历史状态当作当前结果。
 
-## 2026-10-31 校订与仅语音执行提案（待用户确认，未执行）
+## 2026-10-31 独立校订获批后的正式音频结果
+
+用户明确批准独立校订稿及TTS、累计仍上限8元。实际只执行5次glm-tts、420字符，tongtong/xiaochen、语速1.0；每句一次尝试，没有重试，没有文本模型或Embedding调用。新脚本是明确归因的USER_EDIT子修订，保留真实Book Intelligence和真实模型生成的父修订，不能表述为未经人工校订的全自动模型成品。
+
+正式脚本修订cmvvv456a00017bek8eltfy0k，父修订cmvvqetqw001u7bewh9dnevft；正式音频run cmvvv457c00097bekjvwpb7uc为SUCCEEDED，CurrentPodcastAudio指向cmvvv50dd001i7bekyz0fnbj7。WAV为102755ms、4932316字节、24000Hz单声道；SHA256为6b0673d3f077c4ad99371da26a4b98386919c8b351c75839cb923a935ef4d5e0。MinIO读回、私有本地文件及浏览器媒体HTTP读回的SHA完全一致。音频评估hardFailures为空，两个voiceIdentityHash不同，五段顺序与校订稿一致。
+
+文稿逐句核对用户批准的固定稿件；10处来源范围均绑定真实extraction和SourceBlock。当前正式脚本文稿页面改从CurrentPodcastScript快照读取，显示校订来源，不再展示旧generationRun的可变发言；证据按同一workspace内的精确范围读取，不以整块文本替代失效范围。音频响应补content-length供浏览器识别完整时长。用户已反馈“可以接受”（双音色、中文清晰度、停顿和对话衔接）。
+
+Windows Edge156真实页面从头完整播放：2026-10-31 11:56:24至11:58:06（Asia/Shanghai），playing→ended，currentTime=duration=102.754958秒，paused=true、muted=false、volume=1、mediaError=null。私有chapter-editorial-edge-playback.private.json及chapter-editorial-edge-played.private.png保存事件/UA/URL/HTTP哈希与截图。刷新后从头重播超过3秒，390px窄屏无横向溢出；账本仍65条，重播不产生模型/TTS费用。控制台仅favicon.ico 404，未发现与媒体或应用渲染相关的错误。
+
+账本现为65次物理请求、stopped=true；全部旧60条7.21068元预留保留，新增420字符标价估0.084元，累计预留7.29468元，低于8元。TTS无供应商实报usage，字符数来自固定稿件和实际请求，不冒充账单；旧7次超时的实扣仍未知。真实模型累计实报和旧响应保留，见下方历史source-v6用量。旧音频失败run仍FAILED、原模型响应不改写；B03仍为0正式提取/0ChunkSet，不进入播客。
+
+私有证据根目录为`D:/ai-cognitive-pdf-benchmark-data/private/book-to-podcast-real-slice`。可信书源/提取与39块、5个Chunk的证据为chapter-provenance.private.json和trusted-text-and-chunks.private.json；真实Book结果及旧模型稿保留在原执行记录；paid-flashx-attempt-v1下chapter-editorial-script.private.json为完整校订稿，chapter-editorial-podcast.private.wav为正式音频，chapter-editorial-final-audit.private.json包含音频评估、顺序、双音色及逐句来源对应，chapter-call-reservations.private.json为唯一累计调用账本。书籍、脚本正文、响应和媒体不入Git或公开PR。
+
+非付费验证：新Web快照/证据范围测试2 PASS、与原文阅读组合10 PASS，Web lint/typecheck及生产构建通过。既有Podcast持久化30 PASS、预算19 PASS与真实供应商5次调用区分记录。8813c1a的CI仍因测试断言遗漏前缀“AI ”而失败，现按正式processingCopy修正精确文案，保留真实数据库失败及恢复断言。新提交的准确HEAD CI必须重新验证，不以旧成功域替代全绿。
+
+扩展结论：可信提取和Book已覆盖第一章，当前节目只围绕其中有证据的具体对话形成约103秒切片，不宣称完整讲解章节。可以继续按同一来源版本、逐段语义校验和有界预算推进其他章节；整书尚未实测。此前大量模型格式/语义失败证明不能线性外推费用和自然度；不能直接批量重跑。反向裁静音缓存整段、媒体接口整文件读入内存，当前约4.9MB样本可用，长音频必须另做资源验证。整书调用须单独估算授权，不自动扩展。集成顺序仍main←#215←#216←#217←#218，各次准确HEAD CI和迁移验证后再按明确授权合并；#209～#212仅逐项移植确实未覆盖能力。
+
+## 2026-10-31 校订与仅语音执行提案（历史授权前快照）
 
 原模型稿存在语义错误，不能使用其合法引用编号冒充事实正确。已准备420字符、五轮中文对话的独立USER_EDIT子修订提案，逐句引用同章三条真实QUOTE记忆及原文范围，未注册正式修订、未调用供应商。需要用户明确批准采用人工校订路径；不能将此提案称为完全由模型生成的最终脚本。原模型响应、父修订和失败音频完整保留。
 
@@ -14,7 +32,7 @@
 
 此前准确HEAD 699390a9的CI 41157284268：static/core-tests/quality-performance/stability-beta成功，product-acceptance失败（文本定位器“深度理解失败”同时匹配状态和说明）。测试现以exact定位状态标签，不减弱失败恢复数据库/浏览器断言；新HEAD CI尚待执行确认。最终状态仍BOOK_TO_PODCAST_VERTICAL_SLICE_BLOCKED_WITH_EVIDENCE。
 
-## 2026-10-31 source-v6 真实执行结果（最新）
+## 2026-10-31 source-v6 真实执行结果（校订前历史）
 
 用户已授权累计8.00元方案，暂停期间未启动；用户恢复目标后核验旧48条预留、stopped=true及一次性授权文件未使用，再启动一次。真实Book全部复用，新增5次Air、2次Embedding、5次glm-tts（423字符）。脚本生成已SUCCEEDED并创建正式脚本修订；音频合成/组装/持久化真实完成，但QUALITY_VALIDATION拒绝标准化输出，原run/Job均FAILED，没有CurrentPodcastAudio。费用授权已经触发停止条件，不得自动恢复或新增调用。
 
