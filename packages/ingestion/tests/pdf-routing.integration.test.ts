@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { PassThrough } from "node:stream";
@@ -6,10 +6,12 @@ import PDFDocument from "pdfkit";
 import { prisma } from "@ai-cognitive/db";
 import { CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseExtractionQualityMetadata } from "@ai-cognitive/domain";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import { createIngestionService, DEFAULT_PARSER_LIMITS, evaluatePdfExtractionQuality, extractNativePdf, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, pdfRoutingOutcome, planPdfRouting, terminalizeRunWithRoutingOutcome, createRapidOcrPdfOcrExecutor, type PdfOcrExecutor } from "../src/index.js";
+import { createIngestionService, DEFAULT_PARSER_LIMITS, evaluatePdfExtractionQuality, extractNativePdf, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, pdfRoutingOutcome, planPdfRouting, parseRoutingPlan, terminalizeRunWithRoutingOutcome, createRapidOcrPdfOcrExecutor, type PdfOcrExecutor } from "../src/index.js";
 import { claimIngestionRun, lockRunForPublication, renewIngestionRunClaim, transitionRunToTerminal } from "../src/ingestion-run-claim.js";
 import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, writeRoutingOutcome, writeRoutingPlan } from "../src/ocr-durability.js";
 import { FakePdfOcrExecutor, fakeOcrTerminalFailure, fakeOcrText, fakeOcrTransientFailure } from "./helpers/pdf/fake-ocr-executor.js";
+import { inspectAndPersistDoclingLayoutSidecar, selectDoclingLayoutPages } from "../src/docling/docling-layout-sidecar.js";
+import type { DoclingLayoutHandle } from "../src/docling/docling-layout-executor.js";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
@@ -631,3 +633,85 @@ it("selected-page review executes only the requested page and rejects a partial 
  expect(await prisma.documentExtraction.count({where:{ingestionRunId:f.run.id}})).toBe(0);
  expect(await prisma.currentDocumentExtraction.count({where:{sourceDocumentId:f.document.id}})).toBe(0);
 });
+
+describe("Docling layout non-authoritative sidecar (real PostgreSQL)",()=>{
+  it("preserves native/OCR publication, stores a source-bound candidate once, verifies replay and detects tampering",async()=>{
+    const bytes=await mixedPdf();
+    const storage=new FakeStorageProvider();
+    const {workspace,document,run}=await createPdfRunFixture(bytes,storage);
+    // Unlike legacy benchmark fixtures, the sidecar admits only the actual
+    // immutable source PDF digest. Update both fixture lineage hashes.
+    const actualSha=createHash("sha256").update(bytes).digest("hex");
+    await prisma.sourceBlob.update({
+      where:{id:document.sourceBlobId},data:{sha256:actualSha},
+    });
+    await prisma.sourceDocument.update({
+      where:{id:document.id},data:{sha256:actualSha},
+    });
+    const sourceExecutor=new FakePdfOcrExecutor().script(1,[fakeOcrText("OCR on page two")]);
+    await serviceWith(storage,sourceExecutor).processIngestionRun(run.id);
+    const state=await prisma.ingestionRun.findUniqueOrThrow({where:{id:run.id}});
+    expect(state.status).toBe("SUCCEEDED");
+    const selector=selectDoclingLayoutPages(parseRoutingPlan(state.routingPlan));
+    expect(selector).toEqual([1]);
+
+    const inspect=vi.fn(async({physicalPageIndex}:{pdfBytes:Uint8Array;physicalPageIndex:number})=>({
+      status:"SUCCEEDED" as const,
+      candidate:{
+        authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE" as const,
+        sourceMethod:"DOCLING_LAYOUT_CANDIDATE_ONLY" as const,
+        physicalPageIndex,ocrUsed:false as const,fullPageReference:false as const,
+        parserName:"docling-standard-layout" as const,
+        parserVersion:"2.141.0" as const,
+        artifactSha256:"c".repeat(64),
+        markdown:"## Synthetic page layout\n\n| x | y |",textItemCount:2,
+        pictureItemCount:1,tableItemCount:1,
+      },
+    }));
+    const executor:DoclingLayoutHandle={
+      parserName:"docling-standard-layout",modelSha256:"c".repeat(64),
+      inspect,close:async()=>undefined,
+    };
+    const input={
+      workspaceId:workspace.id,sourceDocumentId:document.id,
+      ingestionRunId:run.id,physicalPageIndex:1,pdfBytes:bytes,
+      storage,executor,
+    };
+    const blocksBefore=await prisma.sourceBlock.findMany({
+      where:{extraction:{ingestionRunId:run.id}},orderBy:{ordinal:"asc"},
+      select:{id:true,text:true},
+    });
+    const pointerBefore=await prisma.currentDocumentExtraction.findUniqueOrThrow({
+      where:{sourceDocumentId_workspaceId:{sourceDocumentId:document.id,workspaceId:workspace.id}},
+    });
+    const first=await inspectAndPersistDoclingLayoutSidecar(input);
+    expect(first).toMatchObject({
+      authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE",physicalPageIndex:1,
+      parserName:"docling-standard-layout",modelSha256:"c".repeat(64),reused:false,
+    });
+    const again=await inspectAndPersistDoclingLayoutSidecar(input);
+    expect(again).toEqual({...first,reused:true});
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(await prisma.doclingLayoutSnapshot.count({
+      where:{ingestionRunId:run.id},
+    })).toBe(1);
+    expect(await prisma.sourceBlock.findMany({
+      where:{extraction:{ingestionRunId:run.id}},orderBy:{ordinal:"asc"},
+      select:{id:true,text:true},
+    })).toEqual(blocksBefore);
+    expect(await prisma.currentDocumentExtraction.findUniqueOrThrow({
+      where:{sourceDocumentId_workspaceId:{sourceDocumentId:document.id,workspaceId:workspace.id}},
+    })).toEqual(pointerBefore);
+    await expect(inspectAndPersistDoclingLayoutSidecar({...input,physicalPageIndex:0}))
+      .rejects.toThrow("DOCLING_LAYOUT_PAGE_NOT_ELIGIBLE");
+    await expect(inspectAndPersistDoclingLayoutSidecar({...input,workspaceId:"wrong-workspace"}))
+      .rejects.toThrow("DOCLING_LAYOUT_SOURCE_AUTHORITY_MISMATCH");
+    await expect(inspectAndPersistDoclingLayoutSidecar({...input,pdfBytes:new Uint8Array(Buffer.from("changed-pdf"))}))
+      .rejects.toThrow("DOCLING_LAYOUT_SOURCE_AUTHORITY_MISMATCH");
+    storage.objects.set(first.markdownStorageKey,Buffer.from("TAMPERED","utf8"));
+    await expect(inspectAndPersistDoclingLayoutSidecar(input))
+      .rejects.toThrow("DOCLING_LAYOUT_REPLAY_ARTIFACT_INVALID");
+    expect(inspect).toHaveBeenCalledTimes(1);
+  });
+});
+
