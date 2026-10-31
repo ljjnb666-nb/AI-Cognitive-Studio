@@ -443,7 +443,28 @@ async function runEmbeddingStage(run: any, token: string, dependencies: ActiveBo
     // batches remain available for normal durable recovery.
     const targetLineageHash = sha256(JSON.stringify(batchTargets.map(target => ({ kind: target.kind, id: target.id, extractionId: target.extractionId, contentHash: target.contentHash, ...(target.kind === "BOOK_MEMORY" ? { analysisRunId: target.analysisRunId } : {}) }))));
     const baseIdempotencyKey = bookAnalysisEmbeddingIdempotencyKey(run.id, batchOrdinal);
-    const previous = (await prisma.providerInvocation.findMany({ where: { workspaceId: run.workspaceId, idempotencyKey: { startsWith: baseIdempotencyKey } }, select: { idempotencyKey: true, status: true } })).filter(invocation => invocation.idempotencyKey === baseIdempotencyKey || invocation.idempotencyKey.startsWith(`${baseIdempotencyKey}:retry:`));
+    // A replacement BookAnalysis owner must not mint a second paid Gateway
+    // invocation while a previous owner is still executing remotely.
+    // The BookAnalysis lease and Gateway invocation lease are independent.
+    const findPrevious = async () => (await prisma.providerInvocation.findMany({
+      where: { workspaceId: run.workspaceId, idempotencyKey: { startsWith: baseIdempotencyKey } },
+      select: { idempotencyKey: true, status: true },
+    })).filter(invocation => invocation.idempotencyKey === baseIdempotencyKey ||
+      invocation.idempotencyKey.startsWith(`${baseIdempotencyKey}:retry:`));
+    let previous = await findPrevious();
+    // Bounded lease-fenced handoff: a timeout is a safe deferral, not
+    // permission to make an independent potentially billable request.
+    for (let poll = 0; poll < 80 && previous.some(invocation => invocation.status === "RUNNING"); poll++) {
+      await new Promise<void>(resolve => setTimeout(resolve, 125));
+      if (poll % 8 === 0) await renewBookAnalysisLease(run.id, token);
+      previous = await findPrevious();
+    }
+    if (previous.some(invocation => invocation.status === "RUNNING")) {
+      throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED");
+    }
+    if (previous.some(invocation => invocation.status === "RECONCILIATION_REQUIRED" || invocation.status === "BLOCKED")) {
+      throw new Error("BOOK_ANALYSIS_EMBEDDING_RECONCILIATION_REQUIRED");
+    }
     const successful = previous.find(invocation => invocation.status === "SUCCEEDED");
     const retryOrdinal = Math.max(0, ...previous.map(invocation => { const match = invocation.idempotencyKey.match(/:retry:([1-9][0-9]*)$/); return match ? Number(match[1]) : 0; }).filter(Number.isSafeInteger));
     const idempotencyKey = successful?.idempotencyKey ?? (previous.length ? bookAnalysisEmbeddingRetryIdempotencyKey(run.id, batchOrdinal, retryOrdinal + 1) : baseIdempotencyKey);
