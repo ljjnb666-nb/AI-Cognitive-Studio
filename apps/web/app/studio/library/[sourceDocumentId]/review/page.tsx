@@ -159,6 +159,7 @@ export default async function PdfSourceReviewPage({
           }}>
             <span>第 <strong>{physicalPageIndex + 1}</strong> 物理页 · 当前提取记录共 {pages} 页</span>
             <a href={originalPdfHref} target="_blank" rel="noopener noreferrer" className="btn btn-secondary" aria-label={`打开受保护的原始 PDF 第 ${physicalPageIndex+1} 物理页`}>打开原始 PDF 对照</a>
+            {evidence ? <a href={`/api/studio/pdf-visual-review/${source.id}/review-packet?page=${physicalPageIndex}`} target="_blank" rel="noopener noreferrer" className="btn btn-secondary" aria-label={`查看 PDF 第 ${physicalPageIndex+1} 物理页的只读来源审核数据包`}>查看本页核验包 JSON</a> : null}
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               {physicalPageIndex > 0 ? <Link href={pageHref(physicalPageIndex - 1)} className="btn btn-secondary">上一页</Link> : null}
               {physicalPageIndex + 1 < pages ? <Link href={pageHref(physicalPageIndex + 1)} className="btn btn-secondary">下一页</Link> : null}
