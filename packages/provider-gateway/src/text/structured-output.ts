@@ -10,7 +10,7 @@ export function normalizeTextResponse(text: string, providerModel: string | unde
   }
   let value: unknown;
   try { value = JSON.parse(text); } catch { throw invalid(); }
-  if (structured.mode === "STRICT_JSON_SCHEMA") {
+  if (structured.mode === "STRICT_JSON_SCHEMA" || (structured.mode === "JSON_MODE" && structured.schema)) {
     try { if (!compileStrictJsonSchema(structured.schema!)(value)) throw invalid(); } catch (error) { if (error instanceof ProviderGatewayError) throw error; throw invalid(); }
   }
   return { type: "STRUCTURED", structured: value, providerModel, finishReason };

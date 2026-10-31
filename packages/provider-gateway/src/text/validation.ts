@@ -16,7 +16,7 @@ export function validateTextGenerationInput(input: TextGenerationInput | undefin
   if (structured) {
     if (!structured.mode || structured.mode === "STRICT_JSON_SCHEMA" && (!structured.schemaName || !structured.schema)) throw invalid();
     if (structured.schemaName && (!/^[A-Za-z0-9_-]{1,64}$/.test(structured.schemaName) || structured.schemaName.length > limits.schemaName)) throw invalid();
-    if (structured.mode === "STRICT_JSON_SCHEMA") validateStrictSchema(structured.schema);
+    if (structured.mode === "STRICT_JSON_SCHEMA" || (structured.mode === "JSON_MODE" && structured.schema !== undefined)) validateStrictSchema(structured.schema);
   }
 }
 function validateStrictSchema(schema: unknown): void {

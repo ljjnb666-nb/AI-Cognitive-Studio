@@ -5,12 +5,13 @@ import { BookDetailView } from "@/components/book-detail-view";
 import { deriveProcessingStatus } from "@/lib/processing-state";
 import { processingWorkerAvailability } from "@/lib/worker-heartbeat";
 
-export default async function SourcePage({ params }: { params: Promise<{ sourceDocumentId: string }> }) {
-  const { sourceDocumentId } = await params;
+export default async function SourcePage({ params, searchParams }: { params: Promise<{ sourceDocumentId: string }>; searchParams: Promise<{ textPage?: string | string[] }> }) {
+  const [{ sourceDocumentId }, query] = await Promise.all([params, searchParams]);
+  const requestedPage = typeof query.textPage === "string" && /^\d{1,9}$/.test(query.textPage) ? Number(query.textPage) : 1;
   let item: Awaited<ReturnType<typeof sourceDetail>>;
 
   try {
-    item = await sourceDetail(sourceDocumentId);
+    item = await sourceDetail(sourceDocumentId, undefined, requestedPage);
   } catch (error) {
     if (error instanceof Error && error.message === "SOURCE_DOCUMENT_ACCESS_DENIED") notFound();
     throw error;
@@ -39,6 +40,7 @@ export default async function SourcePage({ params }: { params: Promise<{ sourceD
         mediaType: item.mediaType,
         version: item.version,
         hasIntelligence: Boolean(item.currentIntelligence),
+        extractionSummary: item.currentExtraction?.extraction.status === "SUCCEEDED" ? { pages: item.currentExtraction.extraction._count.pages, characters: item.currentExtraction.extraction.characterCount, blocks: item.currentExtraction.extraction._count.blocks } : null,
         ingestionStatus,
         analysisStatus,
         bootstrapStatus: bootstrap?.status,
@@ -50,6 +52,7 @@ export default async function SourcePage({ params }: { params: Promise<{ sourceD
         workerAvailability,
         processingSince: (item.analysisRuns[0]?.startedAt ?? item.analysisRuns[0]?.createdAt ?? bootstrap?.startedAt ?? bootstrap?.createdAt ?? item.ingestionRuns[0]?.startedAt ?? item.ingestionRuns[0]?.createdAt)?.toISOString() ?? null,
       }}
+      textPreview={item.textPreview}
       memories={memories as any}
       structureNodes={structureNodes as any}
     />

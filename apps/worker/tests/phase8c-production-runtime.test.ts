@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
-import { DeterministicProviderHttpTransport, ProviderGatewayRepository, createProviderAdapterResolver, parseKeyring, stableHash, type GatewayRequest } from "@ai-cognitive/provider-gateway";
+import { DeterministicProviderHttpTransport, ProviderGatewayError, ProviderGatewayRepository, createProviderAdapterResolver, parseKeyring, stableHash, type GatewayRequest } from "@ai-cognitive/provider-gateway";
 import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser } from "@ai-cognitive/book-intelligence";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { startWorkerRuntime } from "../src/runtime.js";
@@ -40,6 +40,54 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
   it("W01-W05 starts the real production worker and processes a pinned Book route plan", async () => { const f = await fixture(), calls = { text: 0, embedding: 0 }, document = await bookLineage(f), isolation = randomUUID(), workerSource = { ...source, BOOK_ANALYSIS_PROVIDER: "fixture" }; await routes(f); const runtimeWorker = await startWorkerRuntime({ REDIS_URL: source.REDIS_URL } as never, { source: workerSource, bookProductionGatewayOverrides: { ...controls, adapterResolver: input => runtime(calls).gateway ? ({ execute: async ({ request }) => input.family === "EMBEDDING" ? (calls.embedding++, { response: { vectors: request.embedding!.texts.map(() => [1, 0, 0]), dimensions: 3 } }) : (calls.text++, { response: { type: "STRUCTURED", structured: { summary: "worker summary", memory: [{ type: "SUMMARY", content: "worker memory" }] } }, usage: { inputTokens: 1, outputTokens: 1 } }) }) : undefined }, dispatchIntervalMs: 100, bullmqPrefix: `phase8c-${isolation}`, outboxTopics: { bookAnalysis: `phase8c.worker.${isolation}` } }); try { expect(runtimeWorker.bookWorker).toBeTruthy(); const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "worker", promptVersion: "p", provider: "fixture", model: "fixture-model", routePlan: await durableRoutePlan(f.workspaceId), outboxTopic: `phase8c.worker.${isolation}` }); const completed = await waitForRun(requested.run.id); expect(completed).toMatchObject({ status: "SUCCEEDED", analysisStage: "COMPLETED" }); expect(calls.text).toBeGreaterThan(0); expect(calls.embedding).toBe(1); } finally { await runtimeWorker.close(); } });
   it("W06 enables the real worker with a durable local keyring and pinned plan", async () => { const f = await fixture(), calls = { text: 0, embedding: 0 }, document = await bookLineage(f), isolation = randomUUID(), directory = mkdtempSync(join(tmpdir(), "acs-local-keyring-")), localKeyring = join(directory, "provider-gateway-keyring.json"); writeFileSync(localKeyring, keyring); await routes(f, undefined, { providerKey: "openai", protocol: "OPENAI_RESPONSES", displayName: "OpenAI", modelId: "gpt-4o-mini", embeddingModelId: "text-embedding-3-small", embeddingDimensions: 1536 }); const workerSource = { REDIS_URL: source.REDIS_URL, NODE_ENV: "test", PROVIDER_GATEWAY_LOCAL_KEYRING_PATH: localKeyring }; const runtimeWorker = await startWorkerRuntime({ REDIS_URL: source.REDIS_URL } as never, { source: workerSource, bookProductionGatewayOverrides: { ...controls, adapterResolver: input => ({ execute: async ({ request }) => input.family === "EMBEDDING" ? (calls.embedding++, { response: { vectors: request.embedding!.texts.map(() => [1, ...Array(1535).fill(0)]), dimensions: 1536 } }) : (calls.text++, { response: { type: "STRUCTURED", structured: { summary: "zero config summary", memory: [{ type: "SUMMARY", content: "grounded durable evidence" }] } }, usage: { inputTokens: 1, outputTokens: 1 } }) }) }, dispatchIntervalMs: 100, bullmqPrefix: `phase8c-${isolation}`, outboxTopics: { bookAnalysis: `phase8c.zero-config.${isolation}` } }); try { expect(runtimeWorker.bookWorker).toBeTruthy(); const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "zero-config", promptVersion: "p", provider: "openai", model: "gpt-4o-mini", routePlan: await durableRoutePlan(f.workspaceId), outboxTopic: `phase8c.zero-config.${isolation}` }); const completed = await waitForRun(requested.run.id); expect(completed).toMatchObject({ status: "SUCCEEDED", analysisStage: "COMPLETED" }); expect(await prisma.currentBookIntelligence.findFirst({ where: { workspaceId: f.workspaceId, analysisRunId: requested.run.id } })).toBeTruthy(); expect(calls.text).toBeGreaterThan(0); expect(calls.embedding).toBe(1); } finally { await runtimeWorker.close(); rmSync(directory, { recursive: true, force: true }); } });
   it("P01 valid production startup", () => expect(runtime({ text: 0, embedding: 0 })).toMatchObject({ gateway: expect.any(Object), repository: expect.any(Object) }));
+  it("honors one-attempt policy even when the gateway deadline replaces adapter cancellation", async () => {
+    const f = await fixture(); await routes(f); let calls = 0;
+    const r = createBookProductionGatewayRuntime(source, { ...controls, maxAttempts: 1, timeoutMs: 20, adapterResolver: () => ({ execute: async ({ signal }) => {
+      calls++; return new Promise((_, reject) => signal.addEventListener("abort", () => reject(new ProviderGatewayError("CANCELLED")), { once: true }));
+    } }) });
+    try {
+      await expect(r.gateway.execute(request(f.workspaceId, "BOOK_CHUNK_ANALYSIS", "bounded-deadline"), { userId: f.userId })).rejects.toMatchObject({ code: "TIMEOUT" });
+      expect(calls).toBe(1);
+      const invocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: f.workspaceId }, include: { attempts: true } });
+      expect(invocation.attempts).toHaveLength(1); expect(invocation.attempts[0]).toMatchObject({ status: "TIMEOUT", failureCode: "TIMEOUT" });
+    } finally { await r.close(); }
+  });
+  it("sends real bounded source IDs/ranges and materializes their validated evidence", async () => {
+    const f = await fixture(), document = await bookLineage(f); await routes(f); let groundedRequests = 0;
+    const r = createBookProductionGatewayRuntime(source, { ...controls, adapterResolver: input => ({ execute: async ({ request: value }) => {
+      if (input.family === "EMBEDDING") return { response: { vectors: value.embedding!.texts.map(() => [1, 0, 0]), dimensions: 3 } };
+      if (value.routeSlot !== "BOOK_CHUNK_ANALYSIS") return { response: { type: "STRUCTURED", structured: { summary: "derived summary" } } };
+      const payload = JSON.parse(value.text!.messages[0]!.content), spans = payload.sourceEvidence;
+      expect(spans.length).toBeGreaterThan(0); expect(value.text!.system).toContain("Never invent IDs");
+      expect(spans.map((span: { text: string }) => span.text).join("\n\n")).toBe(payload.content);
+      for (const span of spans) {
+        const block = await prisma.sourceBlock.findUniqueOrThrow({ where: { id: span.sourceBlockId } });
+        expect(block.text.slice(span.startOffset, span.endOffset)).toBe(span.text);
+      }
+      groundedRequests++;
+      const { sourceBlockId, startOffset, endOffset } = spans[0];
+      return { response: { type: "STRUCTURED", structured: { summary: "grounded", memory: [{ type: "CLAIM", content: "Grounded evidence.", evidence: [{ sourceBlockId, startOffset, endOffset }] }] } } };
+    } }) });
+    try {
+      const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "source-evidence-test", promptVersion: "v2", provider: "fixture", model: "fixture-model" });
+      const final = await processBookAnalysisRun(requested.run.id, { analysisProviderForRun: r.createAnalysisProvider, embeddingGatewayForRun: input => ({ gateway: r.gateway, repository: r.repository, userId: input.userId }) });
+      expect(final.status).toBe("SUCCEEDED"); expect(groundedRequests).toBeGreaterThan(0);
+      expect(await prisma.bookMemoryEvidence.count({ where: { analysisRunId: requested.run.id } })).toBeGreaterThan(0);
+    } finally { await r.close(); }
+  });
+  it("allows the explicitly selected two-attempt deadline policy within the original business lease", async () => {
+    const f = await fixture(); await routes(f); let calls = 0;
+    const r = createBookProductionGatewayRuntime(source, { ...controls, maxAttempts: 2, timeoutMs: 20, adapterResolver: () => ({ execute: async ({ signal }) => {
+      if (++calls === 1) return new Promise((_, reject) => signal.addEventListener("abort", () => reject(new ProviderGatewayError("CANCELLED")), { once: true }));
+      return { response: { type: "STRUCTURED", structured: { summary: "recovered" } }, usage: { inputTokens: 1, outputTokens: 1 } };
+    } }) });
+    try {
+      expect(await r.gateway.execute(request(f.workspaceId, "BOOK_CHUNK_ANALYSIS", "bounded-two-attempts"), { userId: f.userId })).toMatchObject({ status: "SUCCEEDED", attempt: 2 });
+      expect(calls).toBe(2);
+      const invocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: f.workspaceId }, include: { attempts: { orderBy: { attemptNumber: "asc" } } } });
+      expect(invocation.attempts.map(attempt => attempt.status)).toEqual(["TIMEOUT", "SUCCEEDED"]);
+    } finally { await r.close(); }
+  });
   it("P02 missing keyring fails closed", () => expect(() => createBookProductionGatewayRuntime({ ...source, PROVIDER_GATEWAY_KEYRING: undefined, PROVIDER_GATEWAY_LOCAL_KEYRING_PATH: join(tmpdir(), `missing-keyring-${randomUUID()}`) })).toThrow("PROVIDER_GATEWAY_KEYRING_MISSING"));
   it("P03 malformed manifest fails closed", () => expect(() => createBookProductionGatewayRuntime({ ...source, PROVIDER_GATEWAY_MODEL_MANIFEST: "{" })).toThrow("PROVIDER_GATEWAY_MODEL_MANIFEST_INVALID"));
   it("P04 missing BOOK_CHUNK_ANALYSIS route", async () => { const f = await fixture(), calls = { text: 0, embedding: 0 }; await expect(runtime(calls).gateway.execute(request(f.workspaceId, "BOOK_CHUNK_ANALYSIS", "p04"), { userId: f.userId })).rejects.toMatchObject({ code: "ROUTE_UNAVAILABLE" }); expect(calls.text).toBe(0); });

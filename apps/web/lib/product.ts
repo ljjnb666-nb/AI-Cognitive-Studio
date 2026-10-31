@@ -108,7 +108,7 @@ export async function dashboard(context?: WebIdentityContext) {
   }
 }
 
-export async function sourceDetail(sourceDocumentId: string, context?: WebIdentityContext) {
+export async function sourceDetail(sourceDocumentId: string, context?: WebIdentityContext, requestedTextPage = 1) {
   const identity = await webIdentity(context);
   const record = await prisma.sourceDocument.findFirst({
     where: { id: sourceDocumentId, workspaceId: identity.workspaceId },
@@ -122,10 +122,18 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
       ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1 },
       bookAnalysisBootstraps: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, createdAt: true, startedAt: true, updatedAt: true } },
       analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, status: true, analysisStage: true, extractionId: true, chunkSetId: true, errorCode: true, createdAt: true, startedAt: true, completedAt: true, executionLeaseUntil: true } },
-      currentExtraction: { include: { extraction: { include: { structureNodes: { orderBy: { ordinal: "asc" } }, blocks: { orderBy: { ordinal: "asc" }, take: 40 } } } } },
+      currentExtraction: { include: { extraction: { include: { _count: { select: { pages: true, blocks: true } }, pages: { orderBy: { ordinal: "asc" }, select: { id: true, physicalPageIndex: true } }, structureNodes: { orderBy: { ordinal: "asc" } }, blocks: { orderBy: { ordinal: "asc" }, take: 40 } } } } },
       currentIntelligence: { include: { analysisRun: { include: { memoryItems: { include: { evidence: { include: { sourceBlock: true } } }, orderBy: { ordinal: "asc" }, take: 80 }, artifacts: { where: { scope: "BOOK" }, take: 1 } } } } },
     },
   }).catch(() => null);
   if (!record) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
-  return record;
+  // Preview only the owner's current published extraction, independently of AI
+  // memories. Never read unpublished candidates or another document's pages.
+  const extraction = record.currentExtraction?.extraction;
+  const pages = extraction?.status === "SUCCEEDED" ? extraction.pages : [];
+  const pageNumber = Math.min(Math.max(1, Number.isSafeInteger(requestedTextPage) ? requestedTextPage : 1), Math.max(1, pages.length));
+  const page = pages[pageNumber - 1];
+  const blocks = page ? await prisma.sourceBlock.findMany({ where: { extractionId: extraction!.id, sourcePageId: page.id }, orderBy: { ordinal: "asc" }, take: 41, select: { id: true, ordinal: true, text: true } }) : [];
+  const textPreview = page ? { pageNumber, pageCount: pages.length, physicalPageNumber: page.physicalPageIndex === null ? null : page.physicalPageIndex + 1, truncated: blocks.length > 40 || blocks.some(block => block.text.length > 4000), blocks: blocks.slice(0, 40).map(block => ({ ...block, text: block.text.slice(0, 4000) })) } : null;
+  return { ...record, textPreview };
 }

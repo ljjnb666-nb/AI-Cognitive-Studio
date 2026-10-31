@@ -7,6 +7,13 @@ export const statusLabel = (status: string, errorCode?: string | null) => {
   return "等待处理";
 };
 
+/** Text extraction success is independent of a current AI understanding result. */
+export const sourceStatusLabel = (status: string, hasIntelligence: boolean, errorCode?: string | null) => {
+  if (hasIntelligence) return "理解完成";
+  if (errorCode === "PASSWORD_REQUIRED" || errorCode === "OCR_REQUIRED") return statusLabel(status, errorCode);
+  return status === "SUCCEEDED" || status === "COMPLETED" ? "正文已提取" : statusLabel(status, errorCode);
+};
+
 export const podcastStageLabel = (stage: string) => {
   if (stage === "COMPLETED") return "成片已就绪";
   if (stage === "SCRIPTING") return "脚本生成中";

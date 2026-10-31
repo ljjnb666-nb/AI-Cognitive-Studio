@@ -2,8 +2,8 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma, PrismaClient } from "@ai-cognitive/db";
 import { type Environment } from "@ai-cognitive/shared/server";
 import { createPodcastGenerationQueue, createPodcastGenerationWorker } from "../../../apps/worker/src/podcast-generation.js";
-import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysis, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "@ai-cognitive/book-intelligence";
-import { claimPodcastGenerationRun, createEpisode, createPodcastProject, dispatchPendingPodcastGeneration, evaluatePodcastScript, getEpisodeScript, getPodcastGenerationStatus, PODCAST_GENERATION_OWNERSHIP_LOST, processPodcastGenerationRun, rearmPodcastGenerationRunById, requestPodcastGeneration, type DialogueOutput, type EpisodePlanOutput, type HumanizationOutput, type NarrativeOutput, type PodcastGenerationProvider, type SegmentOutlineOutput } from "../src/index.js";
+import { materializeChunkSet, estimateAnalysisTokens, processBookAnalysisRun, requestBookAnalysis, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "@ai-cognitive/book-intelligence";
+import { claimPodcastGenerationRun, createEditedPodcastScriptRevision, createEpisode, createPodcastProject, dispatchPendingPodcastGeneration, evaluatePodcastScript, getEpisodeScript, getPodcastGenerationStatus, PODCAST_GENERATION_OWNERSHIP_LOST, processPodcastGenerationRun, rearmPodcastGenerationRunById, requestPodcastGeneration, type DialogueOutput, type EpisodePlanOutput, type HumanizationOutput, type NarrativeOutput, type PodcastGenerationProvider, type SegmentOutlineOutput } from "../src/index.js";
 import { clearBookAnalysisEmbeddingGatewayFixtureState, createBookAnalysisEmbeddingGatewayFixture } from "../../book-intelligence/tests/helpers/book-analysis-embedding-gateway.js";
 
 const workspaces: string[] = [], users: string[] = [];
@@ -166,6 +166,139 @@ afterEach(async () => { for (const workspaceId of workspaces.splice(0)) await cl
 afterAll(() => Promise.all([prisma.$disconnect(), observerPrisma.$disconnect()]));
 
 describe("durable Phase 3 generation", () => {
+  it("rejects read-only editorial changes and permits an editor without rewriting the model parent", async () => {
+    const data = await fixture();
+    await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.retrievalEmbeddings });
+    const current = await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id }, include: { revision: true } });
+    const snapshot = current.revision.scriptSnapshot as { utterances: Array<{ id: string; text: string; substantive: boolean; evidenceMemoryIds: string[] }> };
+    const input = { episodeId: data.episode.id, expectedRevisionId: current.revisionId, edits: snapshot.utterances.map(item => ({ utteranceId: item.id, text: item.substantive ? item.text : item.text + " 先核对原文。", evidenceMemoryIds: item.evidenceMemoryIds })) };
+    await prisma.workspaceMember.update({ where: { workspaceId_userId: data.context }, data: { role: "VIEWER" } });
+    await expect(createEditedPodcastScriptRevision(data.context, input)).rejects.toThrow("WORKSPACE_ACCESS_DENIED");
+    expect((await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id } })).revisionId).toBe(current.revisionId);
+    expect(await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } })).toBe(1);
+    await prisma.workspaceMember.update({ where: { workspaceId_userId: data.context }, data: { role: "EDITOR" } });
+    expect((await createEditedPodcastScriptRevision(data.context, input)).created).toBe(true);
+    expect((await prisma.podcastScriptRevision.findUniqueOrThrow({ where: { id: current.revisionId } })).scriptSnapshot).toEqual(current.revision.scriptSnapshot);
+  });
+
+  it("rechecks editorial membership after a concurrent revocation commits", async () => {
+    const data = await fixture();
+    await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.retrievalEmbeddings });
+    const current = await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id }, include: { revision: true } });
+    const snapshot = current.revision.scriptSnapshot as { utterances: Array<{ id: string; text: string; evidenceMemoryIds: string[] }> };
+    let release!: () => void, markLocked!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const locked = new Promise<void>(resolve => { markLocked = resolve; });
+    const revoke = prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT "role" FROM "WorkspaceMember" WHERE "workspaceId" = ${data.workspace.id} AND "userId" = ${data.user.id} FOR UPDATE`;
+      markLocked(); await gate;
+      await tx.workspaceMember.delete({ where: { workspaceId_userId: data.context } });
+    }, { timeout: 15000 });
+    await locked;
+    const edit = createEditedPodcastScriptRevision(data.context, { episodeId: data.episode.id, expectedRevisionId: current.revisionId, edits: snapshot.utterances.map(item => ({ utteranceId: item.id, text: item.text, evidenceMemoryIds: item.evidenceMemoryIds })) });
+    const rejected = expect(edit).rejects.toThrow("WORKSPACE_ACCESS_DENIED");
+    try {
+      await expect.poll(async () => {
+        const [state] = await observerPrisma.$queryRaw<Array<{ count: number }>>`SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%WorkspaceMember%' AND query LIKE '%FOR SHARE%'`;
+        return state?.count ?? 0;
+      }, { timeout: 5000 }).toBeGreaterThan(0);
+    } finally { release(); }
+    await revoke; await rejected;
+    expect((await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id } })).revisionId).toBe(current.revisionId);
+    expect(await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } })).toBe(1);
+  });
+
+  it("creates an attributed, idempotent USER_EDIT child without rewriting the model snapshot", async () => {
+    const data = await fixture();
+    await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.retrievalEmbeddings });
+    const current = await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id }, include: { revision: true } });
+    const originalSnapshot = current.revision.scriptSnapshot;
+    const snapshot = originalSnapshot as { utterances: Array<{ id: string; text: string; substantive: boolean; evidenceMemoryIds: string[] }> };
+    const edits = snapshot.utterances.map(item => ({ utteranceId: item.id, text: item.substantive ? item.text : item.text + " 先看原文。", evidenceMemoryIds: item.evidenceMemoryIds }));
+    const input = { episodeId: data.episode.id, expectedRevisionId: current.revisionId, edits };
+    const concurrent = await Promise.all([createEditedPodcastScriptRevision(data.context, input), createEditedPodcastScriptRevision(data.context, input)]);
+    expect(concurrent.map(result => result.created).sort()).toEqual([false, true]);
+    const result = concurrent.find(result => result.created)!;
+    expect(result.created).toBe(true);
+    expect(result.revision).toMatchObject({ source: "USER_EDIT", parentRevisionId: current.revisionId, createdByUserId: data.user.id });
+    expect((await prisma.podcastScriptRevision.findUniqueOrThrow({ where: { id: current.revisionId } })).scriptSnapshot).toEqual(originalSnapshot);
+    expect((await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id } })).revisionId).toBe(result.revision.id);
+    expect((await createEditedPodcastScriptRevision(data.context, input))).toMatchObject({ created: false, revision: { id: result.revision.id } });
+    expect((await createEditedPodcastScriptRevision(data.context, { ...input, expectedRevisionId: result.revision.id }))).toMatchObject({ created: false, revision: { id: result.revision.id } });
+    await expect(createEditedPodcastScriptRevision(data.context, { ...input, edits: edits.map((edit, index) => index === 1 ? { ...edit, text: edit.text + " 再核对。" } : edit) })).rejects.toThrow("PODCAST_SCRIPT_REVISION_STALE");
+    expect(await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } })).toBe(2);
+    const evaluation = await prisma.podcastEvaluationRun.findUniqueOrThrow({ where: { revisionId_evaluatorVersion: { revisionId: result.revision.id, evaluatorVersion: "user-edit-grounding-v1" } }, include: { result: true } });
+    expect(evaluation.result?.hardFailures).toEqual([]);
+  });
+
+  it("rejects missing evidence, altered exact quotes and cross-workspace edits before changing current", async () => {
+    const data = await fixture();
+    await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.retrievalEmbeddings });
+    const current = await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id }, include: { revision: true } });
+    const snapshot = current.revision.scriptSnapshot as { utterances: Array<{ id: string; text: string; substantive: boolean; evidenceMemoryIds: string[] }> };
+    const edits = snapshot.utterances.map(item => ({ utteranceId: item.id, text: item.text, evidenceMemoryIds: item.evidenceMemoryIds }));
+    const input = { episodeId: data.episode.id, expectedRevisionId: current.revisionId, edits };
+    await expect(createEditedPodcastScriptRevision(data.context, { ...input, edits: edits.map((edit, index) => index === 0 ? { ...edit, evidenceMemoryIds: [] } : edit) })).rejects.toThrow("PODCAST_EVIDENCE_REQUIRED");
+    await expect(createEditedPodcastScriptRevision(data.context, { ...input, edits: edits.map((edit, index) => index === 0 ? { ...edit, text: "改掉所有直接引语" } : edit) })).rejects.toThrow("PODCAST_DIRECT_QUOTE_LINEAGE_INVALID");
+    await expect(createEditedPodcastScriptRevision(data.context, { ...input, edits: edits.map((edit, index) => index === 0 ? { ...edit, evidenceMemoryIds: ["foreign-memory"] } : edit) })).rejects.toThrow("PODCAST_USER_EDIT_EVIDENCE_INVALID");
+    const foreign = await fixture();
+    await expect(createEditedPodcastScriptRevision(foreign.context, input)).rejects.toThrow("PODCAST_EPISODE_ACCESS_DENIED");
+    expect((await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id } })).revisionId).toBe(current.revisionId);
+    expect(await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } })).toBe(1);
+  });
+
+  it("persists exact bounded source excerpts separately from quote status and accounts for their budget", async () => {
+    const data = await fixture(), provider = new PodcastFixtureProvider();
+    const person = await prisma.bookMemoryItem.findFirstOrThrow({ where: { workspaceId: data.workspace.id, type: "QUOTE", evidence: { some: {} } } });
+    await prisma.bookMemoryItem.update({ where: { id: person.id }, data: { type: "PERSON" } });
+    await prisma.bookMemoryEvidence.updateMany({ where: { memoryItemId: person.id }, data: { quoteText: null, quoteHash: null } });
+    await processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.retrievalEmbeddings });
+    const rows = await prisma.podcastPlanContextItem.findMany({ where: { podcastGenerationRunId: data.requested.run.id } });
+    let nonQuoteExcerpts = 0;
+    for (const row of rows) {
+      const spans = row.evidenceSpans as Array<{ sourceBlockId: string; startOffset: number; endOffset: number; sourceText?: string; quoteText: string | null }>;
+      for (const span of spans) {
+        const block = await prisma.sourceBlock.findUniqueOrThrow({ where: { id: span.sourceBlockId } });
+        expect(block.extractionId).toBe(row.extractionId);
+        expect(span.sourceText).toBe(block.text.slice(span.startOffset, span.endOffset));
+        if (span.quoteText === null) nonQuoteExcerpts++;
+      }
+      const memory = await prisma.bookMemoryItem.findUniqueOrThrow({ where: { id: row.memoryItemId } });
+      const text = spans.length ? [memory.content, ...spans.map(span => span.sourceText!)].join("\n") : memory.content;
+      expect(row.tokenEstimate).toBe(estimateAnalysisTokens(text));
+    }
+    // PERSON evidence gains an excerpt without acquiring exact-quote status.
+    // Uncited CLAIM/SUMMARY memories remain context-only.
+    expect(rows.length).toBeGreaterThan(0);
+    expect(nonQuoteExcerpts).toBeGreaterThan(0);
+    expect(rows.some(row => (row.evidenceSpans as unknown[]).length > 0)).toBe(true);
+  });
+
+  it("honors stop-on-quality policy before invoking the built-in paid redraft", async () => {
+    const data = await fixture(), provider = new RegeneratingPodcastProvider();
+    await expect(processPodcastGenerationRun(data.requested.run.id, { provider, embeddingProvider: data.retrievalEmbeddings, qualityFailurePolicy: "STOP" })).rejects.toThrow("PODCAST_GROUNDING_FAILED:UNSUPPORTED:");
+    expect([...provider.draftsBySegment.values()].every(attempts => attempts === 1)).toBe(true);
+    expect(provider.calls.filter(call => call.stage === "SEGMENT_DRAFTING").every(call => call.generationAttempt === 1)).toBe(true);
+    expect(await prisma.episodeSegment.count({ where: { podcastGenerationRunId: data.requested.run.id, generationAttemptCount: { gt: 1 } } })).toBe(0);
+    expect(await prisma.currentPodcastScript.count({ where: { episodeId: data.episode.id } })).toBe(0);
+    expect(await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } })).toMatchObject({ status: "FAILED", stage: "GROUNDING_VALIDATION" });
+  });
+
+  it("rejects a context-only memory citation atomically and preserves the failed run", async () => {
+    const data = await fixture();
+    const summary = await prisma.bookMemoryItem.findFirstOrThrow({ where: { workspaceId: data.workspace.id, type: "SUMMARY", evidence: { none: {} } } });
+    class UncitableSummaryProvider extends PodcastFixtureProvider {
+      override async draftSegment(input: Parameters<PodcastGenerationProvider["draftSegment"]>[0]) {
+        expect(input.context.some(item => item.memoryItemId === summary.id && item.sourceBlockEvidenceSpans.length === 0)).toBe(true);
+        const output = await super.draftSegment(input);
+        return { utterances: output.utterances.map((item, index) => index === 0 ? { ...item, isDirectQuote: false, evidence: [{ memoryItemId: summary.id }] } : item) };
+      }
+    }
+    await expect(processPodcastGenerationRun(data.requested.run.id, { provider: new UncitableSummaryProvider(), embeddingProvider: data.retrievalEmbeddings })).rejects.toThrow("PODCAST_EVIDENCE_REQUIRED");
+    expect(await prisma.podcastUtterance.count({ where: { podcastGenerationRunId: data.requested.run.id } })).toBe(0);
+    expect(await prisma.currentPodcastScript.count({ where: { episodeId: data.episode.id } })).toBe(0);
+    expect(await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: data.requested.run.id } })).toMatchObject({ status: "FAILED" });
+  });
   describe("A2 claim/rearm authority races", () => {
     it("lets rearm N→N+1 win before a stale Podcast claim and gives the stale processor zero authority", async () => {
       const data = await fixture();

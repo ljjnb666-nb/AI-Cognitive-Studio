@@ -5,7 +5,7 @@ export type EvidenceCandidate = { sourceBlockId: string; startOffset: number; en
 export type MemoryCandidate = { type: "SUMMARY" | "CONCEPT" | "ARGUMENT" | "CLAIM" | "EXAMPLE" | "STORY" | "QUOTE" | "PERSON" | "QUESTION" | "COUNTERPOINT"; content: string; evidence?: EvidenceCandidate[] };
 export type AnalysisResponse = { summary: string; memory?: MemoryCandidate[]; relations?: Array<{ fromOrdinal: number; toOrdinal: number; type: "EXPLAINS" | "SUPPORTS" | "OPPOSES" | "ASSOCIATED_WITH" | "DEVELOPS" }> };
 export type BoundedChunkProvenance = { chunkId: string; contentHash: string; sourceBlockIds: string[] };
-export interface AnalysisRequest { stage: AnalysisStage; content: string; sourceBlockIds: string[]; tokenBudget: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; provider?: string; model?: string; operationKey?: string; boundedChunk?: BoundedChunkProvenance }
+export interface AnalysisRequest { stage: AnalysisStage; content: string; sourceBlockIds: string[]; sourceEvidence?: Array<{ sourceBlockId: string; startOffset: number; endOffset: number; text: string }>; tokenBudget: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; provider?: string; model?: string; operationKey?: string; boundedChunk?: BoundedChunkProvenance }
 export interface AnalysisProvider { generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> }
 export type AnalysisTransaction = { $queryRaw<T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T> };
 export type AnalysisReceiptConsumer = { consumerKind: string; consumerKey: string; consumerFingerprint: string; materialize: (tx: AnalysisTransaction, response: AnalysisResponse) => Promise<void> };
@@ -44,6 +44,10 @@ export function assertBoundedProviderRequest(request: AnalysisRequest, blocks: S
   const sameIds = requested.size === provenanceIds.size && [...requested].every((id) => provenanceIds.has(id));
   const isBoundedChunk = request.stage === "CHUNK" && Boolean(provenance?.chunkId) && provenance?.contentHash === sha256(request.content) && sameIds && [...requested].every((id) => ids.has(id));
   const containsWholeSource = request.content === whole || [...ids].every((id) => requested.has(id));
+  if (request.sourceEvidence && (request.stage !== "CHUNK" || request.sourceEvidence.map(span => span.text).join("\n\n") !== request.content || request.sourceEvidence.some(span => {
+    const block = blocks.find(block => block.id === span.sourceBlockId);
+    return !block || !requested.has(span.sourceBlockId) || !Number.isSafeInteger(span.startOffset) || !Number.isSafeInteger(span.endOffset) || span.startOffset < 0 || span.endOffset <= span.startOffset || span.endOffset > block.text.length || block.text.slice(span.startOffset, span.endOffset) !== span.text;
+  }))) throw new Error("INVALID_CHUNK_EVIDENCE_PAYLOAD");
   if (!request.systemInstructions || request.content.length > limit || (containsWholeSource && !isBoundedChunk)) throw new Error("FULL_BOOK_PROMPT_PROHIBITED"); if (estimateAnalysisTokens(request.content) > request.tokenBudget) throw new Error("ANALYSIS_TOKEN_BUDGET_EXCEEDED");
 }
 export function validateQuote(block: Pick<SourceBlockInput, "text">, evidence: EvidenceCandidate): string {

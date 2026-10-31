@@ -54,7 +54,7 @@ export const podcastStyleSchema = z.object({ language: boundedText(80), tone: bo
 export type PodcastContextItem = {
   sourceDocumentId: string; extractionId: string; chunkSetId: string; analysisRunId: string; memoryItemId: string;
   artifactId: string; chunkId?: string | null; type?: string; content: string; score: number; selectionReason: string;
-  tokenEstimate: number; sourceBlockEvidenceSpans: Array<{ sourceBlockId: string; startOffset: number; endOffset: number; quoteText?: string | null }>;
+  tokenEstimate: number; sourceBlockEvidenceSpans: Array<{ sourceBlockId: string; startOffset: number; endOffset: number; quoteText?: string | null; sourceText?: string }>;
 };
 export type ProviderMetadata = { stage: string; episodeId: string; segmentId?: string; generationAttempt?: number; provider: string; model: string; correlationId: string; tokenBudget: number };
 export type PodcastTextReceipt = { operationKey: string; invocationId: string; snapshotId: string };
