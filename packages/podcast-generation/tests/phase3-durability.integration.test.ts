@@ -166,6 +166,48 @@ afterEach(async () => { for (const workspaceId of workspaces.splice(0)) await cl
 afterAll(() => Promise.all([prisma.$disconnect(), observerPrisma.$disconnect()]));
 
 describe("durable Phase 3 generation", () => {
+  it("rejects read-only editorial changes and permits an editor without rewriting the model parent", async () => {
+    const data = await fixture();
+    await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.retrievalEmbeddings });
+    const current = await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id }, include: { revision: true } });
+    const snapshot = current.revision.scriptSnapshot as { utterances: Array<{ id: string; text: string; substantive: boolean; evidenceMemoryIds: string[] }> };
+    const input = { episodeId: data.episode.id, expectedRevisionId: current.revisionId, edits: snapshot.utterances.map(item => ({ utteranceId: item.id, text: item.substantive ? item.text : item.text + " 先核对原文。", evidenceMemoryIds: item.evidenceMemoryIds })) };
+    await prisma.workspaceMember.update({ where: { workspaceId_userId: data.context }, data: { role: "VIEWER" } });
+    await expect(createEditedPodcastScriptRevision(data.context, input)).rejects.toThrow("WORKSPACE_ACCESS_DENIED");
+    expect((await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id } })).revisionId).toBe(current.revisionId);
+    expect(await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } })).toBe(1);
+    await prisma.workspaceMember.update({ where: { workspaceId_userId: data.context }, data: { role: "EDITOR" } });
+    expect((await createEditedPodcastScriptRevision(data.context, input)).created).toBe(true);
+    expect((await prisma.podcastScriptRevision.findUniqueOrThrow({ where: { id: current.revisionId } })).scriptSnapshot).toEqual(current.revision.scriptSnapshot);
+  });
+
+  it("rechecks editorial membership after a concurrent revocation commits", async () => {
+    const data = await fixture();
+    await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.retrievalEmbeddings });
+    const current = await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id }, include: { revision: true } });
+    const snapshot = current.revision.scriptSnapshot as { utterances: Array<{ id: string; text: string; evidenceMemoryIds: string[] }> };
+    let release!: () => void, markLocked!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const locked = new Promise<void>(resolve => { markLocked = resolve; });
+    const revoke = prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT "role" FROM "WorkspaceMember" WHERE "workspaceId" = ${data.workspace.id} AND "userId" = ${data.user.id} FOR UPDATE`;
+      markLocked(); await gate;
+      await tx.workspaceMember.delete({ where: { workspaceId_userId: data.context } });
+    }, { timeout: 15000 });
+    await locked;
+    const edit = createEditedPodcastScriptRevision(data.context, { episodeId: data.episode.id, expectedRevisionId: current.revisionId, edits: snapshot.utterances.map(item => ({ utteranceId: item.id, text: item.text, evidenceMemoryIds: item.evidenceMemoryIds })) });
+    const rejected = expect(edit).rejects.toThrow("WORKSPACE_ACCESS_DENIED");
+    try {
+      await expect.poll(async () => {
+        const [state] = await observerPrisma.$queryRaw<Array<{ count: number }>>`SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%WorkspaceMember%' AND query LIKE '%FOR SHARE%'`;
+        return state?.count ?? 0;
+      }, { timeout: 5000 }).toBeGreaterThan(0);
+    } finally { release(); }
+    await revoke; await rejected;
+    expect((await prisma.currentPodcastScript.findUniqueOrThrow({ where: { episodeId: data.episode.id } })).revisionId).toBe(current.revisionId);
+    expect(await prisma.podcastScriptRevision.count({ where: { episodeId: data.episode.id } })).toBe(1);
+  });
+
   it("creates an attributed, idempotent USER_EDIT child without rewriting the model snapshot", async () => {
     const data = await fixture();
     await processPodcastGenerationRun(data.requested.run.id, { provider: new PodcastFixtureProvider(), embeddingProvider: data.retrievalEmbeddings });

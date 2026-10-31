@@ -27,7 +27,8 @@ export async function createEditedPodcastScriptRevision(context: TrustedRequestC
   if (new Set(input.edits.map(edit => edit.utteranceId)).size !== input.edits.length || input.edits.some(edit => new Set(edit.evidenceMemoryIds).size !== edit.evidenceMemoryIds.length)) throw new Error("PODCAST_USER_EDIT_INVALID");
   const requestHash = sha(canonicalJson({ parent: input.expectedRevisionId, edits: [...input.edits].sort((a, b) => a.utteranceId.localeCompare(b.utteranceId)) }));
   return prisma.$transaction(async tx => {
-    if (!await tx.workspaceMember.findUnique({ where: { workspaceId_userId: context } })) throw new Error("WORKSPACE_ACCESS_DENIED");
+    const members = await tx.$queryRaw<Array<{ role: string }>>`SELECT "role" FROM "WorkspaceMember" WHERE "workspaceId" = ${context.workspaceId} AND "userId" = ${context.userId} FOR SHARE`;
+    if (members.length !== 1 || !["OWNER", "EDITOR"].includes(members[0]!.role)) throw new Error("WORKSPACE_ACCESS_DENIED");
     const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "PodcastEpisode" WHERE "id" = ${input.episodeId} AND "workspaceId" = ${context.workspaceId} FOR UPDATE`;
     if (locked.length !== 1) throw new Error("PODCAST_EPISODE_ACCESS_DENIED");
     const current = await tx.currentPodcastScript.findFirstOrThrow({ where: { episodeId: input.episodeId, workspaceId: context.workspaceId }, include: { revision: true } });
