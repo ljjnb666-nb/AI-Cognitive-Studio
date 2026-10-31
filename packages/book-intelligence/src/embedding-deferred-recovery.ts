@@ -107,7 +107,10 @@ export async function recoverSettledDeferredBookEmbeddings(options: {
       logger.warn("book.embedding.deferred_auto_rearm.failed", { errorCode: "RECOVERY_ATTEMPT_FAILED" });
     }
   }
-  const { nextCursor: _nextCursor, ...safeSummary } = result;
-  logger.info("book.embedding.deferred_auto_rearm.completed", safeSummary);
+  logger.info("book.embedding.deferred_auto_rearm.completed", {
+    discovered: result.discovered, recovered: result.recovered,
+    skipped: result.skipped, capacityBlocked: result.capacityBlocked,
+    raced: result.raced, errors: result.errors,
+  });
   return result;
 }
