@@ -34,7 +34,7 @@ describe("source-bound visual candidate storage",()=>{
     expect(()=>buildPdfVisualReviewStorageRows(identity,y)).toThrow("PDF_VISUAL_CANDIDATE_AUTHORITY_INVALID");
   });
   it("never stores failed, empty or fabricated visual nodes",()=>{
-    const x=output();x.pages[0]!={...x.pages[0]!,status:"REVIEW_REQUIRED",failureReason:"VISION_REJECTED",figures:[]};
+    const x=output();x.pages[0]={...x.pages[0]!,status:"REVIEW_REQUIRED",failureReason:"VISION_REJECTED",figures:[]};
     expect(buildPdfVisualReviewStorageRows(identity,x)).toEqual([]);
     const y=output();y.pages[0]!.figures[0]!.edges[0]!.to="nonexistent";
     expect(()=>buildPdfVisualReviewStorageRows(identity,y)).toThrow("VISUAL_STRUCTURE_REJECTED");

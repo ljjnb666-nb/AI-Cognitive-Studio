@@ -73,7 +73,7 @@ describe("Worker on-demand PDF visual candidate task",()=>{
 
   it("persists only on independent explicit consent after authenticated source and gateway checks",async()=>{
     const f=await fixture();
-    const persist=vi.fn(async (_identity:unknown,_output:unknown)=>1);
+    const persist=vi.fn(async (...args:unknown[])=>{expect(args).toHaveLength(2);return 1;});
     f.deps.persistReviewCandidate=persist;
     const out=await executeOnDemandPdfVisualReview({...task,persistReviewCandidate:true},f.deps);
     expect(persist).toHaveBeenCalledTimes(1);
