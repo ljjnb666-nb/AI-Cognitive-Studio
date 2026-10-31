@@ -2,6 +2,7 @@ import { DelayedError, Queue, Worker } from "bullmq";
 import { createIngestionService, createMineruPdfOcrExecutor, dispatchPendingIngestion, INGESTION_JOB, INGESTION_QUEUE, OcrCapacityDeferredError, resolveMineruExecutorConfig, verifyMineruRuntime, verifyMineruStandardModels, type MineruExecutorConfig, type PdfOcrExecutor } from "@ai-cognitive/ingestion";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { createRedisConnection, type Environment } from "@ai-cognitive/shared/server";
+import { createRapidOcrPdfOcrExecutor, resolveRapidOcrExecutorConfig, verifyRapidOcrRuntime } from "@ai-cognitive/ingestion";
 
 export type SourceIngestionQueueOptions = { prefix?: string; concurrency?: number; /** Real OCR fallback executor (04B-3). Resolved once via resolveSourceIngestionOcrExecutor; injected for testability. */ pdfOcrExecutor?: PdfOcrExecutor; /** STEP6-2B-1: guarded standard admission fully verified at startup (double switch + manifest + model hashes). */ ocrStandardAdmissionEnabled?: boolean };
 export function createSourceIngestionWorker(environment: Environment, options: SourceIngestionQueueOptions = {}) {
@@ -39,14 +40,9 @@ export async function deferDeliveryOnPostCommitCapacitySignal(error: unknown, jo
   return true;
 }
 
-export type SourceIngestionOcrRuntime = {
-  pdfOcrExecutor: PdfOcrExecutor;
-  /** Verified runtime configuration for same-host OCR server reconciliation (RF01 P1-06). */
-  config: MineruExecutorConfig;
-  /** STEP6-2B-1: true only when the guarded standard admission fully verified at startup. */
-  standardAdmissionEnabled: boolean;
-  close(): Promise<void>;
-};
+export type SourceIngestionOcrRuntime =
+  | { kind: "mineru"; pdfOcrExecutor: PdfOcrExecutor; config: MineruExecutorConfig; standardAdmissionEnabled: boolean; close(): Promise<void> }
+  | { kind: "rapidocr"; pdfOcrExecutor: PdfOcrExecutor; standardAdmissionEnabled: false; close(): Promise<void> };
 
 /**
  * Production OCR runtime resolution (BOOK-INGESTION-04B-3, RF01 P1-08).
@@ -57,6 +53,37 @@ export type SourceIngestionOcrRuntime = {
  * operator-declared text.
  */
 export async function resolveSourceIngestionOcrExecutor(environment: Environment): Promise<SourceIngestionOcrRuntime | undefined> {
+  // RapidOCR is explicit opt-in only; never silently substitute it for MinerU.
+  if (environment.OCR_PROVIDER === "rapidocr") {
+    // Fail before any subprocess probe if another OCR engine has settings.
+    if (environment.MINERU_EXECUTABLE !== undefined ||
+        environment.MINERU_MODEL_PATH !== undefined ||
+        environment.MINERU_EXECUTABLE_ARGS !== undefined ||
+        environment.MINERU_MODEL_SOURCE !== undefined ||
+        environment.MINERU_TIER !== undefined ||
+        environment.MINERU_TIMEOUT_MS !== undefined ||
+        environment.MINERU_HOME_ROOT !== undefined ||
+        environment.MINERU_VERSION !== undefined ||
+        environment.MINERU_SERVER_START_TIMEOUT_MS !== undefined ||
+        environment.MINERU_SERVER_STOP_TIMEOUT_MS !== undefined ||
+        environment.MINERU_MAX_OUTPUT_BYTES !== undefined ||
+        environment.MINERU_CAPACITY_DEFERRAL_DELAY_MS !== undefined ||
+        environment.OCR_HOST_ID !== undefined ||
+        environment.OCR_TIER_STANDARD_EXPERIMENTAL_ENABLED !== undefined ||
+        environment.OCR_TIER_STANDARD_EXECUTION_ADMISSION_ENABLED !== undefined ||
+        environment.MINERU_STANDARD_MODEL_MANIFEST !== undefined ||
+        environment.MINERU_STANDARD_MIN_FREE_MEMORY_BYTES !== undefined ||
+        environment.MINERU_STANDARD_TIMEOUT_MS !== undefined) {
+      throw new Error("OCR_MIXED_PROVIDER_CONFIGURATION");
+    }
+    const config = resolveRapidOcrExecutorConfig(environment);
+    if (!config) throw new Error("OCR_RAPIDOCR_CONFIG_MISSING");
+    const verified = await verifyRapidOcrRuntime(config);
+    const handle = createRapidOcrPdfOcrExecutor(config, verified);
+    return { kind: "rapidocr", pdfOcrExecutor: handle, standardAdmissionEnabled: false, close: () => handle.close() };
+  }
+  // Reject orphan RapidOCR settings even if OCR is otherwise disabled.
+  resolveRapidOcrExecutorConfig(environment);
   const config = resolveMineruExecutorConfig(environment);
   if (!config) return undefined;
   await verifyMineruRuntime(config);
@@ -74,7 +101,7 @@ export async function resolveSourceIngestionOcrExecutor(environment: Environment
     standardModelsVerified = true;
   }
   const runtime = createMineruPdfOcrExecutor(config, { standardModelsVerified });
-  return { pdfOcrExecutor: runtime.executor, config, standardAdmissionEnabled: standardModelsVerified, close: () => runtime.close() };
+  return { kind: "mineru", pdfOcrExecutor: runtime.executor, config, standardAdmissionEnabled: standardModelsVerified, close: () => runtime.close() };
 }
 
 export function createSourceIngestionQueue(environment: Environment, options: SourceIngestionQueueOptions = {}) {
