@@ -27,3 +27,14 @@
 - 模型仅能返回七个固定轴的 CLEAR/ISSUE/UNKNOWN，综合判定 PASSED/REJECTED/REVIEW_REQUIRED；通过不授权 Book Intelligence、播客、Gold 或发布，模型返回的越权字段直接拒绝。
 - **重要**：本版只是实际可调用、已接入已有 Gateway 类型的第二次模型判定执行器；没有持久化第二次授权/模型审核决策、没有自动队列或生产 UI 按钮，不能用第一次图结构生成的同意暗中触发第二次付费。继续后续集成前保持无调用、不可发布。
 - 新增 `pdf-graph-model-review.test.ts`，由现有 `test:phase8b` CI 脚本运行，模拟网关结果测试来源、预算、同意、未知、截断、模型自宣称批准拒绝等。
+
+## 第二次独立付费审核的持久化授权（新增）
+
+- 新增 PostgreSQL `PdfGraphSecondReviewRequest` 与追加迁移 `20261031180000_pdf_graph_second_review_request`。模型源图 SHA、候选图 SHA、原书 SHA、workspace、run、routing generation 与物理页都固定保存；不保留页面图像、提示词或全文。
+- 新的独立 POST/GET：`/api/studio/pdf-visual-review/[sourceDocumentId]/second-review`。POST 必须完成真实登录、canonical Origin、OWNER/EDITOR 成员资格、已绑定视觉 Gateway、当前成功 extraction/run/page、未过期图结构及 SHA 校验；必须另行同时同意独立二次复核、图像外发与供应商费用。
+- 数据库 UNIQUE(ingestionRunId,routingGeneration,physicalPageIndex)，防止并发多次授权；发生冲突直接返回 409，**不允许重试产生另一次付费申请**。
+- `PDF_GRAPH_SECOND_REVIEW_REQUEST_ENABLED=false` 默认关闭；即使显式打开，当前只能创建 `AUTHORIZED_NOT_DISPATCHED` 状态。没有注册 Worker、没有发送图像或实际调用模型，也不生成已核验的播客事实。后续必须新增安全 claim、消费加密回执与模型判定的事务，才能执行第二次调用。
+- 添加 Web 严格同意/权限合约回归和 Worker 真实 PostgreSQL 唯一性/复合外键/SQL CHECK 测试。
+
+## 仍需下一步
+独立审核任务必须复核未过期授权、当前成员角色及来源绑定；使用已有 Gateway 的加密调用回执（不确定响应绝不重试）及一次性结果消费，在 PostgreSQL 写入审核决定，再经完整原书质量门禁评测确认是否可用于播客。以上尚未完成，不得视为自动审核闭环。
