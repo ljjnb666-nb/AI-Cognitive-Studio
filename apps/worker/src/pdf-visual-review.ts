@@ -6,6 +6,8 @@ import { createGatewayPdfVisualExecutor, WorkspaceMembershipExecutionAuthorizer,
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
 import type { Environment } from "@ai-cognitive/shared/server";
 import { createBookProductionGatewayRuntime } from "./provider-gateway-runtime.js";
+import { persistPdfVisualReviewCandidates, type StorePdfVisualCandidateIdentity } from "./pdf-visual-review-store.js";
+import type { PdfVisualStructureResult } from "@ai-cognitive/ingestion";
 
 const MAX_PDF_BYTES=110_000_000;
 const sha256=(bytes:Uint8Array)=>createHash("sha256").update(bytes).digest("hex");
@@ -19,6 +21,8 @@ export type PdfVisualReviewWorkerTask={
   sourceDocumentId:string;
   ingestionRunId:string;
   maxReviewPages?:1|2;
+  /** Separate explicit consent for storing only structured unverified graph for 24h. */
+  persistReviewCandidate?:true;
 };
 export type PdfVisualSourceRecord={
   id:string;
@@ -38,6 +42,7 @@ export type PdfVisualReviewWorkerDeps={
   storage:Pick<StorageProvider,"headObject"|"getObjectStream">;
   gateway:ProviderGateway;
   parserLimits?:ParserLimits;
+  persistReviewCandidate?:(identity:StorePdfVisualCandidateIdentity, output:PdfVisualStructureResult)=>Promise<number>;
 };
 
 /**
@@ -53,6 +58,8 @@ export async function executeOnDemandPdfVisualReview(
      !task.workspaceId||!task.userId||!task.ingestionRunId||!task.sourceDocumentId||
      (task.maxReviewPages!==undefined&&task.maxReviewPages!==1&&task.maxReviewPages!==2))
     throw new Error("PDF_VISUAL_WORKER_OPT_IN_REQUIRED");
+  if(task.persistReviewCandidate===true && !deps.persistReviewCandidate)
+    throw new Error("PDF_VISUAL_REVIEW_STORAGE_UNAVAILABLE");
   // Access check precedes run existence and private storage read.
   await deps.authorize(task.userId,task.workspaceId);
   const run=await deps.loadRun({workspaceId:task.workspaceId,ingestionRunId:task.ingestionRunId});
@@ -108,6 +115,13 @@ export async function executeOnDemandPdfVisualReview(
   if(output.pageCount!==plan.pages.length||
      output.pages.some(p=>!plan.pages.some(x=>x.physicalPageIndex===p.physicalPageIndex&&x.route==="NATIVE_TEXT")))
     throw new Error("PDF_VISUAL_WORKER_ROUTE_PLAN_MISMATCH");
+  const stored=task.persistReviewCandidate===true
+    ? await deps.persistReviewCandidate!({
+      workspaceId:task.workspaceId,sourceDocumentId:task.sourceDocumentId,
+      ingestionRunId:task.ingestionRunId,routingGeneration:run.routingGeneration,
+      sourcePdfSha256:run.sourceDocument.sha256,
+    },output)
+    : 0;
   return {
     ...output,
     taskMode:"ON_DEMAND_REVIEW_ONLY" as const,
@@ -115,13 +129,45 @@ export async function executeOnDemandPdfVisualReview(
     ingestionRunId:task.ingestionRunId,
     reviewRequired:true as const,
     canonicalTextUpdated:false as const,
-    persistedVisualContent:false as const,
+    persistedVisualContent:stored>0,
+  };
+}
+
+/**
+ * Explicit visual runtime accepts only one running request; shutdown fences
+ * admission synchronously and drains the active operation before closing S3
+ * and Gateway. Never drop a paid in-flight invocation on normal shutdown.
+ */
+export function createManagedPdfVisualReviewRuntime<TTask, TResult>(
+  run:(task:TTask)=>Promise<TResult>,
+  release:()=>Promise<void>|void,
+){
+  let accepting=true;
+  let closePromise:Promise<void>|undefined;
+  const pending=new Set<Promise<TResult>>();
+  return {
+    execute(task:TTask):Promise<TResult>{
+      if(!accepting)return Promise.reject(new Error("PDF_VISUAL_WORKER_CLOSING"));
+      if(pending.size!==0)return Promise.reject(new Error("PDF_VISUAL_WORKER_BUSY"));
+      const operation=Promise.resolve().then(()=>run(task));
+      pending.add(operation);
+      void operation.then(()=>{pending.delete(operation);},()=>{pending.delete(operation);});
+      return operation;
+    },
+    close():Promise<void>{
+      if(closePromise)return closePromise;
+      accepting=false;
+      closePromise=(async()=>{
+        await Promise.allSettled([...pending]);
+        await release();
+      })();
+      return closePromise;
+    },
   };
 }
 
 /** Resource-complete composition, deliberately not wired to startWorkerRuntime. */
 export function createOnDemandPdfVisualWorkerRuntime(environment:Environment,source:NodeJS.ProcessEnv){
-  const gatewayRuntime=createBookProductionGatewayRuntime(source);
   const storage=new S3CompatibleStorageProvider({
     endpoint:environment.S3_ENDPOINT,
     region:environment.S3_REGION,
@@ -130,26 +176,25 @@ export function createOnDemandPdfVisualWorkerRuntime(environment:Environment,sou
     secretKey:environment.S3_SECRET_KEY,
     forcePathStyle:environment.S3_FORCE_PATH_STYLE,
   });
+  let gatewayRuntime:ReturnType<typeof createBookProductionGatewayRuntime>;
+  try {
+    gatewayRuntime=createBookProductionGatewayRuntime(source);
+  } catch (error) {
+    storage.close();
+    throw error;
+  }
   const authorizer=new WorkspaceMembershipExecutionAuthorizer();
   const deps:PdfVisualReviewWorkerDeps={
     authorize:(userId,workspaceId)=>authorizer.authorizeExecution({userId},workspaceId),
-    loadRun:async identity=>{
-      const run=await prisma.ingestionRun.findFirst({
-        where:{id:identity.ingestionRunId,workspaceId:identity.workspaceId},
-        include:{sourceDocument:true},
-      });
-      return run;
-    },
+    loadRun:async identity=>prisma.ingestionRun.findFirst({
+      where:{id:identity.ingestionRunId,workspaceId:identity.workspaceId},
+      include:{sourceDocument:true},
+    }),
     storage,gateway:gatewayRuntime.gateway,
+    persistReviewCandidate:persistPdfVisualReviewCandidates,
   };
-  let closed=false;
-  return {
-    execute:(task:PdfVisualReviewWorkerTask)=>executeOnDemandPdfVisualReview(task,deps),
-    async close(){
-      if(closed)return;
-      closed=true;
-      storage.close();
-      await gatewayRuntime.close();
-    },
-  };
+  return createManagedPdfVisualReviewRuntime(
+    (task:PdfVisualReviewWorkerTask)=>executeOnDemandPdfVisualReview(task,deps),
+    async()=>{try{storage.close();}finally{await gatewayRuntime.close();}},
+  );
 }

@@ -17,6 +17,8 @@ import { startProcessingHeartbeat } from "./processing-heartbeat.js";
 import { resolveCredentialKeyring, resolveProviderCatalog } from "@ai-cognitive/provider-gateway";
 import { DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE, scheduleDurableOperationReconciliation, reconcileDurableExpensiveOperationsSweep, type ReconciliationQueue, type ReconciliationQueues, type ReconciliationSweepState, type ReconciliationTopics } from "./durable-operation-reconciliation.js";
 import {processNextOcrStructureReview} from "./ocr-structure-review.js";
+import { createOnDemandPdfVisualWorkerRuntime } from "./pdf-visual-review.js";
+import { processNextPdfVisualUserRequest } from "./pdf-visual-user-request.js";
 import {S3CompatibleStorageProvider} from "@ai-cognitive/storage";
 
 export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider> };
@@ -69,6 +71,10 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   let ocrReviewGateway: BookGatewayRuntime | undefined;
   let ocrReviewStorage:S3CompatibleStorageProvider|undefined;
   const ocrReviewEnabled=source.PDF_VISUAL_REVIEW_ON_DEMAND_ENABLED==="true";
+  // Independent opt-in: OCR structure review does not activate paid graph vision.
+  const visualReviewEnabled=source.PDF_MIXED_GRAPH_REVIEW_REQUEST_ENABLED==="true";
+  if(visualReviewEnabled&&!gatewayConfigured)throw new Error("PDF_MIXED_GRAPH_REVIEW_RUNTIME_CONFIGURATION_REQUIRED");
+  let visualReviewRuntime: ReturnType<typeof createOnDemandPdfVisualWorkerRuntime>|undefined;
   if(ocrReviewEnabled&&(!gatewayConfigured||!source.PDF_REVIEW_PRIVATE_TEMP_ROOT))throw new Error("OCR_REVIEW_RUNTIME_CONFIGURATION_REQUIRED");
   let sourceIngestionOcrRuntime: Awaited<ReturnType<typeof resolveSourceIngestionOcrExecutor>>;
   let doclingLayoutExecutor: Awaited<ReturnType<typeof resolveDoclingBackgroundExecutor>> = null;
@@ -104,6 +110,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const audioWorker = audioConfigured ? createPodcastAudioWorker(environment, audioAdapter, workerOptions(environment.WORKER_AUDIO_CONCURRENCY)) : undefined;
   const shortVideoAdapter = shortVideoConfigured ? options.shortVideoAdapter ?? { providerForRun: input => (productionShortVideoGatewayRuntime ??= createShortVideoProductionGatewayRuntime(source, options.bookProductionGatewayOverrides)).createTextProviderForRun(input), embeddingProviderForRun: input => (productionShortVideoGatewayRuntime ??= createShortVideoProductionGatewayRuntime(source, options.bookProductionGatewayOverrides)).createEmbeddingProviderForRun(input), ttsForRun: input => (productionShortVideoGatewayRuntime ??= createShortVideoProductionGatewayRuntime(source, options.bookProductionGatewayOverrides)).createSpeechProviderForRun(input) } : undefined;
   const shortVideoWorker = shortVideoConfigured ? createShortVideoGenerationWorker(environment, shortVideoAdapter, workerOptions(environment.WORKER_SHORT_VIDEO_CONCURRENCY)) : undefined;
+  if(visualReviewEnabled)visualReviewRuntime=createOnDemandPdfVisualWorkerRuntime(environment,source);
   const doclingLayoutQueue = doclingLayoutExecutor ? createDoclingLayoutQueue(environment, options.bullmqPrefix) : undefined;
   const doclingLayoutWorker = doclingLayoutExecutor ? createDoclingLayoutWorker(environment, doclingLayoutExecutor, { ...(options.bullmqPrefix ? { prefix:options.bullmqPrefix } : {}) }) : undefined;
   const ingestionQueue = createSourceIngestionQueue(environment, queueOptions);
@@ -193,6 +200,10 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   if (reconcileDeferredBookEmbedding) initial.push(reconcileDeferredBookEmbedding);
   initial.push(reconcileIngestionDeliveriesSweep);
   if (reconcileDoclingSidecars) initial.push(reconcileDoclingSidecars);
+  if(visualReviewRuntime){
+    const visual=visualReviewRuntime;
+    initial.push(dispatch("pdf-mixed-graph-user-requests",()=>processNextPdfVisualUserRequest(task=>visual.execute(task)),5_000));
+  }
   if(ocrReviewEnabled)initial.push(dispatch("ocr-structure-review",async()=>{
     const runtime=ocrReviewGateway??=createBookProductionGatewayRuntime(source);
     const storage=ocrReviewStorage??=new S3CompatibleStorageProvider({endpoint:environment.S3_ENDPOINT,region:environment.S3_REGION,bucket:environment.S3_BUCKET,accessKey:environment.S3_ACCESS_KEY,secretKey:environment.S3_SECRET_KEY,forcePathStyle:environment.S3_FORCE_PATH_STYLE});
@@ -242,8 +253,9 @@ const ingestionWorkerClose = ingestionWorker.close(); await sourceIngestionOcrRu
 const doclingWorkerClose = doclingLayoutWorker?.close();
 try { await doclingLayoutExecutor?.close(); }
 finally { try { await doclingWorkerClose; } finally { if (doclingLayoutWorker) closeDoclingLayoutWorkerOwnedStorage(doclingLayoutWorker); } }
-await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await ocrReviewGateway?.close(); ocrReviewStorage?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await visualReviewRuntime?.close(); await ocrReviewGateway?.close(); ocrReviewStorage?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
+    await visualReviewRuntime?.close();
     await ocrReviewGateway?.close();ocrReviewStorage?.close();
     await sourceIngestionOcrRuntime?.close();
     await doclingLayoutExecutor?.close();

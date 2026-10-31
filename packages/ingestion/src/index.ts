@@ -22,6 +22,7 @@ export { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDisp
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export { parseDocument, extractNativePdf, pdfTextToBlocks, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
+export { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
 export { PDF_VISUAL_STRUCTURE_VERSION, PDF_VISUAL_STRUCTURE_AUTHORITY, inspectPdfMixedPageVisualStructure, validatePdfVisualStructureCandidate, type VisualFigureCandidate, type VisualPageExecutor, type VisualPageReview, type PdfVisualStructureResult, type PdfVisualStructureOptions } from "./pdf-visual-structure.js";
 export { PDF_MIXED_PREVIEW_AUTHORITY, renderPdfMixedPageSourcePreviews, type PdfMixedPageSourcePreview, type PdfMixedPageSourcePreviewResult, type PdfMixedPreviewOptions } from "./pdf-mixed-page-preview.js";
 export { PDF_MIXED_CONTENT_SHADOW_SCHEMA_VERSION, PDF_MIXED_CONTENT_SHADOW_AUTHORITY, inspectPdfMixedContentShadow, type PdfMixedContentShadowPage, type PdfMixedContentShadowReport, type PdfMixedContentEvidenceKind } from "./pdf-mixed-content-shadow.js";
