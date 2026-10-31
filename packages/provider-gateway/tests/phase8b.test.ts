@@ -7,6 +7,20 @@ function input(providerKey: ExecutionSnapshot["providerKey"], protocol: Executio
 function transport(body: unknown, status = 200) { return new DeterministicProviderHttpTransport(() => ({ status, headers: { "x-request-id": "req-1", "retry-after": "2" }, body: JSON.stringify(body) })); }
 
 describe("Phase 8B real text provider adapters", () => {
+  it("locally validates an optional JSON-mode schema and rejects a schema echo", () => {
+    const jsonInput: TextGenerationInput = { ...text, structuredOutput: { mode: "JSON_MODE", schema: text.structuredOutput!.schema } };
+    expect(() => validateTextGenerationInput(jsonInput)).not.toThrow();
+    expect(normalizeTextResponse('{"answer":"actual data"}', "model", "STOP", jsonInput)).toMatchObject({ structured: { answer: "actual data" } });
+    expect(() => normalizeTextResponse(JSON.stringify(text.structuredOutput!.schema), "model", "STOP", jsonInput)).toThrow("invalid structured output");
+    expect(() => validateTextGenerationInput({ ...text, structuredOutput: { mode: "JSON_MODE", schema: { type: "invalid-schema-type" } } })).toThrow("Invalid text generation input");
+  });
+  it("preserves reported Zhipu usage when a billed JSON response echoes the validation schema", async () => {
+    const value = input("zhipu", "OPENAI_COMPATIBLE", "https://open.bigmodel.cn/api/paas/v4/chat/completions");
+    value.request.text = { ...text, structuredOutput: { mode: "JSON_MODE", schema: text.structuredOutput!.schema } };
+    const wire = transport({ model: "model", choices: [{ message: { content: JSON.stringify(text.structuredOutput!.schema) }, finish_reason: "stop" }], usage: { prompt_tokens: 11, completion_tokens: 7 } });
+    await expect(new OpenAICompatibleAdapter(wire).execute(value)).rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE", retryable: false, usage: { inputTokens: 11, outputTokens: 7, extra: { textStructuredResponse: { httpStatus: 200, reportedUsagePresent: true } } } });
+    expect(JSON.parse(wire.calls[0]!.body).response_format).toEqual({ type: "json_object" });
+  });
   it("hashes canonical runtime input without retaining runtime content", () => { expect(canonicalTextInputHash(text)).toBe(canonicalTextInputHash({ ...text, structuredOutput: { ...text.structuredOutput!, schema: { required: ["answer"], properties: { answer: { type: "string" } }, type: "object" } } })); expect(canonicalTextInputHash(text)).not.toBe(canonicalTextInputHash({ ...text, system: "changed" })); expect(canonicalTextInputHash(text)).not.toBe(canonicalTextInputHash({ ...text, messages: [{ role: "user", content: "changed" }] })); expect(canonicalTextInputHash(text)).not.toBe(canonicalTextInputHash({ ...text, generation: { ...text.generation, temperature: 1 } })); });
   it("rejects invalid inputs before transport", () => { expect(() => validateTextGenerationInput({ ...text, messages: [] })).toThrow(ProviderGatewayError); expect(() => validateTextGenerationInput({ ...text, generation: { temperature: 9 } })).toThrow(ProviderGatewayError); expect(() => validateTextGenerationInput({ ...text, structuredOutput: { mode: "STRICT_JSON_SCHEMA", schemaName: "bad name", schema: {} } })).toThrow(ProviderGatewayError); });
   it("preflights strict JSON schemas without leaking schema or AJV errors", () => {

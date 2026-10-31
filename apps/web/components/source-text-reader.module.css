@@ -1,0 +1,35 @@
+.reader { min-width: 0; padding-top: 16px; }
+.meta, .note { color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.meta { margin: 0 0 12px; font-variant-numeric: tabular-nums; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; padding-bottom: 20px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.modes { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.modes button, .navigation button, .navigation a { font: inherit; font-size: 13px; line-height: 1.4; cursor: pointer; border-radius: 6px; padding: 8px 10px; }
+.modes button { border: 0; background: transparent; color: var(--text-secondary); }
+.modes button[aria-pressed="true"] { background: var(--parchment); color: var(--on-surface); box-shadow: 0 1px 3px #00000012; font-weight: 600; }
+.navigation, .navigation form { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.navigation a, .navigation button { border: 1px solid var(--border); color: var(--on-surface); background: transparent; text-decoration: none; white-space: nowrap; }
+.navigation label { font-size: 12px; color: var(--text-secondary); }
+.navigation input { box-sizing: border-box; width: 62px; padding: 7px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--on-surface); font: inherit; font-size: 13px; text-align: center; }
+.modes button:focus-visible, .navigation a:focus-visible, .navigation button:focus-visible, .navigation input:focus-visible { outline: 2px solid var(--on-surface); outline-offset: 3px; }
+.tocHeader, .toc li { display: grid; grid-template-columns: minmax(0, 1fr) 4.5em; gap: 20px; }
+.tocHeader { padding: 10px 0; font-size: 12px; color: var(--text-secondary); border-bottom: 1px solid var(--border); }
+.tocHeader > :last-child { text-align: right; white-space: nowrap; }
+.toc { list-style: none; padding: 0; margin: 0; }
+.toc li { padding: 13px 0; border-bottom: 1px solid var(--border); font-size: 15px; line-height: 1.65; color: var(--on-surface); }
+.toc li > :first-child { overflow-wrap: anywhere; }
+.pageLabel { text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--text-secondary); padding-top: 2px; }
+.note { margin: 16px 0 0; }
+.prose { max-width: 42em; font-size: 16px; line-height: 1.95; overflow-wrap: anywhere; color: var(--on-surface); }
+.prose p { margin: 0 0 1.25em; }
+.raw { font-size: 15px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; }
+.raw > div { margin-bottom: 20px; }
+@media (max-width: 600px) {
+  .toolbar { align-items: stretch; gap: 12px; }
+  .navigation { width: 100%; gap: 6px; }
+  .navigation form { gap: 5px; }
+  .navigation label { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
+  .navigation a, .navigation button { padding: 8px; font-size: 12px; }
+  .navigation input { width: 50px; }
+  .tocHeader, .toc li { gap: 12px; grid-template-columns: minmax(0, 1fr) 4em; }
+  .toc li { font-size: 14px; padding: 12px 0; }
+}

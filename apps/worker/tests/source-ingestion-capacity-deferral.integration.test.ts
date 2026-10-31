@@ -20,7 +20,6 @@ import { startWorkerRuntime } from "../src/runtime.js";
  * both runs publish exactly once.
  */
 
-const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 const fakeMineruPath = fileURLToPath(new URL("../../../packages/ingestion/tests/helpers/mineru/fake-mineru.mjs", import.meta.url));
 const fixtureBytes = () => new Uint8Array(readFileSync(fileURLToPath(new URL("../../../packages/ingestion/tests/fixtures/mineru/scanned-mixed-real.pdf", import.meta.url))));
 
@@ -52,10 +51,12 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-async function createOcrRunAt(workspaceId: string, userId: string, storageKey: string, sizeBytes: number): Promise<string> {
+async function createOcrRunAt(workspaceId: string, userId: string, storageKey: string, bytes: Uint8Array): Promise<string> {
+  const sizeBytes=bytes.byteLength;
+  const digest=createHash("sha256").update(bytes).digest("hex");
   const blob = await prisma.sourceBlob.upsert({
-    where: { workspaceId_sha256: { workspaceId, sha256: sha256(storageKey) } },
-    create: { workspaceId, sha256: sha256(storageKey), sizeBytes, mediaType: "application/pdf", storageKey },
+    where: { workspaceId_sha256: { workspaceId, sha256: digest } },
+    create: { workspaceId, sha256: digest, sizeBytes, mediaType: "application/pdf", storageKey },
     update: {},
   });
   const source = await prisma.source.create({ data: { workspaceId, kind: "FILE", displayName: `deferral-${crypto.randomUUID()}.pdf` } });
@@ -89,8 +90,8 @@ describe("real BullMQ OCR capacity deferral (RF03 P1-03)", () => {
     const storageKey0 = `test/${crypto.randomUUID()}`;
     await storage.putObject({ key: storageKey0, body: bytes, contentType: "application/pdf" });
     // Route BOTH fixtures at the uploaded canonical object.
-    const runA = await createOcrRunAt(workspace.id, user.id, storageKey0, bytes.length);
-    const runB = await createOcrRunAt(workspace.id, user.id, storageKey0, bytes.length);
+    const runA = await createOcrRunAt(workspace.id, user.id, storageKey0, bytes);
+    const runB = await createOcrRunAt(workspace.id, user.id, storageKey0, bytes);
     await prisma.outboxEvent.create({ data: { topic: ingestionTopic, aggregateId: runA, payload: { ingestionRunId: runA } } });
     await prisma.outboxEvent.create({ data: { topic: ingestionTopic, aggregateId: runB, payload: { ingestionRunId: runB } } });
     const jobBId = (await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runB } })).jobId;

@@ -120,6 +120,13 @@ enum IngestionStatus {
 
 /// Durable OCR page checkpoint state (BOOK-INGESTION-04B-1; consumed by 04B-2+).
 /// One checkpoint row per (run, physical page, routing generation).
+enum DoclingLayoutTaskStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
 enum OcrPageAttemptStatus {
   PENDING
   RUNNING
@@ -679,6 +686,7 @@ model ProviderExecutionSnapshot {
 }
 
 model ProviderInvocation {
+  ocrModelReviewEvents OcrModelReviewEvent[]
   id                     String                              @id @default(cuid())
   workspaceId            String
   snapshotId             String
@@ -1127,9 +1135,55 @@ model IngestionRun {
   bookAnalysisBootstrap BookAnalysisBootstrap?
   ocrPageAttempts       OcrPageAttempt[]
   ocrServerInstances    OcrServerInstance[]
+  doclingLayoutSnapshots DoclingLayoutSnapshot[]
+  doclingLayoutTasks     DoclingLayoutTask[]
+  pdfVisualReviewCandidates PdfVisualReviewCandidate[]
+  pdfVisualReviewRequests   PdfVisualReviewRequest[]
 
   @@unique([id, sourceDocumentId, workspaceId])
   @@index([executionLeaseUntil])
+}
+
+model PdfVisualReviewCandidate {
+  id                String       @id @default(cuid())
+  workspaceId       String
+  sourceDocumentId  String
+  ingestionRunId    String
+  routingGeneration Int
+  physicalPageIndex Int
+  sourcePdfSha256   String
+  sourcePngSha256   String
+  candidateJson     Json
+  candidateSha256   String
+  createdAt         DateTime     @default(now())
+  expiresAt         DateTime
+  ingestionRun      IngestionRun @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@unique([ingestionRunId, physicalPageIndex, routingGeneration, sourcePngSha256], map: "PdfVisualReviewCandidate_identity_uq")
+  @@index([workspaceId, sourceDocumentId, physicalPageIndex, expiresAt], map: "PdfVisualReviewCandidate_read_idx")
+  @@index([expiresAt], map: "PdfVisualReviewCandidate_expiry_idx")
+}
+
+model PdfVisualReviewRequest {
+  id                String       @id @default(cuid())
+  workspaceId       String
+  userId            String
+  sourceDocumentId  String
+  ingestionRunId    String
+  routingGeneration Int
+  sourcePdfSha256   String
+  status            String       @default("PENDING")
+  failureCode       String?
+  claimToken        String?
+  createdAt         DateTime     @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  expiresAt         DateTime
+  ingestionRun      IngestionRun @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@unique([ingestionRunId, routingGeneration], map: "PdfVisualReviewRequest_single_attempt_uq")
+  @@index([status, expiresAt, createdAt], map: "PdfVisualReviewRequest_pending_idx")
+  @@index([workspaceId, sourceDocumentId], map: "PdfVisualReviewRequest_read_idx")
 }
 
 /// Current per-host OCR machine-capacity authority (fenced lease). Deliberately
@@ -1154,6 +1208,50 @@ model OcrHostLease {
 /// immutable artifacts/logs, not extra rows. Workspace/source lineage columns
 /// exist so every relation and write predicate fails closed across tenant
 /// boundaries.
+model DoclingLayoutTask {
+  id                String                  @id @default(cuid())
+  workspaceId       String
+  sourceDocumentId  String
+  ingestionRunId    String
+  physicalPageIndex Int
+  routingGeneration Int
+  modelSha256       String
+  status            DoclingLayoutTaskStatus @default(PENDING)
+  attemptCount      Int                     @default(0)
+  claimToken        String?
+  leaseUntil        DateTime?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  ingestionRun      IngestionRun            @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@unique([ingestionRunId, physicalPageIndex, routingGeneration, modelSha256], name: "byPageAndModel", map: "DoclingLayoutTask_unique_page_model")
+  @@index([status, leaseUntil], map: "DoclingLayoutTask_status_lease_idx")
+  @@index([workspaceId, sourceDocumentId], map: "DoclingLayoutTask_workspace_source_idx")
+}
+
+model DoclingLayoutSnapshot {
+  id                 String       @id @default(cuid())
+  workspaceId        String
+  sourceDocumentId   String
+  ingestionRunId     String
+  physicalPageIndex  Int
+  routingGeneration  Int
+  sourceSha256       String
+  parserName         String
+  parserVersion      String
+  modelSha256        String
+  markdownSha256     String
+  markdownStorageKey String
+  textItemCount      Int
+  pictureItemCount   Int
+  tableItemCount     Int
+  createdAt          DateTime     @default(now())
+  ingestionRun       IngestionRun @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@unique([ingestionRunId, physicalPageIndex, routingGeneration, parserName, parserVersion, modelSha256], name: "byPageAndModel", map: "DoclingLayoutSnapshot_unique_page_model")
+  @@index([workspaceId, sourceDocumentId], map: "DoclingLayoutSnapshot_workspace_source_idx")
+}
+
 model OcrPageAttempt {
   id                       String               @id @default(cuid())
   workspaceId              String
@@ -1183,6 +1281,17 @@ model OcrPageAttempt {
   @@index([ingestionRunId, routingGeneration])
   @@index([status, nextAttemptAt])
   @@index([workspaceId])
+  proposedTier             String?
+  admittedTier             String?
+  actualTier               String?
+  manifestDigest           String?
+  executionStatus          String?
+  fallbackReason           String?
+  sourceIdentity           Json?
+  claimIdentity            Json?
+  qualityStatus            String?
+  executions               OcrPageExecution[]
+
 }
 
 /// Durable identity/history for detached MinerU server instances. One row
@@ -3017,6 +3126,7 @@ model OutboxEvent {
 }
 
 model Job {
+  ocrModelReviewEvent OcrModelReviewEvent?
   id                      String                   @id @default(cuid())
   userId                  String?
   workspaceId             String?
@@ -3046,4 +3156,56 @@ model Job {
   @@index([status])
   @@index([correlationId])
   @@index([workspaceId, status])
+}
+/// Immutable execution receipts; page checkpoint remains the sole retry authority.
+model OcrPageExecution {
+  modelReviewEvents OcrModelReviewEvent[]
+  id                String @id @default(cuid())
+  pageAttemptId     String
+  pageClaimToken    String @unique
+  runExecutionToken String
+  hostClaimToken    String?
+  serverIdentity    Json?
+  proposedTier      String?
+  admittedTier      String?
+  actualTier        String?
+  modelRevision     String?
+  manifestDigest    String?
+  executionStatus   String
+  fallbackReason    String?
+  errorCode         String?
+  resultTextSha256  String?
+  sourceIdentity    Json
+  qualityDecision   Json?
+  createdAt         DateTime @default(now())
+  pageAttempt       OcrPageAttempt @relation(fields:[pageAttemptId], references:[id], onDelete:Cascade)
+  @@index([pageAttemptId, createdAt])
+}
+
+/// Independent model judgement. Never referenced by canonical publication.
+model OcrModelReviewEvent {
+  id String @id @default(cuid())
+  jobId String @unique
+  workspaceId String
+  sourceDocumentId String
+  ingestionRunId String
+  physicalPageIndex Int
+  receiptId String
+  sourcePdfSha256 String
+  sourcePngSha256 String
+  ocrTextSha256 String
+  evidenceSha256 String
+  invocationId String @unique
+  snapshotId String
+  providerKey String
+  modelId String
+  reportedModelId String?
+  decision String
+  reasons Json
+  usage Json
+  createdAt DateTime @default(now())
+  job Job @relation(fields:[jobId],references:[id],onDelete:Cascade,onUpdate:NoAction)
+  receipt OcrPageExecution @relation(fields:[receiptId],references:[id],onDelete:Cascade,onUpdate:NoAction)
+  invocation ProviderInvocation @relation(fields:[invocationId,workspaceId],references:[id,workspaceId],onDelete:Restrict,onUpdate:NoAction)
+  @@index([workspaceId,sourceDocumentId,ingestionRunId,physicalPageIndex],map:"OcrModelReviewEvent_scope_page_idx")
 }

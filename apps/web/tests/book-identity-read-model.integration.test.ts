@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { projectBookDisplay } from "../lib/book-display";
+import { sourceStatusLabel } from "../lib/product-labels";
 import { sourceDetail, sources } from "../lib/product";
 import type { WebIdentityContext } from "../lib/identity";
 
@@ -60,6 +61,12 @@ async function makeSource(workspaceId: string, fileName: string, versionCount: n
 afterEach(async () => {
   if (workspaceIds.length) {
     const where = { workspaceId: { in: workspaceIds } };
+    await prisma.currentDocumentExtraction.deleteMany({ where });
+    await prisma.sourceBlock.deleteMany({ where: { extraction: where } });
+    await prisma.sourcePage.deleteMany({ where: { extraction: where } });
+    await prisma.documentExtraction.deleteMany({ where });
+    await prisma.ingestionRun.deleteMany({ where });
+    await prisma.job.deleteMany({ where });
     await prisma.sourceDocument.deleteMany({ where });
     await prisma.source.deleteMany({ where });
     await prisma.edition.deleteMany({ where });
@@ -74,6 +81,33 @@ afterEach(async () => {
 });
 
 describe("04C-4C3 authoritative Source/Work read model (real PostgreSQL)", () => {
+  it("previews owner-scoped published PDF text without AI and bounds each requested page", async () => {
+    const identity = await createWorkspace(), foreign = await createWorkspace();
+    const sample = await makeSource(identity.workspaceId, "native.pdf", 1, "application/pdf");
+    const documentId = sample.documents[0]!.id;
+    const job = await prisma.job.create({ data: { workspaceId: identity.workspaceId, type: "source.ingest", payload: {} } });
+    const run = await prisma.ingestionRun.create({ data: { sourceDocumentId: documentId, workspaceId: identity.workspaceId, jobId: job.id, parserVersion: "test", normalizationVersion: "test", status: "SUCCEEDED" } });
+    const extraction = await prisma.documentExtraction.create({ data: { sourceDocumentId: documentId, workspaceId: identity.workspaceId, ingestionRunId: run.id, status: "SUCCEEDED", qualityStatus: "ACCEPTED", parserName: "test", parserVersion: "test", normalizationVersion: "test" } });
+    for (let ordinal = 0; ordinal < 3; ordinal++) {
+      const page = await prisma.sourcePage.create({ data: { extractionId: extraction.id, ordinal, physicalPageIndex: ordinal } });
+      await prisma.sourceBlock.create({ data: { extractionId: extraction.id, sourcePageId: page.id, ordinal, kind: "PARAGRAPH", text: ordinal === 2 ? "文".repeat(4001) : `原文第${ordinal + 1}页`, contentHash: `hash-${ordinal}` } });
+    }
+    expect((await sourceDetail(documentId, identity)).textPreview).toBeNull();
+    await prisma.currentDocumentExtraction.create({ data: { workspaceId: identity.workspaceId, sourceDocumentId: documentId, extractionId: extraction.id } });
+    const detail = await sourceDetail(documentId, identity, 2);
+    expect(detail.currentIntelligence).toBeNull();
+    const summary = (await sources(identity)).find(item => item.id === documentId)!;
+    expect(sourceStatusLabel(summary.status, summary.hasIntelligence, summary.errorCode)).toBe("正文已提取");
+    expect(detail.textPreview).toMatchObject({ pageNumber: 2, pageCount: 3, physicalPageNumber: 2, truncated: false, blocks: [{ text: "原文第2页" }] });
+    expect(JSON.stringify(detail.textPreview)).not.toContain("原文第1页");
+    expect((await sourceDetail(documentId, identity, -1)).textPreview?.pageNumber).toBe(1);
+    expect((await sourceDetail(documentId, identity, Number.NaN)).textPreview?.pageNumber).toBe(1);
+    const last = (await sourceDetail(documentId, identity, 999)).textPreview;
+    expect(last).toMatchObject({ pageNumber: 3, truncated: true });
+    expect(last!.blocks[0]!.text).toHaveLength(4000);
+    await expect(sourceDetail(documentId, foreign, 1)).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");
+  });
+
   it("never displays unconfirmed EPUB metadata as a book title", async () => {
     const identity = await createWorkspace();
     const sample = await makeSource(identity.workspaceId, "original-unpromoted.epub", 1);

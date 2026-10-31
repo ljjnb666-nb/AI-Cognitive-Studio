@@ -1,14 +1,17 @@
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import PDFDocument from "pdfkit";
 import { prisma } from "@ai-cognitive/db";
 import { CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseExtractionQualityMetadata } from "@ai-cognitive/domain";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import { createIngestionService, DEFAULT_PARSER_LIMITS, evaluatePdfExtractionQuality, extractNativePdf, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, pdfRoutingOutcome, planPdfRouting, terminalizeRunWithRoutingOutcome } from "../src/index.js";
+import { createIngestionService, DEFAULT_PARSER_LIMITS, evaluatePdfExtractionQuality, extractNativePdf, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, pdfRoutingOutcome, planPdfRouting, parseRoutingPlan, terminalizeRunWithRoutingOutcome, createRapidOcrPdfOcrExecutor, type PdfOcrExecutor } from "../src/index.js";
 import { claimIngestionRun, lockRunForPublication, renewIngestionRunClaim, transitionRunToTerminal } from "../src/ingestion-run-claim.js";
 import { claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, writeRoutingOutcome, writeRoutingPlan } from "../src/ocr-durability.js";
 import { FakePdfOcrExecutor, fakeOcrTerminalFailure, fakeOcrText, fakeOcrTransientFailure } from "./helpers/pdf/fake-ocr-executor.js";
+import { inspectAndPersistDoclingLayoutSidecar, selectDoclingLayoutPages } from "../src/docling/docling-layout-sidecar.js";
+import type { DoclingLayoutHandle } from "../src/docling/docling-layout-executor.js";
 
 const workspaceIds: string[] = [];
 const userIds: string[] = [];
@@ -84,7 +87,7 @@ async function createPdfRunFixture(bytes: Uint8Array, storage?: FakeStorageProvi
   return { user, workspace, document, job, run, storageKey };
 }
 
-function serviceWith(storage: FakeStorageProvider, executor?: FakePdfOcrExecutor) {
+function serviceWith(storage: FakeStorageProvider, executor?: PdfOcrExecutor) {
   return createIngestionService(storage, { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3, ...(executor ? { pdfOcrExecutor: executor } : {}) });
 }
 
@@ -209,6 +212,90 @@ describe("mixed PDF routing (real PostgreSQL)", () => {
     expect(await prisma.bookAnalysisBootstrap.count({ where: { ingestionRunId: run.id } })).toBe(1);
     expect(await prisma.outboxEvent.findFirstOrThrow({ where: { aggregateId: bootstrap.id } })).toMatchObject({ topic: "book.analysis.bootstrap.requested" });
     expect(executor.calls).toEqual([expect.objectContaining({ physicalPageIndex: 1, ingestionRunId: run.id, workspaceId: workspace.id, routingGeneration: PDF_ROUTING_GENERATION, pdfByteLength: bytes.length })]);
+  });
+
+  it("RAPIDOCR_PRODUCTION_ADAPTER: real Node executor seam persists middle-page OCR and publishes canonical source to book bootstrap", async () => {
+    // Real PDF.js native parsing, PostgreSQL durable OCR attempt, object storage
+    // and analysis outbox. Only the Python subprocess is injected so Linux CI
+    // needs no installed ONNX model. Windows owner-only synthetic smoke proves
+    // the actual PyMuPDF -> RapidOCR Python path independently.
+    const bytes = await mixedPdf();
+    const storage = new FakeStorageProvider();
+    const { workspace, run } = await createPdfRunFixture(bytes, storage);
+    const modelSha = "a".repeat(64);
+    let called = 0;
+    let temporaryPdfPath: string | null = null;
+    const executor = createRapidOcrPdfOcrExecutor({
+      python: "/synthetic/rapidocr-venv/bin/python",
+      script: "/synthetic/rapidocr-child.py",
+      timeoutMs: 120_000,
+      maxOutputBytes: 512_000,
+    }, { modelSha256: modelSha }, async (program, argv, options) => {
+      called++;
+      expect(program).toBe("/synthetic/rapidocr-venv/bin/python");
+      expect(argv[0]).toBe("/synthetic/rapidocr-child.py");
+      expect(argv[1]).toBe("--pdf");
+      expect(argv[3]).toBe("--page");
+      expect(argv[4]).toBe("1"); // physicalPageIndex, not printed page label
+      expect(options.timeoutMs).toBe(120_000);
+      expect(options.maxOutputBytes).toBe(512_000);
+      expect(options.env.DATABASE_URL).toBeUndefined();
+      temporaryPdfPath = argv[2]!;
+      expect(await readFile(temporaryPdfPath)).toEqual(Buffer.from(bytes));
+      return {
+        code: 0,
+        signal: null,
+        timedOut: false,
+        aborted: false,
+        outputOverflow: false,
+        directChildExitObserved: false,
+        treeTerminationConfirmed: false,
+        stdout: JSON.stringify({ schemaVersion: 1, status: "SUCCEEDED", text: "RapidOCR scanned page content" }),
+        stderr: "",
+      };
+    });
+    const service = serviceWith(storage, executor);
+
+    await service.processIngestionRun(run.id);
+    expect(called).toBe(1);
+    expect(temporaryPdfPath).not.toBeNull();
+    await expect(stat(temporaryPdfPath!)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const attempt = await attemptRow(workspace.id, run.id, 1);
+    expect(attempt.status).toBe("SUCCEEDED");
+    expect(attempt.attemptCount).toBe(1);
+    expect(attempt.parserName).toBe("rapidocr-offline");
+    expect(attempt.parserVersion).toBe("3.9.2");
+    expect(attempt.parserMode).toBe("offline-pdf-1.6x");
+    expect(attempt.modelRevision).toBe(modelSha);
+    expect(attempt.textSha256).toBe(sha256("RapidOCR scanned page content"));
+    expect(attempt.authoritativeArtifactKey).toBe(
+      `workspaces/${workspace.id}/extractions/${run.id}/ocr-pages/1/${sha256("RapidOCR scanned page content")}.txt`,
+    );
+    expect(await storage.getObjectBytes(attempt.authoritativeArtifactKey!)).toEqual(
+      Buffer.from("RapidOCR scanned page content"),
+    );
+
+    const extraction = await prisma.documentExtraction.findUniqueOrThrow({ where: { ingestionRunId: run.id } });
+    expect(extraction.status).toBe("SUCCEEDED");
+    expect(extraction.qualityStatus).toBe("DEGRADED");
+    expect(parseExtractionQualityMetadata(extraction.qualityMetadata)).toEqual({ warnings: ["OCR_USED"] });
+    const pages = await prisma.sourcePage.findMany({ where: { extractionId: extraction.id }, orderBy: { ordinal: "asc" } });
+    const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: extraction.id }, orderBy: { ordinal: "asc" } });
+    expect(pages.map((page) => page.physicalPageIndex)).toEqual([0, 1, 2]);
+    expect(blocks.map((block) => block.text)).toEqual(["Hello PDF", "RapidOCR scanned page content", "Second Page"]);
+    expect(blocks.map((block) => parseCanonicalBlockMetadata(block.metadata).provenance)).toMatchObject([
+      { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated" },
+      { sourceMethod: "OCR", parserName: "rapidocr-offline", parserVersion: "3.9.2" },
+      { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated" },
+    ]);
+    expect(blocks[1]?.sourcePageId).toBe(pages[1]?.id);
+    expect((await prisma.currentDocumentExtraction.findUniqueOrThrow({
+      where: { sourceDocumentId_workspaceId: { sourceDocumentId: run.sourceDocumentId, workspaceId: workspace.id } },
+    })).extractionId).toBe(extraction.id);
+    const bootstrap = await prisma.bookAnalysisBootstrap.findUniqueOrThrow({ where: { ingestionRunId: run.id } });
+    expect(await prisma.outboxEvent.findFirstOrThrow({ where: { aggregateId: bootstrap.id } }))
+      .toMatchObject({ topic: "book.analysis.bootstrap.requested" });
   });
 
   it("TRUE_BLANK_PAGE: a genuinely blank page is represented, published, and never sent to OCR", async () => {
@@ -532,3 +619,99 @@ describe("RF01 zero-usable-text OCR results (real PostgreSQL)", () => {
 function healthyArtifactReadable(storage: FakeStorageProvider, key: string | null): boolean {
   return key !== null && storage.objects.has(key);
 }
+
+it("selected-page review executes only the requested page and rejects a partial book without checkpoint provenance",async()=>{
+ const bytes=await buildPdf([d=>d.image(png1x1,50,50,{width:60}),d=>d.image(png1x1,50,50,{width:60})]);
+ const storage=new FakeStorageProvider();const f=await createPdfRunFixture(bytes,storage);const executor=new FakePdfOcrExecutor();
+ const service=createIngestionService(storage,{maxUploadBytes:100*1024*1024,uploadTtlSeconds:900,maxPdfPages:2000,completionLeaseMs:900000,processMaxAttempts:3,pdfOcrExecutor:executor,ocrStandardAdmissionEnabled:true});
+ // This legacy fake has no source receipt. Review mode must retain the
+ // stronger rejection, rather than inventing trusted review evidence.
+ await expect(service.processIngestionRun(f.run.id,{physicalPageIndex:1})).rejects.toThrow("SOURCE_QUALITY_REJECTED");
+ expect(executor.calls.map(c=>c.physicalPageIndex)).toEqual([1]);
+ const attempts=await prisma.ocrPageAttempt.findMany({where:{ingestionRunId:f.run.id},orderBy:{physicalPageIndex:"asc"}});
+ expect(attempts.map(p=>p.status)).toEqual(["PENDING","SUCCEEDED"]);
+ expect(await prisma.documentExtraction.count({where:{ingestionRunId:f.run.id}})).toBe(0);
+ expect(await prisma.currentDocumentExtraction.count({where:{sourceDocumentId:f.document.id}})).toBe(0);
+});
+
+describe("Docling layout non-authoritative sidecar (real PostgreSQL)",()=>{
+  it("preserves native/OCR publication, stores a source-bound candidate once, verifies replay and detects tampering",async()=>{
+    const bytes=await mixedPdf();
+    const storage=new FakeStorageProvider();
+    const {workspace,document,run}=await createPdfRunFixture(bytes,storage);
+    // Unlike legacy benchmark fixtures, the sidecar admits only the actual
+    // immutable source PDF digest. Update both fixture lineage hashes.
+    const actualSha=createHash("sha256").update(bytes).digest("hex");
+    await prisma.sourceBlob.update({
+      where:{id:document.sourceBlobId},data:{sha256:actualSha},
+    });
+    await prisma.sourceDocument.update({
+      where:{id:document.id},data:{sha256:actualSha},
+    });
+    const sourceExecutor=new FakePdfOcrExecutor().script(1,[fakeOcrText("OCR on page two")]);
+    await serviceWith(storage,sourceExecutor).processIngestionRun(run.id);
+    const state=await prisma.ingestionRun.findUniqueOrThrow({where:{id:run.id}});
+    expect(state.status).toBe("SUCCEEDED");
+    const selector=selectDoclingLayoutPages(parseRoutingPlan(state.routingPlan));
+    expect(selector).toEqual([1]);
+
+    const inspect=vi.fn(async({physicalPageIndex}:{pdfBytes:Uint8Array;physicalPageIndex:number})=>({
+      status:"SUCCEEDED" as const,
+      candidate:{
+        authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE" as const,
+        sourceMethod:"DOCLING_LAYOUT_CANDIDATE_ONLY" as const,
+        physicalPageIndex,ocrUsed:false as const,fullPageReference:false as const,
+        parserName:"docling-standard-layout" as const,
+        parserVersion:"2.141.0" as const,
+        artifactSha256:"c".repeat(64),
+        markdown:"## Synthetic page layout\n\n| x | y |",textItemCount:2,
+        pictureItemCount:1,tableItemCount:1,
+      },
+    }));
+    const executor:DoclingLayoutHandle={
+      parserName:"docling-standard-layout",modelSha256:"c".repeat(64),
+      inspect,close:async()=>undefined,
+    };
+    const input={
+      workspaceId:workspace.id,sourceDocumentId:document.id,
+      ingestionRunId:run.id,physicalPageIndex:1,pdfBytes:bytes,
+      storage,executor,
+    };
+    const blocksBefore=await prisma.sourceBlock.findMany({
+      where:{extraction:{ingestionRunId:run.id}},orderBy:{ordinal:"asc"},
+      select:{id:true,text:true},
+    });
+    const pointerBefore=await prisma.currentDocumentExtraction.findUniqueOrThrow({
+      where:{sourceDocumentId_workspaceId:{sourceDocumentId:document.id,workspaceId:workspace.id}},
+    });
+    const first=await inspectAndPersistDoclingLayoutSidecar(input);
+    expect(first).toMatchObject({
+      authority:"NON_AUTHORITATIVE_LAYOUT_CANDIDATE",physicalPageIndex:1,
+      parserName:"docling-standard-layout",modelSha256:"c".repeat(64),reused:false,
+    });
+    const again=await inspectAndPersistDoclingLayoutSidecar(input);
+    expect(again).toEqual({...first,reused:true});
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(await prisma.doclingLayoutSnapshot.count({
+      where:{ingestionRunId:run.id},
+    })).toBe(1);
+    expect(await prisma.sourceBlock.findMany({
+      where:{extraction:{ingestionRunId:run.id}},orderBy:{ordinal:"asc"},
+      select:{id:true,text:true},
+    })).toEqual(blocksBefore);
+    expect(await prisma.currentDocumentExtraction.findUniqueOrThrow({
+      where:{sourceDocumentId_workspaceId:{sourceDocumentId:document.id,workspaceId:workspace.id}},
+    })).toEqual(pointerBefore);
+    await expect(inspectAndPersistDoclingLayoutSidecar({...input,physicalPageIndex:0}))
+      .rejects.toThrow("DOCLING_LAYOUT_PAGE_NOT_ELIGIBLE");
+    await expect(inspectAndPersistDoclingLayoutSidecar({...input,workspaceId:"wrong-workspace"}))
+      .rejects.toThrow("DOCLING_LAYOUT_SOURCE_AUTHORITY_MISMATCH");
+    await expect(inspectAndPersistDoclingLayoutSidecar({...input,pdfBytes:new Uint8Array(Buffer.from("changed-pdf"))}))
+      .rejects.toThrow("DOCLING_LAYOUT_SOURCE_AUTHORITY_MISMATCH");
+    storage.objects.set(first.markdownStorageKey,Buffer.from("TAMPERED","utf8"));
+    await expect(inspectAndPersistDoclingLayoutSidecar(input))
+      .rejects.toThrow("DOCLING_LAYOUT_REPLAY_ARTIFACT_INVALID");
+    expect(inspect).toHaveBeenCalledTimes(1);
+  });
+});
+

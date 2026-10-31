@@ -40,6 +40,7 @@ export const SourceError = {
   // records this stable failure and the durable attempt budget governs retry;
   // it is never accepted as usable fallback content. PAGE-level code — the run
   // itself ends through the ordinary REQUIRES_FALLBACK / OCR_REQUIRED path.
+  OCR_MEMORY_PRESSURE: "SOURCE_OCR_MEMORY_PRESSURE",
   OCR_NO_USABLE_TEXT: "SOURCE_OCR_NO_USABLE_TEXT",
   // ---------------------------------------------------------------------------
   // Real OCR executor failure classes (BOOK-INGESTION-04B-3). Stable, typed,

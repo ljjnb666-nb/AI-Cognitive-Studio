@@ -12,6 +12,7 @@ import {
   estimateAnalysisTokens,
   materializeChunkSet,
   processBookAnalysisRun,
+  recoverSettledDeferredBookEmbeddings,
   rearmBookAnalysisRunById,
   recoverBookAnalysisForUser,
   requestBookAnalysis,
@@ -665,6 +666,186 @@ describe("durable Phase 2 orchestration", () => {
     expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } })).toBe(await prisma.documentChunk.count({ where: { chunkSetId: data.chunkSet.id } }));
     expect(await prisma.bookMemoryEmbedding.count({ where: { analysisRunId: data.run.id } })).toBe(await prisma.bookMemoryItem.count({ where: { analysisRunId: data.run.id } }));
     expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status).toBe("SUCCEEDED");
+  });
+
+  it("does not bill a second Gateway invocation when a successor reclaims an in-flight embedding", async () => {
+    const data = await fixture(undefined, { pauseRemote: true });
+    const a = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
+    await data.gateway.remoteEntered;
+    const previous = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } });
+    expect(previous.executionClaimToken).toBeTruthy();
+    await expireLease(data.run.id);
+    const b = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
+    // Observe B's durable ownership claim, not merely starting its Promise.
+    let claimed = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const current = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } });
+      if (current.executionClaimToken && current.executionClaimToken !== previous.executionClaimToken) {
+        claimed = true;
+        break;
+      }
+      await sleep(10);
+    }
+    expect(claimed).toBe(true);
+    // Give B time to inspect A's still-RUNNING Gateway invocation. It must
+    // wait for A to finish, rather than minting a new :retry: key.
+    await sleep(400);
+    const midflight = await prisma.providerInvocation.findMany({
+      where: { workspaceId: data.workspace.id }, select: { idempotencyKey: true },
+    });
+    data.gateway.releaseRemote();
+    await expect(a).rejects.toThrow(BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST);
+    await b;
+    expect(midflight).toHaveLength(1);
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    const calls = await prisma.providerInvocation.findMany({
+      where: { workspaceId: data.workspace.id }, select: { status: true, idempotencyKey: true },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.status).toBe("SUCCEEDED");
+    const receipt = await prisma.providerEmbeddingResult.findFirstOrThrow({
+      where: { workspaceId: data.workspace.id },
+    });
+    expect(receipt.consumedAt).not.toBeNull();
+    expect(receipt.purgedAt).not.toBeNull();
+    expect(await prisma.documentChunkEmbedding.count({ where: { workspaceId: data.workspace.id } }))
+      .toBe(await prisma.documentChunk.count({ where: { chunkSetId: data.chunkSet.id } }));
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status)
+      .toBe("SUCCEEDED");
+  });
+
+  it("fails closed after a prolonged Gateway handoff and rearms without a second remote bill", async () => {
+    const data = await fixture(undefined, { pauseRemote: true });
+    const a = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
+    await data.gateway.remoteEntered;
+    await expireLease(data.run.id);
+    const b = processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)));
+    try {
+      // Keep A's remote invocation RUNNING longer than the 80 * 125 ms
+      // wait budget. B must fail closed rather than minting a :retry: key.
+      await expect(b).rejects.toThrow("BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED");
+      const stalled = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } });
+      expect([stalled.status, stalled.analysisStage, stalled.errorCode]).toEqual([
+        "FAILED", "EMBEDDINGS", "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+      ]);
+      const active = await prisma.providerInvocation.findMany({ where: { workspaceId: data.workspace.id } });
+      expect(active).toHaveLength(1);
+      expect(active[0]?.status).toBe("RUNNING");
+      expect(data.gateway.remoteCallCount()).toBe(1);
+      expect(await prisma.providerUsageEvent.count({ where: { workspaceId: data.workspace.id } })).toBe(0);
+    } finally {
+      // Never leave a paused remote adapter blocking after a failed assertion.
+      data.gateway.releaseRemote();
+    }
+    await expect(a).rejects.toThrow(BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST);
+    const stored = await prisma.providerEmbeddingResult.findFirstOrThrow({
+      where: { workspaceId: data.workspace.id },
+    });
+    expect([stored.consumedAt, stored.purgedAt]).toEqual([null, null]);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    // Durable rearm is explicit: the deferral does NOT silently schedule a new
+    // request, and recovery must be possible without another remote charge.
+    await expect(rearmBookAnalysisRunById(data.run.id, 0)).resolves.toBe("REARMED");
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)), 1);
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    expect(await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    const receipt = await prisma.providerEmbeddingResult.findFirstOrThrow({
+      where: { workspaceId: data.workspace.id },
+    });
+    expect(receipt.consumedAt).not.toBeNull();
+    expect(receipt.purgedAt).not.toBeNull();
+    expect([receipt.ciphertext, receipt.iv, receipt.authTag, receipt.keyVersion]).toEqual([
+      null, null, null, null,
+    ]);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status)
+      .toBe("SUCCEEDED");
+  }, 35_000);
+
+  it("auto-rearms one settled paid deferred run exactly once without another remote charge", async () => {
+    const data = await fixture();
+    await expect(processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks), {
+      faultInjector: (point) => { if (point === "afterEmbeddingGatewayPersist") throw new Error("EMBEDDING_RECEIPT_CRASH"); },
+    }))).rejects.toThrow("EMBEDDING_RECEIPT_CRASH");
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    await prisma.bookAnalysisRun.update({ where: { id: data.run.id }, data: {
+      errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+    } });
+    const early = await recoverSettledDeferredBookEmbeddings({ now: new Date() });
+    expect(early.recovered).toBe(0);
+    const now = new Date(Date.now() + 60_000);
+    const [left, right] = await Promise.all([
+      recoverSettledDeferredBookEmbeddings({ now }),
+      recoverSettledDeferredBookEmbeddings({ now }),
+    ]);
+    expect(left.recovered + right.recovered).toBe(1);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).dispatchGeneration).toBe(1);
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: data.run.id } })).toBe(2);
+    await processBookAnalysisRun(data.run.id, deps(data, new DurableProvider(data.blocks)), 1);
+    expect(data.gateway.remoteCallCount()).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: data.workspace.id } })).toBe(1);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: data.run.id } })).status).toBe("SUCCEEDED");
+    expect((await recoverSettledDeferredBookEmbeddings({ now })).recovered).toBe(0);
+  });
+
+  it("auto-recovery keyset visits paid receipts behind quarantined older rows", async () => {
+    const quarantined = await fixture();
+    await prisma.$transaction([
+      prisma.bookAnalysisRun.update({ where: { id: quarantined.run.id }, data: {
+        status: "FAILED", analysisStage: "EMBEDDINGS",
+        errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+        completedAt: new Date(Date.now() - 5_000),
+      } }),
+      prisma.job.update({ where: { id: quarantined.job.id }, data: { status: "FAILED", completedAt: new Date() } }),
+    ]);
+    const eligible = await fixture();
+    await expect(processBookAnalysisRun(eligible.run.id, deps(eligible, new DurableProvider(eligible.blocks), {
+      faultInjector: (point) => { if (point === "afterEmbeddingGatewayPersist") throw new Error("EMBEDDING_RECEIPT_CRASH"); },
+    }))).rejects.toThrow("EMBEDDING_RECEIPT_CRASH");
+    await prisma.bookAnalysisRun.update({ where: { id: eligible.run.id }, data: {
+      errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+    } });
+    const now = new Date(Date.now() + 60_000);
+    const first = await recoverSettledDeferredBookEmbeddings({ now, limit: 1 });
+    expect([first.discovered, first.recovered, first.skipped]).toEqual([1, 0, 1]);
+    expect(first.nextCursor?.id).toBe(quarantined.run.id);
+    const second = await recoverSettledDeferredBookEmbeddings({ now, limit: 1, cursor: first.nextCursor });
+    expect([second.discovered, second.recovered]).toEqual([1, 1]);
+    expect(second.nextCursor?.id).toBe(eligible.run.id);
+    const frontier = await recoverSettledDeferredBookEmbeddings({ now, limit: 1, cursor: second.nextCursor });
+    expect([frontier.discovered, frontier.nextCursor]).toEqual([0, null]);
+    await processBookAnalysisRun(eligible.run.id, deps(eligible, new DurableProvider(eligible.blocks)), 1);
+    expect(eligible.gateway.remoteCallCount()).toBe(1);
+    expect(await prisma.providerUsageEvent.count({ where: { workspaceId: eligible.workspace.id } })).toBe(1);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: eligible.run.id } })).status).toBe("SUCCEEDED");
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: quarantined.run.id } })).dispatchGeneration).toBe(0);
+  });
+
+  it("auto-recovery quarantines missing or ambiguous gateway receipts", async () => {
+    const missing = await fixture();
+    await prisma.$transaction([
+      prisma.bookAnalysisRun.update({ where: { id: missing.run.id }, data: {
+        status: "FAILED", analysisStage: "EMBEDDINGS",
+        errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED", completedAt: new Date(),
+      } }),
+      prisma.job.update({ where: { id: missing.job.id }, data: { status: "FAILED", completedAt: new Date() } }),
+    ]);
+    const ambiguous = await fixture();
+    await expect(processBookAnalysisRun(ambiguous.run.id, deps(ambiguous, new DurableProvider(ambiguous.blocks), {
+      faultInjector: (point) => { if (point === "afterEmbeddingGatewayPersist") throw new Error("EMBEDDING_RECEIPT_CRASH"); },
+    }))).rejects.toThrow("EMBEDDING_RECEIPT_CRASH");
+    await prisma.bookAnalysisRun.update({ where: { id: ambiguous.run.id }, data: {
+      errorCode: "BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED",
+    } });
+    const invocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: ambiguous.workspace.id } });
+    await prisma.providerInvocation.update({ where: { id: invocation.id }, data: { status: "RECONCILIATION_REQUIRED" } });
+    const result = await recoverSettledDeferredBookEmbeddings({ now: new Date(Date.now() + 60_000) });
+    expect(result.recovered).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(2);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: missing.run.id } })).dispatchGeneration).toBe(0);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: ambiguous.run.id } })).dispatchGeneration).toBe(0);
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: missing.run.id } })).toBe(1);
+    expect(await prisma.outboxEvent.count({ where: { aggregateId: ambiguous.run.id } })).toBe(1);
   });
 
   it("rejects vectors returned by an embedding call whose owner became stale", async () => {

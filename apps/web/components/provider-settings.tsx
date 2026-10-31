@@ -5,13 +5,14 @@ import { StatusBadge } from "./status-badge";
 import { readableProviderError } from "@/lib/provider-settings-ui-errors";
 import { readinessDisplay, type ProviderReadinessView } from "@/lib/provider-readiness-ui";
 
-type Model = { modelId: string; families: string[]; speechFormats?: string[]; embeddingDimensionOptions?: number[] };
+type Model = { modelId: string; families: string[]; visionInput?:boolean; speechFormats?: string[]; embeddingDimensionOptions?: number[] };
 type Provider = { providerKey: string; displayName: string; protocol: string; capabilityProtocols?: Record<string, string>; models: Model[] };
 type Connection = { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credential: { id?: string; exists: boolean; displayHint?: string | null; status?: string } };
 type Route = { id: string; routeSlot: string; connectionId: string; modelId: string; configuration: Record<string, unknown>; connection: { displayName: string; providerKey: string } };
 type State = { manifest: { providers: Provider[] }; connections: Connection[]; routes: Route[]; readiness: Record<string, ProviderReadinessView> };
 
 const routeSlots = [
+  { slot: "PDF_VISUAL_STRUCTURE", label: "PDF 页面模型审核（按需授权）" },
   { slot: "BOOK_CHUNK_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_REDUCTION_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_SYNTHESIS", label: "书籍理解" },
   { slot: "EMBEDDING", label: "向量检索" }, { slot: "THINKING_SESSION", label: "思考" }, { slot: "TEACH_BACK_ASSESSMENT", label: "Teach Back 评估" },
   { slot: "PODCAST_SCRIPT", label: "播客脚本" }, { slot: "PODCAST_TTS", label: "语音合成" }, { slot: "SHORT_VIDEO_SCRIPT", label: "短视频脚本" }, { slot: "SHORT_VIDEO_TTS", label: "短视频语音合成" },
@@ -376,7 +377,7 @@ function RouteForm({
   const provider = providers.find((p) => p.providerKey === connection?.providerKey);
 
   const capability = slot === "EMBEDDING" ? "EMBEDDING" : slot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION";
-  const models = provider?.models.filter((m) => m.families.includes(capability)) ?? [];
+  const models = provider?.models.filter((m) => m.families.includes(capability)&&(slot!=="PDF_VISUAL_STRUCTURE"||(provider.providerKey==="zhipu"&&m.visionInput===true))) ?? [];
 
   return (
     <form

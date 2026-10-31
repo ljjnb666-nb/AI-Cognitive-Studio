@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { lockOcrPublicationSources } from "./ocr-source-authority.js";
+import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
 import { buildEpubProductIdentityCandidate, CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
 import type { EpubExtractionMetadata } from "@ai-cognitive/domain";
@@ -21,20 +22,30 @@ export { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDisp
 export { cleanupTemporaryUploads } from "./temporary-upload-cleanup.js";
 export { SourceError, sourceErrorForParserResult } from "./source-errors.js";
 export { parseDocument, extractNativePdf, pdfTextToBlocks, DEFAULT_PARSER_LIMITS, blockProvenance } from "./document-parsers.js";
+export { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
+export { PDF_VISUAL_STRUCTURE_VERSION, PDF_VISUAL_STRUCTURE_AUTHORITY, inspectPdfMixedPageVisualStructure, validatePdfVisualStructureCandidate, type VisualFigureCandidate, type VisualPageExecutor, type VisualPageReview, type PdfVisualStructureResult, type PdfVisualStructureOptions } from "./pdf-visual-structure.js";
+export { PDF_MIXED_PREVIEW_AUTHORITY, renderPdfMixedPageSourcePreviews, type PdfMixedPageSourcePreview, type PdfMixedPageSourcePreviewResult, type PdfMixedPreviewOptions } from "./pdf-mixed-page-preview.js";
+export { PDF_MIXED_CONTENT_SHADOW_SCHEMA_VERSION, PDF_MIXED_CONTENT_SHADOW_AUTHORITY, inspectPdfMixedContentShadow, type PdfMixedContentShadowPage, type PdfMixedContentShadowReport, type PdfMixedContentEvidenceKind } from "./pdf-mixed-content-shadow.js";
 export { PDF_EXTRACTION_PARSER, PDF_INSPECTOR_VERSION, PDF_QUALITY_REASON_CODES, PDF_ROUTING_GENERATION, PDF_ROUTING_OUTCOME_SCHEMA_VERSION, PDF_ROUTING_PLAN_SCHEMA_VERSION, PDF_ROUTING_REASON_CODES, assertRoutingPlanReplay, evaluatePdfExtractionQuality, inspectPdfPage, parseRoutingPlan, pdfRoutingOutcome, planPdfRouting, type PdfContentEvidence, type PdfExtractionQualityDecision, type PdfExtractionQualityStatus, type PdfOcrExecutor, type PdfOcrExecutorDescriptor, type PdfOcrPageRequest, type PdfOcrPageResult, type PdfPageEvidence, type PdfPageInspection, type PdfPageQualityDecision, type PdfPageRoute, type PdfPageExtractionOutcome, type PdfQualityReasonCode, type PdfRoutingOutcome, type PdfRoutingPlan, type PdfRoutingPlanPage, type PdfRoutingReasonCode } from "./pdf-routing.js";
 export { EPUB_QUALITY_REASON_CODES, evaluateEpubExtractionQuality, type EpubExtractionQualityDecision, type EpubExtractionQualityStatus, type EpubQualityReasonCode } from "./epub-quality.js";
 export { OcrCapacityDeferredError, OcrCapacityDeferralError } from "./ocr-capacity-errors.js";
 export { PRODUCT_IDENTITY_PROMOTION_REASON_CODES, promoteCurrentProductIdentityForUser, type ProductIdentityConflict, type ProductIdentityIgnoredField, type ProductIdentityPromotionOutcome, type ProductIdentityPromotionReasonCode } from "./product-identity-promotion.js";
 export { readProductIdentityPreviewForUser, type ProductIdentityPreview, type ProductIdentityPreviewState } from "./product-identity-preview.js";
 export { correctProductIdentityForUser, type ProductIdentityCorrectionInput, type ProductIdentityCorrectionOutcome, type ProductIdentityManualValues } from "./product-identity-correction.js";
+export { assessOcrCandidateQuality, assessStandardPreAdmission, parseStep62aConfig, OCR_STEP6_2A_POLICY_VERSION, OCR_STANDARD_EXECUTION_ADMISSION_ENV, OCR_STANDARD_MAX_RENDERED_PIXELS, OCR_STANDARD_MIN_AVAILABLE_MEMORY_BYTES, OCR_QUALITY_MAX_TEXT_CHARS, OCR_STEP6_2A_ADMISSION_REASONS, OCR_STEP6_2A_QUALITY_REASONS, type Step62aConfig, type OcrRasterEvidenceClaim, type OcrHostCapacitySnapshot, type OcrStep62aAdmission, type OcrStep62aAdmissionReason, type OcrStep62aQuality, type OcrStep62aQualityReason } from "./ocr-step6-2a.js";
+export { buildOcrPageTierAuditRecord, classifyOcrOutput, decideOcrTier, OCR_CHART_LEAKAGE_NUMERIC_LINE_RATIO, OCR_OUTPUT_CHART_MARKER, OCR_OUTPUT_IMAGE_MARKER, OCR_PAGE_TIER_AUDIT_SCHEMA_VERSION, OCR_TIER_POLICY_REASON_CODES, OCR_TIER_POLICY_VERSION, OCR_TIER_STANDARD_EXPERIMENTAL_ENV, parseOcrTierPolicyConfig, type OcrEngineExecutionFact, type OcrOutputClassification, type OcrOutputSignals, type OcrPageTierAuditRecord, type OcrTierDecision, type OcrTierDecisionTier, type OcrTierPolicyConfig, type OcrTierPolicyReasonCode, type OcrTierPostOcrPageType, type OcrTierPreOcrPageType } from "./ocr-tier-policy.js";
 export { runPdfExtraction, type PdfRunExtraction, type PdfRunExtractionInput } from "./pdf-run.js";
 export { claimIngestionRun, completeRunSuccess, INGESTION_ATTEMPTS_EXHAUSTED, INGESTION_EXECUTION_LEASE_EXPIRED, INGESTION_EXECUTION_OWNERSHIP_LOST, lockRunForPublication, renewIngestionRunClaim, RUN_LEASE_TTL_MS, RUN_RENEW_INTERVAL_MS, terminalizeExhaustedQueuedIngestionRun, terminalizeExpiredIngestionRun, terminalizeRunWithRoutingOutcome, transitionOcrCapacityDeferred, transitionRunToRetryable, transitionRunToTerminal, type IngestionRunClaim, type IngestionTerminalStatus } from "./ingestion-run-claim.js";
 export { classifyIngestionFailure, ingestionStatusForTerminalFailure, type IngestionFailureClass } from "./ingestion-failure.js";
 export { acquireOcrHostLease, claimOcrPageAttempt, completeOcrPageAttempt, createOcrPageIntents, createOcrServerInstance, failOcrPageAttempt, listReconcilableOcrServerInstances, markOcrServerOrphaned, markOcrServerStartNeverStarted, markOcrServerStopped, markOcrServerStoppedProcessGone, markOcrServerStopping, OCR_HOST_LEASE_TTL_MS, OCR_PAGE_LEASE_TTL_MS, OCR_PAGE_MAX_ATTEMPTS, recordOcrServerEndpoint, releaseOcrHostLease, renewOcrHostLease, writeRoutingOutcome, writeRoutingPlan } from "./ocr-durability.js";
 export { INGESTION_RECONCILIATION_BATCH_SIZE, reconcileIngestionDeliveries, type IngestionDeliveryState, type IngestionReconciliationQueuePort, type IngestionReconciliationResult } from "./ingestion-reconciliation.js";
 export { MINERU_EXECUTOR_NAME, MINERU_PINNED_TIER, MINERU_PINNED_VERSION, buildMineruParseArgs, buildMineruServerArgs, judgeMineruParseExit, mineruFailureForOutcome, mineruPageSelector, parseMineruEndpoint, parseMineruParseEnvelope, type MineruEndpoint, type MineruParseOutcome } from "./mineru/mineru-commands.js";
+export { assessMineruStandardExecution, MINERU_STANDARD_EXECUTION_REASONS, MINERU_STANDARD_MANIFEST_ENV, MINERU_STANDARD_MANIFEST_SCHEMA, MINERU_STANDARD_MIN_FREE_MEMORY_BYTES_ENV, MINERU_STANDARD_TIMEOUT_MS_ENV, MINERU_STANDARD_TIER, MINERU_STANDARD_DEFAULT_MIN_FREE_MEMORY_BYTES, MINERU_STANDARD_DEFAULT_TIMEOUT_MS, parseMineruStandardAdmissionConfig, parseMineruStandardManifest, sha256Bytes, verifyMineruStandardModels, type MineruStandardAdmissionConfig, type MineruStandardExecutionReason, type MineruStandardExecutionRecheck, type MineruStandardManifest, type MineruStandardManifestFile, type MineruStandardModelsFailure, type MineruStandardModelsVerification } from "./mineru/mineru-standard-admission.js";
 export { resolveMineruExecutorConfig, verifyMineruRuntime, isWithinPath, type MineruExecutorConfig, type MineruRuntimeVerification } from "./mineru/mineru-config.js";
 export { createMineruPdfOcrExecutor, type MineruOcrCallRecord, type MineruPdfOcrExecutorHandle } from "./mineru/mineru-executor.js";
+export { DOCLING_LAYOUT_SIDECAR_SCHEMA, selectDoclingLayoutPages, inspectAndPersistDoclingLayoutSidecar, type DoclingSidecarInput, type DoclingSidecarReceipt } from "./docling/docling-layout-sidecar.js";
+export { DOCLING_LAYOUT_ID, DOCLING_LAYOUT_VERSION, resolveDoclingLayoutConfig, verifyDoclingLayout, createDoclingLayoutCandidateExecutor, type DoclingLayoutCandidate, type DoclingLayoutResult, type DoclingLayoutHandle, type DoclingLayoutConfig, type DoclingLayoutRequest } from "./docling/docling-layout-executor.js";
+export { RAPIDOCR_EXECUTOR_NAME, RAPIDOCR_PINNED_VERSION, RAPIDOCR_PINNED_ONNX_VERSION, createRapidOcrPdfOcrExecutor, rapidOcrOfflineEnv, resolveRapidOcrExecutorConfig, verifyRapidOcrRuntime, type RapidOcrExecutorConfig, type RapidOcrExecutorHandle } from "./rapidocr/rapidocr-executor.js";
 export { reconcileOcrServerInstances, type OcrServerReconciliationResult } from "./mineru/mineru-reconciler.js";
 export { createMineruServerSession, processPrecedesEndpointEvidence, readMineruEndpointFile, type MineruServerSession, type MineruServerSessionInput, type MineruServerStartFailure, type MineruServerStopDisposition } from "./mineru/mineru-server.js";
 
@@ -53,7 +64,7 @@ const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").m
 const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
 
 /** Service options; pdfOcrExecutor is a test seam until 04B-2's production cutover (none in 04B-2). */
-export type IngestionServiceOptions = { maxUploadBytes: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor };
+export type IngestionServiceOptions = { maxUploadBytes: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor; /** STEP6-2B-1: guarded standard admission verified at worker startup; when true, image-only OCR pages carry a standard tier proposal (the executor still rechecks every page). */ ocrStandardAdmissionEnabled?: boolean };
 
 /**
  * Canonical v1 write gate for SourceBlock.metadata, keyed on the authoritative
@@ -184,7 +195,8 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
         throw error;
       }
     },
-    async processIngestionRun(runId: string) {
+    async processIngestionRun(runId: string, review?:{physicalPageIndex:number}) {
+      if(review&&(!options.ocrStandardAdmissionEnabled||!options.pdfOcrExecutor))throw new Error("OCR_REVIEW_EXECUTION_DISABLED");
       const run = await prisma.ingestionRun.findUniqueOrThrow({ where: { id: runId }, include: { sourceDocument: { include: { source: true } }, job: true } });
       if (["SUCCEEDED", "REJECTED", "OCR_REQUIRED", "PASSWORD_REQUIRED"].includes(run.status)) return;
       // Durable execution claim: run + Job transition atomically, attempt-guarded
@@ -220,6 +232,8 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
             limits,
             storage,
             executor: options.pdfOcrExecutor,
+            ...(options.ocrStandardAdmissionEnabled === true ? { ocrStandardAdmissionEnabled: true } : {}),
+            ...(review?{reviewPhysicalPageIndex:review.physicalPageIndex}:{}),
             ownershipLost: () => ownershipLost,
           });
           if (extraction.kind !== "PUBLISH") {
@@ -228,7 +242,7 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
             // that first verifies live claim ownership in PostgreSQL — a
             // superseded owner (stale in-memory ownershipLost or not) changes
             // ZERO durable state. Ownership loss writes nothing.
-            const errorCode = extraction.kind === "OCR_REQUIRED" ? SourceError.OCR_REQUIRED : SourceError.QUALITY_REJECTED;
+            const errorCode = extraction.decision.reasonCodes.includes("OCR_MANUAL_REVIEW_REQUIRED") ? "SOURCE_OCR_REVIEW_REQUIRED" : extraction.kind === "OCR_REQUIRED" ? SourceError.OCR_REQUIRED : SourceError.QUALITY_REJECTED;
             const status: IngestionTerminalStatus = extraction.kind === "OCR_REQUIRED" ? "OCR_REQUIRED" : "REJECTED";
             if (!await terminalizeRunWithRoutingOutcome(run.id, claim.token, status, errorCode, extraction.routingGeneration, pdfRoutingOutcome(extraction.decision, false))) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
             nonPublishTerminalized = true;
@@ -265,6 +279,7 @@ export function createIngestionService(storage: StorageProvider, options: Ingest
           // assert live claim ownership BEFORE any extraction data is written.
           // The row lock holds the run against reclaim until this transaction ends.
           if (ownershipLost || !(await lockRunForPublication(tx, run.id, claim.token))) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
+          if(pdfRouting && !await lockOcrPublicationSources(tx,{workspaceId:run.workspaceId,sourceDocumentId:run.sourceDocumentId,ingestionRunId:run.id,runExecutionToken:claim.token,routingGeneration:pdfRouting.routingGeneration,sourceSha256:createHash("sha256").update(bytes).digest("hex"),sourceSizeBytes:bytes.byteLength})) throw new Error(INGESTION_EXECUTION_OWNERSHIP_LOST);
           // Publication hard gate (04B-2): a PDF may persist an extraction only
           // with a quality decision, and only an ACCEPTED/DEGRADED decision may
           // publish. The pipeline never returns forbidden decisions — reaching
@@ -479,3 +494,6 @@ function parserProvenance(mediaType: string): { name: string; version: string } 
   if (mediaType === "application/epub+zip") return { name: "builtin-epub", version: "epub-parser-v2" };
   return { name: "unsupported", version: "unsupported-v1" };
 }
+export * from "./ocr-structure-review-evidence.js";
+export * from "./ocr-model-review-request.js";
+export * from "./ocr-review-page-image.js";

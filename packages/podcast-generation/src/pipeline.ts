@@ -21,7 +21,7 @@ const SEGMENT_CONTEXT_BUDGET = 2_400;
 type DurableStage = "EPISODE_PLANNING" | "NARRATIVE_DESIGN" | "SEGMENT_OUTLINE" | "SEGMENT_DRAFTING" | "HUMANIZATION" | "GROUNDING_VALIDATION" | "FINALIZING" | "COMPLETED";
 type FaultPoint = "afterPlanningRetrieval" | "afterTextReceipt" | "afterPlanning" | "afterNarrative" | "afterOutline" | "afterSegmentDraft" | "afterQualityDecision" | "afterQualityRedraftMaterialization" | "afterSegmentHumanization" | "afterSegmentGrounding" | "beforeFinalization";
 export type PodcastFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
-export type ProcessPodcastDependencies = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider>; faultInjector?: PodcastFaultInjector; correlationId?: string };
+export type ProcessPodcastDependencies = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider>; faultInjector?: PodcastFaultInjector; correlationId?: string; qualityFailurePolicy?: "REDRAFT_ONCE" | "STOP" };
 const isDurable = (provider: PodcastGenerationProvider): provider is DurablePodcastGenerationProvider => "consumeTextResult" in provider && "verifyConsumedTextResult" in provider;
 const operationKey = (run: any, stage: string, segmentId?: string, generationAttempt?: number) => `${run.id}:${stage}${segmentId ? `:${segmentId}` : ""}${generationAttempt ? `:attempt:${generationAttempt}` : ""}`;
 const consumerFingerprint = (run: any, stage: string, destination: string, input: unknown, output: unknown) => podcastConsumerFingerprint({ run, stage, destination, input, output });
@@ -68,9 +68,14 @@ async function verifyConsumedDestination(run: any, provider: PodcastGenerationPr
   if (state !== "EXACT") throw new Error("PODCAST_TEXT_RECONCILIATION_REQUIRED");
 }
 
+function contextTokenEstimate(item: Pick<PodcastContextItem, "content" | "sourceBlockEvidenceSpans">): number {
+  const excerpts = item.sourceBlockEvidenceSpans.flatMap(span => span.sourceText === undefined ? [] : [span.sourceText]);
+  return estimateAnalysisTokens(excerpts.length ? [item.content, ...excerpts].join("\n") : item.content);
+}
+
 async function assertBoundedContext(run: any, context: PodcastContextItem[], tokenBudget: number) {
   const estimated = context.reduce((sum, item) => sum + item.tokenEstimate, 0);
-  if (estimated > tokenBudget || context.some((item) => item.tokenEstimate !== estimateAnalysisTokens(item.content))) throw new Error("PODCAST_CONTEXT_BUDGET_VIOLATION");
+  if (estimated > tokenBudget || context.some((item) => item.tokenEstimate !== contextTokenEstimate(item))) throw new Error("PODCAST_CONTEXT_BUDGET_VIOLATION");
   for (const source of run.sources) {
     const sourceItems = context.filter((item) => item.sourceDocumentId === source.sourceDocumentId);
     const selectedBlocks = new Set(sourceItems.flatMap((item) => item.sourceBlockEvidenceSpans.map((span) => span.sourceBlockId)));
@@ -81,7 +86,7 @@ async function assertBoundedContext(run: any, context: PodcastContextItem[], tok
 
 const stableScore = (value: number) => Number(value.toPrecision(15));
 function canonicalContextItem(item: any): PodcastContextItem {
-  return { sourceDocumentId: item.sourceDocumentId, extractionId: item.extractionId, chunkSetId: item.chunkSetId, analysisRunId: item.analysisRunId, memoryItemId: item.memoryItemId, artifactId: item.artifactId, chunkId: item.chunkId ?? null, type: item.type ?? item.memoryItem?.type ?? null, content: item.content ?? item.memoryItem?.content ?? "", score: stableScore(item.score), selectionReason: item.selectionReason, tokenEstimate: item.tokenEstimate, sourceBlockEvidenceSpans: (item.sourceBlockEvidenceSpans ?? item.evidenceSpans ?? []).map((evidence: any) => ({ sourceBlockId: evidence.sourceBlockId, startOffset: evidence.startOffset, endOffset: evidence.endOffset, quoteText: evidence.quoteText ?? null })) } as PodcastContextItem;
+  return { sourceDocumentId: item.sourceDocumentId, extractionId: item.extractionId, chunkSetId: item.chunkSetId, analysisRunId: item.analysisRunId, memoryItemId: item.memoryItemId, artifactId: item.artifactId, chunkId: item.chunkId ?? null, type: item.type ?? item.memoryItem?.type ?? null, content: item.content ?? item.memoryItem?.content ?? "", score: stableScore(item.score), selectionReason: item.selectionReason, tokenEstimate: item.tokenEstimate, sourceBlockEvidenceSpans: (item.sourceBlockEvidenceSpans ?? item.evidenceSpans ?? []).map((evidence: any) => ({ sourceBlockId: evidence.sourceBlockId, startOffset: evidence.startOffset, endOffset: evidence.endOffset, quoteText: evidence.quoteText ?? null, ...(typeof evidence.sourceText === "string" ? { sourceText: evidence.sourceText } : {}) })) } as PodcastContextItem;
 }
 function contextFromRows(rows: any[]): PodcastContextItem[] {
   return rows.map(canonicalContextItem);
@@ -98,7 +103,23 @@ async function retrieveContext(run: any, dependencies: ProcessPodcastDependencie
   for (const source of run.sources) {
     const pack = await buildBookContextForIntelligence({ workspaceId: run.workspaceId, sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, task, tokenBudget: perSource, embeddingProvider: dependencies.embeddingProvider!, operationKey: retrievalOperationKey });
     if (pack.lineage.sourceDocumentId !== source.sourceDocumentId || pack.lineage.extractionId !== source.extractionId || pack.lineage.chunkSetId !== source.chunkSetId || pack.lineage.analysisRunId !== source.analysisRunId) throw new Error("PODCAST_GENERATION_SOURCE_LINEAGE_MISMATCH");
-    packs.push(pack.items.map((item: any) => canonicalContextItem({ ...item, sourceBlockEvidenceSpans: item.evidence })));
+    const candidates = pack.items.map((item: any) => canonicalContextItem({ ...item, sourceBlockEvidenceSpans: item.evidence }));
+    const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: source.extractionId, id: { in: [...new Set(candidates.flatMap(item => item.sourceBlockEvidenceSpans.map(span => span.sourceBlockId)))] } }, select: { id: true, text: true } });
+    const byId = new Map(blocks.map(block => [block.id, block.text]));
+    const selected: PodcastContextItem[] = [];
+    let used = 0;
+    for (const item of candidates) {
+      for (const span of item.sourceBlockEvidenceSpans) {
+        const text = byId.get(span.sourceBlockId);
+        if (text === undefined || !Number.isInteger(span.startOffset) || !Number.isInteger(span.endOffset) || span.startOffset < 0 || span.endOffset <= span.startOffset || span.endOffset > text.length) throw new Error("PODCAST_CONTEXT_EVIDENCE_LINEAGE_INVALID");
+        // Persist the exact bounded excerpt separately from quoteText. An
+        // excerpt does not turn a model memory into an exact quotation or gold.
+        span.sourceText = text.slice(span.startOffset, span.endOffset);
+      }
+      item.tokenEstimate = contextTokenEstimate(item);
+      if (used + item.tokenEstimate <= perSource) { selected.push(item); used += item.tokenEstimate; }
+    }
+    packs.push(selected);
   }
   const result = packs.flat();
   await assertBoundedContext(run, result, totalBudget);
@@ -353,6 +374,7 @@ async function runGrounding(run: any, token: string, dependencies: ProcessPodcas
     if (current.status !== "HUMANIZED") throw new Error(`PODCAST_SEGMENT_STATE_INVALID:${current.status}`);
     let qualityReasons = await qualityRepairReasons(segment.id, run.styleProfile);
     let errors = [...await groundingErrors(segment.id), ...qualityReasons];
+    if (errors.length && dependencies.qualityFailurePolicy === "STOP") throw new Error(`PODCAST_GROUNDING_FAILED:${errors[0]}`);
     if (errors.length && current.generationAttemptCount < 2) {
       await dependencies.faultInjector?.("afterQualityDecision", { podcastGenerationRunId: run.id, segmentId: segment.id, generationAttempt: current.generationAttemptCount, repairReasons: qualityReasons });
       await draftSegment(run, current, token, dependencies, { mode: "QUALITY_REDRAFT", repairReasons: qualityReasons });

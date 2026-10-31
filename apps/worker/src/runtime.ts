@@ -1,4 +1,4 @@
-import { reconcileStaleBookAnalysisJobs, type EmbeddingProvider, type ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
+import { recoverSettledDeferredBookEmbeddings, reconcileStaleBookAnalysisJobs, type EmbeddingProvider, type ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
 import type { PodcastGenerationProvider, DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
 import { logger } from "@ai-cognitive/shared";
 import type { Environment } from "@ai-cognitive/shared/server";
@@ -8,6 +8,7 @@ import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPo
 import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudioGenerationWithQueue } from "./audio-generation.js";
 import { createShortVideoGenerationWorker, createShortVideoGenerationQueue, dispatchShortVideoGenerationWithQueue, type ShortVideoRuntimeAdapter } from "./short-video-generation.js";
 import { createSourceIngestionWorker, createSourceIngestionQueue, dispatchSourceIngestionWithQueue, resolveSourceIngestionOcrExecutor, INGESTION_JOB } from "./source-ingestion.js";
+import { createDoclingLayoutQueue, createDoclingLayoutWorker, closeDoclingLayoutWorkerOwnedStorage, dispatchDoclingLayoutSweep, recoverDoclingLayoutTasks, resolveDoclingBackgroundExecutor, type DoclingSweepCursor } from "./docling-layout.js";
 import { reconcileIngestionDeliveries, reconcileOcrServerInstances, type IngestionReconciliationQueuePort } from "@ai-cognitive/ingestion";
 import { createBookAnalysisBootstrapWorker, createBookAnalysisBootstrapQueue, dispatchBookAnalysisBootstrapWithQueue, reconcileHistoricalBookAnalysisBootstraps, reconcileWaitingBookAnalysisBootstraps } from "./book-analysis-bootstrap.js";
 import { createHealthCheckWorker } from "./worker.js";
@@ -15,6 +16,10 @@ import { createBookProductionGatewayRuntime, createPodcastAudioProductionGateway
 import { startProcessingHeartbeat } from "./processing-heartbeat.js";
 import { resolveCredentialKeyring, resolveProviderCatalog } from "@ai-cognitive/provider-gateway";
 import { DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE, scheduleDurableOperationReconciliation, reconcileDurableExpensiveOperationsSweep, type ReconciliationQueue, type ReconciliationQueues, type ReconciliationSweepState, type ReconciliationTopics } from "./durable-operation-reconciliation.js";
+import {processNextOcrStructureReview} from "./ocr-structure-review.js";
+import { createOnDemandPdfVisualWorkerRuntime } from "./pdf-visual-review.js";
+import { processNextPdfVisualUserRequest } from "./pdf-visual-user-request.js";
+import {S3CompatibleStorageProvider} from "@ai-cognitive/storage";
 
 export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider> };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
@@ -63,13 +68,23 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const gatewayConfigured = resolveBookWorkerCapability(source);
   const bookEnabled = Boolean(options.bookDependencies || bookConfigured || gatewayConfigured);
   let productionBookGatewayRuntime: BookGatewayRuntime | undefined;
+  let ocrReviewGateway: BookGatewayRuntime | undefined;
+  let ocrReviewStorage:S3CompatibleStorageProvider|undefined;
+  const ocrReviewEnabled=source.PDF_VISUAL_REVIEW_ON_DEMAND_ENABLED==="true";
+  // Independent opt-in: OCR structure review does not activate paid graph vision.
+  const visualReviewEnabled=source.PDF_MIXED_GRAPH_REVIEW_REQUEST_ENABLED==="true";
+  if(visualReviewEnabled&&!gatewayConfigured)throw new Error("PDF_MIXED_GRAPH_REVIEW_RUNTIME_CONFIGURATION_REQUIRED");
+  let visualReviewRuntime: ReturnType<typeof createOnDemandPdfVisualWorkerRuntime>|undefined;
+  if(ocrReviewEnabled&&(!gatewayConfigured||!source.PDF_REVIEW_PRIVATE_TEMP_ROOT))throw new Error("OCR_REVIEW_RUNTIME_CONFIGURATION_REQUIRED");
   let sourceIngestionOcrRuntime: Awaited<ReturnType<typeof resolveSourceIngestionOcrExecutor>>;
+  let doclingLayoutExecutor: Awaited<ReturnType<typeof resolveDoclingBackgroundExecutor>> = null;
   try {
   // Real OCR runtime (04B-3/RF01): resolved + version-verified FIRST, before
   // any worker or connection is constructed — malformed explicit MinerU
   // configuration AND a runtime not reporting the pinned 4.0.3 fail fast at
   // startup. undefined keeps the no-OCR behavior.
   sourceIngestionOcrRuntime = await resolveSourceIngestionOcrExecutor(environment);
+  doclingLayoutExecutor = await resolveDoclingBackgroundExecutor(environment);
   // RF03 P1-01 STARTUP BARRIER: with the OCR runtime enabled, ONE bounded
   // same-host crash-reconciliation sweep runs BEFORE the source-ingestion
   // Worker is constructed and before any dispatch can enqueue new OCR work.
@@ -77,7 +92,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   // expired host lease, and spawn a SECOND claim-scoped MinerU server while
   // the crashed worker's server was still (possibly) alive. This is a real
   // await barrier, not an earlier entry in Promise.all.
-  if (sourceIngestionOcrRuntime) {
+  if (sourceIngestionOcrRuntime?.kind === "mineru") {
     await reconcileOcrServerInstances({ hostId: sourceIngestionOcrRuntime.config.hostId, executable: sourceIngestionOcrRuntime.config.executable, executableArgs: sourceIngestionOcrRuntime.config.executableArgs, stopTimeoutMs: sourceIngestionOcrRuntime.config.serverStopTimeoutMs, homeRoot: sourceIngestionOcrRuntime.config.homeRoot });
   }
   if (!podcastAdapter && source.PODCAST_GENERATION_PROVIDER?.trim()) {
@@ -89,12 +104,15 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const bookWorker = bookEnabled ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY)) : undefined;
   const bookBootstrapWorker = createBookAnalysisBootstrapWorker(environment, { ...workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY), source });
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);
-  const ingestionWorker = createSourceIngestionWorker(environment, { ...workerOptions(environment.WORKER_INGESTION_CONCURRENCY), ...(sourceIngestionOcrRuntime ? { pdfOcrExecutor: sourceIngestionOcrRuntime.pdfOcrExecutor } : {}) });
+  const ingestionWorker = createSourceIngestionWorker(environment, { ...workerOptions(environment.WORKER_INGESTION_CONCURRENCY), ...(sourceIngestionOcrRuntime ? { pdfOcrExecutor: sourceIngestionOcrRuntime.pdfOcrExecutor, ...(sourceIngestionOcrRuntime.standardAdmissionEnabled ? { ocrStandardAdmissionEnabled: true } : {}) } : {}) });
   if (!bookWorker) logger.info("worker.book_analysis.disabled", { reason: "BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED" });
   const podcastWorker = podcastAdapter ? createPodcastGenerationWorker(environment, podcastAdapter, workerOptions(environment.WORKER_PODCAST_GENERATION_CONCURRENCY)) : undefined;
   const audioWorker = audioConfigured ? createPodcastAudioWorker(environment, audioAdapter, workerOptions(environment.WORKER_AUDIO_CONCURRENCY)) : undefined;
   const shortVideoAdapter = shortVideoConfigured ? options.shortVideoAdapter ?? { providerForRun: input => (productionShortVideoGatewayRuntime ??= createShortVideoProductionGatewayRuntime(source, options.bookProductionGatewayOverrides)).createTextProviderForRun(input), embeddingProviderForRun: input => (productionShortVideoGatewayRuntime ??= createShortVideoProductionGatewayRuntime(source, options.bookProductionGatewayOverrides)).createEmbeddingProviderForRun(input), ttsForRun: input => (productionShortVideoGatewayRuntime ??= createShortVideoProductionGatewayRuntime(source, options.bookProductionGatewayOverrides)).createSpeechProviderForRun(input) } : undefined;
   const shortVideoWorker = shortVideoConfigured ? createShortVideoGenerationWorker(environment, shortVideoAdapter, workerOptions(environment.WORKER_SHORT_VIDEO_CONCURRENCY)) : undefined;
+  if(visualReviewEnabled)visualReviewRuntime=createOnDemandPdfVisualWorkerRuntime(environment,source);
+  const doclingLayoutQueue = doclingLayoutExecutor ? createDoclingLayoutQueue(environment, options.bullmqPrefix) : undefined;
+  const doclingLayoutWorker = doclingLayoutExecutor ? createDoclingLayoutWorker(environment, doclingLayoutExecutor, { ...(options.bullmqPrefix ? { prefix:options.bullmqPrefix } : {}) }) : undefined;
   const ingestionQueue = createSourceIngestionQueue(environment, queueOptions);
   const bookBootstrapQueue = createBookAnalysisBootstrapQueue(environment, queueOptions);
   const bookQueue = bookWorker ? createBookAnalysisQueue(environment, queueOptions) : undefined;
@@ -130,6 +148,22 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   // This bounded domain sweep has its own dispatch guard and error boundary;
   // the PR #46 durable-operation sweep is scheduled independently below.
   const reconcileBookAnalysisStale = dispatch("book-analysis-stale-reconciliation", () => reconcileStaleBookAnalysisJobs(25), 60_000);
+  // Explicit opt-in only: merging this code must not enable automatic recovery.
+  const deferredRecoveryFlag = source.BOOK_EMBEDDING_DEFERRED_RECOVERY_ENABLED?.trim();
+  if (deferredRecoveryFlag && !["true", "false"].includes(deferredRecoveryFlag)) {
+    throw new Error("BOOK_EMBEDDING_DEFERRED_RECOVERY_FLAG_INVALID");
+  }
+  let deferredRecoveryCursor: { completedAt: Date; id: string } | null = null;
+  const reconcileDeferredBookEmbedding = deferredRecoveryFlag === "true" && bookQueue
+    ? dispatch("book-embedding-deferred-recovery", async () => {
+        const result = await recoverSettledDeferredBookEmbeddings({
+          limit: 25, cursor: deferredRecoveryCursor,
+          ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}),
+        });
+        // A null cursor wraps back to the oldest candidate on next sweep.
+        deferredRecoveryCursor = result.nextCursor;
+      }, 60_000)
+    : undefined;
   // Durable ingestion delivery reconciliation: PostgreSQL first, BullMQ second.
   // Redis state loss may delay a delivery; it can never exceed the durable
   // attempt guard or strand an expired RUNNING run.
@@ -144,14 +178,37 @@ export async function startWorkerRuntime(environment: Environment, options: Work
     add: async (jobId) => { await ingestionQueue.add(INGESTION_JOB, { ingestionRunId: jobId }, { jobId }); },
   };
   const reconcileIngestionDeliveriesSweep = dispatch("source-ingestion-reconciliation", () => reconcileIngestionDeliveries({ queue: ingestionReconciliationQueue, maxAttempts: environment.SOURCE_INGESTION_PROCESS_MAX_ATTEMPTS }), 60_000);
+  // Layout sidecar remains an opt-in non-authoritative post-publication queue.
+  // One bounded cursor and recovery sweep per interval, not all pages of a book.
+  const doclingSweepCursor: DoclingSweepCursor = {};
+  const reconcileDoclingSidecars = doclingLayoutQueue && doclingLayoutExecutor
+    ? (() => {
+        const layout = doclingLayoutExecutor;
+        return dispatch("docling-layout-candidates", async () => {
+          await dispatchDoclingLayoutSweep(doclingLayoutQueue, layout.modelSha256, doclingSweepCursor);
+          await recoverDoclingLayoutTasks(doclingLayoutQueue, layout.modelSha256);
+        }, 60_000);
+      })()
+    : undefined;
   // Same-host OCR server reconciliation (RF01 P1-06): converges OcrServerInstance
   // rows left by hard crashes, cleaning ONLY this configured host's rows and
   // ONLY processes whose identity can be proven. One bounded startup sweep plus
   // a periodic bounded sweep; never cross-host, never process-name based.
-  const reconcileOcrServersSweep = sourceIngestionOcrRuntime ? (() => { const ocrRuntime = sourceIngestionOcrRuntime; return dispatch("ocr-server-reconciliation", () => reconcileOcrServerInstances({ hostId: ocrRuntime.config.hostId, executable: ocrRuntime.config.executable, executableArgs: ocrRuntime.config.executableArgs, stopTimeoutMs: ocrRuntime.config.serverStopTimeoutMs, homeRoot: ocrRuntime.config.homeRoot }), 60_000); })() : undefined;
+  const reconcileOcrServersSweep = sourceIngestionOcrRuntime?.kind === "mineru" ? (() => { const ocrRuntime = sourceIngestionOcrRuntime; return dispatch("ocr-server-reconciliation", () => reconcileOcrServerInstances({ hostId: ocrRuntime.config.hostId, executable: ocrRuntime.config.executable, executableArgs: ocrRuntime.config.executableArgs, stopTimeoutMs: ocrRuntime.config.serverStopTimeoutMs, homeRoot: ocrRuntime.config.homeRoot }), 60_000); })() : undefined;
   const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); }];
   initial.push(reconcileBookAnalysisStale);
+  if (reconcileDeferredBookEmbedding) initial.push(reconcileDeferredBookEmbedding);
   initial.push(reconcileIngestionDeliveriesSweep);
+  if (reconcileDoclingSidecars) initial.push(reconcileDoclingSidecars);
+  if(visualReviewRuntime){
+    const visual=visualReviewRuntime;
+    initial.push(dispatch("pdf-mixed-graph-user-requests",()=>processNextPdfVisualUserRequest(task=>visual.execute(task)),5_000));
+  }
+  if(ocrReviewEnabled)initial.push(dispatch("ocr-structure-review",async()=>{
+    const runtime=ocrReviewGateway??=createBookProductionGatewayRuntime(source);
+    const storage=ocrReviewStorage??=new S3CompatibleStorageProvider({endpoint:environment.S3_ENDPOINT,region:environment.S3_REGION,bucket:environment.S3_BUCKET,accessKey:environment.S3_ACCESS_KEY,secretKey:environment.S3_SECRET_KEY,forcePathStyle:environment.S3_FORCE_PATH_STYLE});
+    return processNextOcrStructureReview({gateway:runtime.gateway,repository:runtime.repository,storage,privateTempRoot:source.PDF_REVIEW_PRIVATE_TEMP_ROOT!});
+  }));
   if (reconcileOcrServersSweep) initial.push(reconcileOcrServersSweep);
   if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (podcastQueue) initial.push(dispatch("podcast-generation", () => dispatchPodcastGenerationWithQueue(podcastQueue, { ...(options.outboxTopics?.podcastGeneration ? { topic: options.outboxTopics.podcastGeneration } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
@@ -185,16 +242,23 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   void reconcileDurableOperations();
   logger.info("worker.started", { queue: "system.health-check", podcastGenerationEnabled: Boolean(podcastWorker) });
   let closePromise: Promise<void> | undefined;
-  return { healthWorker, ingestionWorker, bookBootstrapWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.close().catch(() => undefined); await ingestionQueue.close(); await bookBootstrapQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); // RF01 P1-02 shutdown order: BullMQ's close() first stops the worker from
+  return { healthWorker, ingestionWorker, doclingLayoutWorker, bookBootstrapWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.close().catch(() => undefined); await ingestionQueue.close(); await doclingLayoutQueue?.close(); await bookBootstrapQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); // RF01 P1-02 shutdown order: BullMQ's close() first stops the worker from
 // fetching NEW jobs and only then waits for the active job, so beginning it
 // before aborting the OCR runtime closes the claim-start window; aborting the
 // executor next interrupts the ACTIVE MinerU work; awaiting the worker close
 // last waits for the interrupted job to finish its bounded unwind. No new OCR
 // claim can start after the executor entered closing, and no owned server,
 // host lease or claim temp tree survives the runtime close.
-const ingestionWorkerClose = ingestionWorker.close(); await sourceIngestionOcrRuntime?.close(); await ingestionWorkerClose; await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
+const ingestionWorkerClose = ingestionWorker.close(); await sourceIngestionOcrRuntime?.close(); await ingestionWorkerClose;
+const doclingWorkerClose = doclingLayoutWorker?.close();
+try { await doclingLayoutExecutor?.close(); }
+finally { try { await doclingWorkerClose; } finally { if (doclingLayoutWorker) closeDoclingLayoutWorkerOwnedStorage(doclingLayoutWorker); } }
+await bookBootstrapWorker.close(); await bookWorker?.close(); await podcastWorker?.close(); await audioWorker?.close(); await shortVideoWorker?.close(); await visualReviewRuntime?.close(); await ocrReviewGateway?.close(); ocrReviewStorage?.close(); await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close(); logger.info("worker.shutdown.completed", { signal }); })(); } };
   } catch (error) {
+    await visualReviewRuntime?.close();
+    await ocrReviewGateway?.close();ocrReviewStorage?.close();
     await sourceIngestionOcrRuntime?.close();
+    await doclingLayoutExecutor?.close();
     await productionBookGatewayRuntime?.close(); await productionPodcastGatewayRuntime?.close(); await productionPodcastAudioGatewayRuntime?.close(); await productionShortVideoGatewayRuntime?.close();
     throw error;
   }
