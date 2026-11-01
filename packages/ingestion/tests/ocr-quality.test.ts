@@ -12,7 +12,15 @@ it.each([["same repeated paragraph\nsame repeated paragraph\nsame repeated parag
 });
 
 it("requires review of B15-style axis ticks split into OCR text lines",()=>{
- const text="正文说明\\n收益↑\\n→ 时间\\n0\\n100\\n80\\n60\\n40\\n图注".replaceAll("\\\\n","\\n");
+ const text=`正文说明
+收益↑
+→ 时间
+0
+100
+80
+60
+40
+图注`;
  const decision=classifyOcrQuality(text,108);
  expect(decision.status).toBe("REVIEW_REQUIRED");
  expect(decision.reasons).toContain("CHART_LEAKAGE_SUSPECTED");
