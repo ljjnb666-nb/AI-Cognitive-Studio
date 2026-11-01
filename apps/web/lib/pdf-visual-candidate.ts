@@ -36,6 +36,7 @@ export function projectStoredPdfVisualCandidate(
     approvedForPodcast: false as const,
     approvedForBookIntelligence: false as const,
     sourcePngSha256: row.sourcePngSha256,
+    candidateSha256: row.candidateSha256,
     expiresAt: row.expiresAt.toISOString(),
     figures,
   };

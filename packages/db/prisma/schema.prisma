@@ -1139,6 +1139,7 @@ model IngestionRun {
   doclingLayoutTasks     DoclingLayoutTask[]
   pdfVisualReviewCandidates PdfVisualReviewCandidate[]
   pdfVisualReviewRequests   PdfVisualReviewRequest[]
+  pdfGraphSecondReviewRequests PdfGraphSecondReviewRequest[]
 
   @@unique([id, sourceDocumentId, workspaceId])
   @@index([executionLeaseUntil])
@@ -1184,6 +1185,36 @@ model PdfVisualReviewRequest {
   @@unique([ingestionRunId, routingGeneration], map: "PdfVisualReviewRequest_single_attempt_uq")
   @@index([status, expiresAt, createdAt], map: "PdfVisualReviewRequest_pending_idx")
   @@index([workspaceId, sourceDocumentId], map: "PdfVisualReviewRequest_read_idx")
+}
+
+/// One separately authorized graph-checking admission; never auto-dispatched.
+model PdfGraphSecondReviewRequest {
+  id                String       @id @default(cuid())
+  workspaceId       String
+  userId            String
+  sourceDocumentId  String
+  ingestionRunId    String
+  routingGeneration Int
+  physicalPageIndex Int
+  sourcePdfSha256   String
+  sourcePngSha256   String
+  candidateSha256   String
+  status            String       @default("AUTHORIZED_NOT_DISPATCHED")
+  consentRecordedAt DateTime     @default(now())
+  expiresAt         DateTime
+  startedAt         DateTime?
+  completedAt       DateTime?
+  claimToken        String?
+  failureCode       String?
+  invocationId      String?      @unique
+  snapshotId        String?
+  modelDecision     String?
+  modelAxes         Json?
+  ingestionRun      IngestionRun @relation(fields: [ingestionRunId, sourceDocumentId, workspaceId], references: [id, sourceDocumentId, workspaceId], onDelete: Cascade)
+
+  @@unique([ingestionRunId, routingGeneration, physicalPageIndex], map: "PdfGraphSecondReviewRequest_one_per_page_uq")
+  @@index([workspaceId, sourceDocumentId, physicalPageIndex], map: "PdfGraphSecondReviewRequest_read_idx")
+  @@index([status, expiresAt, consentRecordedAt], map: "PdfGraphSecondReviewRequest_admission_idx")
 }
 
 /// Current per-host OCR machine-capacity authority (fenced lease). Deliberately
