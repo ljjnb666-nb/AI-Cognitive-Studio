@@ -7,6 +7,12 @@ it("accepts simple candidate text but never treats unverified standard structure
 it.each([["","EMPTY_OUTPUT"],["abc\u0000def","CONTROL_CHARACTERS"],["a���b","GARBLED_TEXT"],["<!-- page: 2 --> text","SOURCE_PAGE_MISMATCH"]])("rejects corrupt or mismatched page output",(text,reason)=>{
  const decision=classifyOcrQuality(text!,0);expect(decision.status).toBe("REJECTED");expect(decision.reasons).toContain(reason);
 });
-it.each([["same repeated paragraph\nsame repeated paragraph\nsame repeated paragraph","DUPLICATE_BLOCKS"],["# title\n##### misplaced","READING_ORDER_RISK"],["| a | b |\n| 1 | 2 |","TABLE_STRUCTURE_UNATTESTED"],["<chart>plot</chart>","UNVERIFIED_CHART_MARKER"],["x axis:\n0 1 2 3","AXIS_LABEL_LEAKAGE"],["x".repeat(20001),"ABNORMAL_TEXT_BLOCK"]])("requires review of structural risks",(text,reason)=>{
+it.each([["same repeated paragraph\nsame repeated paragraph\nsame repeated paragraph","DUPLICATE_BLOCKS"],["# title\n##### misplaced","READING_ORDER_RISK"],["| a | b |\n| 1 | 2 |","TABLE_STRUCTURE_UNATTESTED"],["<chart>plot</chart>","UNVERIFIED_CHART_MARKER"],["![Chart block]","UNVERIFIED_CHART_MARKER"],["![Chart block](local/figure.png)","CHART_SEMANTICS_UNATTESTED"],["![Image block](local/photo.png)","UNVERIFIED_IMAGE_MARKER"],["x axis:\n0 1 2 3","AXIS_LABEL_LEAKAGE"],["x".repeat(20001),"ABNORMAL_TEXT_BLOCK"]])("requires review of structural risks",(text,reason)=>{
  const decision=classifyOcrQuality(text!,0);expect(decision.status).toBe("REVIEW_REQUIRED");expect(decision.reasons).toContain(reason);
+});
+
+it("does not confuse descriptive prose with unverified Markdown image or chart markers",()=>{
+ const decision=classifyOcrQuality("This paragraph discusses an Image block and a Chart block.",0);
+ expect(decision.status).toBe("ACCEPTED");
+ expect(decision.reasons).toEqual([]);
 });
