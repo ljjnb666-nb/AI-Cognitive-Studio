@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { prisma } from "@ai-cognitive/db";
+import { prisma, Prisma } from "@ai-cognitive/db";
 import { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
 import { DEFAULT_PARSER_LIMITS, renderPdfMixedPageSourcePreviews, validatePdfVisualStructureCandidate } from "@ai-cognitive/ingestion";
-import { createGatewayPdfGraphModelReviewer, PDF_GRAPH_REVIEW_AXES, type PdfGraphModelVerdict, type ProviderGateway } from "@ai-cognitive/provider-gateway";
+import { createGatewayPdfGraphModelReviewer, validatePdfGraphModelReview, PDF_GRAPH_REVIEW_AXES, type PdfGraphModelVerdict, type ProviderGateway, type ProviderExecutionRepository } from "@ai-cognitive/provider-gateway";
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
 import type { Environment } from "@ai-cognitive/shared/server";
 import { createManagedPdfVisualReviewRuntime } from "./pdf-visual-review.js";
@@ -71,9 +71,10 @@ async function currentSourceBound(task: ReviewTask): Promise<boolean> {
  * background sweep. Claimed RUNNING rows have no retry/rearm path, because
  * a lost provider reply might still represent a billed invocation. */
 export async function processNextPdfGraphSecondReviewRequest(
-  options: { enabled: true; execute: Execute },
+  options: { enabled: true; execute: Execute; repository: Pick<ProviderExecutionRepository,"consumeTextResult"> },
 ): Promise<"IDLE" | "DONE"> {
-  if (options.enabled !== true || typeof options.execute !== "function") fail();
+  if (options.enabled !== true || typeof options.execute !== "function" ||
+      typeof options.repository?.consumeTextResult !== "function") fail();
   const now = new Date();
   await prisma.pdfGraphSecondReviewRequest.updateMany({
     where: { status: "AUTHORIZED_NOT_DISPATCHED", expiresAt: { lte: now } },
@@ -92,10 +93,6 @@ export async function processNextPdfGraphSecondReviewRequest(
   });
   if (claimed.count !== 1) return "IDLE";
 
-  let status: "SUCCEEDED" | "REVIEW_REQUIRED" | "REJECTED" | "FAILED" = "FAILED";
-  let failureCode: string | null = "PDF_SECOND_REVIEW_FAILED_OR_UNCERTAIN";
-  let modelDecision: string | null = null;
-  let modelAxes: Record<string, { status: string; reason: string }> | null = null;
   let invocationId: string | null = null, snapshotId: string | null = null;
   try {
     const run = await prisma.ingestionRun.findFirst({
@@ -172,20 +169,114 @@ export async function processNextPdfGraphSecondReviewRequest(
         !["PASSED", "REJECTED", "REVIEW_REQUIRED"].includes(output.decision.status)) fail();
     invocationId = output.invocationId;
     snapshotId = output.snapshotId;
-    modelDecision = output.decision.status;
-    const axes = output.decision.axes;
-    if (Object.keys(axes).sort().join("|") !== [...PDF_GRAPH_REVIEW_AXES].sort().join("|") ||
-        PDF_GRAPH_REVIEW_AXES.some(axis =>
-          !axes[axis] || !["CLEAR", "ISSUE", "UNKNOWN"].includes(axes[axis].status) ||
-          typeof axes[axis].reason !== "string" ||
-          !axes[axis].reason.trim() || axes[axis].reason.length > 280)) fail();
-    modelAxes = Object.fromEntries(PDF_GRAPH_REVIEW_AXES.map(axis =>
-      [axis, { status: axes[axis].status, reason: axes[axis].reason }]));
-    status = await currentSourceBound(task)
-      ? output.decision.status === "PASSED" ? "SUCCEEDED" : output.decision.status
-      : "REVIEW_REQUIRED";
-    failureCode = status === "REVIEW_REQUIRED" && output.decision.status === "PASSED"
-      ? "PDF_SECOND_REVIEW_SOURCE_STALE" : null;
+    const expected = {
+      sourceSha256: task.sourcePdfSha256,
+      sourcePngSha256: task.sourcePngSha256,
+      physicalPageIndex: task.physicalPageIndex,
+      candidateSha256: task.candidateSha256,
+      textSha256: sha256(Buffer.from(task.sourceTextExcerpt.slice(0,1_500), "utf8")),
+    };
+    const fingerprint = createHash("sha256").update(JSON.stringify([
+      task.requestId, task.ingestionRunId, task.routingGeneration,
+      task.physicalPageIndex, task.sourcePdfSha256, task.sourcePngSha256,
+      task.candidateSha256, expected.textSha256,
+    ])).digest("hex");
+    const consumed = await options.repository.consumeTextResult({
+      workspaceId: task.workspaceId, invocationId: output.invocationId,
+      snapshotId: output.snapshotId, consumerKind: "PDF_GRAPH_SECOND_REVIEW",
+      consumerKey: task.requestId, consumerFingerprint: fingerprint,
+    }, async ({ tx, response, snapshot }) => {
+      // Lock the sole paid admission while materializing and purging the
+      // encrypted text receipt. Both changes are in ONE repository transaction.
+      await tx.$queryRaw`SELECT "id" FROM "PdfGraphSecondReviewRequest"
+        WHERE "id" = ${task.requestId} FOR UPDATE`;
+      const held = await tx.pdfGraphSecondReviewRequest.findFirst({
+        where: { id: task.requestId, claimToken: token, status: "RUNNING",
+          workspaceId: task.workspaceId, ingestionRunId: task.ingestionRunId,
+          routingGeneration: task.routingGeneration,
+          physicalPageIndex: task.physicalPageIndex,
+          sourcePdfSha256: task.sourcePdfSha256,
+          sourcePngSha256: task.sourcePngSha256,
+          candidateSha256: task.candidateSha256 },
+        select: { id: true, expiresAt: true },
+      });
+      if (!held) fail();
+      if (snapshot.id !== output.snapshotId ||
+          snapshot.workspaceId !== task.workspaceId ||
+          snapshot.routeSlot !== "PDF_VISUAL_STRUCTURE" ||
+          response.type !== "STRUCTURED" || response.finishReason !== "STOP") fail();
+      // HOLD SHARE locks so a concurrent membership revocation / extraction
+      // switch cannot commit between our final check and receipt purging.
+      const memberLock = await tx.$queryRaw<Array<{ userId: string }>>`SELECT "userId"
+        FROM "WorkspaceMember" WHERE "workspaceId" = ${task.workspaceId}
+        AND "userId" = ${task.userId} FOR SHARE`;
+      const extractionLock = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id"
+        FROM "CurrentDocumentExtraction" WHERE "workspaceId" = ${task.workspaceId}
+        AND "sourceDocumentId" = ${task.sourceDocumentId} FOR SHARE`;
+      if (memberLock.length !== 1 || extractionLock.length !== 1) fail();
+      // Source and paid-call authorization must STILL be live at commit time.
+      // Model output never overrides a revoked member or a replaced extraction.
+      const [current, run, member, route, graph] = await Promise.all([
+        tx.currentDocumentExtraction.findFirst({
+          where: { sourceDocumentId: task.sourceDocumentId,
+            workspaceId: task.workspaceId, extraction: {
+              ingestionRunId: task.ingestionRunId, status: "SUCCEEDED" } },
+          select: { id: true },
+        }),
+        tx.ingestionRun.findFirst({
+          where: { id: task.ingestionRunId, workspaceId: task.workspaceId,
+            sourceDocumentId: task.sourceDocumentId,
+            routingGeneration: task.routingGeneration, status: "SUCCEEDED",
+            sourceDocument: { sha256: task.sourcePdfSha256,
+              mediaType: "application/pdf", storageKey: task.sourcePdfKey,
+              sizeBytes: task.sourcePdfBytes } },
+          select: { id: true },
+        }),
+        tx.workspaceMember.findUnique({
+          where: { workspaceId_userId: {
+            workspaceId: task.workspaceId, userId: task.userId } },
+          select: { role: true },
+        }),
+        tx.providerRouteBinding.findFirst({
+          where: { workspaceId: task.workspaceId, routeSlot: "PDF_VISUAL_STRUCTURE",
+            connection: { status: "ACTIVE" } },
+          select: { connectionId: true, modelId: true },
+        }),
+        tx.pdfVisualReviewCandidate.findFirst({
+          where: { workspaceId: task.workspaceId, sourceDocumentId: task.sourceDocumentId,
+            ingestionRunId: task.ingestionRunId,
+            routingGeneration: task.routingGeneration,
+            physicalPageIndex: task.physicalPageIndex,
+            sourcePdfSha256: task.sourcePdfSha256,
+            sourcePngSha256: task.sourcePngSha256,
+            candidateSha256: task.candidateSha256,
+            expiresAt: { gt: new Date() } },
+          select: { id: true },
+        }),
+      ]);
+      if (!current || !run || !member || member.role === "VIEWER" ||
+          !route || !graph || route.modelId !== snapshot.modelId ||
+          route.connectionId !== snapshot.connectionId ||
+          held.expiresAt <= new Date()) fail();
+      const verified = validatePdfGraphModelReview(
+        response.structured, expected, task.sourceTextPreviewTruncated,
+      );
+      if (verified.status !== output.decision.status ||
+          JSON.stringify(verified.axes) !== JSON.stringify(output.decision.axes) ||
+          verified.approvedForPodcast !== false ||
+          verified.approvedForBookIntelligence !== false) fail();
+      const applied = await tx.pdfGraphSecondReviewRequest.updateMany({
+        where: { id: task.requestId, claimToken: token, status: "RUNNING" },
+        data: { status: verified.status === "PASSED" ? "SUCCEEDED" : verified.status,
+          modelDecision: verified.status,
+          modelAxes: JSON.parse(JSON.stringify(verified.axes)) as Prisma.InputJsonValue,
+          invocationId: output.invocationId, snapshotId: output.snapshotId,
+          completedAt: new Date(), claimToken: null, failureCode: null },
+      });
+      if (applied.count !== 1) fail();
+    });
+    if (consumed.status !== "CONSUMED") fail();
+    return "DONE";
   } catch {
     // A network error, uncertain remote outcome or stale source is never
     // permission for a second call. No raw book/provider details are logged.
@@ -193,9 +284,8 @@ export async function processNextPdfGraphSecondReviewRequest(
   const final = await prisma.pdfGraphSecondReviewRequest.updateMany({
     where: { id: candidate.id, status: "RUNNING", claimToken: token },
     data: {
-      status, failureCode, completedAt: new Date(),
-      invocationId, snapshotId, modelDecision, modelAxes: modelAxes ?? undefined,
-      claimToken: null,
+      status: "FAILED", failureCode: "PDF_SECOND_REVIEW_FAILED_OR_UNCERTAIN",
+      completedAt: new Date(), invocationId, snapshotId, claimToken: null,
     },
   });
   if (final.count !== 1) throw Error("PDF_SECOND_REVIEW_CLAIM_LOST");
@@ -272,6 +362,7 @@ export function createOnDemandPdfGraphSecondReviewRuntime(
       execute: createPdfGraphSecondReviewExecutor({
         storage, gateway: gatewayRuntime.gateway,
       }),
+      repository: gatewayRuntime.repository,
     }),
     async () => { try { storage.close(); } finally { await gatewayRuntime.close(); } },
   );

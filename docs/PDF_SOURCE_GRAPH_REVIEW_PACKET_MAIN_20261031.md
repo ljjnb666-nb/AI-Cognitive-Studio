@@ -47,3 +47,11 @@
 - 复用 `createGatewayPdfGraphModelReviewer` 作第二次 Vision 调用；只记录审核三个安全状态及七个轴、Provider invocationId、snapshotId 到申请表。重新确认身份、来源、成员与路由；失效降级为 REVIEW_REQUIRED。所有状态保持不可发布，不写入 Book Intelligence、播客或 Gold。
 - worker PostgreSQL 集成测试覆盖：成功落库、撤权后的零模型调用、进程重启残留 RUNNING 禁止重试。必须以新 HEAD CI 验收。
 - **限制**：此版本尚未通过真实私人电子书/付费视觉模型进行端到端验收，也没有实现 Provider 加密结果的跨进程补取/消费确认、独立人工 Gold 与播客发布质量门禁；有争议的远端结果只能交由人工/运维核对，不得自动重新调用。
+
+## 2026-11-01：加密文本回执的事务消费与审计状态原子化
+
+- 第二次图审核的执行现在必须提供 `ProviderExecutionRepository.consumeTextResult`。真实运行入口复用现有 `createBookProductionGatewayRuntime(...).repository`；没有消费仓库则在尝试认领前拒绝。禁止直接把模型返回体写入已通过的数据库字段。
+- 仅在加密文本回执通过 Gateway 的快照、成功状态、解密完整性检查后，进入同一 PostgreSQL 事务：锁定审核申请、原书当前 extraction 与成员，校验审核来源 SHA、图候选、当前 Provider 路由和用户权限；用原始加密回执里的 JSON 再次运行七轴严格校验；原子写回 `SUCCEEDED/REJECTED/REVIEW_REQUIRED`、调用标识与七轴结论。Provider 仓库在同一事务中将回执标记 consumed 并清除密文键材料。
+- 如果回执无效、权限撤销、当前解析版本变更或消费出现异常，则事务回滚；状态记录为 `FAILED` 且 `PDF_SECOND_REVIEW_FAILED_OR_UNCERTAIN`，保留已知 invocation/snapshot 供运维对账；**不得改回 `AUTHORIZED_NOT_DISPATCHED`，不得自动再次收费**。
+- 使用 PostgreSQL 事务替身（合成解密 JSON、无外部付费调用）覆盖一次成功、非法回执拒绝、模型返回与落库判定的一致性、调用后撤权及不可重放。现有 ProviderExecutionRepository 独立测试负责加密存取实现。
+- **仍未解决**：不确定的外部网络调用若在保存 invocation 身份之前崩溃，可能只能通过 Gateway 的持久 idempotency 账本对账，不做自动重试；没有真实私有电子书的云端二次审核与发布门禁验证。只能称为“安全的一次性人工触发链路”，不能称为正式自动质量发布闭环。

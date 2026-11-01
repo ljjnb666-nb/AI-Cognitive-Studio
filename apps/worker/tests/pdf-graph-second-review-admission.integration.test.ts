@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
-import { PDF_GRAPH_REVIEW_AXES } from "@ai-cognitive/provider-gateway";
+import { PDF_GRAPH_REVIEW_AXES, type ProviderExecutionRepository } from "@ai-cognitive/provider-gateway";
 import { processNextPdfGraphSecondReviewRequest } from "../src/pdf-graph-second-review.js";
 
 /** PostgreSQL-backed proof of one separate charged-call authorization per
@@ -132,14 +132,15 @@ async function readyGraphRequest() {
     sourcePdfSha256:"a".repeat(64),sourcePngSha256:"b".repeat(64),
     candidateSha256:fp,expiresAt:new Date(Date.now()+600_000),
   }});
-  await prisma.providerConnection.create({data:{
+  const provider = await prisma.providerConnection.create({data:{
     workspaceId:f.workspace.id, providerKey:"OPENAI",
     displayName:"proof-provider",status:"ACTIVE",protocol:"OPENAI_COMPATIBLE",
-  }}).then(async c=>{await prisma.providerRouteBinding.create({data:{
-    workspaceId:f.workspace.id,routeSlot:"PDF_VISUAL_STRUCTURE",connectionId:c.id,
+  }});
+  await prisma.providerRouteBinding.create({data:{
+    workspaceId:f.workspace.id,routeSlot:"PDF_VISUAL_STRUCTURE",connectionId:provider.id,
     modelId:"review-fixture",
-  }})});
-  return { ...f, request };
+  }});
+  return { ...f, request, provider };
 }
 const verdict = {
   decision: {
@@ -152,19 +153,62 @@ const verdict = {
   invocationId:"invocation-fixture",snapshotId:"snapshot-fixture",
   approvedForPodcast:false as const,approvedForBookIntelligence:false as const,
 };
+type ReviewExecuteTask = Parameters<Parameters<typeof processNextPdfGraphSecondReviewRequest>[0]["execute"]>[0];
+function fixtureReceiptRepository(
+  getTask: () => ReviewExecuteTask | undefined,
+  connectionId: string,
+  override?: { malformed?: boolean; onConsume?: () => Promise<void> },
+): Pick<ProviderExecutionRepository,"consumeTextResult"> {
+  return {
+    async consumeTextResult(input, materialize) {
+      await override?.onConsume?.();
+      const task = getTask();
+      if (!task) throw Error("NOT_CALLED");
+      const sourceText = task.sourceTextExcerpt.slice(0,1500);
+      const textSha256 = createHash("sha256").update(sourceText,"utf8").digest("hex");
+      // Simulate decrypted receipt but run the real DB transaction/materializer.
+      await prisma.$transaction(async tx => {
+        await materialize({
+          tx,
+          response: {
+            type: "STRUCTURED",finishReason:"STOP",
+            structured: {
+              schemaVersion:1,
+              sourceSha256:task.sourcePdfSha256,
+              sourcePngSha256:task.sourcePngSha256,
+              physicalPageIndex:task.physicalPageIndex,
+              candidateSha256:override?.malformed?"d".repeat(64):task.candidateSha256,
+              textSha256,
+              axes:verdict.decision.axes,
+            },
+          } as Parameters<typeof materialize>[0]["response"],
+          snapshot: {
+            id:"snapshot-fixture",workspaceId:task.workspaceId,
+            routeSlot:"PDF_VISUAL_STRUCTURE",modelId:"review-fixture",
+            connectionId,
+          } as Parameters<typeof materialize>[0]["snapshot"],
+          receipt:{id:"fake-encrypted-receipt"},
+        });
+      });
+      return {status:"CONSUMED",invocationId:input.invocationId,snapshotId:input.snapshotId};
+    },
+  };
+}
 describe("real PostgreSQL second review one-time worker claim",()=>{
   it("stores a bounded, non-publishable result and never bills a second execution",async()=>{
     const f=await readyGraphRequest();
     let called=0;
-    const execute=async()=>{called++;return verdict};
-    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute})).toBe("DONE");
+    let task:ReviewExecuteTask|undefined;
+    const execute=async(input:ReviewExecuteTask)=>{task=input;called++;return verdict};
+    const repository=fixtureReceiptRepository(()=>task,f.provider.id);
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute,repository})).toBe("DONE");
     expect(called).toBe(1);
     const row=await prisma.pdfGraphSecondReviewRequest.findUniqueOrThrow({where:{id:f.request.id}});
     expect(row).toMatchObject({status:"SUCCEEDED",modelDecision:"PASSED",
       claimToken:null,invocationId:"invocation-fixture",snapshotId:"snapshot-fixture",
     });
     expect(row.modelAxes).toHaveProperty("relationships");
-    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute})).toBe("IDLE");
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute,repository})).toBe("IDLE");
     expect(called).toBe(1);
   });
   it("rejects revoked membership before any external model admission, no retry",async()=>{
@@ -173,13 +217,15 @@ describe("real PostgreSQL second review one-time worker claim",()=>{
       workspaceId:f.workspace.id,userId:f.user.id,
     }},data:{role:"VIEWER"}});
     let called=0;
-    const execute=async()=>{called++;return verdict};
-    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute})).toBe("DONE");
+    let task:ReviewExecuteTask|undefined;
+    const execute=async(input:ReviewExecuteTask)=>{task=input;called++;return verdict};
+    const repository=fixtureReceiptRepository(()=>task,f.provider.id);
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute,repository})).toBe("DONE");
     expect(called).toBe(0);
     const row=await prisma.pdfGraphSecondReviewRequest.findUniqueOrThrow({where:{id:f.request.id}});
     expect(row.status).toBe("FAILED");
     expect(row.modelDecision).toBeNull();
-    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute})).toBe("IDLE");
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute,repository})).toBe("IDLE");
   });
   it("never reclaims an uncertain RUNNING paid action after process restart",async()=>{
     const f=await readyGraphRequest();
@@ -189,7 +235,37 @@ describe("real PostgreSQL second review one-time worker claim",()=>{
     let called=0;
     expect(await processNextPdfGraphSecondReviewRequest({
       enabled:true,execute:async()=>{called++;return verdict},
+      repository:fixtureReceiptRepository(()=>undefined,f.provider.id),
     })).toBe("IDLE");
     expect(called).toBe(0);
   });
+  it("rejects mismatched decrypted receipt identity and does not mark PASSED",async()=>{
+    const f=await readyGraphRequest();
+    let task:ReviewExecuteTask|undefined,called=0;
+    const execute=async(input:ReviewExecuteTask)=>{task=input;called++;return verdict};
+    const repository=fixtureReceiptRepository(()=>task,f.provider.id,{malformed:true});
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute,repository})).toBe("DONE");
+    expect(called).toBe(1);
+    const row=await prisma.pdfGraphSecondReviewRequest.findUniqueOrThrow({where:{id:f.request.id}});
+    expect(row).toMatchObject({status:"FAILED",modelDecision:null,
+      invocationId:"invocation-fixture",claimToken:null});
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute,repository})).toBe("IDLE");
+    expect(called).toBe(1);
+  });
+  it("blocks revocation after Gateway reply and before receipt consumption",async()=>{
+    const f=await readyGraphRequest();
+    let task:ReviewExecuteTask|undefined;
+    const execute=async(input:ReviewExecuteTask)=>{task=input;return verdict};
+    const repository=fixtureReceiptRepository(()=>task,f.provider.id,{
+      onConsume:async()=>{await prisma.workspaceMember.update({
+        where:{workspaceId_userId:{workspaceId:f.workspace.id,userId:f.user.id}},
+        data:{role:"VIEWER"},
+      });},
+    });
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute,repository})).toBe("DONE");
+    const row=await prisma.pdfGraphSecondReviewRequest.findUniqueOrThrow({where:{id:f.request.id}});
+    expect(row.status).toBe("FAILED");
+    expect(row.modelDecision).toBeNull();
+  });
+
 });
