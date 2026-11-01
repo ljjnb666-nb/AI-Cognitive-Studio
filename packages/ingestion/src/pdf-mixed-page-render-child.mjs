@@ -27,7 +27,7 @@ try {
   const sourceSha256 = sha(bytes);
   stage = "LOAD_PDF";
   task = getDocument({ data: bytes,
-    wasmUrl: fileURLToPath(new URL("./wasm/", import.meta.resolve("pdfjs-dist/package.json"))), disableWorker: true, isEvalSupported: false,
+    wasmUrl: fileURLToPath(new URL("./wasm/", import.meta.resolve("pdfjs-dist/package.json"))).replaceAll("\\", "/"), disableWorker: true, isEvalSupported: false,
     useSystemFonts: false, stopAtErrors: true });
   const document = await task.promise;
   if (index >= document.numPages) throw new Error("PAGE_OUT_OF_RANGE");
