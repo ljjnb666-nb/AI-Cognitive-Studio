@@ -4,7 +4,7 @@
  */
 import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, URL } from "node:url";
 import { createHash } from "node:crypto";
 import { createCanvas } from "@napi-rs/canvas";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
