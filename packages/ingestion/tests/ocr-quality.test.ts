@@ -11,6 +11,13 @@ it.each([["same repeated paragraph\nsame repeated paragraph\nsame repeated parag
  const decision=classifyOcrQuality(text!,0);expect(decision.status).toBe("REVIEW_REQUIRED");expect(decision.reasons).toContain(reason);
 });
 
+it("requires review of B15-style axis ticks split into OCR text lines",()=>{
+ const text="正文说明\\n收益↑\\n→ 时间\\n0\\n100\\n80\\n60\\n40\\n图注".replaceAll("\\\\n","\\n");
+ const decision=classifyOcrQuality(text,108);
+ expect(decision.status).toBe("REVIEW_REQUIRED");
+ expect(decision.reasons).toContain("CHART_LEAKAGE_SUSPECTED");
+});
+
 it("does not confuse descriptive prose with unverified Markdown image or chart markers",()=>{
  const decision=classifyOcrQuality("This paragraph discusses an Image block and a Chart block.",0);
  expect(decision.status).toBe("ACCEPTED");
