@@ -1,6 +1,8 @@
 /** Evidence-based triage, not a Gold accuracy score. Markdown alone cannot
  * attest reading order, omitted tables or chart semantics. Standard proposals
  * therefore require manual review until a geometry attestation exists. */
+import { classifyOcrOutput } from "./ocr-tier-policy.js";
+
 export type OcrQualityDecision={status:"ACCEPTED"|"REVIEW_REQUIRED"|"REJECTED";reasons:string[]};
 export function classifyOcrQuality(text:string,physicalPageIndex:number,requireStructureAttestation=false):OcrQualityDecision {
  const reject:string[]=[];const review:string[]=[];
@@ -24,6 +26,8 @@ export function classifyOcrQuality(text:string,physicalPageIndex:number,requireS
  if(chartMarker.test(text)) review.push("UNVERIFIED_CHART_MARKER");
  if(imageMarker.test(text)) review.push("UNVERIFIED_IMAGE_MARKER");
  if(/(?:^|\n)\s*[xyXY]\s*(?:轴|axis)?\s*[:：]?\s*\n\s*[-\d.]+(?:\s+[-\d.]+){2,}/.test(text)) review.push("AXIS_LABEL_LEAKAGE");
+ // Keep the production quality check consistent with the existing B15 post-OCR triage.
+ if(classifyOcrOutput({text}).postOcrPageType==="CHART_LEAKAGE_SUSPECTED") review.push("CHART_LEAKAGE_SUSPECTED");
  if(requireStructureAttestation) review.push("STRUCTURE_UNATTESTED");
  return {status:reject.length?"REJECTED":review.length?"REVIEW_REQUIRED":"ACCEPTED",reasons:[...reject,...review]};
 }
