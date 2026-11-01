@@ -4,13 +4,14 @@ import PDFDocument from "pdfkit";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { DEFAULT_PARSER_LIMITS, extractNativePdf } from "@ai-cognitive/ingestion";
-import { ProviderGatewayRepository, parseKeyring, type ProviderGateway } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayRepository, PDF_GRAPH_REVIEW_AXES, parseKeyring, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { readEnvironment } from "@ai-cognitive/shared/server";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { executeOnDemandPdfVisualReview } from "../src/pdf-visual-review.js";
 import { persistPdfVisualReviewCandidates } from "../src/pdf-visual-review-store.js";
 import { processNextPdfVisualUserRequest } from "../src/pdf-visual-user-request.js";
+import { createPdfGraphSecondReviewExecutor, processNextPdfGraphSecondReviewRequest } from "../src/pdf-graph-second-review.js";
 
 const environment = readEnvironment();
 const keyring = JSON.stringify({
@@ -151,6 +152,7 @@ afterEach(async () => {
     await prisma.providerCredentialVersion.deleteMany({ where });
     await prisma.providerConnection.deleteMany({ where });
     await prisma.providerAuditEvent.deleteMany({ where });
+    await prisma.currentDocumentExtraction.deleteMany({ where });
     await prisma.ingestionRun.deleteMany({ where });
     await prisma.job.deleteMany({ where });
     await prisma.sourceDocument.deleteMany({ where });
@@ -208,6 +210,27 @@ describe("real PostgreSQL + MinIO PDF vision Gateway receipt proof", () => {
         execute: async ({ request }) => {
           expect(request.text?.messages[0]?.image?.sourceSha256).toBe(sha256(f.bytes));
           modelCalls++;
+          const raw = request.text?.messages[0]?.content;
+          // Both calls use an offline synthetic adapter, never an external VLM.
+          if (typeof raw === "string" && raw.includes('"graphCandidateUntrusted"')) {
+            const payload = JSON.parse(raw) as {
+              identity: Record<string, string | number>;
+              sourceTextTruncated: boolean;
+            };
+            expect(payload.sourceTextTruncated).toBe(false);
+            return {
+              response: {
+                type: "STRUCTURED" as const, finishReason: "STOP" as const,
+                structured: {
+                  schemaVersion: 1, ...payload.identity,
+                  axes: Object.fromEntries(PDF_GRAPH_REVIEW_AXES.map(axis => [axis, {
+                    status: "CLEAR", reason: "Synthetic original page agrees with graph",
+                  }])),
+                },
+              },
+              usage: { inputTokens: 23, outputTokens: 25 },
+            };
+          }
           return {
             response: { type: "STRUCTURED" as const, structured: graph },
             usage: { inputTokens: 18, outputTokens: 19 },
@@ -337,12 +360,86 @@ describe("real PostgreSQL + MinIO PDF vision Gateway receipt proof", () => {
         where: { workspaceId: f.workspaceId },
       })).toBe(1);
 
+      // Full offline chain: original MinIO PDF -> PDF.js PNG -> graph candidate
+      // -> separately authorized second review -> encrypted receipt consumption.
+      // No external API or user book content is used in this CI fixture.
+      const extraction = await prisma.documentExtraction.create({
+        data: {
+          ingestionRunId: f.ingestionRunId, sourceDocumentId: f.sourceDocumentId,
+          workspaceId: f.workspaceId, status: "SUCCEEDED",
+          parserName: "pdfjs-synthetic", parserVersion: "review-v1",
+          normalizationVersion: "review-v1",
+        },
+      });
+      await prisma.currentDocumentExtraction.create({
+        data: { sourceDocumentId: f.sourceDocumentId,
+          workspaceId: f.workspaceId, extractionId: extraction.id },
+      });
+      const sourcePage = await prisma.sourcePage.create({
+        data: { extractionId: extraction.id, ordinal: 0, physicalPageIndex: 0 },
+      });
+      await prisma.sourceBlock.create({
+        data: {
+          extractionId: extraction.id, sourcePageId: sourcePage.id,
+          ordinal: 0, kind: "PARAGRAPH",
+          text: "Source-bound diagram review proof",
+          contentHash: sha256(Buffer.from("Source-bound diagram review proof")),
+        },
+      });
+      const second = await prisma.pdfGraphSecondReviewRequest.create({
+        data: {
+          workspaceId: f.workspaceId, userId: f.userId,
+          sourceDocumentId: f.sourceDocumentId, ingestionRunId: f.ingestionRunId,
+          routingGeneration: 1, physicalPageIndex: 0,
+          sourcePdfSha256: sha256(f.bytes),
+          sourcePngSha256: candidate.sourcePngSha256,
+          candidateSha256: candidate.candidateSha256,
+          expiresAt: new Date(Date.now() + 10 * 60_000),
+        },
+      });
+      const secondJob = () => processNextPdfGraphSecondReviewRequest({
+        enabled: true,
+        execute: createPdfGraphSecondReviewExecutor({
+          storage, gateway: monitoredGateway,
+        }),
+        repository: runtime.repository,
+      });
+      expect(await secondJob()).toBe("DONE");
+      const receipt = await prisma.pdfGraphSecondReviewRequest.findUniqueOrThrow({
+        where: { id: second.id },
+      });
+      expect(receipt).toMatchObject({
+        status: "SUCCEEDED", modelDecision: "PASSED",
+        failureCode: null, claimToken: null,
+      });
+      expect(receipt.modelAxes).toHaveProperty("figureCoverage");
+      expect(receipt.modelAxes).toHaveProperty("hallucination");
+      expect(receipt.invocationId).toBeTruthy();
+      expect(receipt.snapshotId).toBeTruthy();
+      const secondInvocation = await prisma.providerInvocation.findUniqueOrThrow({
+        where: { id: receipt.invocationId! }, include: { textResult: true },
+      });
+      expect(secondInvocation).toMatchObject({
+        status: "SUCCEEDED", routeSlot: "PDF_VISUAL_STRUCTURE",
+      });
+      expect(secondInvocation.textResult?.consumedAt).toBeTruthy();
+      expect(secondInvocation.textResult?.ciphertext).toBeNull();
+      expect(secondInvocation.textResult?.iv).toBeNull();
+      expect(secondInvocation.textResult?.authTag).toBeNull();
+      expect(secondInvocation.textResult?.keyVersion).toBeNull();
+      expect(await prisma.providerInvocation.count({
+        where: { workspaceId: f.workspaceId },
+      })).toBe(2);
+      expect(modelCalls).toBe(2);
+      expect(await secondJob()).toBe("IDLE");
+      expect(modelCalls).toBe(2);
+
       await storage.putObject({
         key: f.key, body: Buffer.from("corrupt source"), contentType: "application/pdf",
       });
       await expect(executeOnDemandPdfVisualReview(task, deps))
         .rejects.toThrow(/PDF_VISUAL_WORKER_SOURCE_SIZE_MISMATCH|PDF_VISUAL_WORKER_SOURCE_SHA_MISMATCH/);
-      expect(modelCalls).toBe(1);
+      expect(modelCalls).toBe(2);
     } finally {
       await runtime.close();
     }
