@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
+import { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
+import { PDF_GRAPH_REVIEW_AXES } from "@ai-cognitive/provider-gateway";
+import { processNextPdfGraphSecondReviewRequest } from "../src/pdf-graph-second-review.js";
 
 /** PostgreSQL-backed proof of one separate charged-call authorization per
  * existing ingestion generation + physical page, never actually invoking AI. */
@@ -36,6 +39,9 @@ async function fixture() {
 afterEach(async()=>{
   for(const c of cleanups.splice(0)){
     const where={workspaceId:c.workspaceId};
+    await prisma.currentDocumentExtraction.deleteMany({where});
+    await prisma.providerRouteBinding.deleteMany({where});
+    await prisma.providerConnection.deleteMany({where});
     await prisma.ingestionRun.deleteMany({where});
     await prisma.job.deleteMany({where});
     await prisma.sourceDocument.deleteMany({where});
@@ -88,5 +94,102 @@ describe("real PostgreSQL separate graph second-review paid admission",()=>{
     expect(await prisma.pdfGraphSecondReviewRequest.count({
       where:{workspaceId:f.workspace.id},
     })).toBe(0);
+  });
+});
+
+const graph = {schemaVersion:1,figures:[{
+  id:"f1",kind:"DIAGRAM",bbox:[20,30,100,100],caption:"Synthetic diagram",
+  nodes:[{id:"A",label:"Alpha"}],edges:[],
+}]};
+async function readyGraphRequest() {
+  const f=await fixture();
+  const extraction=await prisma.documentExtraction.create({data:{
+    ingestionRunId:f.run.id,sourceDocumentId:f.doc.id,workspaceId:f.workspace.id,
+    status:"SUCCEEDED",parserName:"pdfjs-isolated",parserVersion:"test-v1",
+    normalizationVersion:"test-v1",
+  }});
+  await prisma.currentDocumentExtraction.create({data:{
+    workspaceId:f.workspace.id,sourceDocumentId:f.doc.id,extractionId:extraction.id,
+  }});
+  const page=await prisma.sourcePage.create({data:{
+    extractionId:extraction.id,ordinal:0,physicalPageIndex:0,
+  }});
+  await prisma.sourceBlock.create({data:{
+    extractionId:extraction.id,sourcePageId:page.id,ordinal:0,
+    kind:"PARAGRAPH",text:"Source evidence for alpha diagram.",
+    contentHash:"f".repeat(64),
+  }});
+  const fp=pdfReviewCandidateFingerprint(graph);
+  await prisma.pdfVisualReviewCandidate.create({data:{
+    workspaceId:f.workspace.id,sourceDocumentId:f.doc.id,ingestionRunId:f.run.id,
+    routingGeneration:1,physicalPageIndex:0,sourcePdfSha256:"a".repeat(64),
+    sourcePngSha256:"b".repeat(64),candidateJson:graph,candidateSha256:fp,
+    expiresAt:new Date(Date.now()+3600_000),
+  }});
+  const request=await prisma.pdfGraphSecondReviewRequest.create({data:{
+    workspaceId:f.workspace.id,userId:f.user.id,sourceDocumentId:f.doc.id,
+    ingestionRunId:f.run.id,routingGeneration:1,physicalPageIndex:0,
+    sourcePdfSha256:"a".repeat(64),sourcePngSha256:"b".repeat(64),
+    candidateSha256:fp,expiresAt:new Date(Date.now()+600_000),
+  }});
+  await prisma.providerConnection.create({data:{
+    workspaceId:f.workspace.id, providerKey:"OPENAI",
+    displayName:"proof-provider",status:"ACTIVE",protocol:"OPENAI_COMPATIBLE",
+  }}).then(async c=>{await prisma.providerRouteBinding.create({data:{
+    workspaceId:f.workspace.id,routeSlot:"PDF_VISUAL_STRUCTURE",connectionId:c.id,
+    modelId:"review-fixture",
+  }})});
+  return { ...f, request };
+}
+const verdict = {
+  decision: {
+    status:"PASSED" as const,
+    axes:Object.fromEntries(PDF_GRAPH_REVIEW_AXES.map(axis=>[axis,{
+      status:"CLEAR" as const,reason:"Visible in the original page",
+    }])),
+    approvedForPodcast:false as const, approvedForBookIntelligence:false as const,
+  },
+  invocationId:"invocation-fixture",snapshotId:"snapshot-fixture",
+  approvedForPodcast:false as const,approvedForBookIntelligence:false as const,
+};
+describe("real PostgreSQL second review one-time worker claim",()=>{
+  it("stores a bounded, non-publishable result and never bills a second execution",async()=>{
+    const f=await readyGraphRequest();
+    let called=0;
+    const execute=async()=>{called++;return verdict};
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute})).toBe("DONE");
+    expect(called).toBe(1);
+    const row=await prisma.pdfGraphSecondReviewRequest.findUniqueOrThrow({where:{id:f.request.id}});
+    expect(row).toMatchObject({status:"SUCCEEDED",modelDecision:"PASSED",
+      claimToken:null,invocationId:"invocation-fixture",snapshotId:"snapshot-fixture",
+    });
+    expect(row.modelAxes).toHaveProperty("relationships");
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute})).toBe("IDLE");
+    expect(called).toBe(1);
+  });
+  it("rejects revoked membership before any external model admission, no retry",async()=>{
+    const f=await readyGraphRequest();
+    await prisma.workspaceMember.update({where:{workspaceId_userId:{
+      workspaceId:f.workspace.id,userId:f.user.id,
+    }},data:{role:"VIEWER"}});
+    let called=0;
+    const execute=async()=>{called++;return verdict};
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute})).toBe("DONE");
+    expect(called).toBe(0);
+    const row=await prisma.pdfGraphSecondReviewRequest.findUniqueOrThrow({where:{id:f.request.id}});
+    expect(row.status).toBe("FAILED");
+    expect(row.modelDecision).toBeNull();
+    expect(await processNextPdfGraphSecondReviewRequest({enabled:true,execute})).toBe("IDLE");
+  });
+  it("never reclaims an uncertain RUNNING paid action after process restart",async()=>{
+    const f=await readyGraphRequest();
+    await prisma.pdfGraphSecondReviewRequest.update({where:{id:f.request.id},data:{
+      status:"RUNNING",claimToken:"crashed-owner",startedAt:new Date(),
+    }});
+    let called=0;
+    expect(await processNextPdfGraphSecondReviewRequest({
+      enabled:true,execute:async()=>{called++;return verdict},
+    })).toBe("IDLE");
+    expect(called).toBe(0);
   });
 });

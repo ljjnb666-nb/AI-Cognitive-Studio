@@ -38,3 +38,12 @@
 
 ## 仍需下一步
 独立审核任务必须复核未过期授权、当前成员角色及来源绑定；使用已有 Gateway 的加密调用回执（不确定响应绝不重试）及一次性结果消费，在 PostgreSQL 写入审核决定，再经完整原书质量门禁评测确认是否可用于播客。以上尚未完成，不得视为自动审核闭环。
+
+## 新增：一次性 Worker 执行与数据库结果存档（独立手动运行）
+
+- `apps/worker/src/pdf-graph-second-review.ts` 增加 `processNextPdfGraphSecondReviewRequest` 与 `createOnDemandPdfGraphSecondReviewRuntime`。**没有被 `startWorkerRuntime` 注册**、没有 Redis 自动调度、没有重试、没有真实付费调用。只有显式设置 `PDF_GRAPH_SECOND_REVIEW_REQUEST_ENABLED=true` 并由受信运维代码手动调用 `executeOnce` 才会取出一项申请。
+- 原子 CAS：`AUTHORIZED_NOT_DISPATCHED → RUNNING` 后永不重置为可计费状态，进程崩溃保留 `RUNNING` 待审，杜绝不确定结果自动重计费。过期未认领申请只可变 `EXPIRED`。
+- 付费前再次检查当前 `CurrentDocumentExtraction`、成功 `IngestionRun`、workspace 成员不是 VIEWER、视觉 Provider 已连接、候选图结构/原书/物理页/PNG/candidate SHA、来源正文非空。读取 MinIO 原 PDF 验证大小与 SHA，然后从已有 PDF.js 隔离器重新渲染，要求 PNG 的 SHA 与用户独立授权一致；图像不持久化。
+- 复用 `createGatewayPdfGraphModelReviewer` 作第二次 Vision 调用；只记录审核三个安全状态及七个轴、Provider invocationId、snapshotId 到申请表。重新确认身份、来源、成员与路由；失效降级为 REVIEW_REQUIRED。所有状态保持不可发布，不写入 Book Intelligence、播客或 Gold。
+- worker PostgreSQL 集成测试覆盖：成功落库、撤权后的零模型调用、进程重启残留 RUNNING 禁止重试。必须以新 HEAD CI 验收。
+- **限制**：此版本尚未通过真实私人电子书/付费视觉模型进行端到端验收，也没有实现 Provider 加密结果的跨进程补取/消费确认、独立人工 Gold 与播客发布质量门禁；有争议的远端结果只能交由人工/运维核对，不得自动重新调用。
