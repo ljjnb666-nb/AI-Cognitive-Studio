@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
 import { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
 import { DEFAULT_PARSER_LIMITS, renderPdfMixedPageSourcePreviews, validatePdfVisualStructureCandidate } from "@ai-cognitive/ingestion";
-import { createGatewayPdfGraphModelReviewer, type PdfGraphModelVerdict, type ProviderGateway } from "@ai-cognitive/provider-gateway";
+import { createGatewayPdfGraphModelReviewer, PDF_GRAPH_REVIEW_AXES, type PdfGraphModelVerdict, type ProviderGateway } from "@ai-cognitive/provider-gateway";
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
 import type { Environment } from "@ai-cognitive/shared/server";
 import { createManagedPdfVisualReviewRuntime } from "./pdf-visual-review.js";
@@ -94,7 +94,8 @@ export async function processNextPdfGraphSecondReviewRequest(
 
   let status: "SUCCEEDED" | "REVIEW_REQUIRED" | "REJECTED" | "FAILED" = "FAILED";
   let failureCode: string | null = "PDF_SECOND_REVIEW_FAILED_OR_UNCERTAIN";
-  let modelDecision: string | null = null, modelAxes: Record<string, unknown> | null = null;
+  let modelDecision: string | null = null;
+  let modelAxes: Record<string, { status: string; reason: string }> | null = null;
   let invocationId: string | null = null, snapshotId: string | null = null;
   try {
     const run = await prisma.ingestionRun.findFirst({
@@ -172,7 +173,14 @@ export async function processNextPdfGraphSecondReviewRequest(
     invocationId = output.invocationId;
     snapshotId = output.snapshotId;
     modelDecision = output.decision.status;
-    modelAxes = output.decision.axes;
+    const axes = output.decision.axes;
+    if (Object.keys(axes).sort().join("|") !== [...PDF_GRAPH_REVIEW_AXES].sort().join("|") ||
+        PDF_GRAPH_REVIEW_AXES.some(axis =>
+          !axes[axis] || !["CLEAR", "ISSUE", "UNKNOWN"].includes(axes[axis].status) ||
+          typeof axes[axis].reason !== "string" ||
+          !axes[axis].reason.trim() || axes[axis].reason.length > 280)) fail();
+    modelAxes = Object.fromEntries(PDF_GRAPH_REVIEW_AXES.map(axis =>
+      [axis, { status: axes[axis].status, reason: axes[axis].reason }]));
     status = await currentSourceBound(task)
       ? output.decision.status === "PASSED" ? "SUCCEEDED" : output.decision.status
       : "REVIEW_REQUIRED";

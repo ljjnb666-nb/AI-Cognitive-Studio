@@ -146,7 +146,7 @@ const verdict = {
     status:"PASSED" as const,
     axes:Object.fromEntries(PDF_GRAPH_REVIEW_AXES.map(axis=>[axis,{
       status:"CLEAR" as const,reason:"Visible in the original page",
-    }])),
+    }])) as Record<(typeof PDF_GRAPH_REVIEW_AXES)[number],{status:"CLEAR";reason:string}>,
     approvedForPodcast:false as const, approvedForBookIntelligence:false as const,
   },
   invocationId:"invocation-fixture",snapshotId:"snapshot-fixture",
