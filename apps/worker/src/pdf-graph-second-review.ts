@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { prisma, Prisma } from "@ai-cognitive/db";
 import { pdfReviewCandidateFingerprint } from "@ai-cognitive/domain";
 import { DEFAULT_PARSER_LIMITS, renderPdfMixedPageSourcePreviews, validatePdfVisualStructureCandidate } from "@ai-cognitive/ingestion";
-import { createGatewayPdfGraphModelReviewer, validatePdfGraphModelReview, PDF_GRAPH_REVIEW_AXES, type PdfGraphModelVerdict, type ProviderGateway, type ProviderExecutionRepository } from "@ai-cognitive/provider-gateway";
+import { createGatewayPdfGraphModelReviewer, validatePdfGraphModelReview, type PdfGraphModelVerdict, type ProviderGateway, type ProviderExecutionRepository } from "@ai-cognitive/provider-gateway";
 import { S3CompatibleStorageProvider, type StorageProvider } from "@ai-cognitive/storage";
 import type { Environment } from "@ai-cognitive/shared/server";
 import { createManagedPdfVisualReviewRuntime } from "./pdf-visual-review.js";
