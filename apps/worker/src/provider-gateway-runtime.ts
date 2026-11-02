@@ -1,3 +1,4 @@
+import type { BookExecutionContext } from "@ai-cognitive/book-intelligence";
 import { bookAnalysisMessage } from "./book-analysis-request.js";
 import { prisma } from "@ai-cognitive/db";
 import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, GatewayPodcastSpeechSynthesisProvider, type DurablePodcastGenerationProvider, type DurableSpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
@@ -7,7 +8,7 @@ import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewa
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
 
-export type BookGatewayRuntime = { gateway: ProviderGateway; repository: ProviderExecutionRepository; createAnalysisProvider(input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }): Promise<AnalysisProvider>; createEmbeddingGatewayForRun(input: { workspaceId: string; userId: string; analysisRunId: string }): Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute; maxEmbeddingInputs?: number }>; close(): Promise<void>; };
+export type BookGatewayRuntime = { gateway: ProviderGateway; repository: ProviderExecutionRepository; createAnalysisProvider(input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string; execution?: BookExecutionContext }): Promise<AnalysisProvider>; createEmbeddingGatewayForRun(input: { workspaceId: string; userId: string; analysisRunId: string }): Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute; maxEmbeddingInputs?: number }>; close(): Promise<void>; };
 /** Execution limits also let an explicitly budgeted operator disable deadline retries. */
 export type BookProductionGatewayRuntimeOverrides = Pick<GatewayExecutionDependencies, "circuit" | "rate" | "concurrency" | "validateEndpoint" | "maxAttempts" | "timeoutMs"> & { adapterResolver?: ProviderAdapterResolver; redisFactory?: (url: string) => ReturnType<typeof createRedisConnection> };
 
@@ -44,7 +45,7 @@ function slot(stage: AnalysisRequest["stage"]): "BOOK_CHUNK_ANALYSIS" | "BOOK_RE
 
 class GatewayAnalysisProvider implements AnalysisProvider {
   private readonly receipts = new WeakMap<object, { invocationId: string; snapshotId: string }>();
-  constructor(private readonly runtime: BookGatewayRuntime, private readonly input: { workspaceId: string; userId: string; analysisRunId: string; executionKey: string; routes: Record<"BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS", ExecutionSnapshot> }) {}
+  constructor(private readonly runtime: BookGatewayRuntime, private readonly input: { workspaceId: string; userId: string; analysisRunId: string; executionKey: string; execution?: BookExecutionContext; routes: Record<"BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS", ExecutionSnapshot> }) {}
   async generateStructured(request: AnalysisRequest) {
     const routeSlot = slot(request.stage), pinned = this.input.routes[routeSlot], structuredOutput = pinned.capability.structuredOutput === "STRICT_JSON_SCHEMA" ? "STRICT_JSON_SCHEMA" : pinned.capability.structuredOutput === "JSON_MODE" ? "JSON_MODE" : undefined;
     if (!structuredOutput) throw new Error("BOOK_ANALYSIS_STRUCTURED_OUTPUT_UNSUPPORTED");
@@ -55,7 +56,7 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     const content = bookAnalysisMessage(request);
     const text = { system, messages: [{ role: "user" as const, content }], structuredOutput: structuredOutput === "STRICT_JSON_SCHEMA" ? { mode: "STRICT_JSON_SCHEMA" as const, schemaName: "book_analysis_response", schema } : { mode: "JSON_MODE" as const } };
     const inputHash = sha256(JSON.stringify([this.input.workspaceId, routeSlot, this.input.analysisRunId, request.stage, operation, sha256(content), request.pipelineVersion, request.promptVersion, schema]));
-    const outcome = await this.runtime.gateway.execute({ workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion: request.promptVersion, schemaVersion: "book-analysis-v1" }, { userId: this.input.userId });
+    const outcome = await this.runtime.gateway.execute({ bookExecution: this.input.execution, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion: request.promptVersion, schemaVersion: "book-analysis-v1" }, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);
     if (outcome.status === "ALREADY_PROCESSED" && outcome.textConsumed) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const response = outcome.response as { type?: string; structured?: unknown } | undefined;
@@ -102,7 +103,7 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
     }));
     const routes = Object.fromEntries(snapshots.map((snapshot, index) => [slots[index]!, snapshot])) as Record<"BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS", ExecutionSnapshot>;
     if (Object.values(routes).some(snapshot => snapshot.capability.structuredOutput !== "STRICT_JSON_SCHEMA" && snapshot.capability.structuredOutput !== "JSON_MODE")) throw new Error("BOOK_ANALYSIS_STRUCTURED_OUTPUT_UNSUPPORTED");
-    return new GatewayAnalysisProvider(runtime, { workspaceId: input.workspaceId, userId: input.userId, analysisRunId: input.analysisRunId, executionKey: run.jobId, routes });
+    return new GatewayAnalysisProvider(runtime, { workspaceId: input.workspaceId, userId: input.userId, analysisRunId: input.analysisRunId, executionKey: run.jobId, execution: input.execution, routes });
   }, createEmbeddingGatewayForRun: async input => {
     const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: input.analysisRunId }, select: { routePlan: true, routePlanHash: true, job: { select: { payload: true } } } });
     // Legacy rows never recorded an embedding identity.  Assigning today's

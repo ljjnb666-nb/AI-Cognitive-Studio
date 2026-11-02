@@ -23,7 +23,7 @@ import {S3CompatibleStorageProvider} from "@ai-cognitive/storage";
 
 export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider> };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
-export type WorkerRuntimeOptions = { source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: ProcessBookAnalysisDependencies; /** Deterministic adapter/control seam for production-composition tests; never supplies Book dependencies. */ bookProductionGatewayOverrides?: BookProductionGatewayRuntimeOverrides; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysisBootstrap: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
+export type WorkerRuntimeOptions = { bookScope?: { prefix: string; bootstrapIds(): Promise<string[]>; analysisIds(): Promise<string[]> }; source?: NodeJS.ProcessEnv; podcastAdapter?: PodcastRuntimeAdapter; audioAdapter?: AudioRuntimeAdapter; shortVideoAdapter?: ShortVideoRuntimeAdapter; bookDependencies?: ProcessBookAnalysisDependencies; /** Deterministic adapter/control seam for production-composition tests; never supplies Book dependencies. */ bookProductionGatewayOverrides?: BookProductionGatewayRuntimeOverrides; dispatchIntervalMs?: number; bullmqPrefix?: string; outboxTopics?: Partial<{ sourceIngestion: string; bookAnalysisBootstrap: string; bookAnalysis: string; podcastGeneration: string; podcastAudio: string; shortVideo: string }> };
 
 export function resolvePodcastRuntimeAdapter(source: NodeJS.ProcessEnv, injected?: PodcastRuntimeAdapter): PodcastRuntimeAdapter | undefined {
   const configured = source.PODCAST_GENERATION_PROVIDER?.trim();
@@ -51,6 +51,7 @@ function asReconciliationQueue(queue: { getJob(id: string): Promise<{ id?: strin
 }
 
 export async function startWorkerRuntime(environment: Environment, options: WorkerRuntimeOptions = {}) {
+  if (options.bookScope && (!options.bookScope.prefix.trim() || options.bookScope.prefix === (options.bullmqPrefix ?? "bull"))) throw new Error("BOOK_SCOPE_QUEUE_PREFIX_INVALID");
   const source = options.source ?? process.env;
   let productionPodcastGatewayRuntime: PodcastGatewayRuntime | undefined;
   let productionPodcastAudioGatewayRuntime: PodcastAudioGatewayRuntime | undefined;
@@ -62,6 +63,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   if (shortVideoConfigured && options.shortVideoAdapter?.provider && options.shortVideoAdapter.provider.identity.provider !== shortVideoConfigured) throw new Error(`SHORT_VIDEO_GENERATION_PROVIDER_UNSUPPORTED:${shortVideoConfigured}`);
   const queueOptions = options.bullmqPrefix ? { prefix: options.bullmqPrefix } : undefined;
   const workerOptions = (concurrency: number) => ({ ...(queueOptions ?? {}), concurrency });
+  const bookQueueOptions = options.bookScope ? { prefix: options.bookScope.prefix } : queueOptions;
+  const bookWorkerOptions = { ...bookQueueOptions, concurrency: options.bookScope ? 1 : environment.WORKER_BOOK_ANALYSIS_CONCURRENCY, ...(options.bookScope ? { allowAnalysis: async (id: string) => (await options.bookScope!.analysisIds()).includes(id), allowBootstrap: async (id: string) => (await options.bookScope!.bootstrapIds()).includes(id) } : {}) };
   const bookConfigured = source.BOOK_ANALYSIS_PROVIDER?.trim();
   // Workspace BYOK is resolved per run. A gateway-capable worker must not be
   // hidden behind the legacy process-global provider toggle.
@@ -101,8 +104,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   }
   const audioAdapter = audioConfigured ? options.audioAdapter ?? { providerForRun: input => (productionPodcastAudioGatewayRuntime ??= createPodcastAudioProductionGatewayRuntime(source, options.bookProductionGatewayOverrides)).createSpeechProviderForRun(input) } : undefined;
   const productionBookDependencies = bookEnabled && !options.bookDependencies ? (() => { const runtime = productionBookGatewayRuntime = createBookProductionGatewayRuntime(source, options.bookProductionGatewayOverrides); return { analysisProviderForRun: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => runtime.createAnalysisProvider(input), embeddingGatewayForRun: (input: { workspaceId: string; userId: string; analysisRunId: string }) => runtime.createEmbeddingGatewayForRun(input) }; })() : undefined;
-  const bookWorker = bookEnabled ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY)) : undefined;
-  const bookBootstrapWorker = createBookAnalysisBootstrapWorker(environment, { ...workerOptions(environment.WORKER_BOOK_ANALYSIS_CONCURRENCY), source });
+  const bookWorker = bookEnabled ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, bookWorkerOptions) : undefined;
+  const bookBootstrapWorker = createBookAnalysisBootstrapWorker(environment, { ...bookWorkerOptions, source });
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);
   const ingestionWorker = createSourceIngestionWorker(environment, { ...workerOptions(environment.WORKER_INGESTION_CONCURRENCY), ...(sourceIngestionOcrRuntime ? { pdfOcrExecutor: sourceIngestionOcrRuntime.pdfOcrExecutor, ...(sourceIngestionOcrRuntime.standardAdmissionEnabled ? { ocrStandardAdmissionEnabled: true } : {}) } : {}) });
   if (!bookWorker) logger.info("worker.book_analysis.disabled", { reason: "BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED" });
@@ -114,8 +117,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const doclingLayoutQueue = doclingLayoutExecutor ? createDoclingLayoutQueue(environment, options.bullmqPrefix) : undefined;
   const doclingLayoutWorker = doclingLayoutExecutor ? createDoclingLayoutWorker(environment, doclingLayoutExecutor, { ...(options.bullmqPrefix ? { prefix:options.bullmqPrefix } : {}) }) : undefined;
   const ingestionQueue = createSourceIngestionQueue(environment, queueOptions);
-  const bookBootstrapQueue = createBookAnalysisBootstrapQueue(environment, queueOptions);
-  const bookQueue = bookWorker ? createBookAnalysisQueue(environment, queueOptions) : undefined;
+  const bookBootstrapQueue = createBookAnalysisBootstrapQueue(environment, bookQueueOptions);
+  const bookQueue = bookWorker ? createBookAnalysisQueue(environment, bookQueueOptions) : undefined;
   const podcastQueue = podcastWorker ? createPodcastGenerationQueue(environment, queueOptions) : undefined;
   const audioQueue = audioWorker ? createPodcastAudioQueue(environment, queueOptions) : undefined;
   const shortVideoQueue = shortVideoWorker ? createShortVideoGenerationQueue(environment, queueOptions) : undefined;
@@ -144,17 +147,17 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   };
   // Provider-wait repair is deliberately coarse-grained, rather than tied to
   // the high-frequency outbox dispatcher, so an unconfigured workspace cannot poll tightly.
-  schedules.push(setInterval(() => { if (!stopping) void Promise.all([reconcileHistoricalBookAnalysisBootstraps(25), reconcileWaitingBookAnalysisBootstraps(25, source)]).catch(error => logger.warn("worker.book_analysis_bootstrap_reconciliation.failed", { error: error instanceof Error ? error.message : String(error) })); }, 60_000));
+  if (!options.bookScope) schedules.push(setInterval(() => { if (!stopping) void Promise.all([reconcileHistoricalBookAnalysisBootstraps(25), reconcileWaitingBookAnalysisBootstraps(25, source)]).catch(error => logger.warn("worker.book_analysis_bootstrap_reconciliation.failed", { error: error instanceof Error ? error.message : String(error) })); }, 60_000));
   // This bounded domain sweep has its own dispatch guard and error boundary;
   // the PR #46 durable-operation sweep is scheduled independently below.
-  const reconcileBookAnalysisStale = dispatch("book-analysis-stale-reconciliation", () => reconcileStaleBookAnalysisJobs(25), 60_000);
+  const reconcileBookAnalysisStale = options.bookScope ? undefined : dispatch("book-analysis-stale-reconciliation", () => reconcileStaleBookAnalysisJobs(25), 60_000);
   // Explicit opt-in only: merging this code must not enable automatic recovery.
   const deferredRecoveryFlag = source.BOOK_EMBEDDING_DEFERRED_RECOVERY_ENABLED?.trim();
   if (deferredRecoveryFlag && !["true", "false"].includes(deferredRecoveryFlag)) {
     throw new Error("BOOK_EMBEDDING_DEFERRED_RECOVERY_FLAG_INVALID");
   }
   let deferredRecoveryCursor: { completedAt: Date; id: string } | null = null;
-  const reconcileDeferredBookEmbedding = deferredRecoveryFlag === "true" && bookQueue
+  const reconcileDeferredBookEmbedding = !options.bookScope && deferredRecoveryFlag === "true" && bookQueue
     ? dispatch("book-embedding-deferred-recovery", async () => {
         const result = await recoverSettledDeferredBookEmbeddings({
           limit: 25, cursor: deferredRecoveryCursor,
@@ -195,8 +198,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   // ONLY processes whose identity can be proven. One bounded startup sweep plus
   // a periodic bounded sweep; never cross-host, never process-name based.
   const reconcileOcrServersSweep = sourceIngestionOcrRuntime?.kind === "mineru" ? (() => { const ocrRuntime = sourceIngestionOcrRuntime; return dispatch("ocr-server-reconciliation", () => reconcileOcrServerInstances({ hostId: ocrRuntime.config.hostId, executable: ocrRuntime.config.executable, executableArgs: ocrRuntime.config.executableArgs, stopTimeoutMs: ocrRuntime.config.serverStopTimeoutMs, homeRoot: ocrRuntime.config.homeRoot }), 60_000); })() : undefined;
-  const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); }];
-  initial.push(reconcileBookAnalysisStale);
+  const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", async () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.bookScope ? { aggregateIds: (await options.bookScope.bootstrapIds()).concat("__NO_OTHER_BOOTSTRAP__") } : {}), ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { if (!options.bookScope) { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); } }];
+  if (reconcileBookAnalysisStale) initial.push(reconcileBookAnalysisStale);
   if (reconcileDeferredBookEmbedding) initial.push(reconcileDeferredBookEmbedding);
   initial.push(reconcileIngestionDeliveriesSweep);
   if (reconcileDoclingSidecars) initial.push(reconcileDoclingSidecars);
@@ -210,7 +213,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
     return processNextOcrStructureReview({gateway:runtime.gateway,repository:runtime.repository,storage,privateTempRoot:source.PDF_REVIEW_PRIVATE_TEMP_ROOT!});
   }));
   if (reconcileOcrServersSweep) initial.push(reconcileOcrServersSweep);
-  if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
+  if (bookQueue) initial.push(dispatch("book-analysis", async () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.bookScope ? { aggregateIds: (await options.bookScope.analysisIds()).concat("__NO_OTHER_ANALYSIS__") } : {}), ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (podcastQueue) initial.push(dispatch("podcast-generation", () => dispatchPodcastGenerationWithQueue(podcastQueue, { ...(options.outboxTopics?.podcastGeneration ? { topic: options.outboxTopics.podcastGeneration } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (audioQueue) initial.push(dispatch("podcast-audio", () => dispatchPodcastAudioGenerationWithQueue(audioQueue, { ...(options.outboxTopics?.podcastAudio ? { topic: options.outboxTopics.podcastAudio } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
   if (shortVideoQueue) initial.push(dispatch("short-video-generation", () => dispatchShortVideoGenerationWithQueue(shortVideoQueue, { ...(options.outboxTopics?.shortVideo ? { topic: options.outboxTopics.shortVideo } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));
@@ -237,9 +240,9 @@ export async function startWorkerRuntime(environment: Environment, options: Work
     });
     reconciliationSweepState = result.nextState;
   }, undefined, false);
-  schedules.push(scheduleDurableOperationReconciliation(() => { void reconcileDurableOperations(); }));
+  if (!options.bookScope) schedules.push(scheduleDurableOperationReconciliation(() => { void reconcileDurableOperations(); }));
   // Startup work is one bounded page and does not delay readiness.
-  void reconcileDurableOperations();
+  if (!options.bookScope) void reconcileDurableOperations();
   logger.info("worker.started", { queue: "system.health-check", podcastGenerationEnabled: Boolean(podcastWorker) });
   let closePromise: Promise<void> | undefined;
   return { healthWorker, ingestionWorker, doclingLayoutWorker, bookBootstrapWorker, bookWorker, podcastWorker, audioWorker, shortVideoWorker, close(signal = "manual") { return closePromise ??= (async () => { stopping = true; logger.info("worker.shutdown.started", { signal }); for (const timer of schedules) clearInterval(timer); await Promise.allSettled(active); await heartbeat.close().catch(() => undefined); await ingestionQueue.close(); await doclingLayoutQueue?.close(); await bookBootstrapQueue.close(); await bookQueue?.close(); await podcastQueue?.close(); await audioQueue?.close(); await shortVideoQueue?.close(); await healthWorker.close(); // RF01 P1-02 shutdown order: BullMQ's close() first stops the worker from

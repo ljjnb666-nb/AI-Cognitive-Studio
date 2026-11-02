@@ -1,3 +1,4 @@
+import { assertBookOwnedAuthority, type BookExecutionContext } from "./execution-authority.js";
 import { randomUUID } from "node:crypto";
 import { admitWorkspaceExpensiveOperation, Prisma, prisma, type ExpensiveOperationRecoveryTarget } from "../../db/src/index.js";
 import { logger } from "@ai-cognitive/shared";
@@ -54,7 +55,7 @@ type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPe
 export type AnalysisFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
 export type ProcessBookAnalysisDependencies = {
   analysisProvider?: AnalysisProvider;
-  analysisProviderForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => Promise<AnalysisProvider> | AnalysisProvider;
+  analysisProviderForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string; execution?: BookExecutionContext }) => Promise<AnalysisProvider> | AnalysisProvider;
   embeddingProvider?: EmbeddingProvider;
   /** Query/retrieval identity only; never used by the durable EMBEDDINGS stage. */
   embeddingGateway?: { gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute; maxEmbeddingInputs?: number };
@@ -85,8 +86,9 @@ async function persistTextDestination(run: any, token: string, provider: Analysi
   if (!durable.consumeGenerated) return withOwnedAnalysisTransaction(run.id, token, tx => input.write(tx, response));
   const consumerFingerprint = sha256(JSON.stringify([run.workspaceId, run.id, input.kind, input.key, input.lineage]));
   return durable.consumeGenerated(response, { consumerKind: "BOOK_ANALYSIS_TEXT", consumerKey: `${input.kind}:${input.key}`, consumerFingerprint, materialize: async (tx, recovered) => {
-    const owners = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${run.id} AND "workspaceId" = ${run.workspaceId} AND "executionClaimToken" = ${token} AND "executionLeaseUntil" > NOW() AND "status" = 'RUNNING'::"AnalysisRunStatus" FOR UPDATE`;
+    const owners = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${run.id} AND "workspaceId" = ${run.workspaceId} AND "executionClaimToken" = ${token} AND "executionLeaseUntil" > clock_timestamp() AND "status" = 'RUNNING'::"AnalysisRunStatus" FOR UPDATE`;
     if (owners.length !== 1) throw new Error("BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST");
+    await assertBookOwnedAuthority(tx as never, run.id, token);
     await input.write(tx, recovered);
   } });
 }
@@ -468,7 +470,7 @@ async function runEmbeddingStage(run: any, token: string, dependencies: ActiveBo
     const successful = previous.find(invocation => invocation.status === "SUCCEEDED");
     const retryOrdinal = Math.max(0, ...previous.map(invocation => { const match = invocation.idempotencyKey.match(/:retry:([1-9][0-9]*)$/); return match ? Number(match[1]) : 0; }).filter(Number.isSafeInteger));
     const idempotencyKey = successful?.idempotencyKey ?? (previous.length ? bookAnalysisEmbeddingRetryIdempotencyKey(run.id, batchOrdinal, retryOrdinal + 1) : baseIdempotencyKey);
-    const request = { workspaceId: run.workspaceId, routeSlot: "EMBEDDING" as const, correlationId: dependencies.correlationId ?? run.id, idempotencyKey, inputHash: canonicalEmbeddingInputHash(embedding), capability: { family: "EMBEDDING" as const }, embedding, ...(dependencies.embeddingGateway.pinnedRoute ? { pinnedRoute: dependencies.embeddingGateway.pinnedRoute } : {}), pipelineVersion: `${run.pipelineVersion}:book-embedding:${batchOrdinal}:${targetLineageHash}` };
+    const request = { bookExecution: { analysisRunId: run.id, jobId: run.jobId, dispatchGeneration: run.dispatchGeneration, claimToken: token, userId: dependencies.embeddingGateway.userId, workspaceId: run.workspaceId }, workspaceId: run.workspaceId, routeSlot: "EMBEDDING" as const, correlationId: dependencies.correlationId ?? run.id, idempotencyKey, inputHash: canonicalEmbeddingInputHash(embedding), capability: { family: "EMBEDDING" as const }, embedding, ...(dependencies.embeddingGateway.pinnedRoute ? { pinnedRoute: dependencies.embeddingGateway.pinnedRoute } : {}), pipelineVersion: `${run.pipelineVersion}:book-embedding:${batchOrdinal}:${targetLineageHash}` };
     const outcome = await dependencies.embeddingGateway.gateway.execute(request, { userId: dependencies.embeddingGateway.userId });
     if (outcome.status === "RECONCILIATION_REQUIRED") throw new Error("BOOK_ANALYSIS_EMBEDDING_RECONCILIATION_REQUIRED");
     if (outcome.status === "IN_PROGRESS" || outcome.status === "BLOCKED_EXISTING") throw new Error("BOOK_ANALYSIS_EMBEDDING_GATEWAY_DEFERRED");
@@ -767,6 +769,10 @@ async function runFinalizingStage(run: any, token: string, dependencies: ActiveB
     await tx.$executeRaw`UPDATE "BookAnalysisRun" SET "status" = 'SUCCEEDED'::"AnalysisRunStatus", "analysisStage" = 'COMPLETED'::"AnalysisRunStage", "completedAt" = NOW(), "errorCode" = NULL, "executionClaimToken" = NULL, "executionClaimedAt" = NULL, "executionLeaseUntil" = NULL WHERE "id" = ${run.id}`;
     await tx.job.update({ where: { id: run.jobId }, data: { result: { analysisRunId: run.id, chunkSetId: run.chunkSetId, embeddingVersion: identity.embeddingVersion, embeddingIdentityHash: identity.hash } } });
     await tx.$executeRaw`UPDATE "Job" SET "status" = 'SUCCEEDED'::"JobStatus", "progress" = 100, "error" = NULL, "completedAt" = NOW() WHERE "id" = ${run.jobId}`;
+    const finalJob=await tx.job.findUniqueOrThrow({where:{id:run.jobId}});
+    const grantId=(finalJob.payload as {bookPaidGrantId?:string}|null)?.bookPaidGrantId;
+    if(grantId){const changed=await tx.job.updateMany({where:{id:grantId,status:"RUNNING"},data:{status:"SUCCEEDED",completedAt:new Date(),result:{analysisRunId:run.id,executionJobId:run.jobId}}});if(changed.count!==1)throw new Error("BOOK_PAID_EXECUTION_DENIED");}
+
   });
 }
 
@@ -784,7 +790,7 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
       if (!job.userId) throw new Error("BOOK_ANALYSIS_DURABLE_PRINCIPAL_MISSING");
       const membership = job.workspaceId === initial.workspaceId ? await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: initial.workspaceId, userId: job.userId } }, select: { userId: true } }) : null;
       if (!membership) throw new Error("BOOK_ANALYSIS_DURABLE_PRINCIPAL_INVALID");
-      const analysisProvider = dependencies.analysisProviderForRun ? await dependencies.analysisProviderForRun({ workspaceId: initial.workspaceId, userId: job.userId, analysisRunId: initial.id, provider: initial.provider, model: initial.model }) : dependencies.analysisProvider;
+      const analysisProvider = dependencies.analysisProviderForRun ? await dependencies.analysisProviderForRun({ workspaceId: initial.workspaceId, userId: job.userId, analysisRunId: initial.id, provider: initial.provider, model: initial.model, execution: { analysisRunId: initial.id, jobId: initial.jobId, dispatchGeneration: initial.dispatchGeneration, claimToken: executionClaimToken, userId: job.userId, workspaceId: initial.workspaceId } }) : dependencies.analysisProvider;
       if (!analysisProvider) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED");
       activeDependencies = { ...dependencies, analysisProvider, embeddingGateway: dependencies.embeddingGatewayForRun ? await dependencies.embeddingGatewayForRun({ workspaceId: initial.workspaceId, userId: job.userId, analysisRunId: initial.id }) : dependencies.embeddingGateway };
     } else {
@@ -876,7 +882,7 @@ WHERE "id" = ${run.id}
   AND "dispatchGeneration" = ${expectedDispatchGeneration}
   AND "dispatchGeneration" < ${MAX_PERSISTED_DISPATCH_GENERATION}
   AND "status" IN ('QUEUED'::"AnalysisRunStatus", 'RUNNING'::"AnalysisRunStatus", 'FAILED'::"AnalysisRunStatus")
-  AND NOT ("status" = 'RUNNING'::"AnalysisRunStatus" AND "executionClaimToken" IS NOT NULL AND "executionLeaseUntil" > NOW())
+  AND NOT ("status" = 'RUNNING'::"AnalysisRunStatus" AND "executionClaimToken" IS NOT NULL AND "executionLeaseUntil" > clock_timestamp())
 RETURNING "id"`;
       if (changed.length !== 1) return "RACE_LOST";
       const current = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: run.id } });
