@@ -7,6 +7,22 @@ function input(providerKey: ExecutionSnapshot["providerKey"], protocol: Executio
 function transport(body: unknown, status = 200) { return new DeterministicProviderHttpTransport(() => ({ status, headers: { "x-request-id": "req-1", "retry-after": "2" }, body: JSON.stringify(body) })); }
 
 describe("Phase 8B real text provider adapters", () => {
+  it.each(["user", "assistant", "UNKNOWN"])("retains allowlisted moderation diagnostics for %s", async role => {
+    const body = { error: { code: "1301", message: "PRIVATE" }, ...(role === "UNKNOWN" ? {} : { contentFilter: [{ role, level: 1, label: "PRIVATE" }] }) };
+    const wire = transport(body, 400);
+    await expect(new OpenAICompatibleAdapter(wire).execute(input("zhipu", "OPENAI_COMPATIBLE"))).rejects.toMatchObject({ code: "CONTENT_REJECTED", retryable: false, usage: { extra: { moderationDiagnostic: { filters: [{ role, level: role === "UNKNOWN" ? "UNKNOWN" : 1 }] } } } });
+  });
+  it("classifies sensitive completion with no message as rejection and preserves billed usage", async () => {
+    const wire = transport({ choices: [{ finish_reason: "sensitive" }], usage: { prompt_tokens: 7, completion_tokens: 3 } });
+    await expect(new OpenAICompatibleAdapter(wire).execute(input("zhipu", "OPENAI_COMPATIBLE"))).rejects.toMatchObject({ code: "CONTENT_REJECTED", retryable: false, usage: { inputTokens: 7, outputTokens: 3, extra: { moderationDiagnostic: { finishReason: "sensitive", filters: [{ role: "UNKNOWN", level: "UNKNOWN" }] } } } });
+  });
+  it("classifies Zhipu 1301 as a non-retryable content rejection without exposing its message", async () => {
+    const wire = transport({ error: { code: "1301", message: "private-content" } }, 400);
+    await expect(new OpenAICompatibleAdapter(wire).execute(input("zhipu", "OPENAI_COMPATIBLE", "https://open.bigmodel.cn/api/paas/v4/chat/completions"))).rejects.toMatchObject({ code: "CONTENT_REJECTED", message: "CONTENT_REJECTED", retryable: false });
+    expect(wire.calls).toHaveLength(1);
+    const other = transport({ error: { code: "1301" } }, 400);
+    await expect(new OpenAICompatibleAdapter(other).execute(input("deepseek", "OPENAI_COMPATIBLE"))).rejects.toMatchObject({ code: "INVALID_PROVIDER_REQUEST" });
+  });
   it("locally validates an optional JSON-mode schema and rejects a schema echo", () => {
     const jsonInput: TextGenerationInput = { ...text, structuredOutput: { mode: "JSON_MODE", schema: text.structuredOutput!.schema } };
     expect(() => validateTextGenerationInput(jsonInput)).not.toThrow();

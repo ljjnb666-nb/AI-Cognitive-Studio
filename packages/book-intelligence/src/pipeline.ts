@@ -18,7 +18,7 @@ import { buildContext } from "./context.js";
 import { cosineSimilarity, embeddingIdentityWithHash, type EmbeddingProvider } from "./embeddings.js";
 import { sha256, type SourceBlockInput } from "./chunking.js";
 import { bookRoutePlanHash, normalizeBookRoutePlan, type BookAnalysisRoutePlan } from "./route-plan.js";
-import { canonicalEmbeddingInputHash, type ProviderExecutionRepository, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
+import { canonicalEmbeddingInputHash, ProviderGatewayError, type ProviderExecutionRepository, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
 import { bookAnalysisEmbeddingIdempotencyKey, bookAnalysisEmbeddingRetryIdempotencyKey, loadConsumedBookAnalysisEmbeddingIdentity, materializeBookAnalysisEmbeddings, type BookAnalysisEmbeddingTarget, verifyConsumedBookAnalysisEmbeddings } from "./gateway-materialization.js";
 import { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "../../ingestion/src/outbox-dispatcher.js";
 import {
@@ -812,7 +812,7 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
       }
     }
   } catch (error) {
-    const errorCode = error instanceof Error ? error.message.split(":")[0] ?? "BOOK_ANALYSIS_FAILED" : "BOOK_ANALYSIS_FAILED";
+    const errorCode = error instanceof ProviderGatewayError ? error.code : error instanceof Error ? error.message.split(":")[0] ?? "BOOK_ANALYSIS_FAILED" : "BOOK_ANALYSIS_FAILED";
     if (errorCode === BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST) logger.warn("book.analysis.ownership_lost", { ...logFields(initial, dependencies.correlationId), errorCode });
     else await failOwnedBookAnalysis(initial.id, initial.jobId, executionClaimToken, errorCode);
     logger.error("book.analysis.failed", { ...logFields(initial, dependencies.correlationId), errorCode });
