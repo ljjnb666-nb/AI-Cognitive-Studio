@@ -22,7 +22,7 @@ async function bookResponse(request: any) {
     include: { sourceSpans: { include: { sourceBlock: { include: { extraction: true } } }, orderBy: { ordinal: "asc" } } },
   });
   const payload = JSON.parse(request.text?.messages?.[0]?.content ?? "null");
-  if (!chunk || chunk.content !== payload?.content || !chunk.sourceSpans.length)
+  if (!chunk || !chunk.sourceSpans.length)
     throw new Error("PHASE9_BOOK_CHUNK_LINEAGE_MISMATCH");
   for (const span of chunk.sourceSpans) {
     const block = span.sourceBlock;
@@ -30,6 +30,9 @@ async function bookResponse(request: any) {
       throw new Error("PHASE9_BOOK_BLOCK_LINEAGE_MISMATCH");
   }
   const expectedEvidence = chunk.sourceSpans.map(span => ({ sourceBlockId: span.sourceBlockId, startOffset: span.startOffset, endOffset: span.endOffset, text: span.sourceBlock.text.slice(span.startOffset, span.endOffset) }));
+  const duplicated = expectedEvidence.map(span => span.text).join("\n\n") === chunk.content;
+  if (duplicated ? Object.hasOwn(payload, "content") : payload.content !== chunk.content)
+    throw new Error("PHASE9_BOOK_CHUNK_CONTENT_MISMATCH");
   if (JSON.stringify(payload.sourceEvidence) !== JSON.stringify(expectedEvidence)) throw new Error("PHASE9_BOOK_EVIDENCE_PAYLOAD_MISMATCH");
   // Keep the fixture's single evidence anchor per Book. Later bounded chunks
   // contribute claims, so retrieval input size does not grow with quote count.
