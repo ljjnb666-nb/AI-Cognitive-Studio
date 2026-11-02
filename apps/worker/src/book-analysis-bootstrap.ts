@@ -10,7 +10,7 @@ export const BOOK_ANALYSIS_BOOTSTRAP_QUEUE = "book.analysis.bootstrap";
 export const BOOK_ANALYSIS_BOOTSTRAP_JOB = "book.analysis.bootstrap";
 export type BookAnalysisBootstrapPayload = { bootstrapId: string; dispatchGeneration: number };
 export type BookAnalysisBootstrapBlockingReason = "NONE" | "CAPACITY_LIMIT" | "PROVIDER_NOT_READY" | "ACTIVE_LEASE" | "RECOVERY_REQUIRED";
-export type BookAnalysisBootstrapQueueOptions = { prefix?: string; concurrency?: number; source?: NodeJS.ProcessEnv };
+export type BookAnalysisBootstrapQueueOptions = { prefix?: string; concurrency?: number; source?: NodeJS.ProcessEnv; allowBootstrap?: (id: string) => Promise<boolean> };
 export type BookAnalysisBootstrapFaultPoint = "afterClaim" | "afterChunkSetMaterialization" | "afterBookAnalysisRequest";
 export type ProcessBookAnalysisBootstrapOptions = { source?: NodeJS.ProcessEnv; expectedDispatchGeneration?: number; faultInjector?: (point: BookAnalysisBootstrapFaultPoint, input: { bootstrapId: string; analysisRunId?: string }) => Promise<void> | void };
 /**
@@ -106,7 +106,7 @@ export async function processBookAnalysisBootstrap(bootstrapId: string, options:
 }
 
 export function createBookAnalysisBootstrapWorker(environment: Environment, options: BookAnalysisBootstrapQueueOptions = {}) {
-  return new Worker<BookAnalysisBootstrapPayload>(BOOK_ANALYSIS_BOOTSTRAP_QUEUE, job => processBookAnalysisBootstrap(job.data.bootstrapId, { source: options.source, expectedDispatchGeneration: job.data.dispatchGeneration }), { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_BOOK_ANALYSIS_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) });
+  return new Worker<BookAnalysisBootstrapPayload>(BOOK_ANALYSIS_BOOTSTRAP_QUEUE, async job => { if (options.allowBootstrap && !await options.allowBootstrap(job.data.bootstrapId)) throw new Error("BOOK_SCOPE_DENIED"); return processBookAnalysisBootstrap(job.data.bootstrapId, { source: options.source, expectedDispatchGeneration: job.data.dispatchGeneration }); }, { connection: createRedisConnection(environment.REDIS_URL), concurrency: options.concurrency ?? environment.WORKER_BOOK_ANALYSIS_CONCURRENCY ?? 1, ...(options.prefix ? { prefix: options.prefix } : {}) });
 }
 export function createBookAnalysisBootstrapQueue(environment: Environment, options: BookAnalysisBootstrapQueueOptions = {}) { return new Queue<BookAnalysisBootstrapPayload>(BOOK_ANALYSIS_BOOTSTRAP_QUEUE, { connection: createRedisConnection(environment.REDIS_URL), ...(options.prefix ? { prefix: options.prefix } : {}) }); }
 export function dispatchBookAnalysisBootstrapWithQueue(queue: Queue<BookAnalysisBootstrapPayload>, options: { batchSize?: number; leaseMs?: number; maxAttempts?: number; dispatchConcurrency?: number; aggregateIds?: string[]; topic?: string } = {}) {

@@ -1,3 +1,4 @@
+import { assertBookOwnedAuthority } from "./execution-authority.js";
 import { ProviderGatewayError, embeddingDimensions, type ProviderExecutionRepository } from "@ai-cognitive/provider-gateway";
 import { prisma } from "../../db/src/index.js";
 import { sha256 } from "./chunking.js";
@@ -31,8 +32,9 @@ function validVector(value: unknown, dimensions: number): value is number[] { re
  */
 export async function verifyConsumedBookAnalysisEmbeddings(input: BookAnalysisEmbeddingInput) {
   return prisma.$transaction(async (tx) => {
-    const owners = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${input.analysisRunId} AND "workspaceId" = ${input.workspaceId} AND "executionClaimToken" = ${input.claimToken} AND "executionLeaseUntil" > NOW() AND "status" = 'RUNNING'::"AnalysisRunStatus" AND "analysisStage" = 'EMBEDDINGS'::"AnalysisRunStage" FOR UPDATE`;
+    const owners = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${input.analysisRunId} AND "workspaceId" = ${input.workspaceId} AND "executionClaimToken" = ${input.claimToken} AND "executionLeaseUntil" > clock_timestamp() AND "status" = 'RUNNING'::"AnalysisRunStatus" AND "analysisStage" = 'EMBEDDINGS'::"AnalysisRunStage" FOR UPDATE`;
     if (owners.length !== 1) throw new Error("BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST");
+    await assertBookOwnedAuthority(tx as never, input.analysisRunId, input.claimToken);
     const invocation = await tx.providerInvocation.findFirst({ where: { id: input.invocationId, workspaceId: input.workspaceId, status: "SUCCEEDED" }, select: { id: true, snapshotId: true, idempotencyKey: true } });
     if (!invocation || !isBookAnalysisEmbeddingIdempotencyKey(invocation.idempotencyKey, input.analysisRunId) || invocation.snapshotId !== input.snapshotId) throw new ProviderGatewayError("IDEMPOTENCY_CONFLICT", "BookAnalysis invocation provenance changed");
     const [receipt, snapshot] = await Promise.all([
@@ -131,8 +133,9 @@ export async function materializeBookAnalysisEmbeddings(repository: ProviderExec
   });
   return repository.consumeEmbeddingResult({ workspaceId: input.workspaceId, invocationId: input.invocationId, snapshotId: input.snapshotId, consumerKind: "BOOK_ANALYSIS_EMBEDDINGS", consumerKey: input.analysisRunId, consumerFingerprint }, async ({ tx, vectors, snapshot: pinned, receipt }) => {
     if (vectors.length !== input.targets.length || receipt.vectorCount !== input.targets.length) throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "VECTOR_COUNT_TARGET_COUNT_MISMATCH");
-    const owners = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${input.analysisRunId} AND "workspaceId" = ${input.workspaceId} AND "executionClaimToken" = ${input.claimToken} AND "executionLeaseUntil" > NOW() AND "status" = 'RUNNING'::"AnalysisRunStatus" AND "analysisStage" = 'EMBEDDINGS'::"AnalysisRunStage" FOR UPDATE`;
+    const owners = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "BookAnalysisRun" WHERE "id" = ${input.analysisRunId} AND "workspaceId" = ${input.workspaceId} AND "executionClaimToken" = ${input.claimToken} AND "executionLeaseUntil" > clock_timestamp() AND "status" = 'RUNNING'::"AnalysisRunStatus" AND "analysisStage" = 'EMBEDDINGS'::"AnalysisRunStage" FOR UPDATE`;
     if (owners.length !== 1) throw new Error("BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST");
+    await assertBookOwnedAuthority(tx as never, input.analysisRunId, input.claimToken);
     const chunkTargets = input.targets.filter((target): target is Extract<BookAnalysisEmbeddingTarget, { kind: "DOCUMENT_CHUNK" }> => target.kind === "DOCUMENT_CHUNK");
     const memoryTargets = input.targets.filter((target): target is Extract<BookAnalysisEmbeddingTarget, { kind: "BOOK_MEMORY" }> => target.kind === "BOOK_MEMORY");
     const [chunks, memories] = await Promise.all([
