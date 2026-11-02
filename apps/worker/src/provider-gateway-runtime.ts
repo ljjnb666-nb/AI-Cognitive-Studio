@@ -1,3 +1,4 @@
+import { bookAnalysisMessage } from "./book-analysis-request.js";
 import { prisma } from "@ai-cognitive/db";
 import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, GatewayPodcastSpeechSynthesisProvider, type DurablePodcastGenerationProvider, type DurableSpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
 import { GatewayShortVideoProvider, GatewayShortVideoRetrievalEmbeddingProvider, GatewayShortVideoTtsProvider, type ShortVideoProvider, type ShortVideoTtsProvider } from "@ai-cognitive/short-video-generation";
@@ -49,8 +50,9 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     if (!structuredOutput) throw new Error("BOOK_ANALYSIS_STRUCTURED_OUTPUT_UNSUPPORTED");
     const operation = (request as AnalysisRequest & { operationKey?: string }).operationKey ?? sha256(JSON.stringify([request.stage, request.content, request.sourceBlockIds]));
     const evidenceInstruction = request.sourceEvidence ? "\nEvidence contract: sourceEvidence contains the actual sourceBlockId, original UTF-16 startOffset/endOffset and exact bounded text. For factual memory cite the supplied ID and complete supplied span without changing the offsets. Never invent IDs, ordinal IDs or ranges. Direct quotes require exact text and exact original offsets; omit a quote if uncertain. Return at most six grounded memory entries per chunk." : "";
-    const system = (structuredOutput === "JSON_MODE" ? `${request.systemInstructions}\n\n${bookAnalysisJsonOutputContract}` : request.systemInstructions) + evidenceInstruction;
-    const content = request.sourceEvidence ? JSON.stringify({ content: request.content, sourceEvidence: request.sourceEvidence }) : request.content;
+    const objective = request.stage === "CHUNK" ? "\nExtract the author's core claims, facts, supporting evidence, concepts, people and relevant historical examples objectively and concisely. Preserve qualifications and source meaning. Do not invent scenes, extrapolate instructions or add unrelated detail. sourceEvidence contains the bounded source text in reading order." : "";
+    const system = (structuredOutput === "JSON_MODE" ? `${request.systemInstructions}\n\n${bookAnalysisJsonOutputContract}` : request.systemInstructions) + evidenceInstruction + objective;
+    const content = bookAnalysisMessage(request);
     const text = { system, messages: [{ role: "user" as const, content }], structuredOutput: structuredOutput === "STRICT_JSON_SCHEMA" ? { mode: "STRICT_JSON_SCHEMA" as const, schemaName: "book_analysis_response", schema } : { mode: "JSON_MODE" as const } };
     const inputHash = sha256(JSON.stringify([this.input.workspaceId, routeSlot, this.input.analysisRunId, request.stage, operation, sha256(content), request.pipelineVersion, request.promptVersion, schema]));
     const outcome = await this.runtime.gateway.execute({ workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion: request.promptVersion, schemaVersion: "book-analysis-v1" }, { userId: this.input.userId });

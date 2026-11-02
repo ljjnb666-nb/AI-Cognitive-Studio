@@ -3,6 +3,7 @@ import type { ProviderAdapter } from "../types.js";
 import type { ProviderHttpTransport } from "./http-transport.js";
 import { approvedProfile, authHeaders } from "./provider-profiles.js";
 import { failureForStatus, finish, header, number, parseJson, response } from "./shared.js";
+import { zhipuModerationDiagnostic } from "./zhipu-moderation-diagnostic.js";
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   constructor(private readonly transport: ProviderHttpTransport) {}
   async execute(input: Parameters<ProviderAdapter["execute"]>[0]) {
@@ -36,6 +37,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const boundedVision = input.snapshot.providerKey === "zhipu" && input.snapshot.modelId === "glm-4.6v" && input.request.routeSlot === "PDF_VISUAL_STRUCTURE";
     const body = { model: input.snapshot.modelId, messages, max_tokens: text.generation?.maxOutputTokens, temperature: text.generation?.temperature, top_p: text.generation?.topP, ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
     const remote = await this.transport.execute({ url: profile.endpoint, method: "POST", headers: { "content-type": "application/json", ...authHeaders(profile.authScheme, input.credential) }, body: JSON.stringify(body), signal: input.signal });
+    if (input.snapshot.providerKey === "zhipu" && remote.status === 400) {
+      let businessCode: unknown;
+      try { businessCode = (JSON.parse(remote.body) as { error?: { code?: unknown } }).error?.code; } catch { /* Keep ordinary malformed-response handling. */ }
+      if (String(businessCode) === "1301") throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: header(remote.headers, "x-request-id"), usage: { extra: { moderationDiagnostic: zhipuModerationDiagnostic(JSON.parse(remote.body), remote.status) } } });
+    }
     failureForStatus(remote);
     const json = parseJson(remote);
     const choice = Array.isArray(json.choices) ? json.choices[0] as Record<string, unknown> | undefined : undefined;
@@ -43,6 +49,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const rawUsage = json.usage as Record<string, unknown> | undefined;
     const usage = rawUsage ? { inputTokens: number(rawUsage.prompt_tokens), outputTokens: number(rawUsage.completion_tokens), cachedInputTokens: number((rawUsage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens) } : undefined;
     const requestId = header(remote.headers, "x-request-id") ?? (boundedVision && typeof json.request_id === "string" ? json.request_id : undefined);
+    if (input.snapshot.providerKey === "zhipu" && (choice?.finish_reason === "sensitive" || choice?.finish_reason === "content_filter")) throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage: { ...usage, extra: { moderationDiagnostic: zhipuModerationDiagnostic(json, remote.status) } } });
     try {
       if (!message || typeof message.content !== "string") throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
       return response(message.content, typeof json.model === "string" ? json.model : undefined, finish(choice?.finish_reason), text, usage, requestId);

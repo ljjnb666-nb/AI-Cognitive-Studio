@@ -59,7 +59,10 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       if (value.routeSlot !== "BOOK_CHUNK_ANALYSIS") return { response: { type: "STRUCTURED", structured: { summary: "derived summary" } } };
       const payload = JSON.parse(value.text!.messages[0]!.content), spans = payload.sourceEvidence;
       expect(spans.length).toBeGreaterThan(0); expect(value.text!.system).toContain("Never invent IDs");
-      expect(spans.map((span: { text: string }) => span.text).join("\n\n")).toBe(payload.content);
+              const chunkId = /:CHUNK:chunk:([^:]+):/.exec(value.idempotencyKey)![1]!;
+        const chunk = await prisma.documentChunk.findUniqueOrThrow({ where: { id: chunkId } });
+        expect(payload).not.toHaveProperty("content");
+        expect(spans.map((span: { text: string }) => span.text).join("\n\n")).toBe(chunk.content);
       for (const span of spans) {
         const block = await prisma.sourceBlock.findUniqueOrThrow({ where: { id: span.sourceBlockId } });
         expect(block.text.slice(span.startOffset, span.endOffset)).toBe(span.text);
