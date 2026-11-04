@@ -15,7 +15,7 @@ export class GatewayPodcastSpeechSynthesisProvider implements DurableSpeechSynth
   async synthesize(input: Parameters<DurableSpeechSynthesisProvider["synthesize"]>[0]) {
     if (!input.operationKey || !input.semanticIdentity) throw new Error("AUDIO_SPEECH_OPERATION_IDENTITY_MISSING");
     const speech = { text: input.text, language: input.language, voice: input.voice, outputFormat: input.outputFormat, ssml: input.text.startsWith("<speak>") };
-    const request = { workspaceId: this.runtime.workspaceId, routeSlot: "PODCAST_TTS" as const, correlationId: input.correlationId, idempotencyKey: input.operationKey, inputHash: hash({ ...input.semanticIdentity, speech }), capability: { family: "SPEECH" as const, outputFormat: input.outputFormat }, speech, pipelineVersion: `${this.runtime.pipelineVersion}:speech:${this.runtime.speechPreparationVersion}` };
+    const request = { executionRunId: this.runtime.audioGenerationRunId, workspaceId: this.runtime.workspaceId, routeSlot: "PODCAST_TTS" as const, correlationId: input.correlationId, idempotencyKey: input.operationKey, inputHash: hash({ ...input.semanticIdentity, speech }), capability: { family: "SPEECH" as const, outputFormat: input.outputFormat }, speech, pipelineVersion: `${this.runtime.pipelineVersion}:speech:${this.runtime.speechPreparationVersion}` };
     const existing = await this.runtime.repository.findExistingSpeechInvocationForRequest(request);
     if (existing) {
       const handoff = await this.runtime.repository.recoverSpeechHandoff(this.runtime.workspaceId, existing.invocationId);

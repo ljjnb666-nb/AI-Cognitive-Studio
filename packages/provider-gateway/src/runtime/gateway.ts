@@ -4,13 +4,17 @@ import { ProviderRegistry } from "../registry.js";
 import { resolveRoute, type WorkspaceRouteResolver } from "../routing/resolver.js";
 import { createExecutionSnapshot } from "../routing/snapshot.js";
 import { canonicalGatewayRequestFingerprint } from "../request-fingerprint.js";
+import { withTextGenerationDefaults } from "../text/canonical-input.js";
 import { validateTextGenerationInput } from "../text/validation.js";
 import { embeddingDimensions, validateEmbeddingInput, validateVectors } from "../embedding/validation.js";
 import { validateSpeechInput, validateSpeechResponse } from "../speech/validation.js";
 import { resolvePlatformCredential, type PlatformCredentialResolver } from "./platform-credentials.js";
+import { type ResourceBudgetControl } from "./resource-budget.js";
 import type { ExecutionPrincipal, ExecutionSnapshot, GatewayRequest, PlatformDefaultResolver, ProviderAdapterResolver } from "../types.js";
 
 export type GatewayExecutionDependencies = {
+  assertActive?: (request: GatewayRequest) => Promise<void>;
+  resourceBudget?: ResourceBudgetControl;
   authorize?: (principal: ExecutionPrincipal, request: GatewayRequest) => Promise<void>;
   assertRouteUsable?: (snapshot: ExecutionSnapshot) => Promise<void>;
   validateEndpoint?: (snapshot: ExecutionSnapshot) => Promise<void>;
@@ -56,6 +60,7 @@ class ProviderGatewayCore {
   constructor(private readonly registry: ProviderRegistry, private readonly workspaceRoutes: WorkspaceRouteResolver, private readonly platformDefaults: PlatformDefaultResolver, private readonly adapterResolver: ProviderAdapterResolver, private readonly execution: GatewayExecutionDependencies = {}) {}
   async resolveSnapshot(request: GatewayRequest): Promise<ExecutionSnapshot> { if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); const route = request.pinnedRoute ?? await resolveRoute(request, this.workspaceRoutes, this.platformDefaults); if (request.pinnedRoute && (!route.connectionId || !route.credentialVersionId || route.source !== "WORKSPACE")) throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "Pinned Book route is incomplete"); const current = this.registry.resolveCapability(route.providerKey, route.modelId, request.capability); const protocol = this.registry.resolveProtocol(route.providerKey, request.capability.family); if (request.pinnedRoute) return createExecutionSnapshot(request, route); return createExecutionSnapshot(request, { ...route, protocol, capability: current }); }
   async execute(request: GatewayRequest, principal?: ExecutionPrincipal): Promise<GatewayExecutionResult> {
+    if (request.text) request = { ...request, text: withTextGenerationDefaults(request.text) };
     if (!principal) throw new ProviderGatewayError("AUTHORIZATION_FAILED");
     await this.execution.authorize?.(principal, request); if (request.signal?.aborted) throw new ProviderGatewayError("CANCELLED"); assertInputHash(request);
     this.validatePayload(request); let snapshot: ExecutionSnapshot;
@@ -99,17 +104,23 @@ class ProviderGatewayCore {
     for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
       if (request.signal?.aborted) { await this.finish(claim, snapshot, "BLOCKED"); throw new ProviderGatewayError("CANCELLED"); }
       let remoteStarted = false;
+      let reservation: string | undefined;
+      let lease: { key: string; token: string } | undefined;
       try {
+        // Membership may change while a retry sleeps. Recheck before any new paid attempt.
+        await this.execution.authorize?.(principal, request);
+        await this.execution.assertActive?.(request);
         if (claim.invocationId && claim.claimToken) { await this.execution.repository!.renewClaim(snapshot.workspaceId, claim.invocationId, claim.claimToken); await this.execution.repository!.assertExecutionOwnership(snapshot.workspaceId, claim.invocationId, claim.claimToken); }
         const state = snapshot.connectionId ? this.execution.repository ? await this.execution.repository.loadPinnedRuntimeState(snapshot.workspaceId, snapshot.id) : await this.execution.beforeAttempt?.(snapshot) : snapshot.source === "PLATFORM" ? snapshot.protocol === "TEST" ? {} : this.execution.repository ? { credential: await resolvePlatformCredential(this.execution.platformCredentials, snapshot) } : await this.execution.beforeAttempt?.(snapshot) : await this.execution.beforeAttempt?.(snapshot);
         await this.execution.circuit?.admit(key, this.execution.circuitCooldownMs ?? 1_000);
         await this.execution.rate?.admit(key, this.execution.rateLimit ?? 60, this.execution.rateWindowSeconds ?? 60);
-        const lease = await this.execution.concurrency?.acquire(key, this.execution.concurrencyLimit ?? 4, this.execution.concurrencyLeaseMs ?? 30_000);
+        lease = await this.execution.concurrency?.acquire(key, this.execution.concurrencyLimit ?? 4, this.execution.concurrencyLeaseMs ?? 30_000);
+        reservation = await this.execution.resourceBudget?.reserve(request);
         const startedAt = Date.now(); const durableAttempt = claim.invocationId && claim.claimToken ? await this.execution.repository!.startAttempt(snapshot.workspaceId, claim.invocationId, claim.claimToken) : undefined; remoteStarted = Boolean(durableAttempt);
         let remoteSucceeded = false; let heartbeatLost = false;
         try {
           let heartbeat: ClaimHeartbeat | undefined; let result;
-          try { result = await deadline(signal => adapter.execute({ snapshot, request: { ...request, requestFingerprint: fingerprint }, signal, credential: state?.credential }), request.signal, this.execution.timeoutMs ?? 30_000, controller => { if (!claim.invocationId || !claim.claimToken || !this.execution.repository) return; heartbeat = new ClaimHeartbeat(Math.max(1, Math.floor(this.execution.repository.leaseDurationMs / 3)), () => this.execution.repository!.renewClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!), () => controller.abort()); heartbeat.start(); }); } finally { await heartbeat?.stopAndDrain(); heartbeatLost = heartbeat?.lost ?? false; }
+          try { result = await deadline(signal => { remoteStarted = true; return adapter.execute({ snapshot, request: { ...request, requestFingerprint: fingerprint }, signal, credential: state?.credential }); }, request.signal, this.execution.timeoutMs ?? 30_000, controller => { if (!claim.invocationId || !claim.claimToken || !this.execution.repository) return; heartbeat = new ClaimHeartbeat(Math.max(1, Math.floor(this.execution.repository.leaseDurationMs / 3)), async () => { await this.execution.assertActive?.(request); await this.execution.repository!.renewClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!); }, () => controller.abort()); heartbeat.start(); }); } finally { await heartbeat?.stopAndDrain(); heartbeatLost = heartbeat?.lost ?? false; }
           if (heartbeatLost) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership heartbeat was lost");
           remoteSucceeded = true;
           const latencyMs = Date.now() - startedAt;
@@ -132,6 +143,8 @@ class ProviderGatewayCore {
               }
             }
           } catch (persistenceError) { if (claim.invocationId && claim.claimToken) await this.execution.repository!.completeInvocation(snapshot.workspaceId, claim.invocationId, claim.claimToken, "RECONCILIATION_REQUIRED").catch(() => undefined); throw safeError(persistenceError, request.correlationId); }
+          // Persist the paid response before accounting; a failed settlement keeps the conservative reservation.
+          if (reservation) await this.execution.resourceBudget!.settle(reservation, result.usage).catch(() => undefined);
           await this.execution.circuit?.recordSuccess(key);
           return { status: "SUCCEEDED", ...result, snapshot, requestFingerprint: fingerprint, attempt: attemptNumber, invocationId: claim.invocationId };
         } catch (error) {
@@ -142,8 +155,11 @@ class ProviderGatewayCore {
           if (normalized.code === "CANCELLED") { await this.finish(claim, snapshot, "BLOCKED"); throw normalized; }
           last = normalized; if (normalized.retryable) await this.execution.circuit?.recordRetryableFailure(key, this.execution.circuitThreshold ?? 3, this.execution.circuitCooldownMs ?? 1_000); if (!normalized.retryable || attemptNumber === maxAttempts) { await this.finish(claim, snapshot, "FAILED"); throw normalized; }
           const delay = Math.round(100 * 2 ** (attemptNumber - 1) * (0.5 + (this.execution.random?.() ?? 0.5))); if (claim.invocationId && claim.claimToken) await this.execution.repository!.renewClaim(snapshot.workspaceId, claim.invocationId, claim.claimToken); await (this.execution.sleep?.(delay) ?? new Promise<void>(resolve => setTimeout(resolve, delay)));
-        } finally { if (lease) await this.execution.concurrency?.release(lease); }
-      } catch (error) { const normalized = safeError(error, request.correlationId); if (!remoteStarted && (normalized.code === "CIRCUIT_OPEN" || normalized.code === "RATE_LIMITED")) await this.execution.repository?.releasePreRemoteClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!).catch(() => undefined); else if (normalized.code === "CONNECTION_DISABLED" || normalized.code === "CREDENTIAL_REVOKED") await this.finish(claim, snapshot, "BLOCKED"); throw normalized; }
+        } finally { if (lease) { await this.execution.concurrency?.release(lease); lease = undefined; } }
+      } catch (error) { const normalized = safeError(error, request.correlationId); if (!remoteStarted && (normalized.code === "CIRCUIT_OPEN" || normalized.code === "RATE_LIMITED")) await this.execution.repository?.releasePreRemoteClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!).catch(() => undefined); else if (normalized.code === "CONNECTION_DISABLED" || normalized.code === "CREDENTIAL_REVOKED" || normalized.code === "AUTHORIZATION_FAILED" || normalized.code === "CANCELLED" || normalized.code === "BUDGET_EXCEEDED") await this.finish(claim, snapshot, "BLOCKED"); throw normalized; } finally {
+        if (!remoteStarted && reservation) await this.execution.resourceBudget!.release(reservation);
+        if (lease) await this.execution.concurrency?.release(lease);
+      }
     }
     await this.finish(claim, snapshot, "FAILED"); throw last ?? new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
   }

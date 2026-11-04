@@ -22,7 +22,7 @@ export class GatewayPodcastGenerationProvider implements DurablePodcastGeneratio
     const attempt = input.metadata.generationAttempt ? `:attempt:${input.metadata.generationAttempt}` : "";
     const operationKey = `${this.runtime.podcastGenerationRunId}:${stage}${input.metadata.segmentId ? `:${input.metadata.segmentId}` : ""}${attempt}`;
     const text = { system: buildPodcastSystemInstruction(stage, { hosts: input.hosts, repairReasons: input.repairReasons ?? input.qualityHints, targetDurationMinutes: typeof input.style?.targetDurationMinutes === "number" ? input.style.targetDurationMinutes : undefined }), messages: [{ role: "user" as const, content: JSON.stringify(input) }], structuredOutput: { mode: "STRICT_JSON_SCHEMA" as const, schemaName: `podcast_${stage.toLowerCase()}`, schema: podcastGatewaySchemas[stage] } };
-    const request = { workspaceId: this.runtime.workspaceId, routeSlot: "PODCAST_SCRIPT" as const, correlationId: input.metadata.correlationId, idempotencyKey: `podcast-text:${operationKey}`, inputHash: hash({ workspaceId: this.runtime.workspaceId, runId: this.runtime.podcastGenerationRunId, stage, input, provider: this.runtime.provider, model: this.runtime.model, pipelineVersion: this.runtime.pipelineVersion, promptVersion: this.runtime.promptVersion }), capability: { family: "TEXT_GENERATION" as const, structuredOutput: "STRICT_JSON_SCHEMA" as const }, text, pipelineVersion: this.runtime.pipelineVersion, promptVersion: this.runtime.promptVersion, schemaVersion: "podcast-generation-v1", untrustedDataPolicy: sourceDataPolicy };
+    const request = { executionRunId: this.runtime.podcastGenerationRunId, workspaceId: this.runtime.workspaceId, routeSlot: "PODCAST_SCRIPT" as const, correlationId: input.metadata.correlationId, idempotencyKey: `podcast-text:${operationKey}`, inputHash: hash({ workspaceId: this.runtime.workspaceId, runId: this.runtime.podcastGenerationRunId, stage, input, provider: this.runtime.provider, model: this.runtime.model, pipelineVersion: this.runtime.pipelineVersion, promptVersion: this.runtime.promptVersion }), capability: { family: "TEXT_GENERATION" as const, structuredOutput: "STRICT_JSON_SCHEMA" as const }, text, pipelineVersion: this.runtime.pipelineVersion, promptVersion: this.runtime.promptVersion, schemaVersion: "podcast-generation-v1", untrustedDataPolicy: sourceDataPolicy };
     const existing = await this.runtime.repository.findExistingTextInvocationForRequest(request);
     if (existing) {
       const handoff = await this.runtime.repository.recoverTextHandoff(this.runtime.workspaceId, existing.invocationId);
@@ -86,7 +86,7 @@ export class GatewayPodcastRetrievalEmbeddingProvider implements EmbeddingProvid
     if (input.model !== this.identity.model) throw new Error("PODCAST_RETRIEVAL_EMBEDDING_IDENTITY_GAP");
     const embedding = { texts: input.texts, purpose: "QUERY" as const };
     const request = {
-      workspaceId: this.runtime.workspaceId,
+      executionRunId: this.runtime.podcastGenerationRunId, workspaceId: this.runtime.workspaceId,
       routeSlot: "EMBEDDING" as const,
       correlationId: input.correlationId,
       idempotencyKey: `podcast-retrieval-query:${this.runtime.podcastGenerationRunId}:${input.operationKey}`,

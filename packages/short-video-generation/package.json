@@ -3,12 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test:unit": "vitest run tests/renderer.test.ts tests/duration.test.ts tests/process-diagnostics.test.ts",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:phase8c:short-video-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-gateway.integration.test.ts"
   },
@@ -18,7 +20,7 @@
     "@ai-cognitive/ingestion": "workspace:*",
     "@ai-cognitive/provider-gateway": "workspace:*",
     "@ai-cognitive/storage": "workspace:*",
-    "zod": "^4.1.12"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
@@ -26,6 +28,6 @@
     "eslint": "^9.39.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.4",
-    "vitest": "^4.0.8"
+    "vitest": "^4.1.12"
   }
 }

@@ -7,38 +7,21 @@ import { startWorkerRuntime } from "../../../worker/src/runtime.js";
 function wav(seed: number) { const rate = 8_000, samples = 20_000, bytes = new Uint8Array(44 + samples * 2), view = new DataView(bytes.buffer); bytes.set(new TextEncoder().encode("RIFF")); view.setUint32(4, bytes.length - 8, true); bytes.set(new TextEncoder().encode("WAVEfmt "), 8); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); bytes.set(new TextEncoder().encode("data"), 36); view.setUint32(40, samples * 2, true); for (let index = 0; index < samples; index++) view.setInt16(44 + index * 2, Math.round(Math.sin(index * (seed + 1) / 19) * 2_000), true); return bytes; }
 
 async function bookResponse(request: any) {
-  // GatewayAnalysisProvider carries run/job identity in every text operation key.
-  // sourceBlockIds/boundedChunk are not forwarded through the gateway transport.
-  const identity = /^book-analysis-text:([^:]+):([^:]+):(CHUNK|SECTION|CHAPTER|BOOK):(.+)$/.exec(request.idempotencyKey ?? "");
-  if (!identity) throw new Error("PHASE9_BOOK_REQUEST_LINEAGE_REQUIRED");
-  const [, analysisRunId, jobId, stage, operation] = identity;
-  const run = await prisma.bookAnalysisRun.findFirst({ where: { id: analysisRunId, jobId, workspaceId: request.workspaceId } });
-  if (!run) throw new Error("PHASE9_BOOK_RUN_LINEAGE_MISMATCH");
-  if (stage !== "CHUNK") return { summary: "Bounded intelligence from the workspace route." };
-  const chunkIdentity = /^chunk:([^:]+):([^:]+)$/.exec(operation!);
-  if (!chunkIdentity) throw new Error("PHASE9_BOOK_CHUNK_LINEAGE_REQUIRED");
-  const chunk = await prisma.documentChunk.findFirst({
-    where: { id: chunkIdentity[1], contentHash: chunkIdentity[2], chunkSetId: run.chunkSetId, workspaceId: run.workspaceId },
-    include: { sourceSpans: { include: { sourceBlock: { include: { extraction: true } } }, orderBy: [{ sourceBlock: { ordinal: "asc" } }, { startOffset: "asc" }] } },
-  });
-  if (!chunk || chunk.content !== request.text?.messages?.[0]?.content || !chunk.sourceSpans.length)
-    throw new Error("PHASE9_BOOK_CHUNK_LINEAGE_MISMATCH");
-  for (const span of chunk.sourceSpans) {
-    const block = span.sourceBlock;
-    if (block.extractionId !== run.extractionId || block.extraction.sourceDocumentId !== run.sourceDocumentId || block.extraction.workspaceId !== run.workspaceId || span.startOffset < 0 || span.endOffset <= span.startOffset || span.endOffset > block.text.length)
-      throw new Error("PHASE9_BOOK_BLOCK_LINEAGE_MISMATCH");
+  // The fixture sees exactly the provider payload; it has no database side channel.
+  const payload = JSON.parse(request.text?.messages?.[0]?.content ?? "{}");
+  if (payload.stage !== "CHUNK") {
+    const children = String(payload.content).split("\n").map(line => JSON.parse(line));
+    const evidence = children.flatMap(child => (child.memory ?? []).flatMap((item: any) => item.evidence ?? []));
+    return { summary: "Bounded intelligence from the workspace route.", memory: [{ type: "CONCEPT", content: "Reliable AI outcomes remain grounded in evidence.", evidence: evidence.slice(0, 1) }] };
   }
-  // Keep the fixture's single evidence anchor per Book. Later bounded chunks
-  // contribute claims, so retrieval input size does not grow with quote count.
-  if (chunk.ordinal !== 0) return { summary: "Bounded intelligence from the workspace route.", memory: [{ type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence." }] };
-  const span = chunk.sourceSpans[0]!, block = span.sourceBlock;
-  const knownEvidence = "Evidence is the starting point for reliable AI conclusions.";
-  const candidateOffset = block.text.indexOf(knownEvidence, span.startOffset);
-  const hasKnownEvidence = candidateOffset >= span.startOffset && candidateOffset + knownEvidence.length <= span.endOffset;
-  const startOffset = hasKnownEvidence ? candidateOffset : span.startOffset;
-  const endOffset = hasKnownEvidence ? startOffset + knownEvidence.length : Math.min(startOffset + 20, span.endOffset);
-  const quoteText = block.text.slice(startOffset, endOffset);
-  return { summary: "Bounded intelligence from the workspace route.", memory: [{ type: "QUOTE", content: quoteText, evidence: [{ sourceBlockId: block.id, startOffset, endOffset, quoteText }] }, { type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence." }] };
+  const slice = payload.sourceSlices?.[0];
+  if (!slice || typeof slice.sourceBlockId !== "string" || slice.text.length !== slice.endOffset - slice.startOffset) throw new Error("PHASE9_BOOK_PAYLOAD_EVIDENCE_REQUIRED");
+  const known = "Evidence is the starting point for reliable AI conclusions.";
+  const found = slice.text.indexOf(known), localStart = found >= 0 ? found : 0;
+  const quoteText = found >= 0 ? known : [...slice.text].slice(0, 20).join("");
+  const startOffset = slice.startOffset + localStart;
+  const evidence = [{ sourceBlockId: slice.sourceBlockId, startOffset, endOffset: startOffset + quoteText.length, quoteText }];
+  return { summary: "Bounded intelligence from the workspace route.", memory: [{ type: "QUOTE", content: quoteText, evidence }, { type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence.", evidence }] };
 }
 
 function podcastResponse(input: any) {

@@ -1,3 +1,4 @@
+import { CancelJobButton } from "@/components/cancel-job-button";
 import { notFound } from "next/navigation";
 import { sourceDetail } from "@/lib/product";
 import { projectBookDisplay } from "@/lib/book-display";
@@ -26,6 +27,9 @@ export default async function SourcePage({ params }: { params: Promise<{ sourceD
   const processing = deriveProcessingStatus({ ingestion: item.ingestionRuns[0], analysis: item.analysisRuns[0], bootstrap, hasIntelligence: Boolean(item.currentIntelligence), workerAvailability, staleAfterMs: Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000) });
 
   return (
+    <>
+    <a className="btn btn-secondary" href={`/api/studio/sources/${encodeURIComponent(item.id)}/download`} download>下载原始文件</a>
+    {item.analysisRuns[0] && ["QUEUED", "RUNNING"].includes(item.analysisRuns[0].status) && <CancelJobButton jobId={item.analysisRuns[0].jobId} />}
     <BookDetailView
       item={{
         id: item.id,
@@ -53,5 +57,6 @@ export default async function SourcePage({ params }: { params: Promise<{ sourceD
       memories={memories as any}
       structureNodes={structureNodes as any}
     />
+    </>
   );
 }

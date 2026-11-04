@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
+import { clearDrafts } from "./recoverable-draft";
 
 type Workspace = { id: string; name: string };
 
@@ -70,6 +71,7 @@ export function AccountMenu({ name, email, workspace, workspaces }: { name: stri
           type="button"
           onClick={async () => {
             await authClient.signOut();
+            clearDrafts();
             router.replace("/sign-in");
             router.refresh();
           }}

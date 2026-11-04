@@ -25,6 +25,8 @@ function authErrorMessage(mode: "sign-in" | "sign-up", error: unknown): string {
     return "该邮箱已经注册，请直接登录。";
   }
 
+  if (code === "EMAIL_NOT_VERIFIED") return "请先查收验证邮件并完成邮箱验证，然后重新登录。";
+
   if (mode === "sign-in" && code === "INVALID_EMAIL_OR_PASSWORD") {
     return "邮箱或密码不正确。";
   }
@@ -54,6 +56,7 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
     setPending(true);
     setError("");
 
+    try {
     const result =
       mode === "sign-up"
         ? await authClient.signUp.email({ name, email, password })
@@ -65,8 +68,11 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
     }
 
     setPending(false);
+    if (mode === "sign-up" && !result.data?.token) { setError("注册请求已收到，请查收验证邮件，验证后再登录。"); return; }
     router.replace("/studio");
     router.refresh();
+    } catch { setError("网络连接失败，请重试。"); }
+    finally { setPending(false); }
   }
 
   return (
@@ -94,21 +100,21 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
         >
           {mode === "sign-up" && (
             <div className="form-group">
-              <label className="form-label">姓名</label>
-              <input className="input-control" name="name" autoComplete="name" required minLength={2} maxLength={80} placeholder="例如：Scholar" />
+              <label className="form-label" htmlFor="name">姓名</label>
+              <input className="input-control" id="name" name="name" autoComplete="name" required minLength={2} maxLength={80} placeholder="例如：Scholar" />
             </div>
           )}
 
           <div className="form-group">
-            <label className="form-label">邮箱</label>
-            <input className="input-control font-mono" name="email" type="email" autoComplete="email" required maxLength={254} placeholder="name@example.com" />
+            <label className="form-label" htmlFor="email">邮箱</label>
+            <input className="input-control font-mono" id="email" name="email" type="email" autoComplete="email" required maxLength={254} placeholder="name@example.com" />
           </div>
 
           <div className="form-group">
-            <label className="form-label">密码</label>
+            <label className="form-label" htmlFor="password">密码</label>
             <input
               className="input-control font-mono"
-              name="password"
+              id="password" name="password"
               type="password"
               autoComplete={mode === "sign-up" ? "new-password" : "current-password"}
               required
@@ -119,10 +125,10 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
 
           {mode === "sign-up" && (
             <div className="form-group">
-              <label className="form-label">确认密码</label>
+              <label className="form-label" htmlFor="confirmPassword">确认密码</label>
               <input
                 className="input-control font-mono"
-                name="confirmPassword"
+                id="confirmPassword" name="confirmPassword"
                 type="password"
                 autoComplete="new-password"
                 required
@@ -141,6 +147,7 @@ export function AuthForm({ mode }: { mode: "sign-in" | "sign-up" }) {
           </button>
         </form>
 
+        {mode === "sign-in" && <Link href="/reset-password">忘记密码？</Link>}
         <div style={{ marginTop: 24, fontSize: 13, color: "var(--on-surface-variant)", textAlign: "center" }}>
           {mode === "sign-up" ? (
             <>

@@ -9,12 +9,17 @@ function safeFailureCode(error: unknown): string | null { const code = error && 
 export async function workspaceProductionDiagnostics(identity: WorkspaceDiagnosticIdentity, now = new Date()) {
   const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: identity } });
   if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
-  const jobs = await prisma.job.findMany({ where: { workspaceId: identity.workspaceId }, orderBy: { createdAt: "asc" }, take: 100, select: { id: true, type: true, status: true, createdAt: true, startedAt: true, attemptCount: true, error: true } });
+  const [jobs, counts] = await Promise.all([
+    prisma.job.findMany({ where: { workspaceId: identity.workspaceId, OR: [{ status: { in: ["QUEUED", "RUNNING"] } }, { status: "FAILED", updatedAt: { gte: new Date(now.getTime() - 86400000) } }] }, orderBy: { createdAt: "asc" }, take: 100, select: { id: true, type: true, status: true, createdAt: true, startedAt: true, updatedAt: true, attemptCount: true, error: true, bookAnalysisRun: { select: { executionLeaseUntil: true } }, podcastGenerationRun: { select: { executionLeaseUntil: true } }, audioGenerationRun: { select: { executionLeaseUntil: true } }, shortVideoGenerationRun: { select: { executionLeaseUntil: true } }, ingestionRun: { select: { executionLeaseUntil: true } } } }),
+    prisma.job.groupBy({ by: ["status"], where: { workspaceId: identity.workspaceId }, _count: { _all: true } }),
+  ]);
   return {
-    queue: { queued: jobs.filter((job) => job.status === "QUEUED").length, running: jobs.filter((job) => job.status === "RUNNING").length, failed: jobs.filter((job) => job.status === "FAILED").length },
+    queue: { queued: counts.find(row => row.status === "QUEUED")?._count._all ?? 0, running: counts.find(row => row.status === "RUNNING")?._count._all ?? 0, failed: counts.find(row => row.status === "FAILED")?._count._all ?? 0 },
     jobs: jobs.map((job): SafeJobDiagnostic => {
       const ageMs = now.getTime() - (job.startedAt ?? job.createdAt).getTime();
-      return { id: job.id, type: job.type, state: job.status, ageMs, attempts: job.attemptCount, failureCode: safeFailureCode(job.error), stuck: ageMs > 15 * 60_000 };
+      const lease = job.bookAnalysisRun?.executionLeaseUntil ?? job.podcastGenerationRun?.executionLeaseUntil ?? job.audioGenerationRun?.executionLeaseUntil ?? job.shortVideoGenerationRun?.executionLeaseUntil ?? job.ingestionRun?.executionLeaseUntil;
+      const stuck = job.status === "QUEUED" ? ageMs > 15 * 60000 : job.status === "RUNNING" && (lease ? lease < now : now.getTime() - job.updatedAt.getTime() > 15 * 60000);
+      return { id: job.id, type: job.type, state: job.status, ageMs, attempts: job.attemptCount, failureCode: safeFailureCode(job.error), stuck };
     }),
   };
 }

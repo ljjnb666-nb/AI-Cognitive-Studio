@@ -1,3 +1,4 @@
+import { CancelJobButton } from "@/components/cancel-job-button";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@ai-cognitive/db";
@@ -36,7 +37,7 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
           },
         },
       },
-      audioGenerationRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, stage: true, errorCode: true } },
+      audioGenerationRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { jobId: true, status: true, stage: true, errorCode: true } },
       currentScript: { include: { revision: true } },
       currentAudio: { include: { revision: true } },
       audioRevisions: { orderBy: { revisionNumber: "desc" } },
@@ -55,6 +56,8 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
 
   return (
     <div>
+      {run && ["QUEUED", "RUNNING"].includes(run.status) && <CancelJobButton jobId={run.jobId} />}
+      {audioRun && ["QUEUED", "RUNNING"].includes(audioRun.status) && <CancelJobButton jobId={audioRun.jobId} />}
       <PageHeader
         eyebrow="EDITORIAL AUDIO DOCUMENT"
         title={episode.title}

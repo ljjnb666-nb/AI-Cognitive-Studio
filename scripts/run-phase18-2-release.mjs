@@ -18,7 +18,8 @@ try {
   run(["--filter", "@ai-cognitive/provider-gateway", "exec", "vitest", "run", "tests/phase8b.test.ts", "tests/phase8c.test.ts", "tests/phase9-model-manifest.test.ts"]);
   run(["--filter", "@ai-cognitive/provider-gateway", "exec", "vitest", "run", "tests/gateway-admin.integration.test.ts"]);
   run(["--filter", "@ai-cognitive/web", "exec", "vitest", "run", "--config", "vitest.integration.config.mts", "tests/provider-settings-errors.integration.test.ts", "tests/provider-readiness.integration.test.ts"]);
-  run(["--filter", "@ai-cognitive/book-intelligence", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/phase8c-checkpoint3a-acceptance.integration.test.ts", "tests/principal-provenance.integration.test.ts", "tests/route-plan.test.ts"]);
+  run(["--filter", "@ai-cognitive/book-intelligence", "test:unit"]);
+  run(["--filter", "@ai-cognitive/book-intelligence", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/phase8c-checkpoint3a-acceptance.integration.test.ts", "tests/principal-provenance.integration.test.ts"]);
   run(["--filter", "@ai-cognitive/worker", "exec", "vitest", "run", "--config", "vitest.integration.config.ts", "tests/phase8c-production-runtime.test.ts"]);
   run(["test:phase18:release"]);
   run(["test:phase18-1:release"]);

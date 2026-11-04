@@ -1,4 +1,8 @@
 import { ProviderGatewayError } from "../errors.js";
+import { request as httpsRequest } from "node:https";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { validateProviderEndpoint, type DnsResolver } from "../safety/endpoint-policy.js";
 
 export type ProviderHttpRequest = { url: string; method: "POST"; headers: Readonly<Record<string, string>>; body: string; signal: AbortSignal };
 export type ProviderHttpResponse = { status: number; headers: Headers | Readonly<Record<string, string | undefined>>; body: string };
@@ -7,6 +11,7 @@ export type ProviderHttpTransport = { execute(request: ProviderHttpRequest): Pro
 const maxTextResponseBytes = 4 * 1024 * 1024;
 const maxBinaryResponseBytes = 20 * 1024 * 1024;
 export class FetchProviderHttpTransport implements ProviderHttpTransport {
+  constructor(private readonly policy: { environment?: string; allowPrivateEndpoints?: boolean; dns?: DnsResolver } = {}) {}
   async execute(request: ProviderHttpRequest): Promise<ProviderHttpResponse> {
     const response = await this.readResponse(request, maxTextResponseBytes);
     return { status: response.status, headers: response.headers, body: new TextDecoder().decode(response.bytes) };
@@ -16,12 +21,45 @@ export class FetchProviderHttpTransport implements ProviderHttpTransport {
   }
   private async readResponse(request: ProviderHttpRequest, maxResponseBytes: number): Promise<ProviderBinaryHttpResponse> {
     if (request.signal.aborted) throw new ProviderGatewayError("CANCELLED");
-    let response: Response;
-    try { response = await fetch(request.url, { method: request.method, headers: request.headers, body: request.body, signal: request.signal, redirect: "manual" }); } catch (error) { if (request.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) throw new ProviderGatewayError("CANCELLED"); throw new ProviderGatewayError("TRANSIENT_UPSTREAM"); }
-    const reader = response.body?.getReader(); let bytes = 0; const chunks: Uint8Array[] = [];
-    if (reader) { for (;;) { const next = await reader.read(); if (next.done) break; bytes += next.value.byteLength; if (bytes > maxResponseBytes) { await reader.cancel(); throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Provider response exceeded limit"); } chunks.push(next.value); } }
-    return { status: response.status, headers: response.headers, bytes: concat(chunks, bytes) };
+    // Resolve once per attempt, validate both families, then bind that exact set
+    // to the socket. The URL retains the original Host header and TLS SNI.
+    const endpoint = await abortable(validateProviderEndpoint(request.url, { environment: this.policy.environment ?? process.env.NODE_ENV ?? "production", allowPrivateEndpoints: this.policy.allowPrivateEndpoints, dns: this.policy.dns ?? { lookup: async hostname => (await lookup(hostname, { all: true })).map(item => item.address) } }), request.signal);
+    if (request.signal.aborted) throw new ProviderGatewayError("CANCELLED");
+    return new Promise((resolve, reject) => {
+      const call = httpsRequest(endpoint.url, {
+        method: request.method, headers: request.headers, signal: request.signal, agent: false,
+        lookup: (_hostname, options, callback) => {
+          const records = endpoint.addresses.map(address => ({ address, family: isIP(address) }));
+          if (options.all) callback(null, records);
+          else callback(null, records[0]!.address, records[0]!.family);
+        },
+      }, response => {
+        const chunks: Uint8Array[] = []; let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > maxResponseBytes) { call.destroy(); response.destroy(); reject(new ProviderGatewayError("INVALID_PROVIDER_RESPONSE", "Provider response exceeded limit")); return; }
+          chunks.push(chunk);
+        });
+        response.on("error", () => reject(new ProviderGatewayError(request.signal.aborted ? "CANCELLED" : "TRANSIENT_UPSTREAM")));
+        response.on("end", () => {
+          const headers = new Headers();
+          for (const [name, value] of Object.entries(response.headers)) if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+          resolve({ status: response.statusCode ?? 502, headers, bytes: concat(chunks, size) });
+        });
+      });
+      call.on("error", () => reject(new ProviderGatewayError(request.signal.aborted ? "CANCELLED" : "TRANSIENT_UPSTREAM")));
+      call.end(request.body);
+    });
   }
 }
 function concat(chunks: Uint8Array[], size: number): Uint8Array { const out = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; } return out; }
 export class DeterministicProviderHttpTransport implements ProviderHttpTransport { calls: ProviderHttpRequest[] = []; constructor(private readonly responder: (request: ProviderHttpRequest) => ProviderHttpResponse | Promise<ProviderHttpResponse>, private readonly binaryResponder?: (request: ProviderHttpRequest) => ProviderBinaryHttpResponse | Promise<ProviderBinaryHttpResponse>) {} async execute(request: ProviderHttpRequest): Promise<ProviderHttpResponse> { if (request.signal.aborted) throw new ProviderGatewayError("CANCELLED"); this.calls.push(request); return this.responder(request); } async executeBinary(request: ProviderHttpRequest): Promise<ProviderBinaryHttpResponse> { if (request.signal.aborted) throw new ProviderGatewayError("CANCELLED"); this.calls.push(request); if (this.binaryResponder) return this.binaryResponder(request); const response = await this.responder(request); return { status: response.status, headers: response.headers, bytes: new TextEncoder().encode(response.body) }; } }
+
+function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new ProviderGatewayError("CANCELLED"));
+    if (signal.aborted) { work.catch(() => undefined); abort(); return; }
+    signal.addEventListener("abort", abort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}

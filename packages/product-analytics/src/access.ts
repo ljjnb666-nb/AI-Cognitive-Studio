@@ -1,4 +1,5 @@
 import { prisma } from "@ai-cognitive/db";
+import { withParticipantLock } from "./participant-lock.js";
 
 export type BetaAccessMode = "OFF" | "ENFORCED";
 export function betaAccessMode(source: NodeJS.ProcessEnv = process.env): BetaAccessMode {
@@ -33,10 +34,9 @@ export async function betaTelemetryEnabledForUser(userId: string) {
 }
 
 export async function withdrawBetaParticipant(userId: string) {
-  const now = new Date();
-  const result = await prisma.betaParticipant.updateMany({ where: { userId, status: "ACTIVE" }, data: { status: "WITHDRAWN", withdrawnAt: now } });
-  if (!result.count) throw new Error("BETA_PARTICIPANT_NOT_ACTIVE");
-  // Product telemetry and explicit beta feedback are the deletion scope; core product data remains intact.
-  const participant = await prisma.betaParticipant.findUniqueOrThrow({ where: { userId } });
-  await prisma.$transaction([prisma.productEvent.deleteMany({ where: { participantId: participant.id } }), prisma.betaFeedback.deleteMany({ where: { participantId: participant.id } })]);
+  return withParticipantLock(userId, false, async (tx, participant) => {
+    await tx.betaParticipant.updateMany({ where: { id: participant.id, status: "ACTIVE" }, data: { status: "WITHDRAWN", withdrawnAt: new Date() } });
+    await tx.productEvent.deleteMany({ where: { participantId: participant.id } });
+    await tx.betaFeedback.deleteMany({ where: { participantId: participant.id } });
+  });
 }

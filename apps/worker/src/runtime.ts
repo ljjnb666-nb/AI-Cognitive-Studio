@@ -3,6 +3,8 @@ import type { PodcastGenerationProvider, DurablePodcastGenerationProvider } from
 import { logger } from "@ai-cognitive/shared";
 import type { Environment } from "@ai-cognitive/shared/server";
 import type { Worker } from "bullmq";
+import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
+import { cleanupTemporaryUploads } from "@ai-cognitive/ingestion";
 import { createBookAnalysisWorker, createBookAnalysisQueue, dispatchBookAnalysisWithQueue } from "./book-analysis.js";
 import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPodcastGenerationWithQueue } from "./podcast-generation.js";
 import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudioGenerationWithQueue } from "./audio-generation.js";
@@ -130,6 +132,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   // This bounded domain sweep has its own dispatch guard and error boundary;
   // the PR #46 durable-operation sweep is scheduled independently below.
   const reconcileBookAnalysisStale = dispatch("book-analysis-stale-reconciliation", () => reconcileStaleBookAnalysisJobs(25), 60_000);
+  const cleanupStorage = new S3CompatibleStorageProvider({ endpoint: environment.S3_ENDPOINT, region: environment.S3_REGION, bucket: environment.S3_BUCKET, accessKey: environment.S3_ACCESS_KEY, secretKey: environment.S3_SECRET_KEY, forcePathStyle: environment.S3_FORCE_PATH_STYLE });
+  const cleanupUploads = dispatch("temporary-upload-cleanup", () => cleanupTemporaryUploads(cleanupStorage, 60_000), 60_000);
   // Durable ingestion delivery reconciliation: PostgreSQL first, BullMQ second.
   // Redis state loss may delay a delivery; it can never exceed the durable
   // attempt guard or strand an expired RUNNING run.
@@ -151,6 +155,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const reconcileOcrServersSweep = sourceIngestionOcrRuntime ? (() => { const ocrRuntime = sourceIngestionOcrRuntime; return dispatch("ocr-server-reconciliation", () => reconcileOcrServerInstances({ hostId: ocrRuntime.config.hostId, executable: ocrRuntime.config.executable, executableArgs: ocrRuntime.config.executableArgs, stopTimeoutMs: ocrRuntime.config.serverStopTimeoutMs, homeRoot: ocrRuntime.config.homeRoot }), 60_000); })() : undefined;
   const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); }];
   initial.push(reconcileBookAnalysisStale);
+  initial.push(cleanupUploads);
   initial.push(reconcileIngestionDeliveriesSweep);
   if (reconcileOcrServersSweep) initial.push(reconcileOcrServersSweep);
   if (bookQueue) initial.push(dispatch("book-analysis", () => dispatchBookAnalysisWithQueue(bookQueue, { ...(options.outboxTopics?.bookAnalysis ? { topic: options.outboxTopics.bookAnalysis } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })));

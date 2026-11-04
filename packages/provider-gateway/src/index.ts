@@ -33,3 +33,4 @@ export * from "./adapters/gemini-native.js";
 export * from "./adapters/factory.js";
 export * from "./adapters/embeddings.js";
 export * from "./adapters/openai-speech.js";
+export { PostgresResourceBudget, boundedResourceUnits, DEFAULT_OUTPUT_TOKEN_LIMIT, type ResourceBudgetControl } from "./runtime/resource-budget.js";

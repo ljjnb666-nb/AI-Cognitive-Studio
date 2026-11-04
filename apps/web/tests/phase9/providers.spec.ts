@@ -6,6 +6,57 @@ const password = "Phase9Password!1";
 const uniqueEmail = (label: string) => `phase9-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@ai-cognitive-studio.test`;
 let nextTestIp = 10;
 
+test("library filters and pagination survive repeated query parameters and empty results", async ({ page }) => {
+  const email = uniqueEmail("library-pages");
+  await signUp(page, email);
+  const user = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
+  const workspaceId = user.memberships[0]!.workspaceId;
+  const foreign = await prisma.workspace.create({ data: { name: "pagination-outsider" } });
+  await prisma.$transaction(async tx => {
+    for (let index = 0; index < 23; index++) {
+      const owner = index === 22 ? foreign.id : workspaceId;
+      const isText = index === 21;
+      const name = isText ? "纯文本资料.txt" : `分页资料${String(index).padStart(2, "0")}.pdf`;
+      const mediaType = isText ? "text/plain" : "application/pdf";
+      const sha256 = createHash("sha256").update(`${owner}:${index}`).digest("hex");
+      const storageKey = `pagination-fixture/${sha256}`;
+      const source = await tx.source.create({ data: { workspaceId: owner, kind: "FILE", displayName: name } });
+      const blob = await tx.sourceBlob.create({ data: { workspaceId: owner, sha256, sizeBytes: 1, mediaType, storageKey } });
+      await tx.sourceDocument.create({ data: { workspaceId: owner, sourceId: source.id, sourceBlobId: blob.id, version: 1, sha256, sizeBytes: 1, mediaType, storageKey, createdAt: new Date(1_700_000_000_000 + index * 1000) } });
+    }
+  });
+  await page.goto("/studio/library?q=分页资料&q=ignored&format=PDF&format=TXT&page=1&page=2");
+  const titles = page.getByRole("heading", { level: 3, name: /^分页资料/ });
+  await expect(titles).toHaveCount(20);
+  await expect(page.getByRole("textbox", { name: "搜索书名或文件名" })).toHaveValue("分页资料");
+  await expect(page.getByRole("combobox", { name: "文件格式" })).toHaveValue("PDF");
+  const firstPage = await titles.allTextContents();
+  await page.getByRole("link", { name: "下一页", exact: true }).click();
+  await expect(titles).toHaveCount(1);
+  expect(new URL(page.url()).searchParams.get("q")).toBe("分页资料");
+  expect(new Set([...firstPage, ...await titles.allTextContents()]).size).toBe(21);
+  await expect(page.getByRole("heading", { name: "分页资料22.pdf", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "下一页", exact: true })).toHaveCount(0);
+  await page.getByRole("textbox", { name: "搜索书名或文件名" }).fill("不存在的书籍");
+  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await expect(page.getByText("没有匹配当前搜索和筛选条件的书籍。", { exact: true })).toBeVisible();
+  await expect(page.getByText("第 1 页", { exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "搜索书名或文件名" }).fill("");
+  await page.getByRole("combobox", { name: "文件格式" }).selectOption("TXT");
+  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "纯文本资料.txt", exact: true })).toBeVisible();
+  await expect(titles).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("button", { name: "筛选", exact: true })).toBeInViewport();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  await page.goto("/studio/library?page=10000");
+  await expect(page.getByText("这一页没有书籍，请返回上一页。", { exact: true })).toBeVisible();
+  for (const path of ["library", "podcasts", "videos"]) {
+    await page.goto(`/studio/${path}?page=invalid&page=2`);
+    await expect(page.getByText("第 1 页", { exact: true })).toBeVisible();
+  }
+});
+
 async function assertBookEvidenceLineage(workspaceId: string, sourceDocumentId: string) {
   const current = await prisma.currentBookIntelligence.findFirstOrThrow({ where: { workspaceId, sourceDocumentId } });
   const memory = await prisma.bookMemoryItem.findMany({ where: { analysisRunId: current.analysisRunId }, include: { evidence: { include: { sourceBlock: { include: { extraction: true } } } } } });
@@ -79,7 +130,10 @@ async function configureAllRoutes(page: import("@playwright/test").Page, display
   await connectionForm.locator('input[name="displayName"]').fill(displayName);
   await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
   await connectionForm.locator('input[name="secret"]').fill(secret);
+  const created = page.waitForResponse(response => response.url().includes("/api/studio/providers") && response.request().method() === "POST");
   await connectionForm.getByRole("button", { name: "保存 Provider" }).click();
+  expect((await created).status()).toBe(200);
+  await expect(page.getByRole("heading", { name: displayName, exact: true })).toBeVisible();
   await page.getByText("高级设置", { exact: true }).click();
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"]) {
     const route = routeForm(page, slot);
@@ -117,6 +171,19 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   expect(user.memberships).toHaveLength(1);
   expect(user.memberships[0]!.role).toBe("OWNER");
   const workspaceId = user.memberships[0]!.workspaceId;
+
+  await page.goto("/studio/settings/account");
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载个人学习记录（JSON）" }).click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toBe("studio-personal-learning-records.json");
+  const downloadPath = await download.path();
+  expect(downloadPath).toBeTruthy();
+  const exported = JSON.parse(await (await import("node:fs/promises")).readFile(downloadPath!, "utf8"));
+  expect(exported).toMatchObject({ format: "acs-personal-learning-records", version: 1, data: { profile: { id: user.id, email } } });
+  expect(exported.data.memberships).toEqual([{ workspaceId, role: "OWNER" }]);
+  expect(exported.data).not.toHaveProperty("accounts");
+  expect(exported.data).not.toHaveProperty("sessions");
 
   await page.goto("/studio/settings/providers");
   await expect(page.getByRole("heading", { name: "AI Providers" })).toBeVisible();
@@ -316,6 +383,15 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
   await page.locator('input[type="file"]').setInputFiles({ name: "phase9-book.pdf", mimeType: "application/pdf", buffer: testPdf(bookLines) });
   await expect(page).toHaveURL(/\/studio\/library\//, { timeout: 30_000 });
   const sourceDocumentId = page.url().split("/").at(-1)!;
+  const originalDownload = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载原始文件", exact: true }).click();
+  const originalFile = await originalDownload;
+  expect(originalFile.suggestedFilename()).toBe("phase9-book.pdf");
+  const originalPath = await originalFile.path();
+  expect(originalPath).not.toBeNull();
+  const { readFile } = await import("node:fs/promises");
+  expect(createHash("sha256").update(await readFile(originalPath!)).digest("hex"))
+    .toBe(createHash("sha256").update(testPdf(bookLines)).digest("hex"));
   await expect.poll(async () => (await prisma.ingestionRun.findFirst({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 90_000 }).toBe("SUCCEEDED");
   await page.reload();
   await expect.poll(() => prisma.bookAnalysisRun.count({ where: { sourceDocumentId } }), { timeout: 30_000 }).toBe(1);

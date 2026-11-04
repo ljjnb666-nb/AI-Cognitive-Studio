@@ -144,7 +144,7 @@ describe("OCR page checkpoint (real PostgreSQL)", () => {
 describe("OCR server instance durable identity (real PostgreSQL)", () => {
   it("SERVER_STARTING_NULL_ENDPOINT_ALLOWED: STARTING persists before launch with nullable endpoint fields", async () => {
     const { workspace, document, run } = await createRunFixture();
-    const hostA = "host-A";
+    const hostA = `host-A-${crypto.randomUUID()}`;
     hostLeaseIds.push(hostA);
     const hostClaimToken = (await acquireOcrHostLease(hostA))!.claimToken;
     const id = await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: hostA, hostClaimToken, runExecutionToken: "run-token-1", mineruHome: "D:/scratch/servers/home-A" });
@@ -165,7 +165,7 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
 
   it("RF01-05/RF01 SERVER_STATE_MACHINE: ORPHANED is terminal and STOPPED requires a legal previous state", async () => {
     const { workspace, document, run } = await createRunFixture();
-    const orphanHost = "host-orph";
+    const orphanHost = `host-orph-${crypto.randomUUID()}`;
     hostLeaseIds.push(orphanHost);
     const hostClaimToken = (await acquireOcrHostLease(orphanHost))!.claimToken;
     await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: orphanHost, hostClaimToken, runExecutionToken: "run-orph", mineruHome: "home-orph" });
@@ -188,7 +188,7 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
 
   it("RF01 SERVER_STATE_MACHINE: only legal transitions mutate rows (04B-3 RF01 P1-07)", async () => {
     const { workspace, document, run } = await createRunFixture();
-    const machineHost = "host-machine-rf04";
+    const machineHost = `host-machine-rf04-${crypto.randomUUID()}`;
     hostLeaseIds.push(machineHost);
     const starting = (await acquireOcrHostLease(machineHost))!.claimToken;
     await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: machineHost, hostClaimToken: starting, runExecutionToken: "run-machine", mineruHome: "home-machine" });
@@ -221,7 +221,7 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
     // The full legal chain: RUNNING -> STOPPING -> STOPPED (on a fresh host:
     // startedWithIdentity stays STARTING/RUNNING and poisons machineHost —
     // the RF03 P1-02 invariant is asserted separately there).
-    const chainHost = "host-machine-chain";
+    const chainHost = `host-machine-chain-${crypto.randomUUID()}`;
     hostLeaseIds.push(chainHost);
     const running = (await acquireOcrHostLease(chainHost))!.claimToken;
     await createOcrServerInstance({ workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: chainHost, hostClaimToken: running, runExecutionToken: "run-machine-2", mineruHome: "home-machine-2" });
@@ -235,7 +235,7 @@ describe("OCR server instance durable identity (real PostgreSQL)", () => {
   it("RF01-06: duplicate hostClaimToken returns null; other DB errors keep their real class", async () => {
     const { workspace, document, run } = await createRunFixture();
     const hostClaimToken = `hostclaim-${crypto.randomUUID()}`;
-    const dupHost = "host-dup";
+    const dupHost = `host-dup-${crypto.randomUUID()}`;
     hostLeaseIds.push(dupHost);
     const dupLease = (await acquireOcrHostLease(dupHost))!;
     const input = { workspaceId: workspace.id, sourceDocumentId: document.id, ingestionRunId: run.id, hostId: dupHost, hostClaimToken: dupLease.claimToken, runExecutionToken: "run-dup", mineruHome: "home-dup" };

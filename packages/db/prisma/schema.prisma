@@ -464,6 +464,8 @@ model User {
 }
 
 model Workspace {
+  resourcePolicy WorkspaceResourcePolicy?
+  resourceReservations ProviderResourceReservation[]
   id                                 String                              @id @default(cuid())
   name                               String
   createdAt                          DateTime                            @default(now())
@@ -1059,6 +1061,7 @@ model SourceDocument {
 }
 
 model UploadSession {
+  temporaryCleanedAt DateTime?
   id                   String              @id @default(cuid())
   workspaceId          String
   originalFilename     String
@@ -3046,4 +3049,21 @@ model Job {
   @@index([status])
   @@index([correlationId])
   @@index([workspaceId, status])
+}
+model WorkspaceResourcePolicy {
+  workspaceId String @id
+  dailyUnitLimit Int @default(1000000)
+  runUnitLimit Int @default(300000)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+model ProviderResourceReservation {
+  id String @id
+  workspaceId String
+  scopeKey String
+  units Int
+  chargedUnits Int?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, createdAt], map: "ProviderResourceReservation_period_idx")
+  @@index([workspaceId, scopeKey], map: "ProviderResourceReservation_scope_idx")
 }

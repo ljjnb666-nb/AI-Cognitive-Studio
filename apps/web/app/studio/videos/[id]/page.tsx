@@ -1,3 +1,4 @@
+import { CancelJobButton } from "@/components/cancel-job-button";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@ai-cognitive/db";
@@ -42,6 +43,7 @@ export default async function VideoDetail({ params }: { params: Promise<{ id: st
 
   return (
     <div>
+      {run && ["QUEUED", "RUNNING"].includes(run.status) && <CancelJobButton jobId={run.jobId} />}
       <PageHeader
         eyebrow="SHORT VIDEO PROJECT"
         title={project.name}

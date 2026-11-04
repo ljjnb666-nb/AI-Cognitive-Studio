@@ -6,7 +6,7 @@
  * block-local UTF-16 fragment offsets. Comparison offsets are never
  * published as citation offsets.
  *
- * Normalization v1 (deterministic only; no heuristic pass rules):
+ * Normalization v2 (deterministic only; no heuristic pass rules):
  *   N1 Unicode NFC
  *   N2 CRLF / CR → LF
  *   N3 NBSP → space
@@ -16,12 +16,10 @@
  *   N7 trim stream boundaries (and per-block boundaries, so PDF page and
  *      EPUB spine segmentation are representation-neutral)
  *
- * Empirical PDF fidelity probe (production pdfjs-isolated/pdf-isolation-v3
- * path): line breaks are dropped WITHOUT any separator, NBSP arrives as
- * U+0020, U+00AD arrives as U+002D. Therefore the normalized stream joins
- * per-block segments with pure concatenation, and cross-format fixtures
- * place block boundaries at no-whitespace positions of the linear text.
- * Forbidden in v1: case folding, punctuation/quote/dash normalization,
+ * Layout-aware PDF extraction preserves line separators. The comparison view
+ * joins block boundaries with one space, matching the whitespace collapse
+ * within blocks. Fixtures place segmentation boundaries between words.
+ * Forbidden in v2: case folding, punctuation/quote/dash normalization,
  * spelling or OCR correction, generic NFKC, hyphenation guessing, fuzzy
  * matching — none may exist in this file.
  */
@@ -166,7 +164,7 @@ export function buildCrossFormatView(
     const segment = buildComparisonSegment(block.ordinal, block.text, block.kind);
     if (segment.normalizedText) segments.push(segment);
   }
-  return { normalizedStream: segments.map((segment) => segment.normalizedText).join(""), segments, capabilities };
+  return { normalizedStream: segments.map((segment) => segment.normalizedText).join(" "), segments, capabilities };
 }
 
 /**

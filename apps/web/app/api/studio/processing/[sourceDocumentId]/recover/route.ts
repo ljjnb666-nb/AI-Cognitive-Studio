@@ -1,23 +1,23 @@
-import { materializeChunkSet, recoverBookAnalysisForUser, requestBookAnalysisForUser } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, recoverBookAnalysisForUser, requestBookAnalysisForUser, resolveBookAnalysisVersions } from "@ai-cognitive/book-intelligence";
 import { NextResponse } from "next/server";
 import { createIngestionService } from "@ai-cognitive/ingestion";
 import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
 import { readEnvironment } from "@ai-cognitive/shared/server";
-import { resolveWebIdentity } from "@/lib/identity";
+import { resolveWebMutationIdentity } from "@/lib/identity";
 import { sourceDetail } from "@/lib/product";
 import { deriveProcessingStatus } from "@/lib/processing-state";
 import { resolveBookProductExecution } from "@/lib/provider-product";
 import { processingWorkerAvailability } from "@/lib/worker-heartbeat";
 
-async function requestAnalysis(identity: Awaited<ReturnType<typeof resolveWebIdentity>>, sourceDocumentId: string) {
+async function requestAnalysis(identity: Awaited<ReturnType<typeof resolveWebMutationIdentity>>, sourceDocumentId: string) {
   const provider = await resolveBookProductExecution(identity.workspaceId);
   const chunkSet = await materializeChunkSet({ workspaceId: identity.workspaceId, sourceDocumentId });
-  return requestBookAnalysisForUser(identity, { sourceDocumentId, chunkSetId: chunkSet.id, pipelineVersion: process.env.BOOK_ANALYSIS_PIPELINE_VERSION?.trim() || "product-v1", promptVersion: process.env.BOOK_ANALYSIS_PROMPT_VERSION?.trim() || "product-v1", provider: provider.provider, model: provider.model, modelVersion: provider.modelVersion, routePlan: provider.routePlan, outboxTopic: process.env.PHASE9_BOOK_TOPIC?.trim() || undefined });
+  return requestBookAnalysisForUser(identity, { sourceDocumentId, chunkSetId: chunkSet.id, ...resolveBookAnalysisVersions(), provider: provider.provider, model: provider.model, modelVersion: provider.modelVersion, routePlan: provider.routePlan, outboxTopic: process.env.PHASE9_BOOK_TOPIC?.trim() || undefined });
 }
 
 export async function POST(_: Request, { params }: { params: Promise<{ sourceDocumentId: string }> }) {
   try {
-    const sourceDocumentId = (await params).sourceDocumentId, identity = await resolveWebIdentity();
+    const sourceDocumentId = (await params).sourceDocumentId, identity = await resolveWebMutationIdentity();
     const [item, workerAvailability] = await Promise.all([sourceDetail(sourceDocumentId, identity), processingWorkerAvailability()]);
     const status = deriveProcessingStatus({ ingestion: item.ingestionRuns[0], analysis: item.analysisRuns[0], hasIntelligence: Boolean(item.currentIntelligence), workerAvailability, staleAfterMs: Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000) });
     if (status.recoveryAction === "RETRY_INGESTION") {
@@ -39,5 +39,5 @@ export async function POST(_: Request, { params }: { params: Promise<{ sourceDoc
       else await recoverBookAnalysisForUser(identity, sourceDocumentId);
     }
     return NextResponse.json({ result: "RECOVERY_ACCEPTED", recoveryAction: status.recoveryAction });
-  } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "PROCESSING_RECOVERY_FAILED"; return NextResponse.json({ error: code.includes("ACCESS_DENIED") ? code : "PROCESSING_RECOVERY_FAILED" }, { status: code.includes("ACCESS_DENIED") ? 403 : 400 }); }
+  } catch (error) { const code = error instanceof Error ? error.message.split(":")[0] : "PROCESSING_RECOVERY_FAILED"; return NextResponse.json({ error: (code.includes("ACCESS_DENIED") || code === "WORKSPACE_WRITE_DENIED") ? code : "PROCESSING_RECOVERY_FAILED" }, { status: (code.includes("ACCESS_DENIED") || code === "WORKSPACE_WRITE_DENIED") ? 403 : 400 }); }
 }
