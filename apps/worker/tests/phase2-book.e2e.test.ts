@@ -96,7 +96,9 @@ describe("real Phase 2 book intelligence infrastructure", () => {
       expect(memoryEmbeddings).toHaveLength(memories.length);
       expect([...chunkEmbeddings, ...memoryEmbeddings].every((embedding) => embedding.embeddingIdentityHash === identity.hash && embedding.provider === snapshot.providerKey && embedding.model === snapshot.modelId && embedding.dimensions === dimensions && embedding.embeddingVersion === "gateway")).toBe(true);
       expect(gatewayFixture.remoteInputs()).toHaveLength(1);
-      expect(gatewayFixture.remoteInputs()[0]).toHaveLength(289);
+      // The F02 reduction preserves an additional grounded memory; validate
+      // the full persisted vector input set rather than a stale magic number.
+      expect(gatewayFixture.remoteInputs()[0]).toHaveLength(chunks.length + memories.length);
       expect(gatewayFixture.remoteInputs()[0]!.length).toBeGreaterThan(96);
       expect(gatewayFixture.remoteInputs()[0]!.length).toBeLessThanOrEqual(1024);
       expect([gatewayFixture.remoteCallCount(), await prisma.providerExecutionSnapshot.count({ where: { id: snapshot.id, workspaceId: workspace.id } }), await prisma.providerInvocation.count({ where: { id: invocation.id, workspaceId: workspace.id } }), await prisma.providerInvocationAttempt.count({ where: { invocationId: invocation.id, workspaceId: workspace.id, status: "SUCCEEDED" } }), await prisma.providerUsageEvent.count({ where: { invocationId: invocation.id, workspaceId: workspace.id } }), await prisma.providerEmbeddingResult.count({ where: { invocationId: invocation.id, workspaceId: workspace.id } })]).toEqual([1, 1, 1, 1, 1, 1]);

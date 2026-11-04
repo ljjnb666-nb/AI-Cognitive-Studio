@@ -26,9 +26,13 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.waitForLoadState("networkidle");
   await page.locator('input[type="file"]').setInputFiles({ name: "phase6-book.md", mimeType: "text/markdown", buffer: Buffer.from(fixture) });
   await expect(page).toHaveURL(/\/studio\/library\//, { timeout: 30_000 });
-  // The transient processing card can disappear before a fast worker finishes.
-  // Verify the durable extraction result, independent of analysis progress.
-  await expect(page.getByRole("region", { name: "文本提取结果", exact: true }).getByText("提取完成", { exact: true })).toBeVisible();
+  // Sol's layout intentionally omits the old extraction-result panel. Check
+  // durable extraction itself rather than asserting deprecated presentation.
+  const sourceDocumentId = new URL(page.url()).pathname.split("/").pop();
+  if (!sourceDocumentId) throw new Error("PHASE6_SOURCE_ID_MISSING");
+  await expect.poll(() => prisma.currentDocumentExtraction.count({ where: { sourceDocumentId } }), { timeout: 90_000 }).toBe(1);
+  const extraction = await prisma.currentDocumentExtraction.findFirstOrThrow({ where: { sourceDocumentId } });
+  await expect.poll(() => prisma.sourceBlock.count({ where: { extractionId: extraction.extractionId } }), { timeout: 90_000 }).toBeGreaterThan(0);
   await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 90_000 });
   await expect(page.getByText(excerpt).first()).toBeVisible();
   await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
