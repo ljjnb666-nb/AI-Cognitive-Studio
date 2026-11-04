@@ -214,7 +214,7 @@ export async function prepareBookRevisionEmbedding(actor: Actor, revisionId: str
   const embedding = { texts: [memory.after], purpose: "DOCUMENT" as const };
   const request = {
     workspaceId: actor.workspaceId, routeSlot: "EMBEDDING",
-    correlationId: revisionId, idempotencyKey: `book-revision:${revisionId}:${memoryItemId}`,
+    correlationId: revisionId, idempotencyKey: `book-revision:embedding-v1:${revisionId}:${memoryItemId}`,
     inputHash: canonicalEmbeddingInputHash(embedding), capability: { family: "EMBEDDING" },
     embedding, pipelineVersion: `book-revision-v1:${revisionHash}:${memoryItemId}`,
   } satisfies GatewayRequest;
