@@ -1,0 +1,42 @@
+name: ACS PaddleOCR Synthetic OCR Comparison
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/pdf-parser-benchmark/scripts/ebook_paddle_synthetic_benchmark.py'
+      - 'tools/pdf-parser-benchmark/scripts/ebook_synthetic_column_truth.py'
+      - '.github/workflows/acs-ebook-paddle-synthetic.yml'
+permissions:
+  contents: read
+jobs:
+  paddle-synthetic:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-tool-selection-20261022' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PaddlePaddle CPU, PaddleOCR and synthetic test helpers
+        run: |
+          python -m pip install --disable-pip-version-check paddlepaddle==3.2.1 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+          python -m pip install --disable-pip-version-check "paddleocr>=3.0,<4.0" pillow rapidfuzz numpy
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+      - name: Run local PaddleOCR synthetic known truth benchmark
+        run: |
+          python tools/pdf-parser-benchmark/scripts/ebook_paddle_synthetic_benchmark.py --output /tmp/acs-paddle-synthetic-metadata.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acs-paddle-synthetic-metadata
+          path: /tmp/acs-paddle-synthetic-metadata.json
+          if-no-files-found: ignore
+          retention-days: 3

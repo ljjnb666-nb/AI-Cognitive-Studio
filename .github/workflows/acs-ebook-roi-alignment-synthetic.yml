@@ -1,0 +1,31 @@
+name: ACS Ebook ROI Alignment Synthetic
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/pdf-parser-benchmark/scripts/ebook_private_roi_alignment.py'
+      - 'tools/pdf-parser-benchmark/tests/test_ebook_private_roi_alignment.py'
+      - 'tools/pdf-parser-benchmark/scripts/ebook_windows_docling_real.py'
+      - 'tools/pdf-parser-benchmark/docs/BOOK_PRIVATE_ROI_ALIGNMENT_20261022.md'
+      - '.github/workflows/acs-ebook-roi-alignment-synthetic.yml'
+permissions:
+  contents: read
+jobs:
+  roi-alignment:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Exact-head ROI coordinate/provenance/privacy regressions
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 -m unittest discover -v -s tools/pdf-parser-benchmark/tests -p 'test_ebook_private_roi_alignment.py'
+          echo ACS_ROI_ALIGNMENT_SYNTHETIC_PASS
+          echo ACS_REAL_DIAGRAM_MEANING_UNVERIFIED

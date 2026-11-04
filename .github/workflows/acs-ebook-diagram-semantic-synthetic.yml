@@ -1,0 +1,30 @@
+name: ACS Diagram Semantic Gate Synthetic
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/pdf-parser-benchmark/scripts/ebook_semantic_structure_gate.py'
+      - 'tools/pdf-parser-benchmark/tests/test_ebook_semantic_structure_gate.py'
+      - 'tools/pdf-parser-benchmark/docs/BOOK_GRAPH_SEMANTIC_GATE_20261022.md'
+      - '.github/workflows/acs-ebook-diagram-semantic-synthetic.yml'
+permissions:
+  contents: read
+jobs:
+  diagram-gate:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Exact-head structural semantics and privacy regression
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 -m unittest discover -v -s tools/pdf-parser-benchmark/tests -p 'test_ebook_semantic_structure_gate.py'
+          echo ACS_DIAGRAM_SEMANTIC_SYNTHETIC_PASS
+          echo ACS_REAL_GRAPH_CERTIFICATION=UNVERIFIED

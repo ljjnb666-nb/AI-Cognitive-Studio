@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "corpus_id": "ACS-EBOOK-20261022-A",
+  "evidence_level": "AUTO_CONSISTENCY_PROXY_NOT_OCR_ACCURACY",
+  "environment": "Linux CPU / Tesseract 5 chi_sim+eng / PyMuPDF 1.6x render",
+  "matched_books": 5,
+  "scanned_pages": 10,
+  "executions": 30,
+  "errors": 0,
+  "engine_modes": [
+    3,
+    6,
+    11
+  ],
+  "per_mode": {
+    "3": {
+      "median_ms": 1734,
+      "mean_engine_confidence": 88.7,
+      "mean_characters": 576.4
+    },
+    "6": {
+      "median_ms": 1781.5,
+      "mean_engine_confidence": 84.5,
+      "mean_characters": 586.7
+    },
+    "11": {
+      "median_ms": 1705,
+      "mean_engine_confidence": 88.3,
+      "mean_characters": 578.4
+    }
+  },
+  "mean_pairwise_similarity": {
+    "3_vs_6": 0.906,
+    "3_vs_11": 0.944,
+    "6_vs_11": 0.887
+  },
+  "page_columns": [
+    "book_id",
+    "physical_page",
+    "psm3_chars",
+    "psm6_chars",
+    "psm11_chars",
+    "psm3_engine_conf",
+    "psm6_engine_conf",
+    "psm11_engine_conf",
+    "psm3_vs_psm6",
+    "psm3_vs_psm11",
+    "psm6_vs_psm11"
+  ],
+  "pages": [
+    [
+      "B03",
+      67,
+      625,
+      627,
+      614,
+      84.3,
+      84.8,
+      84.9,
+      0.864,
+      0.92,
+      0.893
+    ],
+    [
+      "B03",
+      135,
+      551,
+      560,
+      540,
+      87.2,
+      78,
+      88.2,
+      0.857,
+      0.961,
+      0.845
+    ],
+    [
+      "B08",
+      64,
+      240,
+      219,
+      237,
+      87.8,
+      78.8,
+      88.1,
+      0.771,
+      0.973,
+      0.776
+    ],
+    [
+      "B08",
+      128,
+      734,
+      738,
+      730,
+      92.5,
+      92.5,
+      91.6,
+      0.996,
+      0.969,
+      0.967
+    ],
+    [
+      "B15",
+      109,
+      196,
+      223,
+      208,
+      84,
+      76.8,
+      79.3,
+      0.768,
+      0.822,
+      0.761
+    ],
+    [
+      "B15",
+      219,
+      561,
+      565,
+      563,
+      87,
+      87.1,
+      88.8,
+      0.993,
+      0.872,
+      0.865
+    ],
+    [
+      "B29",
+      72,
+      482,
+      487,
+      482,
+      90.8,
+      90,
+      91.1,
+      0.995,
+      0.985,
+      0.98
+    ],
+    [
+      "B29",
+      144,
+      434,
+      433,
+      432,
+      90.2,
+      79,
+      89.6,
+      0.927,
+      0.979,
+      0.916
+    ],
+    [
+      "B31",
+      126,
+      1176,
+      1188,
+      1187,
+      91.5,
+      90,
+      91.5,
+      0.949,
+      0.978,
+      0.944
+    ],
+    [
+      "B31",
+      252,
+      765,
+      827,
+      791,
+      91.4,
+      88.4,
+      90,
+      0.941,
+      0.976,
+      0.922
+    ]
+  ],
+  "ai_visual_spotchecks": [
+    {
+      "book_id": "B15",
+      "physical_page": 109,
+      "observation": "At least two plots present; pure OCR cannot reconstruct plot curves/coordinates",
+      "status": "AI_VISUAL_ASSESSMENT_NOT_INDEPENDENT_TRUTH"
+    },
+    {
+      "book_id": "B31",
+      "physical_page": 126,
+      "observation": "Directional client-server flow diagram with arrows; pure OCR cannot reconstruct relation directions",
+      "status": "AI_VISUAL_ASSESSMENT_NOT_INDEPENDENT_TRUTH"
+    }
+  ],
+  "not_measured": [
+    "CER/WER vs independent reference",
+    "Table TEDS and figure-relation F1",
+    "Docling, MinerU, Marker, PaddleOCR, Surya and olmOCR exact-page head-to-head",
+    "Windows GPU/VRAM throughput"
+  ],
+  "guards": [
+    "No book text or page image in GitHub",
+    "No paid inference",
+    "OCR text similarity and confidence are NOT accuracy metrics"
+  ]
+}

@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "corpus_id": "ACS-EBOOK-20261022-A",
+  "privacy": "Only hashes and positions: never commit book source bytes, images, OCR output, or full text to public GitHub",
+  "page_numbering": "1-based physical PDF pages",
+  "sources": [
+    {
+      "id": "B01",
+      "format": "epub",
+      "size": 11747388,
+      "sha256": "f06e3486b3860cfb38e519b52041430f310904c4472aec2d077b918f6265ae15"
+    },
+    {
+      "id": "B02",
+      "format": "epub",
+      "size": 12544717,
+      "sha256": "bc45843c166af457b68525c9cb2eb73ca5b4dbf89531aa5ed29fafbae6ae3223"
+    },
+    {
+      "id": "B03",
+      "format": "pdf",
+      "size": 151495200,
+      "sha256": "5be652d2066b680f1242bf358979c549aaf8a1588d9648926ecd8b6c30697440",
+      "total_physical_pages": 271,
+      "selected_physical_pages": [
+        15,
+        67,
+        135,
+        203
+      ],
+      "ocr_physical_pages": [
+        67,
+        135
+      ]
+    },
+    {
+      "id": "B04",
+      "format": "epub",
+      "size": 142470,
+      "sha256": "cbeb358e56900cfee4f427f546df8c2ad074fda07d53fba2107bd2947a05bfb7"
+    },
+    {
+      "id": "B05",
+      "format": "epub",
+      "size": 2955622,
+      "sha256": "bd03d1c8ff3345bee37da96ad50c04095b7e47502789d07cc45cb3d4803ad60a"
+    },
+    {
+      "id": "B07",
+      "format": "epub",
+      "size": 708687,
+      "sha256": "3175efc93b7bb80c777bb6b6667ec279ea85d60284563c44ede966c104456796"
+    },
+    {
+      "id": "B08",
+      "format": "pdf",
+      "size": 98039345,
+      "sha256": "c89d89a3a47d06bd4506855f81671df49ddd8a61317409f14da904195b88fb70",
+      "total_physical_pages": 256,
+      "selected_physical_pages": [
+        15,
+        64,
+        128,
+        192
+      ],
+      "ocr_physical_pages": [
+        64,
+        128
+      ]
+    },
+    {
+      "id": "B09",
+      "format": "epub",
+      "size": 799688,
+      "sha256": "b18cef2f5160fc19450bcea7eac0f3c66789f530ba830dc267c143bb063a059f"
+    },
+    {
+      "id": "B10",
+      "format": "epub",
+      "size": 755178,
+      "sha256": "dbbc764d15d3f0d47b8c1e4b72db40d912b231ce9f9c9d0b8570c1b6b6935588"
+    },
+    {
+      "id": "B11",
+      "format": "epub",
+      "size": 171553,
+      "sha256": "ac5395ff4765370ec51c984d2654e5f362868c75ccb3a9aad2265f645323689f"
+    },
+    {
+      "id": "B13",
+      "format": "epub",
+      "size": 802253,
+      "sha256": "608c6ecba7fe4432036a4fa06d9d5bb7c55127cdb42244c0aa2ea394a0998a56"
+    },
+    {
+      "id": "B15",
+      "format": "pdf",
+      "size": 37274288,
+      "sha256": "62750b026c0f908d7e637dc2f774a29ac539b82ee145eb878cbabc0ba9f0654b",
+      "total_physical_pages": 438,
+      "selected_physical_pages": [
+        15,
+        109,
+        219,
+        328
+      ],
+      "ocr_physical_pages": [
+        109,
+        219
+      ]
+    },
+    {
+      "id": "B16",
+      "format": "pdf",
+      "size": 2050797,
+      "sha256": "922b2cffaac356b0ad04d949b988490a1b4a2b673c6e41075383b6a776a49126",
+      "total_physical_pages": 213,
+      "selected_physical_pages": [
+        15,
+        53,
+        106,
+        159
+      ],
+      "ocr_physical_pages": []
+    },
+    {
+      "id": "B19",
+      "format": "epub",
+      "size": 1376054,
+      "sha256": "6b68df0dc5d9a524f8af1c8740ffd6695b935d977dceee78bd24028bb5d1d9d0"
+    },
+    {
+      "id": "B21",
+      "format": "epub",
+      "size": 4994549,
+      "sha256": "625f8e9921c44ba12a4670267d25f8a71d0fba4245d4dade9e62a54392615229"
+    },
+    {
+      "id": "B22",
+      "format": "epub",
+      "size": 410177,
+      "sha256": "594b5d448c6b06033d77555ca2482b975d057cacaa430d1df6583cf3811e8199"
+    },
+    {
+      "id": "B24",
+      "format": "epub",
+      "size": 3928878,
+      "sha256": "14248f425d123d3b3e5c7a6a035851c407034b01eeefc5cd4b1ceb217e59a8d3"
+    },
+    {
+      "id": "B27",
+      "format": "epub",
+      "size": 353937,
+      "sha256": "7fb3de1a117680af0c73bce8799039a09b06d48e6450c8a292fe650c04ffb756"
+    },
+    {
+      "id": "B28",
+      "format": "epub",
+      "size": 357191,
+      "sha256": "bda4cc734b47446b83cb598ca26aaec179f0050b5499426b0636b59d125f21aa"
+    },
+    {
+      "id": "B29",
+      "format": "pdf",
+      "size": 59502021,
+      "sha256": "afd916bf25e2c4bc0b513868bb6201edb5768fd408818560e3efbf241d13e8bc",
+      "total_physical_pages": 289,
+      "selected_physical_pages": [
+        15,
+        72,
+        144,
+        216
+      ],
+      "ocr_physical_pages": [
+        72,
+        144
+      ]
+    },
+    {
+      "id": "B30",
+      "format": "epub",
+      "size": 4855361,
+      "sha256": "2e9a0c0f14eda567ce75c3e9c1153dddc7b602e3c056574afa620e5b7c9c7c25"
+    },
+    {
+      "id": "B31",
+      "format": "pdf",
+      "size": 25220812,
+      "sha256": "bf0b7038334a1485462670c3589bf3f09f7c8e5c37621bc3b6940633b5e04fc8",
+      "total_physical_pages": 504,
+      "selected_physical_pages": [
+        15,
+        126,
+        252,
+        378
+      ],
+      "ocr_physical_pages": [
+        126,
+        252
+      ]
+    },
+    {
+      "id": "B32",
+      "format": "epub",
+      "size": 1244016,
+      "sha256": "a22e2a15dec4d170f2048e044421cbe0625b0d64484619617392e65670b4f246"
+    },
+    {
+      "id": "B33",
+      "format": "epub",
+      "size": 555409,
+      "sha256": "91fe1d9f9261e31719e8cc6e2d27140a20432de30497cd29fd5152d6b8a07b9b"
+    },
+    {
+      "id": "B34",
+      "format": "epub",
+      "size": 1489352,
+      "sha256": "afcbdaa1063398d6cb4c61a89d93348c6eb23f5b179cee23fb404ba9820698fa"
+    },
+    {
+      "id": "B35",
+      "format": "epub",
+      "size": 874922,
+      "sha256": "7c63921387dad4d4a04587e8563c4b70a22e149f233d8de67f0ed60ca3681ba0"
+    },
+    {
+      "id": "B36",
+      "format": "epub",
+      "size": 962145,
+      "sha256": "59a10ff5185469658ecfb7548caa62cb8495775fef90c9b56db1689f926478a7"
+    }
+  ]
+}

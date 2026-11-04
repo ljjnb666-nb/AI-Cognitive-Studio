@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "corpus_id": "ACS-EBOOK-20261022-A",
+  "status": "EXECUTED_BASELINE_ONLY_NOT_FINAL_TOOL_RANKING",
+  "environment": "Linux CPU sandbox, not the Windows RTX 4060 runner",
+  "source_archive_count": 36,
+  "selected_sources": 27,
+  "source_formats": {
+    "pdf": 6,
+    "epub": 21,
+    "mobi": 4,
+    "azw3": 4,
+    "prc": 1
+  },
+  "pdf_page_sample": 24,
+  "scanned_pdf_count_by_seven_page_probe": 5,
+  "embedded_text_pdf_count_by_seven_page_probe": 1,
+  "ocr_pages": 10,
+  "epub_spines_processed": 21,
+  "total_executions": 127,
+  "execution_errors": 0,
+  "engines": [
+    {
+      "engine": "EPUB_OPF_spine+lxml",
+      "executions": 21,
+      "successes": 21,
+      "median_wall_ms": 79.35,
+      "p90_wall_ms": 207.02,
+      "html_spine_items": 974,
+      "missing_spine_paths": 0
+    },
+    {
+      "engine": "PyMuPDF",
+      "executions": 24,
+      "successes": 24,
+      "median_wall_ms": 0.13,
+      "p90_wall_ms": 1.17,
+      "extracted_nonspace_characters": 2650
+    },
+    {
+      "engine": "pypdf",
+      "executions": 24,
+      "successes": 24,
+      "median_wall_ms": 0.83,
+      "p90_wall_ms": 11.64,
+      "extracted_nonspace_characters": 2650
+    },
+    {
+      "engine": "pdfplumber",
+      "executions": 24,
+      "successes": 24,
+      "median_wall_ms": 1.31,
+      "p90_wall_ms": 50.63,
+      "extracted_nonspace_characters": 2650
+    },
+    {
+      "engine": "poppler_layout",
+      "executions": 24,
+      "successes": 24,
+      "median_wall_ms": 13.42,
+      "p90_wall_ms": 19.3,
+      "extracted_nonspace_characters": 2650
+    },
+    {
+      "engine": "Tesseract_5_chi_sim+eng",
+      "executions": 10,
+      "successes": 10,
+      "median_wall_ms": 1865.8,
+      "p90_wall_ms": 2494.27,
+      "extracted_nonspace_characters": 5764
+    }
+  ],
+  "not_measured": [
+    "OCR character accuracy (CER/WER), manual ground truth missing",
+    "Table reconstruction TEDS, formula accuracy, graph structure quality",
+    "Cross-tool quality for Docling, MinerU, Marker, PaddleOCR, Surya, olmOCR",
+    "Windows GPU throughput, cost, memory peaks",
+    "EPUB chapter semantics verified against human ground truth"
+  ],
+  "remark": "Length and success are not accuracy metrics. Do not infer best tool from runtime alone."
+}

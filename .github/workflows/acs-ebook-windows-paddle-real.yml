@@ -1,0 +1,95 @@
+name: ACS Ebook Windows PaddleOCR Real Private Pages
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/pdf-parser-benchmark/scripts/ebook_windows_paddle_real.py'
+      - 'tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+      - '.github/workflows/acs-ebook-windows-paddle-real.yml'
+permissions:
+  contents: read
+concurrency:
+  group: acs-ebook-windows-paddle-private
+  cancel-in-progress: false
+jobs:
+  paddle-real:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-tool-selection-20261022' && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact owner SHA without persistent credentials
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: http.proxy
+          GIT_CONFIG_VALUE_0: socks5h://127.0.0.1:10808
+        with:
+          persist-credentials: false
+          clean: false
+          path: acs-ebook-paddle-private
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Install isolated CPU PaddleOCR and evaluate SHA-locked pages
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          OMP_NUM_THREADS: '2'
+          MKL_NUM_THREADS: '2'
+          PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: 'True'
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git -C acs-ebook-paddle-private rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'ACS_PADDLE_EXACT_SHA_MISMATCH' }
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ([double]$os.FreePhysicalMemory -lt 4194304) { throw 'ACS_PADDLE_FREE_RAM_UNDER_4GIB' }
+          $drive=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='D:'" -ErrorAction Stop
+          if ([double]$drive.FreeSpace -lt 17179869184) { throw 'ACS_PADDLE_D_FREE_UNDER_16GIB' }
+          $private='D:\ai-cognitive-pdf-benchmark-data'
+          if (-not (Test-Path -LiteralPath $private -PathType Container)) { throw 'ACS_PADDLE_PRIVATE_CORPUS_MISSING' }
+          $temp=Join-Path $private 'temp'
+          $venv=Join-Path $private 'tool-env\paddleocr-3.7.0'
+          foreach($dir in @($temp,(Split-Path $venv -Parent))) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+          $env:PADDLE_PDX_CACHE_HOME=(Join-Path $private 'model-cache\paddlex')
+          $env:HF_HOME=(Join-Path $private 'model-cache\hf')
+          $env:TEMP=$temp
+          $env:TMP=$temp
+          $env:HTTPS_PROXY='socks5h://127.0.0.1:10808'
+          $env:HTTP_PROXY='socks5h://127.0.0.1:10808'
+          $env:ALL_PROXY='socks5h://127.0.0.1:10808'
+          $py=(Get-Command python -ErrorAction Stop).Source
+          $isolated=Join-Path $venv 'Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $isolated -PathType Leaf)) {
+            & $py -m venv $venv
+            if ($LASTEXITCODE -ne 0) { throw 'ACS_PADDLE_VENV_CREATION_FAILED' }
+          }
+          $socks=(& $isolated -c "import importlib.util; print('yes' if importlib.util.find_spec('socks') else 'no')").Trim()
+          if ($socks -ne 'yes') {
+            $wheel=Join-Path $temp 'PySocks-1.7.1-py3-none-any.whl'
+            if (-not (Test-Path -LiteralPath $wheel -PathType Leaf)) { throw 'ACS_PADDLE_VERIFIED_PYSOCKS_BOOTSTRAP_WHEEL_MISSING' }
+            $hash=(Get-FileHash -LiteralPath $wheel -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne '2725bd0a9925919b9b51739eea5f9e2bae91e83288108a9ad338b2e3a4435ee5') { throw 'ACS_PADDLE_PYSOCKS_SHA_INVALID' }
+            & $isolated -m pip install --disable-pip-version-check --no-index --no-deps --no-input $wheel
+            if ($LASTEXITCODE -ne 0) { throw 'ACS_PADDLE_PYSOCKS_INSTALL_FAILED' }
+          }
+          $check=(& $isolated -c "import importlib.util; print('yes' if importlib.util.find_spec('paddleocr') else 'no')").Trim()
+          if ($check -ne 'yes') {
+            & $isolated -m pip install --disable-pip-version-check --no-input --retries 2 --timeout 35 --no-cache-dir 'paddlepaddle==3.2.1' --index-url 'https://www.paddlepaddle.org.cn/packages/stable/cpu/'
+            if ($LASTEXITCODE -ne 0) { throw 'ACS_PADDLE_CPU_WHEEL_INSTALL_FAILED' }
+            & $isolated -m pip install --disable-pip-version-check --no-input --retries 2 --timeout 35 --no-cache-dir 'paddleocr==3.7.0' 'pymupdf>=1.24,<2' 'rapidfuzz==3.14.6' 'httpx[socks]'
+            if ($LASTEXITCODE -ne 0) { throw 'ACS_PADDLE_OCR_INSTALL_FAILED' }
+          }
+          $script='acs-ebook-paddle-private/tools/pdf-parser-benchmark/scripts/ebook_windows_paddle_real.py'
+          $manifest='acs-ebook-paddle-private/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $report=Join-Path $private ('reports\ebook-paddle-real-' + $env:EXPECTED_SHA.Substring(0,12) + '.private.json')
+          & $isolated $script --root $private --manifest $manifest --output $report
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_PADDLE_REAL_PRIVATE_BENCHMARK_FAILED' }
+          $data=Get-Content -LiteralPath $report -Raw -Encoding UTF8 | ConvertFrom-Json
+          if (@($data.rows).Count -ne 3 -or @($data.missing).Count -ne 0 -or @($data.failed).Count -ne 0) { throw 'ACS_PADDLE_REPORT_INVARIANT_FAILED' }
+          Write-Output ('ACS_PADDLE_REAL_VERSION=' + $data.version)
+          Write-Output ('ACS_PADDLE_REAL_INIT_MS=' + $data.initialization_ms)
+          foreach($row in $data.rows) {
+            if ($row.status -ne 'SUCCESS') { throw 'ACS_PADDLE_REAL_ROW_FAILED' }
+            Write-Output ('ACS_PADDLE_REAL_METRIC=' + $row.book_id + '_P' + $row.physical_page + '|CHARS=' + $row.recognized_characters + '|MS=' + $row.wall_ms)
+            if ($null -ne $row.reference_layer_cer) { Write-Output ('ACS_PADDLE_REAL_NATIVE_REFERENCE_CER=' + $row.book_id + '_P' + $row.physical_page + '|' + $row.reference_layer_cer) }
+            if ($null -eq $row.layout_evidence -or $row.layout_evidence.graph_semantics -ne 'UNVERIFIED') { throw 'ACS_PADDLE_LAYOUT_EVIDENCE_MISSING_OR_UNSAFE' }
+            Write-Output ('ACS_PADDLE_LAYOUT=' + $row.book_id + '_P' + $row.physical_page + '|TEXT_BOXES=' + $row.layout_evidence.recognized_text_boxes + '|DETECTED=' + $row.layout_evidence.detection_polygons + '|RECOGNIZED_POLYGONS=' + $row.layout_evidence.recognized_polygons + '|LOW_CONF=' + $row.layout_evidence.low_confidence_boxes + '|GEOMETRY=' + $row.layout_evidence.geometry_integrity + '|GRAPH=UNVERIFIED')
+          }
+          Write-Output 'ACS_PADDLE_REAL_PRIVATE_REPORT_ONLY_D_DRIVE'

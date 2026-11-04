@@ -1,0 +1,48 @@
+name: ACS Ebook Windows Native PDF EPUB Baseline
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/pdf-parser-benchmark/scripts/ebook_windows_native_baseline.py'
+      - 'tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+      - '.github/workflows/acs-ebook-windows-native-baseline.yml'
+permissions:
+  contents: read
+concurrency:
+  group: acs-ebook-windows-native-baseline
+  cancel-in-progress: false
+jobs:
+  native:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-tool-selection-20261022' && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact SHA without persistent credentials
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'http.proxy'
+          GIT_CONFIG_VALUE_0: 'socks5h://127.0.0.1:10808'
+        with:
+          persist-credentials: false
+          clean: false
+          path: acs-ebook-native
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Check resources and run real private-book native baseline
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $ErrorActionPreference='Stop'
+          if ((git -C acs-ebook-native rev-parse HEAD).Trim() -ne $env:EXPECTED_SHA) { throw 'ACS_NATIVE_EXACT_SHA_MISMATCH' }
+          $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ([double]$os.FreePhysicalMemory -lt 1572864) { throw 'ACS_NATIVE_MEMORY_GATE_BLOCKED' }
+          $python=(Get-Command python -ErrorAction Stop).Source
+          $privateRoot='D:\ai-cognitive-pdf-benchmark-data'
+          if (-not (Test-Path -LiteralPath $privateRoot -PathType Container)) { throw 'ACS_NATIVE_PRIVATE_CORPUS_MISSING' }
+          $script='acs-ebook-native/tools/pdf-parser-benchmark/scripts/ebook_windows_native_baseline.py'
+          $manifest='acs-ebook-native/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $output=Join-Path $privateRoot ('reports\ebook-native-' + $env:EXPECTED_SHA.Substring(0,12) + '.private.json')
+          & $python $script --root $privateRoot --manifest $manifest --output $output
+          if ($LASTEXITCODE -ne 0) { throw 'ACS_NATIVE_BASELINE_EXECUTION_FAILED' }
+          Write-Output 'ACS_NATIVE_PRIVATE_REPORT_WRITTEN_NO_GITHUB_UPLOAD'

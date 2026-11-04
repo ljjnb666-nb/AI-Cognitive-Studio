@@ -1,0 +1,57 @@
+name: ACS Ebook Windows Private Corpus Readonly Preflight
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+      - 'tools/pdf-parser-benchmark/scripts/ebook_tool_selection_preflight.py'
+      - '.github/workflows/acs-ebook-windows-preflight.yml'
+permissions:
+  contents: read
+concurrency:
+  group: acs-ebook-windows-private-preflight
+  cancel-in-progress: false
+jobs:
+  readonly-check:
+    if: ${{ github.repository == 'ljjnb666-nb/AI-Cognitive-Studio' && github.actor == 'ljjnb666-nb' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'bench/ebook-tool-selection-20261022' && github.event.pull_request.user.login == 'ljjnb666-nb' }}
+    runs-on: [self-hosted, Windows, X64, acs-pdf-local]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout owner PR exact SHA
+        uses: actions/checkout@v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'http.proxy'
+          GIT_CONFIG_VALUE_0: 'socks5h://127.0.0.1:10808'
+        with:
+          persist-credentials: false
+          clean: false
+          path: acs-ebook-private-readonly
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Readonly check fixture hashes and installed tools
+        shell: powershell
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $actual = (git -C acs-ebook-private-readonly rev-parse HEAD).Trim()
+          if ($actual -ne $env:EXPECTED_SHA) { throw 'BENCHMARK_EXACT_SHA_MISMATCH' }
+          $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+          if ([double]$os.FreePhysicalMemory -lt 1048576) { throw 'BENCHMARK_MEMORY_GUARD_BLOCKED' }
+          Write-Output ('ACS_BENCHMARK_FREE_MEMORY_KIB=' + $os.FreePhysicalMemory)
+          $python = Get-Command python -ErrorAction SilentlyContinue
+          if ($null -eq $python) { throw 'BENCHMARK_PYTHON_UNAVAILABLE' }
+          $inputRoot = 'D:\ai-cognitive-pdf-benchmark-data'
+          if (-not (Test-Path -LiteralPath $inputRoot -PathType Container)) { throw 'BENCHMARK_PRIVATE_BOOKS_DIRECTORY_UNAVAILABLE' }
+          $script = 'acs-ebook-private-readonly/tools/pdf-parser-benchmark/scripts/ebook_tool_selection_preflight.py'
+          $manifest = 'acs-ebook-private-readonly/tools/pdf-parser-benchmark/corpus/ebook-20261022.manifest.json'
+          $lines = @(& $python.Source $script --root $inputRoot --manifest $manifest)
+          if ($LASTEXITCODE -ne 0) { throw 'BENCHMARK_READONLY_PREFLIGHT_FAILED' }
+          foreach ($line in $lines) { Write-Output $line }
+          $matched = @($lines | Where-Object { $_ -match '^ACS_BENCHMARK_CORPUS_SHA_MATCHED=' } | Select-Object -First 1)
+          $expected = @($lines | Where-Object { $_ -match '^ACS_BENCHMARK_CORPUS_SHA_EXPECTED=' } | Select-Object -First 1)
+          if ($matched.Count -ne 1 -or $expected.Count -ne 1) { throw 'BENCHMARK_PREFLIGHT_COUNTS_MISSING' }
+          $m = [int]($matched[0] -split '=')[1]
+          $e = [int]($expected[0] -split '=')[1]
+          if ($m -ne $e) { throw "BENCHMARK_CORPUS_INCOMPLETE_MATCHED_$($m)_OF_$($e)" }
+          Write-Output 'ACS_BENCHMARK_WINDOWS_CORPUS_SHA_READY'
