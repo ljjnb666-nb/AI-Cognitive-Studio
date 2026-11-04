@@ -1,3 +1,4 @@
+import { readPublishedBookRevisionForRun } from "@ai-cognitive/book-intelligence";
 import { createHash } from "node:crypto";
 import { Prisma, prisma } from "@ai-cognitive/db";
 import {
@@ -61,15 +62,23 @@ type Cognition = {
 async function current(
   identity: Identity,
   memoryItemId: string,
-): Promise<Cognition | null> {
-  const rows = await prisma.$queryRaw<Cognition[]>(
-    Prisma.sql`SELECT memory."id", memory."type", memory."content", memory."sourceDocumentId", source."displayName" AS "sourceTitle" FROM "BookMemoryItem" memory JOIN "CurrentBookIntelligence" current ON current."analysisRunId"=memory."analysisRunId" AND current."workspaceId"=memory."workspaceId" AND current."sourceDocumentId"=memory."sourceDocumentId" AND current."extractionId"=memory."extractionId" JOIN "CurrentDocumentExtraction" extraction ON extraction."workspaceId"=current."workspaceId" AND extraction."sourceDocumentId"=current."sourceDocumentId" AND extraction."extractionId"=current."extractionId" JOIN "SourceDocument" document ON document."id"=memory."sourceDocumentId" AND document."workspaceId"=memory."workspaceId" JOIN "Source" source ON source."id"=document."sourceId" AND source."workspaceId"=document."workspaceId" WHERE memory."workspaceId"=${identity.workspaceId} AND memory."id"=${memoryItemId} LIMIT 1`,
+): Promise<(Cognition & { bookPublicationId: string | null; evidence: Awaited<ReturnType<typeof evidence>> }) | null> {
+  return prisma.$transaction(async tx => {
+  await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+  const rows = await tx.$queryRaw<Array<Cognition & { analysisRunId: string; extractionId: string }>>(
+    Prisma.sql`SELECT memory."id", memory."type", memory."content", memory."sourceDocumentId", memory."analysisRunId", memory."extractionId", source."displayName" AS "sourceTitle" FROM "BookMemoryItem" memory JOIN "CurrentBookIntelligence" current ON current."analysisRunId"=memory."analysisRunId" AND current."workspaceId"=memory."workspaceId" AND current."sourceDocumentId"=memory."sourceDocumentId" AND current."extractionId"=memory."extractionId" JOIN "CurrentDocumentExtraction" extraction ON extraction."workspaceId"=current."workspaceId" AND extraction."sourceDocumentId"=current."sourceDocumentId" AND extraction."extractionId"=current."extractionId" JOIN "SourceDocument" document ON document."id"=memory."sourceDocumentId" AND document."workspaceId"=memory."workspaceId" JOIN "Source" source ON source."id"=document."sourceId" AND source."workspaceId"=document."workspaceId" WHERE memory."workspaceId"=${identity.workspaceId} AND memory."id"=${memoryItemId} LIMIT 1`,
   );
   const item = rows[0];
-  return item && types.has(item.type) ? item : null;
+  if (!item || !types.has(item.type)) return null;
+  const published = await readPublishedBookRevisionForRun(tx, { workspaceId: identity.workspaceId, analysisRunId: item.analysisRunId });
+  const change = published.revision?.memories.find(memory => memory.id === item.id);
+  return { ...item, content: change?.after ?? item.content,
+    bookPublicationId: published.revision ? published.publicationId : null,
+    evidence: await evidence(tx, identity.workspaceId, item.id, item.extractionId, change?.addedEvidence) };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 }
-async function evidence(workspaceId: string, memoryItemId: string) {
-  const rows = await prisma.bookMemoryEvidence.findMany({
+async function evidence(tx: Prisma.TransactionClient, workspaceId: string, memoryItemId: string, extractionId: string, added: Array<{sourceBlockId: string; startOffset: number; endOffset: number}> = []) {
+  const rows = await tx.bookMemoryEvidence.findMany({
     where: { workspaceId, memoryItemId },
     include: { sourceBlock: { select: { text: true, ordinal: true } } },
     orderBy: [
@@ -79,7 +88,14 @@ async function evidence(workspaceId: string, memoryItemId: string) {
     ],
     take: MAX_EVIDENCE,
   });
-  return rows.flatMap((row) =>
+  const blocks = added.length ? await tx.sourceBlock.findMany({ where: { extractionId, id: { in: [...new Set(added.map(span => span.sourceBlockId))] } }, select: { id: true, text: true, ordinal: true } }) : [];
+  const byId = new Map(blocks.map(block => [block.id, block]));
+  const supplements = added.flatMap(span => {
+    const sourceBlock = byId.get(span.sourceBlockId);
+    if (!sourceBlock) throw new Error("BOOK_REVISION_EVIDENCE_INVALID");
+    return rows.some(row => row.sourceBlockId === span.sourceBlockId && row.startOffset === span.startOffset && row.endOffset === span.endOffset) ? [] : [{ ...span, sourceBlock }];
+  });
+  return [...supplements, ...rows].slice(0, MAX_EVIDENCE).flatMap((row) =>
     row.startOffset >= 0 &&
     row.endOffset >= row.startOffset &&
     row.endOffset <= row.sourceBlock.text.length
@@ -94,6 +110,16 @@ async function evidence(workspaceId: string, memoryItemId: string) {
       : [],
   );
 }
+async function pinnedThinkingMemory(workspaceId: string, memory: { id: string; analysisRunId: string; extractionId: string; content: string }, bookPublicationId: string | null) {
+  return prisma.$transaction(async tx => {
+    await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+    const published = bookPublicationId ? await readPublishedBookRevisionForRun(tx, { workspaceId, analysisRunId: memory.analysisRunId }, bookPublicationId) : null;
+    const change = published?.revision?.memories.find(item => item.id === memory.id);
+    return { content: change?.after ?? memory.content,
+      evidence: await evidence(tx, workspaceId, memory.id, memory.extractionId, change?.addedEvidence) };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+}
+
 async function sourceTitles(workspaceId: string, memoryItemIds: string[]) {
   if (!memoryItemIds.length) return new Map<string, string>();
   const rows = await prisma.$queryRaw<
@@ -202,7 +228,7 @@ export async function createThinkingSession(
     identity,
     sessionId,
     operation,
-    prompt(cognition, await evidence(identity.workspaceId, memoryItemId), []),
+    prompt(cognition, cognition.evidence, []),
   );
   if (turn.inProgress) return { id: sessionId, pending: true as const };
   if (turn.consumed) {
@@ -233,6 +259,7 @@ export async function createThinkingSession(
           workspaceId: identity.workspaceId,
           userId: identity.userId,
           memoryItemId,
+          bookPublicationId: cognition.bookPublicationId,
         },
       });
       await tx.thinkingSessionMessage.create({
@@ -335,6 +362,7 @@ export async function appendThinkingResponse(
     (await sourceTitles(identity.workspaceId, [session.memoryItemId])).get(
       session.memoryItemId,
     ) ?? "未知来源";
+  const pinned = await pinnedThinkingMemory(identity.workspaceId, session.memoryItem, session.bookPublicationId);
   const operation = `thinking:${sessionId}:${user.id}`;
   const turn = await generate(
     identity,
@@ -343,10 +371,10 @@ export async function appendThinkingResponse(
     prompt(
       {
         type: session.memoryItem.type,
-        content: session.memoryItem.content,
+        content: pinned.content,
         sourceTitle: title,
       },
-      await evidence(identity.workspaceId, session.memoryItemId),
+      pinned.evidence,
       dialogue.reverse(),
     ),
   );
@@ -440,14 +468,17 @@ export async function thinkingSessionDetail(
     include: { memoryItem: true, messages: { orderBy: { ordinal: "asc" } } },
   });
   if (!session) return null;
-  const pinned = await prisma.$queryRaw<Cognition[]>(
+  const original = await prisma.$queryRaw<Cognition[]>(
     Prisma.sql`SELECT memory."id", memory."type", memory."content", memory."sourceDocumentId", source."displayName" AS "sourceTitle" FROM "BookMemoryItem" memory JOIN "SourceDocument" document ON document."id"=memory."sourceDocumentId" AND document."workspaceId"=memory."workspaceId" JOIN "Source" source ON source."id"=document."sourceId" AND source."workspaceId"=document."workspaceId" WHERE memory."id"=${session.memoryItemId} AND memory."workspaceId"=${identity.workspaceId} LIMIT 1`,
   );
+  const pinned = await pinnedThinkingMemory(identity.workspaceId, session.memoryItem, session.bookPublicationId);
+  const active = await current(identity, session.memoryItemId);
   return {
     ...session,
-    sourceTitle: pinned[0]?.sourceTitle ?? "未知来源",
-    historical: !(await current(identity, session.memoryItemId)),
-    evidence: await evidence(identity.workspaceId, session.memoryItemId),
+    memoryItem: { ...session.memoryItem, content: pinned.content },
+    sourceTitle: original[0]?.sourceTitle ?? "未知来源",
+    historical: !active || active.bookPublicationId !== session.bookPublicationId,
+    evidence: pinned.evidence,
   };
 }
 export async function listThinkingSessions(

@@ -1,3 +1,4 @@
+import { readPublishedBookRevisionForRun } from "@ai-cognitive/book-intelligence";
 import { createHash } from "node:crypto";
 import { Prisma, prisma } from "@ai-cognitive/db";
 import { canonicalTextInputHash, type ProviderExecutionRepository, type ProviderGateway, type TextGenerationInput } from "@ai-cognitive/provider-gateway";
@@ -31,14 +32,25 @@ export function deriveMasteryState(expected: readonly CriterionKey[], criteria: 
   if (criteria.some(item => item.status === "NOT_MET")) return "NEEDS_REVIEW";
   return criteria.every(item => item.status === "MET") ? "DEMONSTRATED" : "DEVELOPING";
 }
-type Cognition = { id: string; type: string; content: string; sourceTitle: string; sourceDocumentId: string };
-async function current(identity: Identity, memoryItemId: string): Promise<Cognition | null> {
-  const rows = await prisma.$queryRaw<Cognition[]>(Prisma.sql`SELECT memory."id", memory."type", memory."content", memory."sourceDocumentId", source."displayName" AS "sourceTitle" FROM "BookMemoryItem" memory ${currentLineageJoin()} WHERE memory."workspaceId"=${identity.workspaceId} AND memory."id"=${memoryItemId} AND run."status" = 'SUCCEEDED'::"AnalysisRunStatus" LIMIT 1`);
+type Cognition = { id: string; type: string; content: string; sourceTitle: string; sourceDocumentId: string; analysisRunId: string; extractionId: string };
+async function current(identity: Identity, memoryItemId: string, tx: Prisma.TransactionClient = prisma): Promise<Cognition | null> {
+  const rows = await tx.$queryRaw<Cognition[]>(Prisma.sql`SELECT memory."id", memory."type", memory."content", memory."sourceDocumentId", memory."analysisRunId", memory."extractionId", source."displayName" AS "sourceTitle" FROM "BookMemoryItem" memory ${currentLineageJoin()} WHERE memory."workspaceId"=${identity.workspaceId} AND memory."id"=${memoryItemId} AND run."status" = 'SUCCEEDED'::"AnalysisRunStatus" LIMIT 1`);
   const value = rows[0]; return value && types.has(value.type) ? value : null;
 }
-async function validEvidence(workspaceId: string, memoryItemId: string) {
-  const rows = await prisma.bookMemoryEvidence.findMany({ where: { workspaceId, memoryItemId }, include: { sourceBlock: { select: { text: true, ordinal: true } } }, orderBy: [{ sourceBlock: { ordinal: "asc" } }, { startOffset: "asc" }, { id: "asc" }], take: MAX_EVIDENCE });
-  return rows.filter((row) => row.startOffset >= 0 && row.endOffset >= row.startOffset && row.endOffset <= row.sourceBlock.text.length).map((row, index) => ({ label: `E${index + 1}`, excerpt: row.sourceBlock.text.slice(row.startOffset, row.endOffset).slice(0, MAX_EXCERPT), blockOrdinal: row.sourceBlock.ordinal }));
+async function validEvidence(tx: Prisma.TransactionClient, workspaceId: string, memory: Pick<Cognition, "id" | "extractionId">, added: Array<{ sourceBlockId: string; startOffset: number; endOffset: number }> = []) {
+  const rows = await tx.bookMemoryEvidence.findMany({ where: { workspaceId, memoryItemId: memory.id }, include: { sourceBlock: { select: { text: true, ordinal: true } } }, orderBy: [{ sourceBlock: { ordinal: "asc" } }, { startOffset: "asc" }, { id: "asc" }], take: MAX_EVIDENCE });
+  const blocks = added.length ? await tx.sourceBlock.findMany({
+    where: { extractionId: memory.extractionId, id: { in: added.map(span => span.sourceBlockId) } },
+    select: { id: true, text: true, ordinal: true },
+  }) : [];
+  const byId = new Map(blocks.map(block => [block.id, block]));
+  const supplemental = added.flatMap(span => {
+    const sourceBlock = byId.get(span.sourceBlockId);
+    if (!sourceBlock) throw new Error("BOOK_REVISION_EVIDENCE_INVALID");
+    return rows.some(row => row.sourceBlockId === span.sourceBlockId && row.startOffset === span.startOffset && row.endOffset === span.endOffset)
+      ? [] : [{ ...span, sourceBlock }];
+  });
+  return [...supplemental, ...rows].slice(0, MAX_EVIDENCE).filter((row) => row.startOffset >= 0 && row.endOffset >= row.startOffset && row.endOffset <= row.sourceBlock.text.length).map((row, index) => ({ label: `E${index + 1}`, excerpt: row.sourceBlock.text.slice(row.startOffset, row.endOffset).slice(0, MAX_EXCERPT), blockOrdinal: row.sourceBlock.ordinal }));
 }
 export function assessmentSchema(expected: readonly CriterionKey[], labels: string[]) { const evidenceRefs = labels.length ? { type: "array", maxItems: labels.length, items: { enum: labels } } : { type: "array", maxItems: 0, items: { type: "string" } }; return { type: "object", additionalProperties: false, required: ["criteria", "feedback", "nextPrompt"], properties: { criteria: { type: "array", minItems: expected.length, maxItems: expected.length, items: { type: "object", additionalProperties: false, required: ["key", "status", "rationale", "evidenceRefs"], properties: { key: { enum: expected }, status: { enum: ["MET", "PARTIAL", "NOT_MET"] }, rationale: { type: "string", minLength: 1, maxLength: MAX_RATIONALE }, evidenceRefs } } }, feedback: { type: "string", minLength: 1, maxLength: MAX_FEEDBACK }, nextPrompt: { anyOf: [{ type: "string", minLength: 1, maxLength: MAX_NEXT }, { type: "null" }] } } }; }
 export function validateTeachBackAssessment(value: unknown, expected: readonly CriterionKey[], labels: string[]) {
@@ -57,19 +69,67 @@ export async function createOrAssessTeachBackAttempt(identity: Identity, input: 
   if (ownedAttempt && ownedAttempt.userId !== identity.userId) throw new Error("TEACH_BACK_ATTEMPT_NOT_FOUND");
   const prior = await prisma.teachBackAttempt.findFirst({ where: { id: input.attemptId, workspaceId: identity.workspaceId, userId: identity.userId } });
   if (prior && (prior.content !== content || prior.memoryItemId !== input.memoryItemId)) throw new Error("TEACH_BACK_IDEMPOTENCY_CONFLICT");
-  const cognition = prior ? await prisma.bookMemoryItem.findFirst({ where: { id: prior.memoryItemId, workspaceId: identity.workspaceId }, select: { id: true, type: true, content: true, sourceDocumentId: true } }).then(async item => item ? ({ ...item, sourceTitle: (await prisma.sourceDocument.findFirst({ where: { id: item.sourceDocumentId, workspaceId: identity.workspaceId }, include: { source: { select: { displayName: true } } } }))?.source.displayName ?? "未知来源" }) : null) : await current(identity, input.memoryItemId);
-  if (!cognition || !types.has(cognition.type)) throw new Error("COGNITION_NOT_CURRENT");
-  await resolveTeachBackProductExecution(identity.workspaceId); const expected = rubricForCognitionType(cognition.type);
-  const attempt = await prisma.$transaction(async tx => { await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${input.attemptId}, 0))`); const existing = await tx.teachBackAttempt.findFirst({ where: { id: input.attemptId, workspaceId: identity.workspaceId, userId: identity.userId } }); if (existing) { if (existing.content !== content || existing.memoryItemId !== input.memoryItemId) throw new Error("TEACH_BACK_IDEMPOTENCY_CONFLICT"); return existing; } return tx.teachBackAttempt.create({ data: { id: input.attemptId, workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.memoryItemId, content } }); });
-  const done = await prisma.teachBackAssessment.findUnique({ where: { attemptId: attempt.id } }); if (done) return { id: attempt.id, pending: false as const };
-  const proof = await validEvidence(identity.workspaceId, attempt.memoryItemId), text = prompt(cognition, attempt.content, expected, proof), operation = `teachback:${attempt.id}:assessment:v1`, active = runtime(); let result;
+  const initialPin = prior?.bookPublicationId ?? (prior ? null : await prisma.$transaction(async tx => {
+    const cognition = await current(identity, input.memoryItemId, tx);
+    if (!cognition) throw new Error("COGNITION_NOT_CURRENT");
+    const published = await readPublishedBookRevisionForRun(tx, { workspaceId: identity.workspaceId, analysisRunId: cognition.analysisRunId });
+    return published.revision ? published.publicationId : null;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }));
+  await resolveTeachBackProductExecution(identity.workspaceId);
+  const attempt = await prisma.$transaction(async tx => {
+    await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${input.attemptId}, 0))`);
+    const existing = await tx.teachBackAttempt.findFirst({ where: { id: input.attemptId, workspaceId: identity.workspaceId } });
+    if (existing) {
+      if (existing.userId !== identity.userId) throw new Error("TEACH_BACK_ATTEMPT_NOT_FOUND");
+      if (existing.content !== content || existing.memoryItemId !== input.memoryItemId) throw new Error("TEACH_BACK_IDEMPOTENCY_CONFLICT");
+      return existing;
+    }
+    return tx.teachBackAttempt.create({ data: { id: input.attemptId, workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId: input.memoryItemId, content, bookPublicationId: initialPin } });
+  });
+  const done = await prisma.teachBackAssessment.findUnique({ where: { attemptId: attempt.id } });
+  if (done) return { id: attempt.id, pending: false as const };
+  const { cognition, proof } = await prisma.$transaction(async tx => {
+    const item = await tx.bookMemoryItem.findFirstOrThrow({ where: { id: attempt.memoryItemId, workspaceId: identity.workspaceId },
+      include: { analysisRun: { select: { sourceDocument: { select: { source: { select: { displayName: true } } } } } } } });
+    const cognition = { ...item, sourceTitle: item.analysisRun.sourceDocument.source.displayName };
+    const published = attempt.bookPublicationId ? await readPublishedBookRevisionForRun(tx, {
+      workspaceId: identity.workspaceId, analysisRunId: item.analysisRunId,
+    }, attempt.bookPublicationId) : null;
+    const change = published?.revision?.memories.find(memory => memory.id === item.id);
+    return { cognition: { ...cognition, content: change?.after ?? item.content },
+      proof: await validEvidence(tx, identity.workspaceId, cognition, change?.addedEvidence) };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+  const expected = rubricForCognitionType(cognition.type);
+  const text = prompt(cognition, attempt.content, expected, proof), operation = `teachback:${attempt.id}:assessment:v1`, active = runtime();
+  let result;
   try { result = await active.gateway.execute({ workspaceId: identity.workspaceId, routeSlot: "TEACH_BACK_ASSESSMENT", correlationId: attempt.id, idempotencyKey: operation, inputHash: canonicalTextInputHash(text), capability: { family: "TEXT_GENERATION", structuredOutput: "STRICT_JSON_SCHEMA" }, text, promptVersion: "phase12-v1", schemaVersion: "phase12-v1", pipelineVersion: "phase12-v1" }, { userId: identity.userId }); } catch { throw new Error("TEACH_BACK_PROVIDER_FAILED"); }
   if (result.status === "IN_PROGRESS") return { id: attempt.id, pending: true as const }; if (result.status !== "SUCCEEDED" && result.status !== "ALREADY_PROCESSED") throw new Error("TEACH_BACK_PROVIDER_FAILED");
   const response = result.response as { type?: string; structured?: unknown } | undefined; if (!result.invocationId || !result.snapshot || !response || response.type !== "STRUCTURED") throw new Error("TEACH_BACK_PROVIDER_FAILED"); const validated = validateTeachBackAssessment(response.structured, expected, proof.map(item => item.label));
   try { await active.repository.consumeTextResult({ workspaceId: identity.workspaceId, invocationId: result.invocationId, snapshotId: result.snapshot.id, consumerKind: "TEACH_BACK_ASSESSMENT", consumerKey: attempt.id, consumerFingerprint: hash({ attemptId: attempt.id, operation }) }, async ({ tx }) => { const assessedAt = new Date(); await tx.teachBackAssessment.create({ data: { workspaceId: identity.workspaceId, attemptId: attempt.id, masteryState: validated.masteryState, rubric: validated.criteria, feedback: validated.feedback, nextPrompt: validated.nextPrompt } }); await tx.teachBackAttempt.update({ where: { id: attempt.id }, data: { status: "ASSESSED", assessedAt } }); await syncTeachBackReviewState(tx as typeof prisma, identity, { memoryItemId: attempt.memoryItemId, masteryState: validated.masteryState, assessedAt }); }); } catch (error) { if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002" || !(await prisma.teachBackAssessment.findUnique({ where: { attemptId: attempt.id }, select: { id: true } }))) throw error; }
   return { id: attempt.id, pending: false as const };
 }
-export async function teachBackAttemptDetail(identity: Identity, attemptId: string) { const attempt = await prisma.teachBackAttempt.findFirst({ where: { id: attemptId, workspaceId: identity.workspaceId, userId: identity.userId }, include: { assessment: true, memoryItem: { include: { evidence: { include: { sourceBlock: { select: { text: true, ordinal: true } } }, orderBy: { createdAt: "asc" }, take: MAX_EVIDENCE } } } } }); if (!attempt) return null; const isCurrent = await current(identity, attempt.memoryItemId); const evidence = attempt.memoryItem.evidence.flatMap(item => item.startOffset >= 0 && item.endOffset >= item.startOffset && item.endOffset <= item.sourceBlock.text.length ? [{ excerpt: item.sourceBlock.text.slice(item.startOffset, item.endOffset), blockOrdinal: item.sourceBlock.ordinal }] : []); return { ...attempt, historical: !isCurrent, evidence, sourceGrounding: evidence.length ? "VERIFIABLE" as const : "NO_VERIFIABLE_EVIDENCE" as const }; }
+export async function teachBackAttemptDetail(identity: Identity, attemptId: string) {
+  return prisma.$transaction(async tx => {
+    const attempt = await tx.teachBackAttempt.findFirst({
+      where: { id: attemptId, workspaceId: identity.workspaceId, userId: identity.userId },
+      include: { assessment: true, memoryItem: true },
+    });
+    if (!attempt) return null;
+    const memory = attempt.memoryItem;
+    const scope = { workspaceId: identity.workspaceId, analysisRunId: memory.analysisRunId };
+    const isCurrent = await current(identity, memory.id, tx);
+    const active = isCurrent ? await readPublishedBookRevisionForRun(tx, scope) : null;
+    const pinned = attempt.bookPublicationId ? await readPublishedBookRevisionForRun(tx, scope, attempt.bookPublicationId) : null;
+    const change = pinned?.revision?.memories.find(item => item.id === memory.id);
+    const proof = await validEvidence(tx, identity.workspaceId, memory, change?.addedEvidence);
+    const evidence = proof.map(({ excerpt, blockOrdinal }) => ({ excerpt, blockOrdinal }));
+    return {
+      ...attempt, memoryItem: { ...memory, content: change?.after ?? memory.content },
+      historical: !isCurrent || (active?.revision ? active.publicationId : null) !== attempt.bookPublicationId,
+      evidence, sourceGrounding: evidence.length ? "VERIFIABLE" as const : "NO_VERIFIABLE_EVIDENCE" as const,
+    };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+}
 export async function latestTeachBackForCognition(identity: Identity, memoryItemId: string) { return prisma.teachBackAttempt.findFirst({ where: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId, status: "ASSESSED" }, include: { assessment: true }, orderBy: [{ assessedAt: "desc" }, { id: "desc" }] }); }
 export async function recoverPendingTeachBackAttempt(identity: Identity, memoryItemId: string) { if (!(await current(identity, memoryItemId))) return null; return prisma.teachBackAttempt.findFirst({ where: { workspaceId: identity.workspaceId, userId: identity.userId, memoryItemId, status: "PENDING_ASSESSMENT" }, select: { id: true, content: true }, orderBy: { createdAt: "desc" } }); }
 type MasteryCursor = { createdAt: string; id: string };
