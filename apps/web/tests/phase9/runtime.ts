@@ -34,9 +34,9 @@ async function bookResponse(request: any) {
   if (duplicated ? Object.hasOwn(payload, "content") : payload.content !== chunk.content)
     throw new Error("PHASE9_BOOK_CHUNK_CONTENT_MISMATCH");
   if (JSON.stringify(payload.sourceSlices) !== JSON.stringify(expectedEvidence)) throw new Error("PHASE9_BOOK_EVIDENCE_PAYLOAD_MISMATCH");
-  // Keep the fixture's single evidence anchor per Book. Later bounded chunks
-  // contribute claims, so retrieval input size does not grow with quote count.
-  if (chunk.ordinal !== 0) return { summary: "Bounded intelligence from the workspace route.", memory: [{ type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence." }] };
+  // Product v2 requires provenance for every chunk. Keep the original known
+  // quote for the opening chunk, and bind subsequent quotes to their own
+  // verified source span. Never use a quote offset from a different chunk.
   const span = chunk.sourceSpans[0]!, block = span.sourceBlock;
   const knownEvidence = "Evidence is the starting point for reliable AI conclusions.";
   const candidateOffset = block.text.indexOf(knownEvidence, span.startOffset);
