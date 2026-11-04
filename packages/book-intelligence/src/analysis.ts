@@ -5,7 +5,8 @@ export type EvidenceCandidate = { sourceBlockId: string; startOffset: number; en
 export type MemoryCandidate = { type: "SUMMARY" | "CONCEPT" | "ARGUMENT" | "CLAIM" | "EXAMPLE" | "STORY" | "QUOTE" | "PERSON" | "QUESTION" | "COUNTERPOINT"; content: string; evidence?: EvidenceCandidate[] };
 export type AnalysisResponse = { summary: string; memory?: MemoryCandidate[]; relations?: Array<{ fromOrdinal: number; toOrdinal: number; type: "EXPLAINS" | "SUPPORTS" | "OPPOSES" | "ASSOCIATED_WITH" | "DEVELOPS" }> };
 export type BoundedChunkProvenance = { chunkId: string; contentHash: string; sourceBlockIds: string[] };
-export interface AnalysisRequest { stage: AnalysisStage; content: string; sourceBlockIds: string[]; sourceEvidence?: Array<{ sourceBlockId: string; startOffset: number; endOffset: number; text: string }>; tokenBudget: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; provider?: string; model?: string; operationKey?: string; boundedChunk?: BoundedChunkProvenance }
+export type AnalysisSourceSlice = EvidenceCandidate & { text: string };
+export interface AnalysisRequest { stage: AnalysisStage; content: string; sourceBlockIds: string[]; sourceSlices?: AnalysisSourceSlice[]; tokenBudget: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; provider?: string; model?: string; operationKey?: string; boundedChunk?: BoundedChunkProvenance }
 export interface AnalysisProvider { generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> }
 export type AnalysisTransaction = { $queryRaw<T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T> };
 export type AnalysisReceiptConsumer = { consumerKind: string; consumerKey: string; consumerFingerprint: string; materialize: (tx: AnalysisTransaction, response: AnalysisResponse) => Promise<void> };
@@ -21,21 +22,70 @@ export function validateAnalysisResponse(value: unknown): AnalysisResponse {
   for (const item of response.memory ?? []) { if (!item || !memoryTypes.has(item.type) || typeof item.content !== "string" || !item.content.trim() || item.content.length > 20_000 || (item.evidence !== undefined && !Array.isArray(item.evidence))) throw new Error("ANALYSIS_PROVIDER_RESPONSE_INVALID"); for (const evidence of item.evidence ?? []) if (!evidence || typeof evidence.sourceBlockId !== "string" || !Number.isInteger(evidence.startOffset) || !Number.isInteger(evidence.endOffset) || (evidence.quoteText !== undefined && typeof evidence.quoteText !== "string")) throw new Error("ANALYSIS_PROVIDER_RESPONSE_INVALID"); }
   for (const relation of response.relations ?? []) if (!relation || !relationTypes.has(relation.type) || !Number.isInteger(relation.fromOrdinal) || !Number.isInteger(relation.toOrdinal)) throw new Error("ANALYSIS_PROVIDER_RESPONSE_INVALID"); return response;
 }
-export async function guardedGenerateStructured(provider: AnalysisProvider, request: AnalysisRequest, blocks: SourceBlockInput[], limit: number): Promise<AnalysisResponse> { assertBoundedProviderRequest(request, blocks, limit); return validateAnalysisResponse(await provider.generateStructured(request)); }
+export async function guardedGenerateStructured(provider: AnalysisProvider, request: AnalysisRequest, blocks: SourceBlockInput[], limit: number): Promise<AnalysisResponse> {
+  // Slice authenticity first so forged input fails with the audit-remediation
+  // error code before the bounded-payload gate reports the generic code.
+  for (const slice of request.sourceSlices ?? []) {
+    const block = blocks.find(block => block.id === slice.sourceBlockId);
+    if (!block || !request.sourceBlockIds.includes(block.id) || !validateEvidence(block, slice, slice.text)) throw new Error("ANALYSIS_SOURCE_SLICE_INVALID");
+  }
+  if (request.sourceSlices && request.sourceSlices.map(slice => slice.text).join("\n\n") !== request.content) throw new Error("ANALYSIS_SOURCE_SLICE_INVALID");
+  assertBoundedProviderRequest(request, blocks, limit);
+  const response = validateAnalysisResponse(await provider.generateStructured(request));
+  if (request.stage === "CHUNK" && request.pipelineVersion === "product-v2-evidence") {
+    const supported = response.memory?.some(item => item.evidence?.some(evidence => {
+      const block = blocks.find(block => block.id === evidence.sourceBlockId);
+      return block && request.sourceSlices?.some(slice => slice.sourceBlockId === evidence.sourceBlockId && evidence.startOffset >= slice.startOffset && evidence.endOffset <= slice.endOffset) && validateEvidence(block, evidence, evidence.quoteText);
+    }));
+    if (!supported) throw new Error("ANALYSIS_EVIDENCE_REQUIRED");
+  }
+  return response;
+}
 export type ReductionBatchIdentity = { stage: AnalysisStage; parentKey: string; level: number; batchOrdinal: number; inputHash: string };
 export type DurableReductionCache = { find(identity: ReductionBatchIdentity): Promise<AnalysisResponse | null>; persist(identity: ReductionBatchIdentity, response: AnalysisResponse): Promise<AnalysisResponse> };
-export async function reduceBoundedAnalysisChildren(input: { provider: AnalysisProvider; stage: AnalysisStage; children: Array<{ ordinal: number; summary: string }>; blocks: SourceBlockInput[]; limit: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; parentKey?: string; cache?: DurableReductionCache; beforeGenerate?: (identity: ReductionBatchIdentity) => Promise<void> }): Promise<AnalysisResponse> {
-  let level = [...input.children].sort((a, b) => a.ordinal - b.ordinal).map((child) => child.summary), depth = 0;
+export async function reduceBoundedAnalysisChildren(input: { provider: AnalysisProvider; stage: AnalysisStage; children: Array<{ ordinal: number; summary: string; structuredOutput?: unknown }>; blocks: SourceBlockInput[]; limit: number; correlationId: string; systemInstructions: string; pipelineVersion?: string; promptVersion?: string; parentKey?: string; cache?: DurableReductionCache; beforeGenerate?: (identity: ReductionBatchIdentity) => Promise<void> }): Promise<AnalysisResponse> {
+  // Structured children carry their evidence through every level, including cache replay.
+  const units = (response: AnalysisResponse): string[] => {
+    const encoded = JSON.stringify(response);
+    if (encoded.length <= input.limit) return [encoded];
+    const result: string[] = [];
+    const width = Math.max(1, Math.floor((input.limit - 40) / 6));
+    for (let offset = 0; offset < response.summary.length;) {
+      let end = Math.min(offset + width, response.summary.length);
+      if (end < response.summary.length && /[\uD800-\uDBFF]/.test(response.summary[end - 1]!)) end--;
+      if (end === offset) end = offset + 2;
+      result.push(JSON.stringify({ summary: response.summary.slice(offset, end) })); offset = end;
+    }
+    for (const memory of response.memory ?? []) result.push(JSON.stringify({ memory: [memory] }));
+    // Relations include their endpoint meanings so reordering cannot change identity.
+    for (const relation of response.relations ?? []) result.push(JSON.stringify({ relation: { type: relation.type, from: response.memory?.[relation.fromOrdinal], to: response.memory?.[relation.toOrdinal] } }));
+    if (result.some(unit => unit.length > input.limit)) throw new Error("ANALYSIS_STRUCTURED_CHILD_EXCEEDS_CONTEXT");
+    return result;
+  };
+  let level = [...input.children].sort((a, b) => a.ordinal - b.ordinal).flatMap(child => units(child.structuredOutput ? validateAnalysisResponse(child.structuredOutput) : { summary: child.summary }));
   if (!level.length) return { summary: "" };
-  while (level.length > 1 || level[0]!.length > input.limit) {
-    if (++depth > 12) throw new Error("ANALYSIS_REDUCTION_DID_NOT_CONVERGE");
+  for (let depth = 1; depth <= 12; depth++) {
     const batches: string[][] = []; let batch: string[] = [], size = 0;
-    for (const summary of level) { if (summary.length > input.limit) { if (batch.length) { batches.push(batch); batch=[]; size=0; } for (let offset=0; offset<summary.length; offset += input.limit) batches.push([summary.slice(offset, offset + input.limit)]); continue; } const cost = (batch.length ? 1 : 0) + summary.length; if (batch.length && size + cost > input.limit) { batches.push(batch); batch=[]; size=0; } batch.push(summary); size += (batch.length === 1 ? 0 : 1) + summary.length; }
-    if (batch.length) batches.push(batch); const next: string[] = [];
-    for (const [batchOrdinal, group] of batches.entries()) { const content = group.join("\n"), identity = { stage: input.stage, parentKey: input.parentKey ?? input.stage, level: depth, batchOrdinal, inputHash: sha256(JSON.stringify(group)) }; const cached = input.cache ? await input.cache.find(identity) : null; if (!cached) await input.beforeGenerate?.(identity); const response = cached ?? await guardedGenerateStructured(input.provider, { stage: input.stage, content, sourceBlockIds: [], tokenBudget: estimateAnalysisTokens(content), correlationId: input.correlationId, systemInstructions: input.systemInstructions, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion }, input.blocks, input.limit); const durable = cached ?? (input.cache ? await input.cache.persist(identity, response) : response); next.push(durable.summary); }
-    if (next.length >= level.length && next.every((summary, index) => summary.length >= (level[index]?.length ?? 0))) throw new Error("ANALYSIS_REDUCTION_DID_NOT_CONVERGE"); level = next;
+    for (const unit of level) {
+      if (batch.length && size + 1 + unit.length > input.limit) { batches.push(batch); batch = []; size = 0; }
+      size += (batch.length ? 1 : 0) + unit.length; batch.push(unit);
+    }
+    if (batch.length) batches.push(batch);
+    const next: string[] = [];
+    for (const [batchOrdinal, group] of batches.entries()) {
+      const content = group.join("\n");
+      const identity = { stage: input.stage, parentKey: input.parentKey ?? input.stage, level: depth, batchOrdinal, inputHash: sha256(JSON.stringify(group)) };
+      const cached = input.cache ? await input.cache.find(identity) : null;
+      if (!cached) await input.beforeGenerate?.(identity);
+      const response = cached ?? await guardedGenerateStructured(input.provider, { stage: input.stage, content, sourceBlockIds: [], tokenBudget: estimateAnalysisTokens(content), correlationId: input.correlationId, systemInstructions: input.systemInstructions, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion }, input.blocks, input.limit);
+      const durable = cached ?? (input.cache ? await input.cache.persist(identity, response) : response);
+      if (batches.length === 1) return durable;
+      next.push(...units(durable));
+    }
+    if (next.join("\n").length >= level.join("\n").length) throw new Error("ANALYSIS_REDUCTION_DID_NOT_CONVERGE");
+    level = next;
   }
-  return { summary: level[0]! };
+  throw new Error("ANALYSIS_REDUCTION_DID_NOT_CONVERGE");
 }
 
 export function assertNoFullBookPrompt(requests: AnalysisRequest[], blocks: SourceBlockInput[], limit: number): void { for (const request of requests) assertBoundedProviderRequest(request, blocks, limit); }
@@ -44,7 +94,7 @@ export function assertBoundedProviderRequest(request: AnalysisRequest, blocks: S
   const sameIds = requested.size === provenanceIds.size && [...requested].every((id) => provenanceIds.has(id));
   const isBoundedChunk = request.stage === "CHUNK" && Boolean(provenance?.chunkId) && provenance?.contentHash === sha256(request.content) && sameIds && [...requested].every((id) => ids.has(id));
   const containsWholeSource = request.content === whole || [...ids].every((id) => requested.has(id));
-  if (request.sourceEvidence && (request.stage !== "CHUNK" || request.sourceEvidence.map(span => span.text).join("\n\n") !== request.content || request.sourceEvidence.some(span => {
+  if (request.sourceSlices && (request.stage !== "CHUNK" || request.sourceSlices.map(span => span.text).join("\n\n") !== request.content || request.sourceSlices.some(span => {
     const block = blocks.find(block => block.id === span.sourceBlockId);
     return !block || !requested.has(span.sourceBlockId) || !Number.isSafeInteger(span.startOffset) || !Number.isSafeInteger(span.endOffset) || span.startOffset < 0 || span.endOffset <= span.startOffset || span.endOffset > block.text.length || block.text.slice(span.startOffset, span.endOffset) !== span.text;
   }))) throw new Error("INVALID_CHUNK_EVIDENCE_PAYLOAD");

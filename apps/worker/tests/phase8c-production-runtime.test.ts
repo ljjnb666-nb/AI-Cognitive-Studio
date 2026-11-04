@@ -75,7 +75,7 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     const dependencies={analysisProviderForRun:async(input:Parameters<typeof r.createAnalysisProvider>[0])=>{
       const provider=await r.createAnalysisProvider(input);
       if(!oldAttempt)return provider;
-      return{generateStructured:(req:import("@ai-cognitive/book-intelligence").AnalysisRequest)=>provider.generateStructured({...req,content:JSON.stringify({content:req.content,sourceEvidence:req.sourceEvidence}),sourceEvidence:undefined}),consumeGenerated:(provider as import("@ai-cognitive/book-intelligence").DurableAnalysisProvider).consumeGenerated!.bind(provider)};
+      return{generateStructured:(req:import("@ai-cognitive/book-intelligence").AnalysisRequest)=>provider.generateStructured({...req,content:JSON.stringify({content:req.content,sourceSlices:req.sourceSlices}),sourceSlices:undefined}),consumeGenerated:(provider as import("@ai-cognitive/book-intelligence").DurableAnalysisProvider).consumeGenerated!.bind(provider)};
     },embeddingGatewayForRun:(input:{userId:string})=>({gateway:r.gateway,repository:r.repository,userId:input.userId,maxEmbeddingInputs:10})};
     try{
       await expect(processBookAnalysisRun(requested.run.id,dependencies)).rejects.toMatchObject({code:"CONTENT_REJECTED"});
@@ -154,7 +154,7 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     const r = createBookProductionGatewayRuntime(source, { ...controls, adapterResolver: input => ({ execute: async ({ request: value }) => {
       if (input.family === "EMBEDDING") return { response: { vectors: value.embedding!.texts.map(() => [1, 0, 0]), dimensions: 3 } };
       if (value.routeSlot !== "BOOK_CHUNK_ANALYSIS") return { response: { type: "STRUCTURED", structured: { summary: "derived summary" } } };
-      const payload = JSON.parse(value.text!.messages[0]!.content), spans = payload.sourceEvidence;
+      const payload = JSON.parse(value.text!.messages[0]!.content), spans = payload.sourceSlices;
       expect(spans.length).toBeGreaterThan(0); expect(value.text!.system).toContain("Never invent IDs");
               const chunkId = /:CHUNK:chunk:([^:]+):/.exec(value.idempotencyKey)![1]!;
         const chunk = await prisma.documentChunk.findUniqueOrThrow({ where: { id: chunkId } });

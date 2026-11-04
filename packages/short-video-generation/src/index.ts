@@ -1,3 +1,6 @@
+import { assertScenes } from "./scene-validation.js";
+import { boundVideoContext } from "./context-budget.js";
+import { sceneVisualFilter, wrapCardText } from "./scene-layout.js";
 /* Durable, bounded short-video generation. Source text remains data throughout. */
 /* The generated Prisma include shapes are deliberately narrowed incrementally in this new package. */
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -682,19 +685,6 @@ function assertBudget(input: unknown) {
   )
     throw new Error("SHORT_VIDEO_PROVIDER_INPUT_BUDGET_EXCEEDED");
 }
-function assertScenes(
-  scenes: z.infer<typeof shortVideoScenesSchema>["scenes"],
-  duration: number,
-) {
-  if (
-    scenes.some((s, i) => s.ordinal !== i + 1) ||
-    scenes.reduce((n, s) => n + s.targetDurationMs, 0) > duration * 1_150 ||
-    scenes.some((s) =>
-      /^(首先|其次|最后|总结|总之|综上|让我们)/.test(s.narrationText),
-    )
-  )
-    throw new Error("SHORT_VIDEO_SCENE_QUALITY_INVALID");
-}
 export async function processShortVideoGenerationRun(
   runId: string,
   dependencies: {
@@ -746,7 +736,8 @@ export async function processShortVideoGenerationRun(
           if (verified === "RECONCILIATION_REQUIRED" || verified === "NOT_CONSUMED") throw new Error("SHORT_VIDEO_TEXT_RECONCILIATION_REQUIRED");
         }
         if (!run.plan) {
-          const bounded = await context(run, embeddingProvider, "VIDEO_PLANNING");
+          const candidates = await context(run, embeddingProvider, "VIDEO_PLANNING");
+          const bounded = boundVideoContext(candidates, { style: run.styleProfile, targetDurationSeconds: run.styleProfile.targetDurationSeconds }, SHORT_VIDEO_PROVIDER_INPUT_BUDGET);
           const input = {
             style: run.styleProfile,
             context: bounded,
@@ -776,7 +767,8 @@ export async function processShortVideoGenerationRun(
           if (verified !== "EXACT") throw new Error("SHORT_VIDEO_TEXT_RECONCILIATION_REQUIRED");
         }
         if (!run.scenes.length) {
-          const bounded = await context(run, embeddingProvider, "SCENE_PLANNING");
+          const candidates = await context(run, embeddingProvider, "SCENE_PLANNING");
+          const bounded = boundVideoContext(candidates, { style: run.styleProfile, plan: run.plan }, SHORT_VIDEO_PROVIDER_INPUT_BUDGET);
           const input = {
             style: run.styleProfile,
             plan: run.plan,
@@ -919,7 +911,7 @@ export async function processShortVideoGenerationRun(
             width: dependencies.renderConfiguration?.width ?? (process.env.NODE_ENV === "test" ? 360 : 1080),
             height: dependencies.renderConfiguration?.height ?? (process.env.NODE_ENV === "test" ? 640 : 1920),
             fps: dependencies.renderConfiguration?.fps ?? (process.env.NODE_ENV === "test" ? 15 : 30),
-            scenes: run.scenes.map((scene: any) => ({ id: scene.id, ordinal: scene.ordinal, sceneType: scene.sceneType, startMs: scene.targetStartMs, endMs: scene.targetEndMs, primaryText: scene.primaryText, secondaryText: scene.secondaryText, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, transitionIntent: scene.transitionIntent })),
+            scenes: run.scenes.map((scene: any) => ({ id: scene.id, ordinal: scene.ordinal, sceneType: scene.sceneType, startMs: scene.targetStartMs, endMs: scene.targetEndMs, primaryText: scene.primaryText, secondaryText: scene.secondaryText, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent })),
             captions: renderCaptions,
             narrationAudio,
           }), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed);
@@ -1188,7 +1180,7 @@ export interface VideoRenderer {
     width: number;
     height: number;
     fps: number;
-    scenes: Array<{ id: string; ordinal: number; sceneType: string; startMs: number; endMs: number; primaryText: string; secondaryText?: string | null; keywords: unknown; layoutTemplate: string; transitionIntent: string }>;
+    scenes: Array<{ id: string; ordinal: number; sceneType: string; startMs: number; endMs: number; primaryText: string; secondaryText?: string | null; keywords: unknown; layoutTemplate: string; motionPreset?: string; transitionIntent: string }>;
     captions: Array<{ startMs: number; endMs: number; text: string }>;
     narrationAudio: Array<{ sceneId: string; bytes: Uint8Array; mediaType: string; durationMs: number }>;
   }): Promise<{
@@ -1218,7 +1210,7 @@ export class FfmpegVideoRenderer implements VideoRenderer {
     width: number;
     height: number;
     fps: number;
-    scenes: Array<{ id: string; ordinal: number; sceneType: string; startMs: number; endMs: number; primaryText: string; secondaryText?: string | null; keywords: unknown; layoutTemplate: string; transitionIntent: string }>;
+    scenes: Array<{ id: string; ordinal: number; sceneType: string; startMs: number; endMs: number; primaryText: string; secondaryText?: string | null; keywords: unknown; layoutTemplate: string; motionPreset?: string; transitionIntent: string }>;
     captions: Array<{ startMs: number; endMs: number; text: string }>;
     narrationAudio: Array<{ sceneId: string; bytes: Uint8Array; mediaType: string; durationMs: number }>;
   }) {
@@ -1242,11 +1234,9 @@ export class FfmpegVideoRenderer implements VideoRenderer {
       const sceneVideos: string[] = [];
       for (const [index, scene] of ordered.entries()) {
         const primary = join(directory, `scene-${index}-primary.txt`), secondary = join(directory, `scene-${index}-secondary.txt`);
-        await writeFile(primary, scene.primaryText, "utf8"); await writeFile(secondary, scene.secondaryText ?? scene.sceneType, "utf8");
+        await writeFile(primary, wrapCardText(scene.primaryText, 10, 5), "utf8"); await writeFile(secondary, wrapCardText(scene.secondaryText ?? scene.sceneType, 18, 4), "utf8");
         const duration = ((scene.endMs - scene.startMs) / 1000).toFixed(3);
-        const palette = ["#0f172a", "#172554", "#1e1b4b", "#312e81", "#3f1d2e", "#134e4a"][index % 6]!;
-        const escapePath = (path: string) => path.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
-        const filter = `color=c=${palette}:s=${input.width}x${input.height}:r=${input.fps}:d=${duration},drawbox=x=70:y=250:w=${input.width - 140}:h=10:color=0x38bdf8@0.9:t=fill,drawtext=textfile='${escapePath(primary)}':fontcolor=white:fontsize=${Math.max(34, Math.floor(input.width / 11))}:x=(w-text_w)/2:y=h*0.32:line_spacing=12:enable='between(t,0.15,${duration})',drawtext=textfile='${escapePath(secondary)}':fontcolor=0x94a3b8:fontsize=${Math.max(22, Math.floor(input.width / 20))}:x=(w-text_w)/2:y=h*0.52:line_spacing=8`;
+        const filter = sceneVisualFilter({ ...input, duration: Number(duration), layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent, primaryPath: primary, secondaryPath: secondary });
         const sceneVideo = join(directory, `scene-${String(index).padStart(3, "0")}.mkv`);
         const sceneArgs = ["-y", "-loglevel", "error", "-f", "lavfi", "-i", filter, "-an", "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p", sceneVideo];
         await this.runStep(directory, sceneArgs, sceneVideo, input, "SCENE_VISUAL_RENDER", scene.ordinal);

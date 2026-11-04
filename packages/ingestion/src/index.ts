@@ -1,4 +1,5 @@
 import { lockOcrPublicationSources } from "./ocr-source-authority.js";
+import { assertWorkspaceWrite } from "@ai-cognitive/db";
 import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
 import { buildEpubProductIdentityCandidate, CANONICAL_SCHEMA_VERSION, parseCanonicalBlockMetadata, parseEpubExtractionMetadata, parseExtractionQualityMetadata, parseSourceBlockBbox, sha256Utf8 } from "@ai-cognitive/domain";
@@ -64,7 +65,7 @@ const safeFilename = (value: string) => value.replace(/[\\/]/g, "_").split("").m
 const UNASSESSED_EXTRACTION_QUALITY = parseExtractionQualityMetadata({ warnings: [] });
 
 /** Service options; pdfOcrExecutor is a test seam until 04B-2's production cutover (none in 04B-2). */
-export type IngestionServiceOptions = { maxUploadBytes: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor; /** STEP6-2B-1: guarded standard admission verified at worker startup; when true, image-only OCR pages carry a standard tier proposal (the executor still rechecks every page). */ ocrStandardAdmissionEnabled?: boolean };
+export type IngestionServiceOptions = { maxWorkspaceStorageBytes?: number; maxUploadBytes: number; uploadTtlSeconds: number; maxPdfPages: number; completionLeaseMs: number; processMaxAttempts: number; /** OCR fallback executor for OCR-routed PDF pages. Production 04B-2 ships none: OCR-routed runs end OCR_REQUIRED. */ pdfOcrExecutor?: PdfOcrExecutor; /** STEP6-2B-1: guarded standard admission verified at worker startup; when true, image-only OCR pages carry a standard tier proposal (the executor still rechecks every page). */ ocrStandardAdmissionEnabled?: boolean };
 
 /**
  * Canonical v1 write gate for SourceBlock.metadata, keyed on the authoritative
@@ -124,16 +125,27 @@ export function sniffMediaType(bytes: Uint8Array, declared: string, filename: st
   throw new Error(SourceError.TYPE_MISMATCH);
 }
 export function createIngestionService(storage: StorageProvider, options: IngestionServiceOptions = { maxUploadBytes: 100 * 1024 * 1024, uploadTtlSeconds: 900, maxPdfPages: 2000, completionLeaseMs: 900000, processMaxAttempts: 3 }) {
-  async function assertMembership(context: TrustedRequestContext) { const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: context } }); if (!member) throw new Error("WORKSPACE_ACCESS_DENIED"); }
   return {
     async createUploadIntent(context: TrustedRequestContext, input: { filename: string; mediaType: string; sizeBytes: number }) {
-      await assertMembership(context); if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0 || input.sizeBytes > options.maxUploadBytes) throw new Error("UPLOAD_SIZE_INVALID");
+      await assertWorkspaceWrite(context); if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0 || input.sizeBytes > options.maxUploadBytes) throw new Error("UPLOAD_SIZE_INVALID");
       const id = randomUUID(); const temporaryStorageKey = `temporary/${context.workspaceId}/${id}`; const expiresAt = new Date(Date.now() + options.uploadTtlSeconds * 1000);
-      const session = await prisma.uploadSession.create({ data: { id, workspaceId: context.workspaceId, originalFilename: safeFilename(input.filename), declaredMediaType: input.mediaType, declaredSizeBytes: input.sizeBytes, temporaryStorageKey, expiresAt } });
-      const upload = await storage.createPresignedUpload({ key: temporaryStorageKey, contentType: input.mediaType, expiresInSeconds: options.uploadTtlSeconds }); return { session, upload };
+      const session = await prisma.$transaction(async tx => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'upload-quota:' + context.workspaceId}, 0))`;
+        await assertWorkspaceWrite(context, tx);
+        // Reserve both temporary and canonical copies until verified cleanup.
+        // This conservative bound also covers still-valid URLs after completion.
+        const [usage] = await tx.$queryRaw<Array<{ bytes: bigint; sessions: bigint }>>`SELECT
+          (COALESCE((SELECT SUM("sizeBytes") FROM "SourceBlob" WHERE "workspaceId"=${context.workspaceId}),0) +
+           COALESCE((SELECT SUM("declaredSizeBytes") * 2 FROM "UploadSession" WHERE "workspaceId"=${context.workspaceId} AND "temporaryCleanedAt" IS NULL),0))::bigint AS bytes,
+          (SELECT count(*) FROM "UploadSession" WHERE "workspaceId"=${context.workspaceId} AND "temporaryCleanedAt" IS NULL)::bigint AS sessions`;
+        const limit = options.maxWorkspaceStorageBytes ?? 1024 * 1024 * 1024;
+        if (!Number.isSafeInteger(limit) || limit <= 0 || Number(usage?.bytes ?? 0) + input.sizeBytes * 2 > limit || Number(usage?.sessions ?? 0) >= 100) throw new Error("WORKSPACE_UPLOAD_QUOTA_EXCEEDED");
+        return tx.uploadSession.create({ data: { id, workspaceId: context.workspaceId, originalFilename: safeFilename(input.filename), declaredMediaType: input.mediaType, declaredSizeBytes: input.sizeBytes, temporaryStorageKey, expiresAt } });
+      });
+      const upload = await storage.createPresignedUpload({ key: temporaryStorageKey, contentType: input.mediaType, sizeBytes: input.sizeBytes, expiresInSeconds: options.uploadTtlSeconds }); return { session, upload };
     },
     async completeUpload(context: TrustedRequestContext, sessionId: string, completion: { outboxTopic?: string } = {}) {
-      await assertMembership(context); const session = await prisma.uploadSession.findFirstOrThrow({ where: { id: sessionId, workspaceId: context.workspaceId } });
+      await assertWorkspaceWrite(context); const session = await prisma.uploadSession.findFirstOrThrow({ where: { id: sessionId, workspaceId: context.workspaceId } });
       if (session.status === "COMPLETED") {
         const completion = await prisma.uploadCompletion.findUniqueOrThrow({
           where: { uploadSessionId_workspaceId: { uploadSessionId: session.id, workspaceId: context.workspaceId } },

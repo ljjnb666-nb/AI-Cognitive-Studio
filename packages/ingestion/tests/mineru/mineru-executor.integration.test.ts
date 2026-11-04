@@ -213,9 +213,9 @@ describe("MinerU executor production cutover (real executor, CLI double)", () =>
       expect(pages.map((page) => page.physicalPageIndex)).toEqual([0, 1, 2]);
       const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: extraction.id }, orderBy: { ordinal: "asc" } });
       expect(blocks.map((block) => parseCanonicalBlockMetadata(block.metadata)).map((metadata) => metadata.provenance)).toMatchObject([
-        { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" },
+        { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" },
         { sourceMethod: "OCR", parserName: "mineru", parserVersion: "4.0.3" },
-        { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" },
+        { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" },
       ]);
       expect(blocks[1]?.text).toBe("recovered scanned page one body");
 

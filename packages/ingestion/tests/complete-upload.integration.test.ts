@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import type { StorageProvider } from "@ai-cognitive/storage";
-import { createIngestionService } from "../src/index.js";
+import { cleanupTemporaryUploads, createIngestionService } from "../src/index.js";
 import { SOURCE_SNIFF_PREFIX_BYTES } from "../src/object-inspection.js";
 
 const workspaceIds: string[] = [];
@@ -474,5 +474,38 @@ describe("completeUpload", () => {
     const value = await createCompletedFixture(), other = await createWorkspaceFixture(), service = createIngestionService(new FakeStorageProvider());
     await expect(service.recoverIngestionForUser({ workspaceId: other.workspace.id, userId: other.user.id }, value.document.id)).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");
     await expect(prisma.ingestionRun.count({ where: { workspaceId: value.workspace.id, sourceDocumentId: value.document.id } })).resolves.toBe(0);
+  });
+});
+
+
+describe("audit upload boundaries", () => {
+  it("denies viewers before creating a session or signing an upload", async () => {
+    const { user, workspace } = await createWorkspaceFixture();
+    await prisma.workspaceMember.update({ where: { workspaceId_userId: { workspaceId: workspace.id, userId: user.id } }, data: { role: "VIEWER" } });
+    const storage = new FakeStorageProvider();
+    storage.createPresignedUpload = async () => { throw new Error("SIGNING_MUST_NOT_HAPPEN"); };
+    await expect(createIngestionService(storage).createUploadIntent({ workspaceId: workspace.id, userId: user.id }, { filename: "a.txt", mediaType: "text/plain", sizeBytes: 10 })).rejects.toThrow("WORKSPACE_WRITE_DENIED");
+    expect(await prisma.uploadSession.count({ where: { workspaceId: workspace.id } })).toBe(0);
+  });
+  it("bounds concurrent uploads and retries cleanup after an object deletion failure", async () => {
+    const { user, workspace } = await createWorkspaceFixture(), storage = new FakeStorageProvider();
+    const context = { workspaceId: workspace.id, userId: user.id };
+    const service = createIngestionService(storage, { maxWorkspaceStorageBytes: 40, maxUploadBytes: 100, uploadTtlSeconds: 60, maxPdfPages: 10, completionLeaseMs: 10000, processMaxAttempts: 3 });
+    const results = await Promise.allSettled(Array.from({ length: 6 }, () => service.createUploadIntent(context, { filename: "a.txt", mediaType: "text/plain", sizeBytes: 10 })));
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(2);
+    const sessions = await prisma.uploadSession.findMany({ where: { workspaceId: workspace.id } });
+    for (const session of sessions) storage.objects.set(session.temporaryStorageKey, new Uint8Array(10));
+    await prisma.uploadSession.updateMany({ where: { workspaceId: workspace.id }, data: { expiresAt: new Date(0), status: "COMPLETING", completionLeaseUntil: null } });
+    const originalDelete = storage.deleteObject.bind(storage);
+    storage.deleteObject = async key => { if (key === sessions[0]!.temporaryStorageKey) throw new Error("STORAGE_TEMPORARY_FAILURE"); await originalDelete(key); };
+    await expect(cleanupTemporaryUploads(storage, 0)).rejects.toThrow("TEMP_UPLOAD_CLEANUP_RETRY_REQUIRED");
+    expect((await prisma.uploadSession.findUniqueOrThrow({ where: { id: sessions[0]!.id } })).temporaryCleanedAt).toBeNull();
+    storage.deleteObject = originalDelete;
+    await cleanupTemporaryUploads(storage, 0);
+    for (const session of sessions) {
+      expect(storage.objects.has(session.temporaryStorageKey)).toBe(false);
+      expect((await prisma.uploadSession.findUniqueOrThrow({ where: { id: session.id } })).temporaryCleanedAt).toBeInstanceOf(Date);
+    }
+    await expect(service.createUploadIntent(context, { filename: "retry.txt", mediaType: "text/plain", sizeBytes: 10 })).resolves.toHaveProperty("upload");
   });
 });

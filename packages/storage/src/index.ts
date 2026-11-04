@@ -12,10 +12,11 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 export type ObjectHead = { key: string; size: number; contentType?: string; etag?: string };
 export type PutObjectInput = { key: string; body: Uint8Array; contentType: string };
 export type PresignedUpload = { url: string; headers: Record<string, string> };
+export type ObjectStreamOptions = { range?: { start: number; end: number }; signal?: AbortSignal; ifMatch?: string };
 export type StorageProvider = {
-  createPresignedUpload(input: { key: string; contentType: string; expiresInSeconds: number }): Promise<PresignedUpload>;
+  createPresignedUpload(input: { key: string; contentType: string; sizeBytes: number; expiresInSeconds: number }): Promise<PresignedUpload>;
   headObject(key: string): Promise<ObjectHead | null>;
-  getObjectStream(key: string, options?: { ifMatch?: string }): Promise<AsyncIterable<Uint8Array>>;
+  getObjectStream(key: string, options?: ObjectStreamOptions): Promise<AsyncIterable<Uint8Array>>;
   /** Conditional, bounded private byte-range read. Never a public/presigned URL. */
   getObjectRangeStream?(key: string, input: { start: number; end: number; totalSize: number; ifMatch: string }): Promise<{ stream: AsyncIterable<Uint8Array>; length: number }>;
   /** @deprecated Transitional compatibility method; migrate callers to getObjectStream. */
@@ -55,13 +56,14 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     this.presignClient = createClient(config, config.publicEndpoint ?? config.endpoint);
   }
 
-  async createPresignedUpload({ key, contentType, expiresInSeconds }: { key: string; contentType: string; expiresInSeconds: number }): Promise<PresignedUpload> {
+  async createPresignedUpload({ key, contentType, sizeBytes, expiresInSeconds }: { key: string; contentType: string; sizeBytes: number; expiresInSeconds: number }): Promise<PresignedUpload> {
     assertKey(key);
     if (!Number.isInteger(expiresInSeconds) || expiresInSeconds <= 0 || expiresInSeconds > MAX_PRESIGN_TTL_SECONDS) throw new Error("STORAGE_INVALID_PRESIGN_TTL");
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) throw new Error("STORAGE_INVALID_UPLOAD_SIZE");
     const url = await getSignedUrl(
       this.presignClient,
-      new PutObjectCommand({ Bucket: this.config.bucket, Key: key, ContentType: contentType }),
-      { expiresIn: expiresInSeconds, signableHeaders: new Set(["content-type"]) },
+      new PutObjectCommand({ Bucket: this.config.bucket, Key: key, ContentType: contentType, ContentLength: sizeBytes }),
+      { expiresIn: expiresInSeconds, signableHeaders: new Set(["content-type", "content-length"]) },
     );
     return { url, headers: { "content-type": contentType } };
   }
@@ -72,9 +74,11 @@ export class S3CompatibleStorageProvider implements StorageProvider {
     catch (error) { if (isNotFound(error)) return null; throw error; }
   }
 
-  async getObjectStream(key: string, options?: { ifMatch?: string }): Promise<AsyncIterable<Uint8Array>> {
+  async getObjectStream(key: string, options: ObjectStreamOptions = {}): Promise<AsyncIterable<Uint8Array>> {
     assertKey(key);
-    const result = await this.serverClient.send(new GetObjectCommand({ Bucket: this.config.bucket, Key: key, IfMatch: options?.ifMatch }));
+    const range = options.range;
+    if (range && (!Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) || range.start < 0 || range.end < range.start)) throw new Error("STORAGE_INVALID_RANGE");
+    const result = await this.serverClient.send(new GetObjectCommand({ Bucket: this.config.bucket, Key: key, Range: range ? `bytes=${range.start}-${range.end}` : undefined, IfMatch: options.ifMatch }), { abortSignal: options.signal });
     const body = result.Body as AsyncIterable<Uint8Array> | undefined;
     if (!body || !body[Symbol.asyncIterator]) throw new Error("STORAGE_STREAM_UNAVAILABLE");
     return body;
@@ -111,7 +115,7 @@ export class S3CompatibleStorageProvider implements StorageProvider {
   async copyObject(sourceKey: string, targetKey: string): Promise<void> { assertKey(sourceKey); assertKey(targetKey); await this.serverClient.send(new CopyObjectCommand({ Bucket: this.config.bucket, Key: targetKey, CopySource: copySource(this.config.bucket, sourceKey) })); }
   async deleteObject(key: string): Promise<void> { assertKey(key); await this.serverClient.send(new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key })); }
   async objectExists(key: string): Promise<boolean> { return (await this.headObject(key)) !== null; }
-  async bucketExists(): Promise<boolean> { try { await this.serverClient.send(new HeadBucketCommand({ Bucket: this.config.bucket })); return true; } catch (error) { if (isNotFound(error)) return false; throw error; } }
+  async bucketExists(): Promise<boolean> { try { await this.serverClient.send(new HeadBucketCommand({ Bucket: this.config.bucket }), { abortSignal: AbortSignal.timeout(1500) }); return true; } catch (error) { if (isNotFound(error)) return false; throw error; } }
 
   /** Release private SDK HTTP agents on worker shutdown or isolated E2E teardown.
    * Call only when this storage instance is no longer used; never dispose of a

@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { cache } from "react";
-import { prisma } from "@ai-cognitive/db";
+import { prisma, assertWorkspaceWrite } from "@ai-cognitive/db";
 import { browserIdentityMode } from "./identity-policy";
 import { auth } from "./auth";
 import { ensurePersonalWorkspace } from "./onboarding";
@@ -17,6 +17,20 @@ export type WebIdentityContext = {
 /** Strip presentation-only identity fields before crossing into domain services. */
 export function trustedRequestContext(identity: WebIdentityContext): { userId: string; workspaceId: string } {
   return { userId: identity.userId, workspaceId: identity.workspaceId };
+}
+
+export async function resolveWebMutationIdentity(): Promise<WebIdentityContext> {
+  const identity = await resolveWebIdentity();
+  await assertWorkspaceWrite(trustedRequestContext(identity));
+  return identity;
+}
+
+/** Account operations must remain available after beta withdrawal. No provisioning. */
+export async function resolveSessionUserId(): Promise<string> {
+  const jar = await cookies();
+  const session = await auth.api.getSession({ headers: new Headers({ cookie: jar.toString() }), query: { disableCookieCache: true } });
+  if (!session?.user?.id) throw new Error("WEB_IDENTITY_REQUIRED");
+  return session.user.id;
 }
 
 const TEST_HARNESS_COOKIE = "acs_phase6_harness";
@@ -92,12 +106,7 @@ function developmentIdentity(): WebIdentityContext {
 }
 
 export async function assertMembership(context: WebIdentityContext): Promise<WebIdentityContext> {
-  try {
-    const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { userId: context.userId, workspaceId: context.workspaceId } }, select: { userId: true } });
-    if (!member && process.env.NODE_ENV === "production") throw new Error("WORKSPACE_ACCESS_DENIED");
-    return context;
-  } catch (error) {
-    if (error instanceof Error && error.message === "WORKSPACE_ACCESS_DENIED" && process.env.NODE_ENV === "production") throw error;
-    return context;
-  }
+  const member = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { userId: context.userId, workspaceId: context.workspaceId } }, select: { userId: true } });
+  if (!member) throw new Error("WORKSPACE_ACCESS_DENIED");
+  return context;
 }

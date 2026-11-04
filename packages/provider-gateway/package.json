@@ -16,7 +16,9 @@
     "test:phase9": "vitest run tests/phase9-model-manifest.test.ts",
     "test:beta-repair:provider-ux": "vitest run tests/beta-provider-catalog.test.ts",
     "test:phase8c:podcast-query": "vitest run tests/phase8c-podcast-query-recovery.integration.test.ts",
-    "test:phase8c:speech": "vitest run tests/phase8c-speech.unit.test.ts tests/phase8c-speech.integration.test.ts tests/zhipu-speech.test.ts"
+    "test:phase8c:speech": "vitest run tests/phase8c-speech.unit.test.ts tests/phase8c-speech.integration.test.ts tests/zhipu-speech.test.ts",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@ai-cognitive/db": "workspace:*",
@@ -30,6 +32,6 @@
     "eslint": "^9.39.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.4",
-    "vitest": "^4.0.8"
+    "vitest": "^4.1.12"
   }
 }

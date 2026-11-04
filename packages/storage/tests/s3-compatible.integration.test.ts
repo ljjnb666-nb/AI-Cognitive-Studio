@@ -33,9 +33,9 @@ afterAll(async () => {
 describe("S3CompatibleStorageProvider against MinIO", () => {
   it("streams, copies, deletes, and supports a browser-style presigned upload", async () => {
     expect(await provider.bucketExists()).toBe(true);
-    await expect(provider.createPresignedUpload({ key: " ", contentType: "text/plain", expiresInSeconds: 60 })).rejects.toThrow("STORAGE_INVALID_KEY");
-    await expect(provider.createPresignedUpload({ key: "tests/ttl.txt", contentType: "text/plain", expiresInSeconds: 0 })).rejects.toThrow("STORAGE_INVALID_PRESIGN_TTL");
-    await expect(provider.createPresignedUpload({ key: "tests/ttl.txt", contentType: "text/plain", expiresInSeconds: 604_801 })).rejects.toThrow("STORAGE_INVALID_PRESIGN_TTL");
+    await expect(provider.createPresignedUpload({ key: " ", contentType: "text/plain", sizeBytes: 17, expiresInSeconds: 60 })).rejects.toThrow("STORAGE_INVALID_KEY");
+    await expect(provider.createPresignedUpload({ key: "tests/ttl.txt", contentType: "text/plain", sizeBytes: 17, expiresInSeconds: 0 })).rejects.toThrow("STORAGE_INVALID_PRESIGN_TTL");
+    await expect(provider.createPresignedUpload({ key: "tests/ttl.txt", contentType: "text/plain", sizeBytes: 17, expiresInSeconds: 604_801 })).rejects.toThrow("STORAGE_INVALID_PRESIGN_TTL");
 
     const originalKey = key("original.txt");
     const copiedKey = key("copied.txt");
@@ -51,10 +51,17 @@ describe("S3CompatibleStorageProvider against MinIO", () => {
     expect(decoder.decode(Buffer.concat(chunks))).toBe("streamed storage payload");
     expect(decoder.decode(await provider.getObjectBytes(originalKey))).toBe("streamed storage payload");
 
+    const rangedChunks: Uint8Array[] = [];
+    for await (const chunk of await provider.getObjectStream(originalKey, { range: { start: 9, end: 15 } })) rangedChunks.push(chunk);
+    expect(decoder.decode(Buffer.concat(rangedChunks))).toBe("storage");
+    await expect(provider.getObjectStream(originalKey, { range: { start: -1, end: 1 } })).rejects.toThrow("STORAGE_INVALID_RANGE");
+    const cancelled = AbortSignal.abort();
+    await expect(provider.getObjectStream(originalKey, { signal: cancelled })).rejects.toThrow();
+
     await provider.copyObject(originalKey, copiedKey);
     expect(decoder.decode(await provider.getObjectBytes(copiedKey))).toBe("streamed storage payload");
 
-    const upload = await provider.createPresignedUpload({ key: uploadedKey, contentType: "text/plain", expiresInSeconds: 60 });
+    const upload = await provider.createPresignedUpload({ key: uploadedKey, contentType: "text/plain", sizeBytes: 17, expiresInSeconds: 60 });
     expect(new URL(upload.url).host).toBe(new URL(publicEndpoint).host);
     const preflightResponse = await fetch(upload.url, {
       method: "OPTIONS",
@@ -78,9 +85,12 @@ describe("S3CompatibleStorageProvider against MinIO", () => {
     expect(uploadResponse.ok).toBe(true);
     expect(decoder.decode(await provider.getObjectBytes(uploadedKey))).toBe("presigned payload");
 
-    const invalidUpload = await provider.createPresignedUpload({ key: rejectedKey, contentType: "text/plain", expiresInSeconds: 60 });
+    const invalidUpload = await provider.createPresignedUpload({ key: rejectedKey, contentType: "text/plain", sizeBytes: 17, expiresInSeconds: 60 });
     const invalidResponse = await fetch(invalidUpload.url, { method: "PUT", headers: { "content-type": "application/json" }, body: encoder.encode("wrong type") });
     expect(invalidResponse.ok).toBe(false);
+    const oversized = await fetch(invalidUpload.url, { method: "PUT", headers: invalidUpload.headers, body: encoder.encode("a".repeat(18)) });
+    expect(oversized.ok).toBe(false);
+    expect(await provider.headObject(rejectedKey)).toBeNull();
 
     const unsignedGet = await fetch(`${publicEndpoint.replace(/\/$/, "")}/${bucket}/${uploadedKey}`);
     expect(unsignedGet.ok).toBe(false);

@@ -1,3 +1,4 @@
+import { CancelJobButton } from "@/components/cancel-job-button";
 import { notFound } from "next/navigation";
 import { sourceDetail } from "@/lib/product";
 import { projectBookDisplay } from "@/lib/book-display";
@@ -5,13 +6,12 @@ import { BookDetailView } from "@/components/book-detail-view";
 import { deriveProcessingStatus } from "@/lib/processing-state";
 import { processingWorkerAvailability } from "@/lib/worker-heartbeat";
 
-export default async function SourcePage({ params, searchParams }: { params: Promise<{ sourceDocumentId: string }>; searchParams: Promise<{ textPage?: string | string[] }> }) {
-  const [{ sourceDocumentId }, query] = await Promise.all([params, searchParams]);
-  const requestedPage = typeof query.textPage === "string" && /^\d{1,9}$/.test(query.textPage) ? Number(query.textPage) : 1;
+export default async function SourcePage({ params }: { params: Promise<{ sourceDocumentId: string }> }) {
+  const { sourceDocumentId } = await params;
   let item: Awaited<ReturnType<typeof sourceDetail>>;
 
   try {
-    item = await sourceDetail(sourceDocumentId, undefined, requestedPage);
+    item = await sourceDetail(sourceDocumentId);
   } catch (error) {
     if (error instanceof Error && error.message === "SOURCE_DOCUMENT_ACCESS_DENIED") notFound();
     throw error;
@@ -27,6 +27,9 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
   const processing = deriveProcessingStatus({ ingestion: item.ingestionRuns[0], analysis: item.analysisRuns[0], bootstrap, hasIntelligence: Boolean(item.currentIntelligence), workerAvailability, staleAfterMs: Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000) });
 
   return (
+    <>
+    <a className="btn btn-secondary" href={`/api/studio/sources/${encodeURIComponent(item.id)}/download`} download>下载原始文件</a>
+    {item.analysisRuns[0] && ["QUEUED", "RUNNING"].includes(item.analysisRuns[0].status) && <CancelJobButton jobId={item.analysisRuns[0].jobId} />}
     <BookDetailView
       item={{
         id: item.id,
@@ -40,7 +43,6 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
         mediaType: item.mediaType,
         version: item.version,
         hasIntelligence: Boolean(item.currentIntelligence),
-        extractionSummary: item.currentExtraction?.extraction.status === "SUCCEEDED" ? { pages: item.currentExtraction.extraction._count.pages, characters: item.currentExtraction.extraction.characterCount, blocks: item.currentExtraction.extraction._count.blocks } : null,
         ingestionStatus,
         analysisStatus,
         bootstrapStatus: bootstrap?.status,
@@ -52,9 +54,9 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
         workerAvailability,
         processingSince: (item.analysisRuns[0]?.startedAt ?? item.analysisRuns[0]?.createdAt ?? bootstrap?.startedAt ?? bootstrap?.createdAt ?? item.ingestionRuns[0]?.startedAt ?? item.ingestionRuns[0]?.createdAt)?.toISOString() ?? null,
       }}
-      textPreview={item.textPreview}
       memories={memories as any}
       structureNodes={structureNodes as any}
     />
+    </>
   );
 }

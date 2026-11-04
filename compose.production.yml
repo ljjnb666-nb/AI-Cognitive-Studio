@@ -1,0 +1,35 @@
+# External PostgreSQL, Redis and private S3 are provisioned separately.
+# Use an immutable application image digest in ACS_IMAGE after building/testing it.
+x-app: &app
+  image: ${ACS_IMAGE:?Set ACS_IMAGE to a tested image digest}
+  env_file: ${ACS_ENV_FILE:?Set ACS_ENV_FILE to an absolute production env path}
+  environment:
+    NODE_ENV: production
+  init: true
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  stop_grace_period: 10m
+  tmpfs:
+    - /tmp:mode=1777,size=2G
+
+services:
+  migrate:
+    <<: *app
+    command: ["pnpm", "db:migrate:deploy"]
+    restart: "no"
+    profiles: [migration]
+  web:
+    <<: *app
+    ports:
+      - "127.0.0.1:${ACS_WEB_PORT:-3001}:3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/readiness',{signal:AbortSignal.timeout(4000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+  worker:
+    <<: *app
+    command: ["node", "--import", "tsx", "apps/worker/src/index.ts"]

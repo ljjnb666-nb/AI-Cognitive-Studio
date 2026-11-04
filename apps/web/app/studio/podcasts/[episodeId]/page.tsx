@@ -1,3 +1,4 @@
+import { CancelJobButton } from "@/components/cancel-job-button";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@ai-cognitive/db";
@@ -9,7 +10,6 @@ import { PodcastQualityFeedback } from "@/components/podcast-quality-feedback";
 import { resolveWebIdentity } from "@/lib/identity";
 import { podcastStageLabel, statusLabel } from "@/lib/product";
 import { betaTelemetryEnabledForUser } from "@ai-cognitive/product-analytics";
-import { parsePodcastScriptView, podcastEvidenceExcerpt } from "@/lib/podcast-script-view";
 
 export default async function PodcastDetail({ params }: { params: Promise<{ episodeId: string }> }) {
   const { episodeId } = await params;
@@ -22,8 +22,22 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
       generationRuns: {
         orderBy: { createdAt: "desc" },
         take: 1,
+        include: {
+          segments: {
+            orderBy: { ordinal: "asc" },
+            include: {
+              utterances: {
+                orderBy: { ordinal: "asc" },
+                include: {
+                  speaker: true,
+                  evidence: { include: { sourceBlock: true } },
+                },
+              },
+            },
+          },
+        },
       },
-      audioGenerationRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, stage: true, errorCode: true } },
+      audioGenerationRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { jobId: true, status: true, stage: true, errorCode: true } },
       currentScript: { include: { revision: true } },
       currentAudio: { include: { revision: true } },
       audioRevisions: { orderBy: { revisionNumber: "desc" } },
@@ -31,10 +45,6 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
   });
 
   if (!episode) notFound();
-
-  const script = episode.currentScript ? parsePodcastScriptView(episode.currentScript.revision.scriptSnapshot, episode.id) : null;
-  const blocks = script ? await prisma.sourceBlock.findMany({ where: { id: { in: [...new Set(script.flatMap(utterance => utterance.evidence.map(evidence => evidence.sourceBlockId)))] }, extraction: { workspaceId: ctx.workspaceId } }, select: { id: true, extractionId: true, text: true } }) : [];
-  const blockById = new Map(blocks.map(block => [block.id, block]));
 
   const run = episode.generationRuns[0];
   const audioRun = episode.audioGenerationRuns[0];
@@ -46,6 +56,8 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
 
   return (
     <div>
+      {run && ["QUEUED", "RUNNING"].includes(run.status) && <CancelJobButton jobId={run.jobId} />}
+      {audioRun && ["QUEUED", "RUNNING"].includes(audioRun.status) && <CancelJobButton jobId={audioRun.jobId} />}
       <PageHeader
         eyebrow="EDITORIAL AUDIO DOCUMENT"
         title={episode.title}
@@ -110,10 +122,10 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
           <h2 className="section-title" style={{ marginBottom: 24 }}>
             节目文稿
           </h2>
-          {episode.currentScript.revision.source === "USER_EDIT" && <p>已确认的校订稿 · 文稿版本 #{episode.currentScript.revision.revisionNumber}</p>}
-          {!script && <p>当前文稿暂时无法显示。</p>}
           <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-            {script?.map((u) => (
+            {run?.segments
+              .flatMap((s) => s.utterances)
+              .map((u) => (
                 <div
                   key={u.id}
                   style={{
@@ -124,16 +136,15 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
                   }}
                 >
                   <div style={{ fontSize: 13, fontWeight: 600, color: "var(--primary)", marginBottom: 6 }}>
-                    {u.speakerName}
+                    {u.speaker.displayName}
                   </div>
                   <p style={{ fontSize: 15, lineHeight: 1.7, color: "var(--on-surface)", margin: "0 0 12px 0" }}>
                     {u.text}
                   </p>
-                  {u.evidence.map((e, index) => {
-                    const excerpt = podcastEvidenceExcerpt(e, blockById.get(e.sourceBlockId));
-                    if (excerpt === null) return null;
+                  {u.evidence.map((e) => {
+                    const excerpt = e.sourceBlock.text.slice(e.startOffset, e.endOffset) || e.sourceBlock.text;
                     return (
-                      <details key={index} style={{ fontSize: 13, color: "var(--outline)" }}>
+                      <details key={e.id} style={{ fontSize: 13, color: "var(--outline)" }}>
                         <summary style={{ cursor: "pointer", userSelect: "none" }}>查看引用证据</summary>
                         <blockquote
                           style={{

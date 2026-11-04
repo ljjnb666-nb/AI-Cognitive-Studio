@@ -2,7 +2,7 @@ import { prisma } from "@ai-cognitive/db";
 import { createEpisodeAudioConfig, createVoiceProfile, requestPodcastAudioGeneration } from "@ai-cognitive/podcast-generation";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { resolveWebIdentity, trustedRequestContext } from "@/lib/identity";
+import { resolveWebMutationIdentity, trustedRequestContext } from "@/lib/identity";
 import { resolvePodcastAudioRoute } from "@/lib/provider-product";
 
 const schema = z.object({ episodeId: z.string().cuid() });
@@ -10,7 +10,7 @@ const schema = z.object({ episodeId: z.string().cuid() });
 export async function POST(request: Request) {
   try {
     const { episodeId } = schema.parse(await request.json());
-    const context = await resolveWebIdentity();
+    const context = await resolveWebMutationIdentity();
     const principal = trustedRequestContext(context);
     const route = await resolvePodcastAudioRoute(context.workspaceId);
     const episode = await prisma.podcastEpisode.findFirstOrThrow({
@@ -33,6 +33,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ audioGenerationRunId: requested.run.id, status: requested.run.status });
   } catch (error) {
     const code = error instanceof Error ? error.message.split(":")[0] : "PODCAST_AUDIO_REQUEST_FAILED";
-    return NextResponse.json({ error: code }, { status: code.includes("ACCESS_DENIED") || code === "WEB_IDENTITY_REQUIRED" ? 403 : code === "PODCAST_SCRIPT_NOT_SUCCEEDED" ? 409 : 400 });
+    return NextResponse.json({ error: code }, { status: (code.includes("ACCESS_DENIED") || code === "WORKSPACE_WRITE_DENIED") || code === "WEB_IDENTITY_REQUIRED" ? 403 : code === "PODCAST_SCRIPT_NOT_SUCCEEDED" ? 409 : 400 });
   }
 }

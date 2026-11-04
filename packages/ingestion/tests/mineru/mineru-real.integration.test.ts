@@ -182,7 +182,7 @@ describe.skipIf(!realGateActive)("REAL MinerU production cutover acceptance (mac
         expect(metadata).toMatchObject({ sourceMethod: "OCR", parserName: "mineru", parserVersion: "4.0.3" });
       }
       for (const metadata of provenance.filter((entry) => entry.sourceMethod === "NATIVE_TEXT")) {
-        expect(metadata).toMatchObject({ parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" });
+        expect(metadata).toMatchObject({ parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" });
       }
       // The OCR block carries the EXACT requested physical page (invocation binding authority).
       const ocrBlock = ocrBlocks[0]!;

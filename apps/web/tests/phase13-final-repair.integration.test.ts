@@ -1,3 +1,4 @@
+import { embeddingIdentityWithHash } from "@ai-cognitive/book-intelligence";
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
@@ -48,20 +49,20 @@ describe("Phase 13 final repair: bounded personal corpus", () => {
 describe("Phase 13 final repair: stable cross-book bounds", () => {
   it("orders bounded candidates deterministically and rejects incompatible, malformed, zero, non-finite, historical, and cross-workspace rows", async () => {
     const data = await makeFixture(), source = await data.current("source"), compatibleA = await data.current("compatible-a"), compatibleB = await data.current("compatible-b"), provider = await data.current("provider"), model = await data.current("model"), version = await data.current("version"), embeddingVersion = await data.current("embedding-version"), dimensions = await data.current("dimensions"), malformed = await data.current("malformed"), zero = await data.current("zero"), nonFinite = await data.current("nonfinite"), below = await data.current("below"), historical = await data.current("historical");
-    const add = async (row: typeof source, vector: unknown, extra: Record<string, unknown> = {}) => prisma.bookMemoryEmbedding.create({ data: { workspaceId: data.identity.workspaceId, memoryItemId: row.item.id, analysisRunId: row.run.id, extractionId: row.run.extractionId, provider: "fixture", model: "model", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-${row.item.id}`, dimensions: 3, vector, ...extra } as never });
+    const add = async (row: typeof source, vector: unknown, extra: Record<string, unknown> = {}) => prisma.bookMemoryEmbedding.create({ data: { workspaceId: data.identity.workspaceId, memoryItemId: row.item.id, analysisRunId: row.run.id, extractionId: row.run.extractionId, provider: "fixture", model: "model", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: embeddingIdentityWithHash({ provider: "fixture", model: "model", modelVersion: "v1", embeddingVersion: "v1", dimensions: 3, ...extra }).hash, dimensions: 3, vector, ...extra } as never });
     await add(source, [1, 0, 0]); await add(compatibleA, [1, 0, 0]); await add(compatibleB, [1, 0, 0]); await add(provider, [1, 0, 0], { provider: "other" }); await add(model, [1, 0, 0], { model: "other" }); await add(version, [1, 0, 0], { modelVersion: "v2" }); await add(embeddingVersion, [1, 0, 0], { embeddingVersion: "v2" }); await add(dimensions, [1, 0], { dimensions: 2 }); await add(malformed, { invalid: true }); await add(zero, [0, 0, 0]); await add(nonFinite, [1e308, 1e308, 1e308]); await add(below, [0, 1, 0]); await add(historical, [1, 0, 0]);
     await prisma.currentBookIntelligence.delete({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: historical.document.id, workspaceId: data.identity.workspaceId } } });
     const results = await findCrossBookCognitionConnections(data.identity, source.item.id);
     expect(results.map(item => item.id)).toEqual([compatibleA.item.id, compatibleB.item.id].sort()); expect(results.every(item => Number.isFinite(item.similarity) && item.semantics === "SEMANTICALLY_RELATED")).toBe(true);
   });
 
-  it("does not let a valid candidate beyond the stable configured bound leak into results", async () => {
+  it("ranks across all compatible rows before applying the candidate bound", async () => {
     const data = await makeFixture(), source = await data.current("bound-source");
-    const add = async (row: typeof source, vector: unknown, hash: string) => prisma.bookMemoryEmbedding.create({ data: { workspaceId: data.identity.workspaceId, memoryItemId: row.item.id, analysisRunId: row.run.id, extractionId: row.run.extractionId, provider: "fixture", model: "model", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: hash, dimensions: 3, vector: vector as never } });
-    await add(source, [1, 0, 0], "source");
-    for (let index = 0; index < MAX_CROSS_BOOK_CANDIDATES; index += 1) { const row = await data.current(`bound-${index}`); await add(row, [0, 1, 0], `a-${String(index).padStart(3, "0")}`); }
-    const outside = await data.current("outside"); await add(outside, [1, 0, 0], "z-valid");
-    await expect(findCrossBookCognitionConnections(data.identity, source.item.id)).resolves.toEqual([]);
+    const add = async (row: typeof source, vector: unknown) => prisma.bookMemoryEmbedding.create({ data: { workspaceId: data.identity.workspaceId, memoryItemId: row.item.id, analysisRunId: row.run.id, extractionId: row.run.extractionId, provider: "fixture", model: "model", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: embeddingIdentityWithHash({ provider: "fixture", model: "model", modelVersion: "v1", embeddingVersion: "v1", dimensions: 3 }).hash, dimensions: 3, vector: vector as never } });
+    await add(source, [1, 0, 0]);
+    for (let index = 0; index < MAX_CROSS_BOOK_CANDIDATES; index += 1) { const row = await data.current(`bound-${index}`); await add(row, [0, 1, 0]); }
+    const outside = await data.current("outside"); await add(outside, [1, 0, 0]);
+    await expect(findCrossBookCognitionConnections(data.identity, source.item.id)).resolves.toEqual([expect.objectContaining({ id: outside.item.id, similarity: 1 })]);
   });
 });
 

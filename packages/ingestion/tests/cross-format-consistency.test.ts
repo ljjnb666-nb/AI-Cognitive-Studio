@@ -74,17 +74,17 @@ describe("PDF fidelity probe (recorded empirical evidence)", () => {
     expect(blockTexts(toSide(parsed))).toEqual(["Chapter One", "First body sentence.", "Second body sentence."]);
   });
 
-  it("documents that line breaks are dropped without separator (glue)", async () => {
+  it("preserves visual line breaks instead of gluing neighboring words", async () => {
     const multiCall = await parseDocument(await buildPdf([["Chapter One", "First body sentence."]]), "application/pdf");
-    expect(blockTexts(toSide(multiCall))).toEqual(["Chapter OneFirst body sentence."]);
+    expect(blockTexts(toSide(multiCall))).toEqual(["Chapter One\nFirst body sentence."]);
     const embeddedLf = await parseDocument(await buildPdf([["Alpha Beta\nGamma Delta"]]), "application/pdf");
-    expect(blockTexts(toSide(embeddedLf))).toEqual(["Alpha BetaGamma Delta"]);
+    expect(blockTexts(toSide(embeddedLf))).toEqual(["Alpha Beta\nGamma Delta"]);
   });
 
   it("documents NBSP→U+0020 and U+00AD→U+002D on the production PDF path", async () => {
     const parsed = await parseDocument(await buildPdf([["Alpha\u00a0Beta", "in\u00adput"]]), "application/pdf");
     const texts = blockTexts(toSide(parsed));
-    expect(texts).toEqual(["Alpha Betain-put"]);
+    expect(texts).toEqual(["Alpha Beta\nin-put"]);
     expect(texts[0]).not.toContain("\u00a0");
     expect(texts[0]).toContain("\u002d");
   });
@@ -159,7 +159,7 @@ describe("segment reconstruction and UTF-16 invariants", () => {
     ];
     const view = invariants(blocks);
     expect(view.segments).toHaveLength(2);
-    expect(view.normalizedStream).toBe("A😀B 中文标题 C🚀D第二节 🧠");
+    expect(view.normalizedStream).toBe("A😀B 中文标题 C🚀D 第二节 🧠");
   });
 
   it("removes soft hyphens while keeping reconstruction exact", () => {
@@ -175,7 +175,7 @@ describe("segment reconstruction and UTF-16 invariants", () => {
   });
 
   it("makes different segmentations of one book produce identical streams", () => {
-    const one = invariants([{ ordinal: 0, kind: "PARAGRAPH", text: "One.Two.Three." }]);
+    const one = invariants([{ ordinal: 0, kind: "PARAGRAPH", text: "One. Two. Three." }]);
     const many = invariants([
       { ordinal: 0, kind: "PARAGRAPH", text: "One." },
       { ordinal: 1, kind: "PARAGRAPH", text: "Two." },
@@ -256,7 +256,7 @@ describe("positive cross-format fixtures", () => {
     expect(result.provenance).toEqual({ status: "PASS" });
     const pdfBlock = pdf.blocks[0]!;
     expect(pdfBlock.locator).toMatchObject({ kind: "pdf", physicalPageIndex: 0, printedPageLabel: null });
-    expect(pdfBlock.provenance).toEqual({ sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" });
+    expect(pdfBlock.provenance).toEqual({ sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" });
     const epubBlock = epub.blocks[0]!;
     expect(epubBlock.locator).toMatchObject({ kind: "epub", spineIndex: 0, href: "OPS/u1.xhtml" });
     expect((epubBlock.locator as { elementPath?: string }).elementPath).toBeTruthy();
@@ -264,7 +264,7 @@ describe("positive cross-format fixtures", () => {
   });
 
   it("DIFFERENT_SEGMENTATION: content PASS with 1 PDF block vs 3 EPUB blocks", async () => {
-    const linear = "First body sentence.Second body sentence.Third body sentence.";
+    const linear = "First body sentence. Second body sentence. Third body sentence.";
     const { result, pdf, epub } = await evaluateFixture({
       id: "different-segmentation",
       pdfPages: [[linear]],
@@ -437,7 +437,7 @@ describe("format-native provenance preservation", () => {
     for (const block of pdf.blocks) {
       expect(block.locator).toMatchObject({ kind: "pdf" });
       expect(typeof (block.locator as { physicalPageIndex: number }).physicalPageIndex).toBe("number");
-      expect(block.provenance).toEqual({ sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" });
+      expect(block.provenance).toEqual({ sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" });
     }
   });
 
@@ -465,7 +465,7 @@ describe("fail-closed provenance authority (RF01)", () => {
     kind: "PARAGRAPH",
     text: "Body text.",
     locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null },
-    provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" },
+    provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" },
   });
   const validEpubBlock = () => ({
     ordinal: 0,
@@ -493,7 +493,7 @@ describe("fail-closed provenance authority (RF01)", () => {
     const missing = evaluateCrossFormat(side([{ ...validPdfBlock(), provenance: undefined }]), side([validEpubBlock()]));
     expectProvenanceFails(missing);
     const alien = evaluateCrossFormat(
-      side([{ ...validPdfBlock(), provenance: { sourceMethod: "OCR", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" } }]),
+      side([{ ...validPdfBlock(), provenance: { sourceMethod: "OCR", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" } }]),
       side([validEpubBlock()]),
     );
     expectProvenanceFails(alien);

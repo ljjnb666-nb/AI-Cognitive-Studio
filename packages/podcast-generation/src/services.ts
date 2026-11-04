@@ -1,3 +1,4 @@
+import { assertWorkspaceWrite } from "@ai-cognitive/db";
 import { createHash } from "node:crypto";
 import { admitWorkspaceExpensiveOperation, prisma } from "@ai-cognitive/db";
 import { evaluatePodcastScriptData, type EvaluationUtterance } from "./evaluation.js";
@@ -15,7 +16,7 @@ const defaultHosts = [
 ];
 
 export async function createPodcastProject(context: TrustedRequestContext, input: { name: string; description?: string; sourceDocumentIds: string[] }) {
-  await assertMembership(context);
+  await assertWorkspaceWrite(context);
   if (!input.sourceDocumentIds.length) throw new Error("PODCAST_PROJECT_SOURCE_REQUIRED");
   const documents = await prisma.sourceDocument.findMany({ where: { workspaceId: context.workspaceId, id: { in: input.sourceDocumentIds } } });
   if (documents.length !== new Set(input.sourceDocumentIds).size) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
@@ -30,7 +31,7 @@ export async function createPodcastProject(context: TrustedRequestContext, input
 
 export type StyleInput = Partial<{ language: string; tone: string; depth: number; pace: number; hostCount: number; targetDurationMinutes: number; targetAudience: string; formality: number; humorLevel: number; debateLevel: number; storytellingLevel: number; interruptionLevel: number; disagreementLevel: number; technicalDepth: number; summaryDensity: number; exampleDensity: number }>;
 export async function configureStyle(context: TrustedRequestContext, podcastProjectId: string, input: StyleInput) {
-  await assertMembership(context);
+  await assertWorkspaceWrite(context);
   const project = await prisma.podcastProject.findFirstOrThrow({ where: { id: podcastProjectId, workspaceId: context.workspaceId }, include: { styleProfiles: { orderBy: { version: "desc" }, take: 1 } } });
   const previous = project.styleProfiles[0];
   const base = previous ? { language: previous.language, tone: previous.tone, depth: previous.depth, pace: previous.pace, hostCount: previous.hostCount, targetDurationMinutes: previous.targetDurationMinutes, targetAudience: previous.targetAudience, formality: previous.formality, humorLevel: previous.humorLevel, debateLevel: previous.debateLevel, storytellingLevel: previous.storytellingLevel, interruptionLevel: previous.interruptionLevel, disagreementLevel: previous.disagreementLevel, technicalDepth: previous.technicalDepth, summaryDensity: previous.summaryDensity, exampleDensity: previous.exampleDensity } : {};
@@ -39,7 +40,7 @@ export async function configureStyle(context: TrustedRequestContext, podcastProj
 
 export type HostInput = Omit<(typeof defaultHosts)[number], "ordinal"> & { ordinal: number; personaVersion?: number };
 export async function configureHosts(context: TrustedRequestContext, podcastProjectId: string, hosts: HostInput[]) {
-  await assertMembership(context);
+  await assertWorkspaceWrite(context);
   if (hosts.length < 2 || new Set(hosts.map((host) => host.ordinal)).size !== hosts.length) throw new Error("PODCAST_HOST_CONFIGURATION_INVALID");
   await prisma.podcastProject.findFirstOrThrow({ where: { id: podcastProjectId, workspaceId: context.workspaceId } });
   const latest = await prisma.podcastHost.aggregate({ where: { podcastProjectId, workspaceId: context.workspaceId }, _max: { configurationVersion: true } });
@@ -49,7 +50,7 @@ export async function configureHosts(context: TrustedRequestContext, podcastProj
 }
 
 export async function createEpisode(context: TrustedRequestContext, input: { podcastProjectId: string; title: string; description?: string; styleProfileId?: string; language?: string; targetDurationMinutes?: number }) {
-  await assertMembership(context);
+  await assertWorkspaceWrite(context);
   const project = await prisma.podcastProject.findFirstOrThrow({ where: { id: input.podcastProjectId, workspaceId: context.workspaceId }, include: { styleProfiles: { orderBy: { version: "desc" }, take: 1 } } });
   const style = input.styleProfileId ? await prisma.podcastStyleProfile.findFirstOrThrow({ where: { id: input.styleProfileId, podcastProjectId: project.id, workspaceId: context.workspaceId } }) : project.styleProfiles[0];
   if (!style) throw new Error("PODCAST_STYLE_REQUIRED");
@@ -57,7 +58,7 @@ export async function createEpisode(context: TrustedRequestContext, input: { pod
 }
 
 export async function requestPodcastGeneration(context: TrustedRequestContext, input: { episodeId: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; correlationId?: string; outboxTopic?: string }) {
-  await assertMembership(context);
+  await assertWorkspaceWrite(context);
   const episode = await prisma.podcastEpisode.findFirstOrThrow({ where: { id: input.episodeId, workspaceId: context.workspaceId }, include: { project: { include: { sources: true } }, styleProfile: true } });
   const latestHosts = await prisma.podcastHost.aggregate({ where: { podcastProjectId: episode.podcastProjectId, workspaceId: context.workspaceId }, _max: { configurationVersion: true } });
   const hostConfigurationVersion = latestHosts._max.configurationVersion;
@@ -94,7 +95,7 @@ export async function getPodcastGenerationStatus(context: TrustedRequestContext,
 export async function getEpisodeScript(context: TrustedRequestContext, episodeId: string) { await assertMembership(context); return prisma.currentPodcastScript.findFirstOrThrow({ where: { episodeId, workspaceId: context.workspaceId }, include: { revision: { include: { evaluations: { include: { result: true } } } } } }); }
 export async function getScriptRevision(context: TrustedRequestContext, revisionId: string) { await assertMembership(context); return prisma.podcastScriptRevision.findFirstOrThrow({ where: { id: revisionId, workspaceId: context.workspaceId }, include: { evaluations: { include: { result: true } } } }); }
 export async function evaluatePodcastScript(context: TrustedRequestContext, revisionId: string, evaluatorVersion = "phase3-deterministic-v2") {
-  await assertMembership(context);
+  await assertWorkspaceWrite(context);
   const revision = await prisma.podcastScriptRevision.findFirstOrThrow({ where: { id: revisionId, workspaceId: context.workspaceId }, include: { generationRun: { include: { sources: true } } } });
   const snapshot = revision.scriptSnapshot as { utterances?: EvaluationUtterance[] };
   const sourceTexts = revision.generationRun ? (await prisma.sourceBlock.findMany({ where: { extractionId: { in: revision.generationRun.sources.map((source) => source.extractionId) } }, orderBy: [{ extractionId: "asc" }, { ordinal: "asc" }], select: { text: true } })).map((block) => block.text) : [];

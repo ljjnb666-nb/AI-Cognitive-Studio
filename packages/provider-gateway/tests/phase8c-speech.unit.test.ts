@@ -1,5 +1,10 @@
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { DeterministicProviderHttpTransport, FetchProviderHttpTransport, OpenAISpeechAdapter, ProviderGatewayError, validateSpeechInput } from "../src/index.js";
+
+const socket = vi.hoisted(() => ({ request: vi.fn() }));
+vi.mock("node:https", () => ({ request: socket.request }));
 
 const capability = { modelId: "gpt-4o-mini-tts", families: ["SPEECH"] as const, confidence: "VERIFIED" as const, speechFormats: ["wav"] as const, languages: ["en"] as const };
 const request = { workspaceId: "workspace", routeSlot: "PODCAST_TTS" as const, correlationId: "trace", idempotencyKey: "podcast-tts:run:chunk", inputHash: "a".repeat(64), capability: { family: "SPEECH" as const, outputFormat: "wav" }, speech: { text: "hello", language: "en", voice: { providerVoiceId: "alloy", voiceVersion: "1", speakingRate: 1, pitch: 0 }, outputFormat: "wav" } };
@@ -8,10 +13,16 @@ const wire = { snapshot: { id: "snapshot", workspaceId: "workspace", routeSlot: 
 describe("Phase 8C speech transport boundary", () => {
   const transportRequest = () => ({ url: "https://provider.test/speech", method: "POST" as const, headers: {}, body: "{}", signal: new AbortController().signal });
   const withFetchResponse = async <T>(bytes: Uint8Array, work: (transport: FetchProviderHttpTransport) => Promise<T>) => {
-    const body = new ArrayBuffer(bytes.byteLength);
-    new Uint8Array(body).set(bytes);
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body));
-    try { return await work(new FetchProviderHttpTransport()); } finally { fetchMock.mockRestore(); }
+    socket.request.mockImplementation((_url, options, callback) => {
+      const call = Object.assign(new EventEmitter(), { destroy: vi.fn(), end: () => {
+        const response = Object.assign(Readable.from([Buffer.from(bytes)]), { statusCode: 200, headers: {} });
+        callback(response);
+      } });
+      // The socket resolver receives exactly the already-validated DNS set.
+      options.lookup("provider.test", { all: true }, (_error: unknown, addresses: unknown) => expect(addresses).toEqual([{ address: "93.184.216.34", family: 4 }]));
+      return call;
+    });
+    try { return await work(new FetchProviderHttpTransport({ dns: { lookup: async () => ["93.184.216.34"] } })); } finally { socket.request.mockReset(); }
   };
   it("sends OpenAI WAV Speech as binary-safe output without fabricating unsupported pitch", async () => {
     const transport = new DeterministicProviderHttpTransport(() => ({ status: 500, headers: {}, body: "unused" }), () => ({ status: 200, headers: { "content-type": "audio/wav", "x-request-id": "speech-request" }, bytes: new Uint8Array([82, 73, 70, 70]) }));

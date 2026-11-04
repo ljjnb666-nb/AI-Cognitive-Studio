@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { resolveWebIdentity } from "@/lib/identity";
+import { resolveWebMutationIdentity } from "@/lib/identity";
 import { createThinkingSession } from "@/lib/thinking";
 import { thinkingSessionFailureForCode } from "@/lib/thinking-session-errors";
 
@@ -14,7 +14,7 @@ function thinkingSessionFailure(error: unknown) {
 
 export async function POST(request: Request) {
   try {
-    const [identity, input] = await Promise.all([resolveWebIdentity(), request.json().then(body.parse)]);
+    const [identity, input] = await Promise.all([resolveWebMutationIdentity(), request.json().then(body.parse)]);
     const result = await createThinkingSession(identity, input.memoryItemId, input.sessionId);
     return NextResponse.json(result.pending ? result : { ...result, href: `/studio/thinking/${result.id}` }, { status: result.pending ? 202 : 200 });
   } catch (error) {

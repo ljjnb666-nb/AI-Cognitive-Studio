@@ -8,7 +8,7 @@ function wav(seed: number) { const rate = 8_000, samples = 20_000, bytes = new U
 
 async function bookResponse(request: any) {
   // GatewayAnalysisProvider carries run/job identity in every text operation key.
-  // CHUNK user data carries the same real sourceEvidence contract as production.
+  // CHUNK user data carries the same real sourceSlices contract as production.
   const identity = /^book-analysis-text:([^:]+):([^:]+):(CHUNK|SECTION|CHAPTER|BOOK):(.+)$/.exec(request.idempotencyKey ?? "");
   if (!identity) throw new Error("PHASE9_BOOK_REQUEST_LINEAGE_REQUIRED");
   const [, analysisRunId, jobId, stage, operation] = identity;
@@ -33,7 +33,7 @@ async function bookResponse(request: any) {
   const duplicated = expectedEvidence.map(span => span.text).join("\n\n") === chunk.content;
   if (duplicated ? Object.hasOwn(payload, "content") : payload.content !== chunk.content)
     throw new Error("PHASE9_BOOK_CHUNK_CONTENT_MISMATCH");
-  if (JSON.stringify(payload.sourceEvidence) !== JSON.stringify(expectedEvidence)) throw new Error("PHASE9_BOOK_EVIDENCE_PAYLOAD_MISMATCH");
+  if (JSON.stringify(payload.sourceSlices) !== JSON.stringify(expectedEvidence)) throw new Error("PHASE9_BOOK_EVIDENCE_PAYLOAD_MISMATCH");
   // Keep the fixture's single evidence anchor per Book. Later bounded chunks
   // contribute claims, so retrieval input size does not grow with quote count.
   if (chunk.ordinal !== 0) return { summary: "Bounded intelligence from the workspace route.", memory: [{ type: "CLAIM", content: "Reliable AI outcomes remain grounded in evidence." }] };

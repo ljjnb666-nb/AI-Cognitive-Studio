@@ -30,6 +30,16 @@ async function expectPortraitMp4(output: Awaited<ReturnType<FfmpegVideoRenderer[
 }
 
 describe("FfmpegVideoRenderer", () => {
+  it.each(["SLIDE", "ZOOM", "REVEAL", "WIPE"])("renders changing pixels for %s without dropping the narration", async effect => {
+    const output = await new FfmpegVideoRenderer().render({ durationMs: 2000, width: 360, height: 640, fps: 15,
+      scenes: [{ id: "motion", ordinal: 1, sceneType: "HOOK", startMs: 0, endMs: 2000, primaryText: "可核查的证据", secondaryText: "Evidence", keywords: [], layoutTemplate: "EVIDENCE_CARD", motionPreset: effect === "WIPE" ? "NONE" : effect, transitionIntent: effect === "WIPE" ? "WIPE" : "CUT" }],
+      captions: [{ startMs: 0, endMs: 2000, text: "Evidence" }], narrationAudio: [{ sceneId: "motion", bytes: audio, mediaType: "audio/mp4", durationMs: 2000 }],
+    });
+    await expectPortraitMp4(output);
+    const frame = async (time: string) => (await execute("ffmpeg", ["-v", "error", "-ss", time, "-i", output.path, "-frames:v", "1", "-an", "-f", "md5", "-"], { windowsHide: true })).stdout.trim();
+    expect(await frame("0.066")).not.toEqual(await frame("0.8"));
+  }, 15000);
+
   it("does not misclassify a diagnostic callback failure as an ffmpeg failure", async () => {
     await expect(new FfmpegVideoRenderer({ onInvocation: () => { throw new Error("DIAGNOSTIC_CALLBACK_FAILED"); } }).render({ durationMs: 2_000, width: 360, height: 640, fps: 30,
       scenes: [{ id: "scene-1", ordinal: 1, sceneType: "HOOK", startMs: 0, endMs: 2_000, primaryText: "GPT-5", secondaryText: "Evidence", keywords: [], layoutTemplate: "QUESTION_CARD", transitionIntent: "FADE" }],

@@ -6,16 +6,9 @@
  * (parseDocument → pdfjs-isolated child); EPUBs are hand-assembled ZIP
  * archives parsed by builtin-epub.
  *
- * EMPIRICAL AUTHORING CONSTRAINTS (from the fidelity probe against the
- * production PDF path):
- *   - Line breaks are dropped WITHOUT any separator; the comparison view
- *     joins blocks with pure concatenation, so every fixture places
- *     page/spine block boundaries at no-whitespace positions of the linear
- *     text. Spaces exist only INSIDE blocks, at identical positions in both
- *     encodings.
- *   - Lines must stay far below the pdfkit auto-wrap width: a wrap silently
- *     drops the space at the break ("lazydog"), which no allowed
- *     normalization can repair.
+ * AUTHORING CONSTRAINTS:
+ *   - Line and block boundaries represent whitespace between words.
+ *   - Real text extraction must preserve these separators.
  *   - pdfkit standard fonts are WinAnsi: NBSP arrives as U+0020 and U+00AD
  *     arrives as U+002D. Cross-format soft-hyphen equivalence is therefore
  *     unprovable without forbidden dash normalization; N5 is covered by

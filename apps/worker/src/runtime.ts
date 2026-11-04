@@ -3,6 +3,8 @@ import type { PodcastGenerationProvider, DurablePodcastGenerationProvider } from
 import { logger } from "@ai-cognitive/shared";
 import type { Environment } from "@ai-cognitive/shared/server";
 import type { Worker } from "bullmq";
+import { S3CompatibleStorageProvider } from "@ai-cognitive/storage";
+import { cleanupTemporaryUploads } from "@ai-cognitive/ingestion";
 import { createBookAnalysisWorker, createBookAnalysisQueue, dispatchBookAnalysisWithQueue } from "./book-analysis.js";
 import { createPodcastGenerationWorker, createPodcastGenerationQueue, dispatchPodcastGenerationWithQueue } from "./podcast-generation.js";
 import { createPodcastAudioWorker, createPodcastAudioQueue, dispatchPodcastAudioGenerationWithQueue } from "./audio-generation.js";
@@ -19,7 +21,6 @@ import { DURABLE_OPERATION_RECONCILIATION_BATCH_SIZE, scheduleDurableOperationRe
 import {processNextOcrStructureReview} from "./ocr-structure-review.js";
 import { createOnDemandPdfVisualWorkerRuntime } from "./pdf-visual-review.js";
 import { processNextPdfVisualUserRequest } from "./pdf-visual-user-request.js";
-import {S3CompatibleStorageProvider} from "@ai-cognitive/storage";
 
 export type PodcastRuntimeAdapter = { provider?: PodcastGenerationProvider; providerForRun?: (input: { workspaceId: string; podcastGenerationRunId: string; provider: string; model: string }) => Promise<DurablePodcastGenerationProvider>; embeddingProvider?: EmbeddingProvider; embeddingProviderForRun?: (input: { workspaceId: string; podcastGenerationRunId: string }) => Promise<EmbeddingProvider> };
 export type AudioRuntimeAdapter = Parameters<typeof createPodcastAudioWorker>[1];
@@ -167,6 +168,8 @@ export async function startWorkerRuntime(environment: Environment, options: Work
         deferredRecoveryCursor = result.nextCursor;
       }, 60_000)
     : undefined;
+  const cleanupStorage = new S3CompatibleStorageProvider({ endpoint: environment.S3_ENDPOINT, region: environment.S3_REGION, bucket: environment.S3_BUCKET, accessKey: environment.S3_ACCESS_KEY, secretKey: environment.S3_SECRET_KEY, forcePathStyle: environment.S3_FORCE_PATH_STYLE });
+  const cleanupUploads = dispatch("temporary-upload-cleanup", () => cleanupTemporaryUploads(cleanupStorage, 60_000), 60_000);
   // Durable ingestion delivery reconciliation: PostgreSQL first, BullMQ second.
   // Redis state loss may delay a delivery; it can never exceed the durable
   // attempt guard or strand an expired RUNNING run.
@@ -201,6 +204,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
   const initial: Array<() => Promise<void>> = [dispatch("source-ingestion", () => dispatchSourceIngestionWithQueue(ingestionQueue, environment, options.outboxTopics?.sourceIngestion ? { topic: options.outboxTopics.sourceIngestion } : {})), dispatch("book-analysis-bootstrap", async () => dispatchBookAnalysisBootstrapWithQueue(bookBootstrapQueue, { ...(options.bookScope ? { aggregateIds: (await options.bookScope.bootstrapIds()).concat("__NO_OTHER_BOOTSTRAP__") } : {}), ...(options.outboxTopics?.bookAnalysisBootstrap ? { topic: options.outboxTopics.bookAnalysisBootstrap } : {}), dispatchConcurrency: environment.OUTBOX_DISPATCH_CONCURRENCY })), async () => { if (!options.bookScope) { await reconcileHistoricalBookAnalysisBootstraps(25); await reconcileWaitingBookAnalysisBootstraps(25, source); } }];
   if (reconcileBookAnalysisStale) initial.push(reconcileBookAnalysisStale);
   if (reconcileDeferredBookEmbedding) initial.push(reconcileDeferredBookEmbedding);
+  initial.push(cleanupUploads);
   initial.push(reconcileIngestionDeliveriesSweep);
   if (reconcileDoclingSidecars) initial.push(reconcileDoclingSidecars);
   if(visualReviewRuntime){

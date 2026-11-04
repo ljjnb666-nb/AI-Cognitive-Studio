@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "@ai-cognitive/db";
 import { createPodcastProject, configureStyle, createEpisode, requestPodcastGeneration } from "@ai-cognitive/podcast-generation";
 import { createShortVideoProject, configureShortVideoStyle, requestShortVideoGeneration } from "@ai-cognitive/short-video-generation";
-import { resolveWebIdentity, trustedRequestContext } from "@/lib/identity";
+import { resolveWebMutationIdentity, trustedRequestContext } from "@/lib/identity";
 import { resolvePodcastProductExecution, resolveShortVideoProductExecution } from "@/lib/provider-product";
 
 const sourceIds = z.array(z.string().cuid()).min(1).max(8).refine(ids => new Set(ids).size === ids.length, "SOURCE_DOCUMENT_IDS_DUPLICATE");
@@ -20,7 +20,7 @@ async function assertGenerationSources(workspaceId: string, ids: string[]) {
 export async function POST(request: Request) {
   try {
     const input = bodySchema.parse(await request.json());
-    const context = await resolveWebIdentity();
+    const context = await resolveWebMutationIdentity();
     const principal = trustedRequestContext(context);
     await assertGenerationSources(context.workspaceId, input.sourceDocumentIds);
     if (input.kind === "podcast") {
@@ -38,6 +38,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ id: project.id, href: `/studio/videos/${project.id}` });
   } catch (error) {
     const code = error instanceof Error ? error.message.split(":")[0] : "GENERATION_FAILED";
-    return NextResponse.json({ error: code }, { status: code.includes("ACCESS_DENIED") || code === "WEB_IDENTITY_REQUIRED" ? 403 : 400 });
+    return NextResponse.json({ error: code }, { status: (code.includes("ACCESS_DENIED") || code === "WORKSPACE_WRITE_DENIED") || code === "WEB_IDENTITY_REQUIRED" ? 403 : 400 });
   }
 }

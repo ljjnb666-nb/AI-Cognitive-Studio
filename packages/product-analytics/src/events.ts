@@ -1,4 +1,5 @@
 import { prisma } from "@ai-cognitive/db";
+import { withParticipantLock } from "./participant-lock.js";
 import { z } from "zod";
 import { CLIENT_EVENT_NAMES, MAX_EVENT_PROPERTIES_BYTES, type ClientEventName } from "./constants.js";
 
@@ -23,18 +24,13 @@ async function assertEntityOwnership(workspaceId: string, input: ClientEventInpu
 }
 
 export async function recordClientEvent(input: ClientEventInput, identity: { userId: string; workspaceId: string }) {
-  const participant = await prisma.betaParticipant.findFirst({ where: { userId: identity.userId, status: "ACTIVE" } });
-  if (!participant) throw new Error("BETA_ACCESS_REQUIRED");
   await assertEntityOwnership(identity.workspaceId, input);
-  const existing = await prisma.productEvent.findUnique({ where: { participantId_clientEventId: { participantId: participant.id, clientEventId: input.clientEventId } }, select: { id: true } });
+  return withParticipantLock(identity.userId, true, async (tx, participant) => {
+  const existing = await tx.productEvent.findUnique({ where: { participantId_clientEventId: { participantId: participant.id, clientEventId: input.clientEventId } }, select: { id: true } });
   if (existing) return { id: existing.id, duplicate: true };
-  try {
-    const event = await prisma.productEvent.create({ data: { participantId: participant.id, userId: identity.userId, workspaceId: identity.workspaceId, ...input } });
-    return { id: event.id, duplicate: false };
-  } catch (error) {
-    if (typeof error === "object" && error && "code" in error && error.code === "P2002") return { id: "", duplicate: true };
-    throw error;
-  }
+  const event = await tx.productEvent.create({ data: { participantId: participant.id, userId: identity.userId, workspaceId: identity.workspaceId, ...input } });
+  return { id: event.id, duplicate: false };
+  });
 }
 
 export const isCompletionEvent = (eventName: ClientEventName) => eventName === "PODCAST_PLAYBACK_90" || eventName === "PODCAST_PLAYBACK_ENDED";

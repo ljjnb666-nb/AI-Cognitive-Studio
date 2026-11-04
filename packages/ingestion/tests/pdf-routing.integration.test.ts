@@ -141,7 +141,7 @@ describe("mixed PDF routing (real PostgreSQL)", () => {
     expect(failed.errorCode).toBe("SOURCE_OCR_REQUIRED");
     // Durable routing plan: versioned, complete, native parser identity preserved.
     expect(failed.routingGeneration).toBe(PDF_ROUTING_GENERATION);
-    expect(failed.routingPlan).toMatchObject({ schemaVersion: PDF_ROUTING_PLAN_SCHEMA_VERSION, pageCount: 3, parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" } });
+    expect(failed.routingPlan).toMatchObject({ schemaVersion: PDF_ROUTING_PLAN_SCHEMA_VERSION, pageCount: 3, parser: { name: "pdfjs-isolated", version: "pdf-isolation-v4-layout" } });
     expect(failed.routingPlan).toMatchObject({ pages: [{ physicalPageIndex: 0, route: "NATIVE_TEXT" }, { physicalPageIndex: 1, route: "OCR_REQUIRED", reasonCodes: ["IMAGE_CONTENT_WITHOUT_TEXT"] }, { physicalPageIndex: 2, route: "NATIVE_TEXT" }] });
     // One-way terminal outcome with the unresolved page recorded.
     expect(failed.routingOutcome).toEqual({ schemaVersion: PDF_ROUTING_OUTCOME_SCHEMA_VERSION, outcome: "REQUIRES_FALLBACK", qualityStatus: "REQUIRES_FALLBACK", unresolvedPhysicalPageIndexes: [1] });
@@ -189,9 +189,9 @@ describe("mixed PDF routing (real PostgreSQL)", () => {
     const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: extraction.id }, orderBy: { ordinal: "asc" } });
     expect(blocks).toHaveLength(3);
     expect(blocks.map((block) => parseCanonicalBlockMetadata(block.metadata))).toMatchObject([
-      { locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null }, provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" } },
+      { locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null }, provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" } },
       { locator: { kind: "pdf", physicalPageIndex: 1, printedPageLabel: null }, provenance: { sourceMethod: "OCR", parserName: "fake-ocr", parserVersion: "fake-ocr-v1" } },
-      { locator: { kind: "pdf", physicalPageIndex: 2, printedPageLabel: null }, provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" } },
+      { locator: { kind: "pdf", physicalPageIndex: 2, printedPageLabel: null }, provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" } },
     ]);
     expect(blocks[1]?.sourcePageId).toBe(pages[1]?.id);
     expect(blocks.map((block) => block.text)).toEqual(["Hello PDF", "scanned page one text", "Second Page"]);
@@ -390,7 +390,7 @@ describe("routing plan replay fence (real PostgreSQL)", () => {
     const storage = new FakeStorageProvider();
     const { run } = await createPdfRunFixture(bytes, storage);
     // A structurally valid but WRONG plan is persisted first (simulated drift).
-    const wrong = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" }, inspections: (await extractNativePdf(bytes, DEFAULT_PARSER_LIMITS)).inspections.map((inspection) => ({ ...inspection, route: "NATIVE_TEXT" as const, contentEvidence: inspection.contentEvidence === "TEXT" ? "TEXT" as const : "EMPTY" as const })) });
+    const wrong = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v4-layout" }, inspections: (await extractNativePdf(bytes, DEFAULT_PARSER_LIMITS)).inspections.map((inspection) => ({ ...inspection, route: "NATIVE_TEXT" as const, contentEvidence: inspection.contentEvidence === "TEXT" ? "TEXT" as const : "EMPTY" as const })) });
     expect(await writeRoutingPlan(run.id, PDF_ROUTING_GENERATION, wrong)).toBe(true);
 
     const service = serviceWith(storage, new FakePdfOcrExecutor());

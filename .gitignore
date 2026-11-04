@@ -17,3 +17,6 @@ packages/db/src/generated/
 
 # Mimosa security-scan state at every depth (never commit user scan state)
 **/.mimosa/
+
+# Local content-addressed ingestion runtime blobs (MinerU output cache)
+blobs/

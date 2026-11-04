@@ -3,16 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "lint": "eslint src tests",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test:unit": "vitest run tests/phase3-evaluation.test.ts tests/phase4-audio.test.ts tests/phase15-quality.test.ts",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:phase8c:podcast-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-gateway.integration.test.ts tests/phase8c-podcast-gateway-durability.integration.test.ts tests/phase8c-podcast-gateway-replay.integration.test.ts",
-    "test:phase8c:podcast-autonomy": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-retrieval-gateway.integration.test.ts"
-    ,"test:phase8c:podcast-speech": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-speech-gateway.integration.test.ts tests/audio-durability.integration.test.ts tests/audio-lineage.integration.test.ts"
+    "test:phase8c:podcast-autonomy": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-retrieval-gateway.integration.test.ts",
+    "test:phase8c:podcast-speech": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-speech-gateway.integration.test.ts tests/audio-durability.integration.test.ts tests/audio-lineage.integration.test.ts"
   },
   "dependencies": {
     "@ai-cognitive/book-intelligence": "workspace:*",
@@ -21,7 +23,7 @@
     "@ai-cognitive/provider-gateway": "workspace:*",
     "@ai-cognitive/shared": "workspace:*",
     "@ai-cognitive/storage": "workspace:*",
-    "zod": "^4.1.12"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
@@ -30,6 +32,6 @@
     "eslint": "^9.39.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.4",
-    "vitest": "^4.0.8"
+    "vitest": "^4.1.12"
   }
 }
