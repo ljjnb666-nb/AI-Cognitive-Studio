@@ -12,7 +12,7 @@ const excerpt = "证据不是装饰，而是判断的起点。";
 function capturePageErrors(page: import("@playwright/test").Page) {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error" && !message.text().includes("favicon")) errors.push(message.text()); });
+  page.on("console", (message) => { if (message.type() === "error" && message.location().url !== "http://localhost:3001/favicon.ico") errors.push(message.text()); });
   return errors;
 }
 

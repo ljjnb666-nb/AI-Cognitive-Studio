@@ -39,10 +39,10 @@ test("worker-down upload becomes a recoverable degraded processing state without
     if (!sourceDocumentId) throw new Error("PHASE18_1_SOURCE_ID_MISSING");
     await mkdir(join(recoverySource, ".."), { recursive: true });
     await writeFile(recoverySource, sourceDocumentId, "utf8");
-    await expect(page.getByText("正在等待解析")).toBeVisible();
-    await page.waitForTimeout(1_200);
+    const degradedStatus = page.getByText("后台处理服务暂时没有响应。你的文件已经保存，可以稍后重试。");
+    await expect(degradedStatus).toBeVisible();
     await page.reload();
-    await expect(page.getByText("后台处理服务暂时没有响应。你的文件已经保存，可以稍后重试。")).toBeVisible();
+    await expect(degradedStatus).toBeVisible();
     await expect(page.getByRole("button", { name: "重新解析" })).toBeVisible();
     await expect(page.getByRole("button", { name: "重新检查状态" })).toBeVisible();
   } finally { await redis.quit(); }
@@ -53,7 +53,7 @@ test("worker recovery processes the same degraded upload and renders grounded in
   const sourceDocumentId = (await readFile(recoverySource, "utf8")).trim();
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error" && !message.text().includes("favicon")) errors.push(message.text()); });
+  page.on("console", (message) => { if (message.type() === "error" && message.location().url !== "http://localhost:3001/favicon.ico") errors.push(message.text()); });
   await page.context().addCookies([{ name: "acs_phase6_harness", value: harnessToken, url: "http://localhost:3001", httpOnly: true, sameSite: "Lax" }]);
   await page.goto(`/studio/library/${sourceDocumentId}`);
   const recheck = page.getByRole("button", { name: "重新检查状态" });

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "@ai-cognitive/db";
-import { DeterministicFakeEmbeddingProvider, type AnalysisProvider } from "@ai-cognitive/book-intelligence";
+import { DeterministicFakeEmbeddingProvider, type AnalysisProvider, type AnalysisRequest, type AnalysisResponse } from "@ai-cognitive/book-intelligence";
 import { clearBookAnalysisEmbeddingGatewayFixtureState, createBookAnalysisEmbeddingGatewayFixture } from "../../../../packages/book-intelligence/tests/helpers/book-analysis-embedding-gateway.js";
 import type { PodcastGenerationProvider, SpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
 import type { ShortVideoProvider, ShortVideoTtsProvider } from "@ai-cognitive/short-video-generation";
@@ -13,15 +13,15 @@ const recoveryExcerpt = "RECOVERY_EVIDENCE_MARKER: durable source recovery is gr
 function wav(seed: number) { const rate = 8_000, samples = 20_000, bytes = new Uint8Array(44 + samples * 2), view = new DataView(bytes.buffer); bytes.set(new TextEncoder().encode("RIFF")); view.setUint32(4, bytes.length - 8, true); bytes.set(new TextEncoder().encode("WAVEfmt "), 8); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true); view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true); bytes.set(new TextEncoder().encode("data"), 36); view.setUint32(40, samples * 2, true); for (let index = 0; index < samples; index++) view.setInt16(44 + index * 2, Math.round(Math.sin(index * (seed + 1) / 31) * 3_000), true); return bytes; }
 
 class Analysis implements AnalysisProvider {
-  async generateStructured(request: any): Promise<any> {
+  async generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> {
     if (request.stage !== "CHUNK") {
       return { summary: "bounded intelligence", memory: request.stage === "BOOK" ? [{ type: "SUMMARY", content: "可靠的 AI 判断需要可回溯的证据。" }] : undefined };
     }
     // A quote from elsewhere in the same SourceBlock is not evidence for
     // this chunk. The fixture must obey the same source-bound v2 contract.
-    const slices = request.sourceSlices as Array<{ sourceBlockId: string; startOffset: number; endOffset: number; text: string }> | undefined;
+    const slices = request.sourceSlices;
     if (!slices?.length) throw new Error("PHASE6_SOURCE_SLICES_REQUIRED");
-    const memoryClaim = { type: "CLAIM", content: "AI、API 与 GPT-5 的结论必须以证据为基础。" };
+    const memoryClaim = { type: "CLAIM" as const, content: "AI、API 与 GPT-5 的结论必须以证据为基础。" };
     for (const slice of slices) {
       if (!slice || typeof slice.sourceBlockId !== "string" || typeof slice.text !== "string"
         || !Number.isSafeInteger(slice.startOffset) || !Number.isSafeInteger(slice.endOffset)
@@ -41,9 +41,10 @@ class Analysis implements AnalysisProvider {
         ] };
       }
     }
-    // Later chunks with no matching anchor contribute claims rather than
-    // falsely borrowing an evidence offset outside their own sourceSlices.
-    return { summary: request.content.slice(0, 120), memory: [memoryClaim] };
+    const { sourceBlockId, startOffset, endOffset } = slices[0]!;
+    return { summary: request.content.slice(0, 120), memory: [{
+      type: "CLAIM", content: "当前分块保留了可追溯的原文证据。", evidence: [{ sourceBlockId, startOffset, endOffset }],
+    }] };
   }
 }
 class Podcast implements PodcastGenerationProvider { readonly identity = { provider: "phase6-podcast", model: "fixture" }; async plan(): Promise<any> { return { centralQuestion: "AI 如何帮助判断？", listenerStartingPoint: "好奇", listenerTakeaway: "先验证证据", coreThesis: "证据优先", tensions: ["速度与依据"], surprisingIdeas: ["引用是可检查的"], misconceptions: ["AI 自动正确"], keyConcepts: ["API"], candidateStories: [], candidateExamples: ["GPT-5"], openQuestions: ["下一步是什么？"] }; } async designNarrative(): Promise<any> { return { arcType: "evidence", intellectualProgression: ["question", "evidence", "synthesis"], openingMove: "question", closingMove: "evidence" }; } async outlineSegments(input: any): Promise<any> { return { segments: [1, 2].map((ordinal) => ({ ordinal, purpose: "grounded discussion", internalLabel: `segment-${ordinal}`, targetDurationSeconds: 20, narrativeFunction: "analysis", keyQuestions: ["为什么？"], requiredMemoryIds: input.availableMemoryIds.slice(0, 1), optionalMemoryIds: [], disagreementReason: "scope" })) }; } async draftSegment(input: any): Promise<any> { const [first, second] = input.hosts; const memoryItemId = input.context.find((item: any) => item.sourceBlockEvidenceSpans.length > 0)?.memoryItemId; return { utterances: [0, 1, 2, 3].map((ordinal) => ({ ordinal: ordinal + 1, speakerHostId: ordinal % 2 ? second.id : first.id, text: ordinal === 0 ? excerpt : `AI API GPT-5 的第 ${ordinal + 1} 个可验证讨论。`, utteranceType: ordinal === 1 ? "QUESTION" : "STATEMENT", substantive: ordinal === 0, isDirectQuote: ordinal === 0, evidence: ordinal === 0 && memoryItemId ? [{ memoryItemId }] : [] })) }; } async humanizeSegment(input: any): Promise<any> { return { utterances: input.dialogue.utterances.map((item: any) => ({ ordinal: item.ordinal, text: item.text })) }; } }
