@@ -4,6 +4,7 @@ import {
   createBookRevisionPublicationService,
   materializeBookRevisionEmbedding,
   prepareBookRevisionEmbedding,
+  previewBookRevision,
   readPublishedBookRevision,
   retrieveBookKnowledge,
   retrieveBookKnowledgeForIntelligence,
@@ -189,6 +190,14 @@ describe("Phase 10 cognition product read model", () => {
       invocationId: result.invocationId!, snapshotId: result.snapshot!.id };
     await materializeBookRevisionEmbedding(repository, actor, materialization);
     await materializeBookRevisionEmbedding(repository, actor, materialization);
+    expect(gatewayFixture.remoteCallCount()).toBe(1);
+    const { revision: successor } = await createBookRevision(actor, base.run.id, {
+      reason: "Fixture successor", archiveSha256: "a".repeat(64),
+      summary: { text: "Another revised summary", evidence: [span] },
+      memories: [{ id: item.id, text: "Revised cognition", addEvidence: [{ ...span, startOffset: 14, endOffset: 24 }] }],
+    });
+    const successorPreview = await previewBookRevision(actor, successor.id, successor.revisionHash);
+    expect(successorPreview.memories[0]?.vectorState).toBe("REFRESHED");
     expect(gatewayFixture.remoteCallCount()).toBe(1);
     const other = await fixture(data);
     const otherRun = await createRun(other, "cross-book");

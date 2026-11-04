@@ -157,10 +157,12 @@ async function readRevisionSnapshot(tx: Prisma.TransactionClient, actor: Pick<Ac
   const byId = new Map(inspected.originals.map(memory => [memory.id, memory]));
   const byEmbedding = new Map(embeddings.map(embedding => [embedding.memoryItemId, embedding]));
   const replacements = await tx.bookRevisionMemoryEmbedding.findMany({ where: {
-    revisionId, analysisRunId: inspected.run.id, workspaceId: inspected.run.workspaceId,
+    analysisRunId: inspected.run.id, workspaceId: inspected.run.workspaceId,
     extractionId: inspected.run.extractionId,
-  } });
-  const byReplacement = new Map(replacements.map(item => [item.memoryItemId, item]));
+    OR: patch.memories.flatMap(change => change.text === undefined ? [] : [{
+      memoryItemId: change.id, inputHash: sha256(change.text),
+    }]),
+  }, orderBy: [{ createdAt: "asc" }, { revisionId: "asc" }] });
   const memories = patch.memories.map(change => {
     const original = byId.get(change.id)!;
     const text = change.text ?? original.content;
@@ -168,7 +170,9 @@ async function readRevisionSnapshot(tx: Prisma.TransactionClient, actor: Pick<Ac
     const originalInputHash = sha256(original.content);
     if (originalInputHash !== original.contentHash) throw new Error("BOOK_REVISION_ORIGINAL_CONTENT_HASH_INVALID");
     const embedding = byEmbedding.get(change.id) ?? null;
-    const replacement = byReplacement.get(change.id);
+    const matching = replacements.filter(item => item.memoryItemId === change.id &&
+      item.inputHash === inputHash && item.embeddingIdentityHash === embedding?.embeddingIdentityHash);
+    const replacement = matching.find(item => item.revisionId === revisionId) ?? matching[0];
     const refreshedVector = inputHash !== originalInputHash && embedding &&
       replacement?.inputHash === inputHash && replacement.embeddingIdentityHash === embedding.embeddingIdentityHash &&
       replacement.dimensions === embedding.dimensions && Array.isArray(replacement.vector) &&
@@ -208,9 +212,14 @@ export async function previewBookRevision(actor: Actor, revisionId: string, expe
 
 /** Prepare one exact input. Authorization to execute a paid request is separate. */
 export async function prepareBookRevisionEmbedding(actor: Actor, revisionId: string, revisionHash: string, memoryItemId: string) {
+  return bookRevisionEmbeddingRequest(actor, revisionId, revisionHash, memoryItemId, false);
+}
+
+async function bookRevisionEmbeddingRequest(actor: Actor, revisionId: string, revisionHash: string, memoryItemId: string, forConsumption: boolean) {
   const preview = await previewBookRevision(actor, revisionId, revisionHash);
   const memory = preview.memories.find(item => item.id === memoryItemId);
   if (!memory?.embedding || memory.inputHash === memory.originalInputHash) throw new Error("BOOK_REVISION_VECTOR_TARGET_INVALID");
+  if (memory.vectorState === "REFRESHED" && !forConsumption) throw new Error("BOOK_REVISION_VECTOR_ALREADY_READY");
   const embedding = { texts: [memory.after], purpose: "DOCUMENT" as const };
   const request = {
     workspaceId: actor.workspaceId, routeSlot: "EMBEDDING",
@@ -225,7 +234,7 @@ export async function prepareBookRevisionEmbedding(actor: Actor, revisionId: str
 export async function materializeBookRevisionEmbedding(repository: ProviderExecutionRepository, actor: Actor, input: {
   revisionId: string; revisionHash: string; memoryItemId: string; invocationId: string; snapshotId: string;
 }) {
-  const prepared = await prepareBookRevisionEmbedding(actor, input.revisionId, input.revisionHash, input.memoryItemId);
+  const prepared = await bookRevisionEmbeddingRequest(actor, input.revisionId, input.revisionHash, input.memoryItemId, true);
   const { workspaceId } = actor;
   const snapshot = await repository.loadExecutionSnapshot(workspaceId, input.snapshotId);
   const fingerprint = canonicalGatewayRequestFingerprint(snapshot, prepared.request);
