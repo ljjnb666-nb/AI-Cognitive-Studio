@@ -3,7 +3,9 @@ import {
   createBookRevision,
   createBookRevisionPublicationService,
   materializeBookRevisionEmbedding,
+  materializeBookRevisionModelReview,
   prepareBookRevisionEmbedding,
+  prepareBookRevisionModelReview,
   previewBookRevision,
   readPublishedBookRevision,
   retrieveBookKnowledge,
@@ -17,6 +19,7 @@ import { teachBackAttemptDetail } from "../lib/teach-back";
 import { findCrossBookCognitionConnections } from "../lib/cognition-associations";
 import { createBookAnalysisEmbeddingGatewayFixture } from "../../../packages/book-intelligence/tests/helpers/book-analysis-embedding-gateway";
 import { embeddingIdentityWithHash } from "../../../packages/book-intelligence/src/embeddings";
+import { createProductionProviderGateway, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, WorkspaceMembershipExecutionAuthorizer, testCipher, type ProviderAdapter } from "@ai-cognitive/provider-gateway";
 
 async function fixture(existing?: { workspace: { id: string }; userA: { id: string }; userB: { id: string } }) {
   const suffix = randomUUID();
@@ -95,6 +98,80 @@ async function sealPublicationBase(
   for (const item of memories) {
     await prisma.bookMemoryItem.update({ where: { id: item.id }, data: { contentHash: sha(item.content) } });
   }
+}
+
+/** Deterministic, zero-cost full Gateway text invocation and encrypted receipt. */
+async function verifiedModelReview(
+  actor: { workspaceId: string; userId: string },
+  revision: { id: string; revisionHash: string },
+  opts: { verdict?: "PASS" | "BLOCKED"; requestId?: string; corruptCitation?: boolean } = {},
+) {
+  const requestId = opts.requestId ?? randomUUID();
+  const prepared = await prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, requestId);
+  const cipher = testCipher();
+  const store = new ProviderGatewayRepository(prisma, cipher);
+  const connection = await store.createConnection(actor, {
+    providerKey: "deterministic-test", protocol: "TEST", displayName: "phase10 semantic reviewer",
+    endpoint: "https://semantic-review.fixture.test/v1",
+  });
+  await store.rotateCredential(actor, connection.id, "phase10-fixture-secret");
+  const capability = {
+    modelId: "semantic-review-fixture-v1", families: ["TEXT_GENERATION"] as const,
+    confidence: "VERIFIED" as const, structuredOutput: "JSON_MODE" as const,
+  };
+  await store.setRoute(actor, { routeSlot: "BOOK_SYNTHESIS", connectionId: connection.id, modelId: capability.modelId });
+  const registry = new ProviderRegistry();
+  registry.register({ providerKey: "deterministic-test", displayName: "deterministic reviewer",
+    protocol: "TEST", adapterVersion: "phase10-review-v1", models: [capability] });
+  const adapter: ProviderAdapter = { execute: async ({ request }) => {
+    const body = JSON.parse(request.text!.messages[0]!.content) as {
+      revisionHash: string; rubricVersion: string; claims: Array<{
+        id: string; evidence: Array<{ sourceBlockId: string; startOffset: number; endOffset: number }>;
+      }>;
+    };
+    const verdict = opts.verdict ?? "PASS";
+    return { response: {
+      type: "STRUCTURED", finishReason: "STOP", providerModel: capability.modelId,
+      structured: {
+        schemaVersion: 1, revisionHash: body.revisionHash,
+        evidenceBundleHash: prepared.evidenceBundleHash,
+        rubricVersion: body.rubricVersion, verdict,
+        notes: verdict === "PASS" ? "Fixture claims checked against provided source" : "Evidence is insufficient",
+        checks: body.claims.map(claim => ({
+          claimId: claim.id, status: verdict === "PASS" ? "SUPPORTED" : "UNSUPPORTED",
+          reason: "Compared against provided excerpt",
+          citations: verdict === "PASS"
+            ? [{
+              sourceBlockId: opts.corruptCitation ? "forged-evidence" : claim.evidence[0]!.sourceBlockId,
+              startOffset: claim.evidence[0]!.startOffset, endOffset: claim.evidence[0]!.endOffset,
+            }] : [],
+        })),
+      },
+    } };
+  } };
+  const repository = new ProviderExecutionRepository(prisma, cipher);
+  const gateway = createProductionProviderGateway(
+    registry, { resolveWorkspaceRoute: input => store.resolveWorkspaceRoute(input) },
+    { resolve: async () => undefined }, () => adapter,
+    { authorize: (principal, req) => new WorkspaceMembershipExecutionAuthorizer(prisma)
+        .authorizeExecution(principal, req.workspaceId),
+      assertRouteUsable: async () => undefined, validateEndpoint: async () => undefined,
+      assertBudget: () => undefined, repository,
+      circuit: { admit: async () => undefined, recordSuccess: async () => undefined,
+        recordRetryableFailure: async () => undefined },
+      rate: { admit: async () => undefined },
+      concurrency: { acquire: async key => ({ key, token: "phase10-review-fixture" }),
+        release: async () => true },
+      maxAttempts: 1,
+    },
+  );
+  const outcome = await gateway.execute(prepared.request, { userId: actor.userId });
+  if (outcome.status !== "SUCCEEDED" || !outcome.invocationId || !outcome.snapshot)
+    throw new Error("MODEL_REVIEW_GATEWAY_FIXTURE_FAILED");
+  const receipt = { revisionId: revision.id, revisionHash: revision.revisionHash,
+    requestId, invocationId: outcome.invocationId, snapshotId: outcome.snapshot.id };
+  await materializeBookRevisionModelReview(repository, actor, receipt);
+  return { receipt, repository };
 }
 
 afterAll(() => prisma.$disconnect());
