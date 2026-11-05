@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { prisma } from "@ai-cognitive/db";
+import { Prisma, prisma } from "@ai-cognitive/db";
 import { DeterministicProviderHttpTransport, ProviderGatewayError, ProviderGatewayRepository, createProviderAdapterResolver, parseKeyring, stableHash, type GatewayRequest } from "@ai-cognitive/provider-gateway";
-import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser, frozenChunkRowDigest, frozenChunkSelectionHash, inspectBookMergeStructure } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser, frozenChunkRowDigest, frozenChunkSelectionHash, inspectBookMergeStructure, inspectBookMergeStructureInTransaction } from "@ai-cognitive/book-intelligence";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 
@@ -241,6 +241,11 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       const audit=await inspectBookMergeStructure(target.run.id,f);
       expect(audit.structuralPass).toBe(true);
       expect(audit.issues).toHaveLength(0);
+      const sameTransactionAudit=await prisma.$transaction(
+        tx=>inspectBookMergeStructureInTransaction(tx,target.run.id,f),
+        {isolationLevel:Prisma.TransactionIsolationLevel.Serializable},
+      );
+      expect(sameTransactionAudit).toEqual(audit);
       expect(audit).toMatchObject({semanticReviewRequired:true,fullBookVerified:false});
       expect(audit.counts.chunks).toBe(leaves.length);
       // Structural acceptance must fail when a copied CHUNK's source digest
