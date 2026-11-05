@@ -175,6 +175,43 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       expect(await prisma.bookMemoryEvidence.count({ where: { analysisRunId: requested.run.id } })).toBeGreaterThan(0);
     } finally { await r.close(); }
   });
+
+  it("v3 restores immutable source tuples from spanIndex and consumes a real gateway receipt", async () => {
+    const f = await fixture(), document = await bookLineage(f);
+    await routes(f);
+    let chunkCalls = 0;
+    const r = createBookProductionGatewayRuntime(source, { ...controls, adapterResolver: input => ({
+      execute: async ({ request: value }) => {
+        if (input.family === "EMBEDDING") return { response: { vectors: value.embedding!.texts.map(() => [1, 0, 0]), dimensions: 3 } };
+        if (value.routeSlot !== "BOOK_CHUNK_ANALYSIS") return { response: { type: "STRUCTURED", structured: { summary: "derived summary" } } };
+        const payload = JSON.parse(value.text!.messages[0]!.content);
+        const slices = payload.sourceSlices as Array<{ spanIndex: number; text: string }>;
+        expect(slices.length).toBeGreaterThan(0);
+        expect(slices.map(slice => slice.spanIndex)).toEqual(slices.map((_slice, i) => i));
+        expect(slices.every(slice => typeof slice.text === "string" && !("sourceBlockId" in slice) && !("startOffset" in slice) && !("endOffset" in slice))).toBe(true);
+        expect(payload).not.toHaveProperty("content");
+        expect(value.text!.system).toContain("Evidence contract v3");
+        expect(value.schemaVersion).toContain("book-evidence-span-v3");
+        expect(value.idempotencyKey).toContain(":span-v3");
+        chunkCalls++;
+        return { response: { type: "STRUCTURED", structured: { summary: "grounded", memory: [{ type: "CLAIM", content: "Grounded evidence.", evidence: [{ spanIndex: 0 }] }] } } };
+      },
+    }) });
+    try {
+      const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "book-span-v3-integration", promptVersion: "book-evidence-span-v3", provider: "fixture", model: "fixture-model" });
+      const result = await processBookAnalysisRun(requested.run.id, { analysisProviderForRun: r.createAnalysisProvider, embeddingGatewayForRun: input => ({ gateway: r.gateway, repository: r.repository, userId: input.userId }) });
+      expect(result.status).toBe("SUCCEEDED");
+      expect(chunkCalls).toBeGreaterThan(0);
+      const items = await prisma.bookMemoryEvidence.findMany({ where: { analysisRunId: requested.run.id } });
+      expect(items.length).toBeGreaterThan(0);
+      for (const item of items) {
+        const sourceBlock = await prisma.sourceBlock.findUniqueOrThrow({ where: { id: item.sourceBlockId } });
+        expect(item.startOffset).toBeGreaterThanOrEqual(0);
+        expect(item.endOffset).toBeLessThanOrEqual(sourceBlock.text.length);
+        expect(item.endOffset).toBeGreaterThan(item.startOffset);
+      }
+    } finally { await r.close(); }
+  });
   it("allows the explicitly selected two-attempt deadline policy within the original business lease", async () => {
     const f = await fixture(); await routes(f); let calls = 0;
     const r = createBookProductionGatewayRuntime(source, { ...controls, maxAttempts: 2, timeoutMs: 20, adapterResolver: () => ({ execute: async ({ signal }) => {
