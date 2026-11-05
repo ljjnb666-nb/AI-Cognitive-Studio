@@ -1,3 +1,4 @@
+import { frozenChunkSelectionHash, loadFrozenChunks, seedFrozenChunks, assertFrozenChunksUnchanged, type FrozenChunkSelection } from "./frozen-chunks.js";
 import { assertBookOwnedAuthority, type BookExecutionContext } from "./execution-authority.js";
 import { rankedMemoryIds } from "./retrieval-ranking.js";
 import { randomUUID } from "node:crypto";
@@ -66,7 +67,7 @@ export type ProcessBookAnalysisDependencies = {
   faultInjector?: AnalysisFaultInjector;
 };
 type ActiveBookAnalysisDependencies = ProcessBookAnalysisDependencies & { analysisProvider: AnalysisProvider };
-export type BookAnalysisRequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; routePlan?: BookAnalysisRoutePlan; correlationId?: string; outboxTopic?: string };
+export type BookAnalysisRequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; routePlan?: BookAnalysisRoutePlan; correlationId?: string; outboxTopic?: string; frozenChunks?: FrozenChunkSelection };
 export type TrustedBookAnalysisRequestContext = { workspaceId: string; userId: string };
 type StageContext = { blocks: SourceBlockInput[]; blockMap: Map<string, SourceBlockInput>; chunks: any[]; nodes: any[] };
 
@@ -110,7 +111,9 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   const identityBase = routePlan
     ? [chunkSet.id, input.pipelineVersion, input.promptVersion, routePlanHash] as const
     : [chunkSet.id, input.pipelineVersion, input.promptVersion, input.provider, input.model, input.modelVersion ?? ""] as const;
-  const analysisIdentityHash = sha256(JSON.stringify(identityBase));
+  const frozenHash = input.frozenChunks ? frozenChunkSelectionHash(input.frozenChunks) : undefined;
+  if (frozenHash && !requestedByUserId) throw new Error("FROZEN_CHUNKS_PRINCIPAL_REQUIRED");
+  const analysisIdentityHash = sha256(JSON.stringify(frozenHash ? [...identityBase, "frozen-chunks-v1", frozenHash] : identityBase));
   const existing = await prisma.bookAnalysisRun.findUnique({ where: { analysisIdentityHash }, include: { job: true } });
   if (existing && existing.status !== "FAILED") return { run: existing, job: existing.job };
   if (existing) {
@@ -125,7 +128,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
         workspaceId: input.workspaceId,
         ...(requestedByUserId ? { userId: requestedByUserId } : {}),
         type: BOOK_ANALYSIS_JOB,
-        payload: bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash) as never,
+        payload: { ...bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash), ...((fresh.job.payload as {frozenChunks?:unknown}|null)?.frozenChunks ? {frozenChunks:(fresh.job.payload as {frozenChunks:unknown}).frozenChunks} : {}) } as never,
         idempotencyKey: await nextBookRecoveryJobIdempotencyKey(tx, input.workspaceId, analysisIdentityHash),
         correlationId: input.correlationId,
       } });
@@ -145,15 +148,28 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   const idempotencyKey = `book:${analysisIdentityHash}`;
   try {
     return await prisma.$transaction(async (tx) => {
+      const frozen = input.frozenChunks
+        ? await loadFrozenChunks(tx, { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id }, input.frozenChunks, requestedByUserId!)
+        : undefined;
       await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
-      const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash) as never, idempotencyKey, correlationId: input.correlationId } });
+      const payload = { ...bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash),
+        ...(frozen ? { frozenChunks: { hash: frozen.hash, selection: input.frozenChunks, origins: frozen.origins } } : {}) };
+      const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: payload as never, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider, model, modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash, ...(routePlan ? { routePlan: routePlan as never, routePlanHash } : {}) } });
+      if (frozen) await seedFrozenChunks(tx, run, frozen);
       await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? BOOK_ANALYSIS_TOPIC, aggregateId: run.id, payload: { analysisRunId: run.id, queueJobId: job.id, dispatchGeneration: run.dispatchGeneration } } });
       logger.info("book.analysis.requested", { ...logFields(run, input.correlationId), extractionId: current.extractionId, jobId: job.id, provider, model, ...(routePlanHash ? { routePlanHash } : {}) });
       return { run, job };
     });
   } catch (error) {
-    if (!isBookAnalysisIdentityUniqueViolation(error)) throw error;
+    if (!isBookAnalysisIdentityUniqueViolation(error)) {
+      const conflict=error as {code?:string;meta?:{target?:unknown}};
+      if(frozenHash && conflict?.code==="P2002" && Array.isArray(conflict.meta?.target) && conflict.meta.target.length===1 && conflict.meta.target[0]==="idempotencyKey"){
+        const winner=await prisma.bookAnalysisRun.findUnique({where:{analysisIdentityHash},include:{job:true}});
+        if(winner?.idempotencyKey===idempotencyKey && winner.job.idempotencyKey===idempotencyKey)return{run:winner,job:winner.job};
+      }
+      throw error;
+    }
     const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { analysisIdentityHash }, include: { job: true } });
     return { run, job: run.job };
   }
@@ -505,8 +521,8 @@ export async function requestBookAnalysis(input: BookAnalysisRequestInput) {
 
 /** Trusted user-facing boundary that persists the initiating principal. */
 export async function requestBookAnalysisForUser(context: TrustedBookAnalysisRequestContext, input: Omit<BookAnalysisRequestInput, "workspaceId">) {
-  const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { userId: true } });
-  if (!membership) throw new Error("WORKSPACE_ACCESS_DENIED");
+  const membership = await prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: context.workspaceId, userId: context.userId } }, select: { userId: true, role: true } });
+  if (!membership || (input.frozenChunks && membership.role === "VIEWER")) throw new Error("WORKSPACE_ACCESS_DENIED");
   return requestBookAnalysisCore({ ...input, workspaceId: context.workspaceId }, context.userId);
 }
 
@@ -782,6 +798,7 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
   if (!await claimBookAnalysisRun(initial.id, executionClaimToken, expectedDispatchGeneration)) return prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: initial.id } });
   logger.info("book.analysis.claimed", logFields(initial, dependencies.correlationId));
   try {
+    await withOwnedAnalysisTransaction(initial.id, executionClaimToken, tx => assertFrozenChunksUnchanged(tx, initial, initial.job.payload));
     let activeDependencies: ActiveBookAnalysisDependencies;
     if (dependencies.analysisProviderForRun || dependencies.embeddingGatewayForRun) {
       const job = await prisma.job.findUniqueOrThrow({ where: { id: initial.jobId }, select: { userId: true, workspaceId: true } });

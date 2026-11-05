@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { DeterministicProviderHttpTransport, ProviderGatewayError, ProviderGatewayRepository, createProviderAdapterResolver, parseKeyring, stableHash, type GatewayRequest } from "@ai-cognitive/provider-gateway";
-import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser, frozenChunkRowDigest, frozenChunkSelectionHash } from "@ai-cognitive/book-intelligence";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 
@@ -211,6 +211,27 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
         expect(item.endOffset).toBeGreaterThan(item.startOffset);
       }
     } finally { await r.close(); }
+  });
+
+  it("reuses every validated frozen CHUNK without invoking the old chunk model again", async () => {
+    const f=await fixture(),document=await bookLineage(f);await routes(f);
+    const calls={text:0,embedding:0},r=runtime(calls);
+    try {
+      const old=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-origin",promptVersion:"original",provider:"fixture",model:"fixture-model"});
+      expect((await processBookAnalysisRun(old.run.id,{analysisProviderForRun:r.createAnalysisProvider,embeddingGatewayForRun:i=>({gateway:r.gateway,repository:r.repository,userId:i.userId})})).status).toBe("SUCCEEDED");
+      const leaves=await prisma.analysisArtifact.findMany({where:{analysisRunId:old.run.id,scope:"CHUNK"},orderBy:{ordinal:"asc"}});
+      expect(leaves.length).toBeGreaterThan(0);
+      const selection={version:1 as const,entries:leaves.map(a=>({artifactId:a.id,digest:frozenChunkRowDigest(a)}))};
+      expect(frozenChunkSelectionHash(selection)).toMatch(/^[a-f0-9]{64}$/);
+      const broken={version:1 as const,entries:selection.entries.map((e,i)=>i===0?{...e,digest:"0".repeat(64)}:e)};
+      await expect(requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-invalid",promptVersion:"invalid",provider:"fixture",model:"fixture-model",frozenChunks:broken})).rejects.toThrow("FROZEN_CHUNKS_LINEAGE_INVALID");
+      const before=await prisma.providerInvocation.count({where:{workspaceId:f.workspaceId,routeSlot:"BOOK_CHUNK_ANALYSIS"}});
+      const target=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-target",promptVersion:"target",provider:"fixture",model:"fixture-model",frozenChunks:selection});
+      expect(await prisma.analysisArtifact.count({where:{analysisRunId:target.run.id,scope:"CHUNK"}})).toBe(leaves.length);
+      expect((await processBookAnalysisRun(target.run.id,{analysisProviderForRun:r.createAnalysisProvider,embeddingGatewayForRun:i=>({gateway:r.gateway,repository:r.repository,userId:i.userId})})).status).toBe("SUCCEEDED");
+      expect(await prisma.providerInvocation.count({where:{workspaceId:f.workspaceId,routeSlot:"BOOK_CHUNK_ANALYSIS"}})).toBe(before);
+      expect((await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-target",promptVersion:"target",provider:"fixture",model:"fixture-model",frozenChunks:selection})).run.id).toBe(target.run.id);
+    }finally{await r.close();}
   });
   it("allows the explicitly selected two-attempt deadline policy within the original business lease", async () => {
     const f = await fixture(); await routes(f); let calls = 0;
