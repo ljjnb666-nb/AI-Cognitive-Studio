@@ -65,6 +65,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Generate Prisma client
         run: pnpm db:generate
+      - name: Dependency audit
+        run: pnpm audit --audit-level=moderate
       - name: Lint
         run: pnpm lint
       - name: Typecheck
@@ -493,27 +495,54 @@ jobs:
   # upstream domain that is not "success" (failed, cancelled or skipped)
   # fails this check.
   # ---------------------------------------------------------------------------
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build the production image from the frozen lockfile
+        run: docker build --tag acs-ci:verify .
+      - name: Verify unprivileged runtime and Chinese fonts
+        run: |
+          docker run --rm --entrypoint node acs-ci:verify -e 'if(process.getuid()===0 || process.env.BETTER_AUTH_SECRET) process.exit(1)'
+          docker run --rm --entrypoint fc-match acs-ci:verify sans | grep 'WenQuanYi Micro Hei'
+      - name: Verify actual media rendering inside the image
+        run: docker run --rm --env NODE_ENV=test --workdir /app/packages/short-video-generation --entrypoint pnpm acs-ci:verify test:unit
+
+      - name: Verify isolated production migrations, readiness and shutdown
+        run: ACS_IMAGE=acs-ci:verify node scripts/verify-container-runtime.mjs
+      - name: Upload container runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-runtime
+          path: output/container-smoke
+
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [static, core-tests, product-acceptance, quality-performance, stability-beta]
+    needs: [static, core-tests, product-acceptance, quality-performance, stability-beta, container]
     if: always()
     steps:
       - name: Verify all validation domains succeeded
         env:
+          CONTAINER_RESULT: ${{ needs.container.result }}
           STATIC_RESULT: ${{ needs.static.result }}
           CORE_TESTS_RESULT: ${{ needs.core-tests.result }}
           PRODUCT_ACCEPTANCE_RESULT: ${{ needs.product-acceptance.result }}
           QUALITY_PERFORMANCE_RESULT: ${{ needs.quality-performance.result }}
           STABILITY_BETA_RESULT: ${{ needs.stability-beta.result }}
         run: |
+          echo "container:           ${CONTAINER_RESULT}"
           echo "static:              ${STATIC_RESULT}"
           echo "core-tests:          ${CORE_TESTS_RESULT}"
           echo "product-acceptance:  ${PRODUCT_ACCEPTANCE_RESULT}"
           echo "quality-performance: ${QUALITY_PERFORMANCE_RESULT}"
           echo "stability-beta:      ${STABILITY_BETA_RESULT}"
           failed=0
-          for result in "${STATIC_RESULT}" "${CORE_TESTS_RESULT}" "${PRODUCT_ACCEPTANCE_RESULT}" "${QUALITY_PERFORMANCE_RESULT}" "${STABILITY_BETA_RESULT}"; do
+          for result in "${CONTAINER_RESULT}" "${STATIC_RESULT}" "${CORE_TESTS_RESULT}" "${PRODUCT_ACCEPTANCE_RESULT}" "${QUALITY_PERFORMANCE_RESULT}" "${STABILITY_BETA_RESULT}"; do
             if [ "${result}" != "success" ]; then
               failed=1
             fi

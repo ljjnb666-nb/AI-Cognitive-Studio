@@ -62,11 +62,25 @@ test("real auth keeps personalized cognition private, durable, current, and cros
   const past = new Date("2020-01-01T00:00:00.000Z");
   await prisma.userCognitionState.create({ data: { workspaceId, userId: owner.id, memoryItemId: unassessed.item.id, state: "SAVED" } });
   await prisma.userCognitionReviewState.create({ data: { workspaceId, userId: owner.id, memoryItemId: unassessed.item.id, lastReviewedAt: past, nextReviewAt: past } });
+  // Cross-book similarity is only valid for vectors from the exact same
+  // embedding identity, not two independently generated model identities.
+  const embeddingIdentityHash = `phase13-${randomUUID()}`;
   await prisma.bookMemoryEmbedding.createMany({ data: [
-    { workspaceId, memoryItemId: needs.item.id, analysisRunId: needs.run.id, extractionId: needs.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-${randomUUID()}`, dimensions: 3, vector: [1, 0, 0] },
-    { workspaceId, memoryItemId: developing.item.id, analysisRunId: developing.run.id, extractionId: developing.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-${randomUUID()}`, dimensions: 3, vector: [0.9, 0.1, 0] },
+    { workspaceId, memoryItemId: needs.item.id, analysisRunId: needs.run.id, extractionId: needs.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash, dimensions: 3, vector: [1, 0, 0] },
+    { workspaceId, memoryItemId: developing.item.id, analysisRunId: developing.run.id, extractionId: developing.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash, dimensions: 3, vector: [0.9, 0.1, 0] },
   ] });
   await expect(findCrossBookCognitionConnections({ workspaceId, userId: owner.id }, needs.item.id)).resolves.toEqual([expect.objectContaining({ id: developing.item.id })]);
+  // Distinct embedding identities must never be compared, even if dimensions
+  // match and the vectors would otherwise yield a high cosine similarity.
+  await prisma.bookMemoryEmbedding.updateMany({
+    where: { workspaceId, memoryItemId: developing.item.id },
+    data: { embeddingIdentityHash: `phase13-incompatible-${randomUUID()}` },
+  });
+  await expect(findCrossBookCognitionConnections({ workspaceId, userId: owner.id }, needs.item.id)).resolves.toEqual([]);
+  await prisma.bookMemoryEmbedding.updateMany({
+    where: { workspaceId, memoryItemId: developing.item.id },
+    data: { embeddingIdentityHash },
+  });
 
   await page.goto("/studio/cognitions");
   await expect(page.locator("h1", { hasText: "我的认知" })).toBeVisible();
@@ -105,9 +119,19 @@ test("real auth keeps personalized cognition private, durable, current, and cros
   await prisma.user.update({ where: { id: member.id }, data: { defaultWorkspaceId: workspaceId } });
   await memberPage.goto("/studio/cognitions");
   await expect(memberPage.getByText(needs.item.content, { exact: true })).toHaveCount(0);
-  const privateReview = await memberPage.request.post(`/api/studio/cognitions/${needs.item.id}/review`, { data: { eventId: randomUUID() } });
-  expect(privateReview.status()).toBe(404);
-  expect(await privateReview.json()).toEqual({ error: "COGNITION_NOT_FOUND" });
+  // Read-only membership is denied at the mutation gate before lookup.
+  const viewerReview = await memberPage.request.post(`/api/studio/cognitions/${needs.item.id}/review`, { data: { eventId: randomUUID() } });
+  expect(viewerReview.status()).toBe(403);
+  expect(await viewerReview.json()).toEqual({ error: "WORKSPACE_WRITE_DENIED" });
+  // A write-capable member still cannot discover or mutate another user's
+  // personal review state; its existence stays private.
+  await prisma.workspaceMember.update({
+    where: { workspaceId_userId: { workspaceId, userId: member.id } },
+    data: { role: "EDITOR" },
+  });
+  const editorReview = await memberPage.request.post(`/api/studio/cognitions/${needs.item.id}/review`, { data: { eventId: randomUUID() } });
+  expect(editorReview.status()).toBe(404);
+  expect(await editorReview.json()).toEqual({ error: "COGNITION_NOT_FOUND" });
   await memberContext.close();
 });
 

@@ -24,7 +24,7 @@ export const DEFAULT_PARSER_LIMITS: ParserLimits = { maxPdfPages: 2000, maxPdfOu
 const parsers = {
   text: { name: "builtin-text", version: "text-parser-v1", sourceMethod: "NATIVE_TEXT" },
   markdown: { name: "builtin-markdown", version: "markdown-parser-v1", sourceMethod: "STRUCTURED_MARKUP" },
-  pdf: { name: "pdfjs-isolated", version: "pdf-isolation-v3", sourceMethod: "NATIVE_TEXT" },
+  pdf: { name: "pdfjs-isolated", version: "pdf-isolation-v4-layout", sourceMethod: "NATIVE_TEXT" },
   epub: { name: "builtin-epub", version: "epub-parser-v2", sourceMethod: "STRUCTURED_MARKUP" },
 } as const;
 export type ParserDescriptor = (typeof parsers)[keyof typeof parsers];

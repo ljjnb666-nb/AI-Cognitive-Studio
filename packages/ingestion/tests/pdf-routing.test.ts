@@ -119,8 +119,8 @@ describe("deterministic PDF routing plan", () => {
   const inspections = sharedInspections;
 
   it("includes every physical page and serializes byte-deterministically", () => {
-    const first = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" }, inspections });
-    const second = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" }, inspections: inspections.map((page) => ({ ...page, reasonCodes: [...page.reasonCodes] })) });
+    const first = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v4-layout" }, inspections });
+    const second = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v4-layout" }, inspections: inspections.map((page) => ({ ...page, reasonCodes: [...page.reasonCodes] })) });
     expect(first.pageCount).toBe(3);
     expect(first.pages.map((page) => [page.physicalPageIndex, page.route])).toEqual([[0, "NATIVE_TEXT"], [1, "OCR_REQUIRED"], [2, "NATIVE_TEXT"]]);
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
@@ -131,7 +131,7 @@ describe("deterministic PDF routing plan", () => {
   });
 
   it("round-trips through parseRoutingPlan and rejects structural drift", () => {
-    const plan = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" }, inspections });
+    const plan = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v4-layout" }, inspections });
     expect(parseRoutingPlan(JSON.parse(JSON.stringify(plan)))).toEqual(plan);
     expect(() => parseRoutingPlan({ ...plan, schemaVersion: "pdf-routing-plan-v2" })).toThrow("SOURCE_ROUTING_PLAN_CONTRACT_INVALID");
     expect(() => parseRoutingPlan({ ...plan, pageCount: 2 })).toThrow("SOURCE_ROUTING_PLAN_CONTRACT_INVALID");
@@ -144,7 +144,7 @@ describe("deterministic PDF routing plan", () => {
   });
 
   it("fails closed on replay conflicts instead of patching persisted history", () => {
-    const runtime = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" }, inspections });
+    const runtime = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v4-layout" }, inspections });
     expect(() => assertRoutingPlanReplay(parseRoutingPlan(JSON.parse(JSON.stringify(runtime))), runtime)).not.toThrow();
     const flipped = JSON.parse(JSON.stringify(runtime));
     flipped.pages[1].route = "NATIVE_TEXT";
@@ -162,7 +162,7 @@ describe("deterministic PDF routing plan", () => {
 // ---------------------------------------------------------------------------
 
 describe("PDF extraction quality gate", () => {
-  const plan = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" }, inspections: sharedInspections });
+  const plan = planPdfRouting({ parser: { name: "pdfjs-isolated", version: "pdf-isolation-v4-layout" }, inspections: sharedInspections });
 
   const outcomes = (values: Record<number, PdfPageExtractionOutcome>) => new Map(Object.entries(values).map(([key, value]) => [Number(key), value]));
   const blockCounts = (values: Record<number, number>) => new Map(Object.entries(values).map(([key, value]) => [Number(key), value]));
@@ -201,7 +201,7 @@ describe("PDF extraction quality gate", () => {
 
   it("rejects documents with no usable content at all", () => {
     const allEmpty = planPdfRouting({
-      parser: { name: "pdfjs-isolated", version: "pdf-isolation-v3" },
+      parser: { name: "pdfjs-isolated", version: "pdf-isolation-v4-layout" },
       inspections: [inspect({ physicalPageIndex: 0 }), inspect({ physicalPageIndex: 1 })],
     });
     const decision = evaluatePdfExtractionQuality(allEmpty, outcomes({ 0: "EMPTY", 1: "EMPTY" }), blockCounts({ 0: 0, 1: 0 }));

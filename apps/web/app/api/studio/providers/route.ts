@@ -1,3 +1,4 @@
+import { readEnvironment } from "@ai-cognitive/shared/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { ProviderGatewayRepository, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
@@ -34,8 +35,8 @@ async function response(workspaceId: string) {
 async function resolveProviderHostname(hostname: string): Promise<readonly string[]> {
   // The Phase 9 browser harness deliberately uses this non-routable namespace;
   // keep the production resolver and SSRF policy unchanged for every real host.
-  if (process.env.PHASE9_BULLMQ_PREFIX && hostname.endsWith(".example.test")) return ["198.18.0.1"];
-  return (await import("node:dns/promises")).resolve4(hostname);
+  if (readEnvironment().NODE_ENV === "test" && process.env.PHASE9_BULLMQ_PREFIX && hostname.endsWith(".example.test")) return ["93.184.216.34"];
+  return (await (await import("node:dns/promises")).lookup(hostname, { all: true })).map(item => item.address);
 }
 function connectionTestUrl(input: z.infer<typeof testConnection>): string | undefined {
   return builtInProviderTestEndpoint(input.providerKey);

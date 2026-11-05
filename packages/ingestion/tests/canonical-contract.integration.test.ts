@@ -146,8 +146,8 @@ describe("canonical contract persistence", () => {
     expect(pages.map((page) => page.physicalPageIndex)).toEqual([0, 1]);
     expect(blocks).toHaveLength(2);
     expect(blocks.map((block) => parseCanonicalBlockMetadata(block.metadata))).toEqual([
-      { locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null }, provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" } },
-      { locator: { kind: "pdf", physicalPageIndex: 1, printedPageLabel: null }, provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" } },
+      { locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null }, provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" } },
+      { locator: { kind: "pdf", physicalPageIndex: 1, printedPageLabel: null }, provenance: { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" } },
     ]);
     expect(blocks.every((block) => block.bbox === null)).toBe(true);
     expect(blocks[0]?.sourcePageId).toBe(pages[0]?.id);
@@ -235,7 +235,7 @@ describe("canonical contract persistence", () => {
     const { document } = await ingest(storage, user, workspace, "text/plain", "anchor.txt", Buffer.from("anchor"));
     const anchorExtraction = await prisma.documentExtraction.findFirstOrThrow({ where: { sourceDocumentId: document.id } });
 
-    const fixtureRun = await createFixtureRun(user, workspace, anchorExtraction.sourceDocumentId, "pdf-isolation-v3");
+    const fixtureRun = await createFixtureRun(user, workspace, anchorExtraction.sourceDocumentId, "pdf-isolation-v4-layout");
     const mixed = await prisma.documentExtraction.create({
       data: {
         ingestionRunId: fixtureRun.id,
@@ -243,7 +243,7 @@ describe("canonical contract persistence", () => {
         workspaceId: workspace.id,
         status: "SUCCEEDED",
         parserName: "pdfjs-isolated",
-        parserVersion: "pdf-isolation-v3",
+        parserVersion: "pdf-isolation-v4-layout",
         normalizationVersion: "canonical-text-v1",
         canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION,
         qualityStatus: "UNKNOWN",
@@ -253,7 +253,7 @@ describe("canonical contract persistence", () => {
     const pageZero = await prisma.sourcePage.create({ data: { extractionId: mixed.id, ordinal: 0, physicalPageIndex: 0 } });
     const pageOne = await prisma.sourcePage.create({ data: { extractionId: mixed.id, ordinal: 1, physicalPageIndex: 1 } });
     const blockTexts = ["native block zero", "ocr fallback block", "native block two"];
-    const nativeProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" };
+    const nativeProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" };
     const ocrProvenance = { sourceMethod: "OCR", parserName: "mineru", parserVersion: "0.9.3", parserMode: "ocr-fallback", confidence: 0.92 };
     const mixedBlocks = [
       await prisma.sourceBlock.create({ data: { extractionId: mixed.id, sourcePageId: pageZero.id, ordinal: 0, kind: "PARAGRAPH", text: blockTexts[0]!, contentHash: sha256Utf8(blockTexts[0]!), metadata: { locator: { kind: "pdf", physicalPageIndex: 0, printedPageLabel: null }, provenance: nativeProvenance }, bbox: { x0: 0, y0: 0, x1: 100, y1: 20 } } }),
@@ -349,7 +349,7 @@ describe("canonical contract persistence", () => {
 });
 
 describe("canonical v1 write gate", () => {
-  const pdfProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" };
+  const pdfProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" };
   const epubProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" };
   const textProvenance = { sourceMethod: "NATIVE_TEXT", parserName: "builtin-text", parserVersion: "text-parser-v1" };
   const markdownProvenance = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-markdown", parserVersion: "markdown-parser-v1" };

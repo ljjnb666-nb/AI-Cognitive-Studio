@@ -1,3 +1,4 @@
+import { embeddingIdentityWithHash } from "@ai-cognitive/book-intelligence";
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
@@ -162,8 +163,8 @@ describe("Phase 12 real database service gates", () => {
     const data = await fixture(), identity = { workspaceId: data.workspace.id, userId: data.userA.id };
     const other = await data.cognition("cross-book", false, true), rejected = await data.cognition("rejected", false, true);
     await prisma.bookMemoryEmbedding.createMany({ data: [
-      { workspaceId: identity.workspaceId, memoryItemId: data.first.item.id, analysisRunId: data.first.run.id, extractionId: data.first.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-source-${randomUUID()}`, dimensions: 3, vector: [1, 0, 0] },
-      { workspaceId: identity.workspaceId, memoryItemId: other.item.id, analysisRunId: other.run.id, extractionId: other.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-other-${randomUUID()}`, dimensions: 3, vector: [0.9, 0.1, 0] },
+      { workspaceId: identity.workspaceId, memoryItemId: data.first.item.id, analysisRunId: data.first.run.id, extractionId: data.first.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: embeddingIdentityWithHash({ provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", dimensions: 3 }).hash, dimensions: 3, vector: [1, 0, 0] },
+      { workspaceId: identity.workspaceId, memoryItemId: other.item.id, analysisRunId: other.run.id, extractionId: other.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: embeddingIdentityWithHash({ provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", dimensions: 3 }).hash, dimensions: 3, vector: [0.9, 0.1, 0] },
       { workspaceId: identity.workspaceId, memoryItemId: other.item.id, analysisRunId: other.run.id, extractionId: other.run.extractionId, provider: "fixture", model: "different", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-incompatible-${randomUUID()}`, dimensions: 3, vector: [1, 0, 0] },
       { workspaceId: identity.workspaceId, memoryItemId: rejected.item.id, analysisRunId: rejected.run.id, extractionId: rejected.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-low-${randomUUID()}`, dimensions: 3, vector: [0, 1, 0] },
       { workspaceId: identity.workspaceId, memoryItemId: rejected.item.id, analysisRunId: rejected.run.id, extractionId: rejected.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash: `phase13-zero-${randomUUID()}`, dimensions: 3, vector: [0, 0, 0] },

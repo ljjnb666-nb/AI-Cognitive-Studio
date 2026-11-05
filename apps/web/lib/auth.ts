@@ -1,4 +1,6 @@
 import "server-only";
+import { after } from "next/server";
+import { authMailConfigured, sendAuthMail } from "./auth-mail";
 
 import { prisma } from "@ai-cognitive/db";
 import { betterAuth } from "better-auth";
@@ -29,7 +31,17 @@ export const auth = betterAuth({
   secret: requiredSecret(),
   database: prismaAdapter(prisma, { provider: "postgresql" }),
   trustedOrigins: trustedOrigins(),
-  emailAndPassword: { enabled: true, minPasswordLength: 10, maxPasswordLength: 128 },
+  emailAndPassword: { enabled: true, minPasswordLength: 10, maxPasswordLength: 128,
+    requireEmailVerification: authMailConfigured(), revokeSessionsOnPasswordReset: true,
+    ...(authMailConfigured() ? { sendResetPassword: async ({ user, url }: { user: { email: string }; url: string }) => {
+      after(async () => { await sendAuthMail(user.email, url, "reset").catch(() => console.error("AUTH_MAIL_DELIVERY_FAILED")); });
+    } } : {}),
+  },
+  ...(authMailConfigured() ? { emailVerification: { sendOnSignUp: true, sendOnSignIn: true, autoSignInAfterVerification: false,
+    sendVerificationEmail: async ({ user, url }: { user: { email: string }; url: string }) => {
+      after(async () => { await sendAuthMail(user.email, url, "verify").catch(() => console.error("AUTH_MAIL_DELIVERY_FAILED")); });
+    },
+  } } : {}),
   session: { expiresIn: 60 * 60 * 24 * 7, updateAge: 60 * 60 * 24, cookieCache: { enabled: false } },
   rateLimit: { enabled: true, window: 60, max: rateLimitMaximum() },
   advanced: { useSecureCookies: new URL(requiredAuthBaseUrl()).protocol === "https:", disableCSRFCheck: false, disableOriginCheck: false },

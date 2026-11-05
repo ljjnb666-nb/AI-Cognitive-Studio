@@ -30,7 +30,7 @@ const pass: DimensionResult = { status: "PASS" };
 const notComparable = (code: CrossFormatCode, detail?: string): DimensionResult => ({ status: "NOT_COMPARABLE", code, detail });
 const failure = (code: CrossFormatCode, detail?: string): DimensionResult => ({ status: "FAIL", code, detail });
 
-const PDF_PROVENANCE = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v3" } as const;
+const PDF_PROVENANCE = { sourceMethod: "NATIVE_TEXT", parserName: "pdfjs-isolated", parserVersion: "pdf-isolation-v4-layout" } as const;
 const EPUB_PROVENANCE = { sourceMethod: "STRUCTURED_MARKUP", parserName: "builtin-epub", parserVersion: "epub-parser-v2" } as const;
 
 /**

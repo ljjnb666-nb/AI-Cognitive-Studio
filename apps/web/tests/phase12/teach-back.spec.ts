@@ -110,6 +110,17 @@ test("real auth Teach Back reloads a database pending attempt and keeps mutation
   const member = await prisma.user.findUniqueOrThrow({ where: { email: memberEmail } });
   await prisma.workspaceMember.create({ data: { workspaceId, userId: member.id, role: "VIEWER" } });
   await prisma.user.update({ where: { id: member.id }, data: { defaultWorkspaceId: workspaceId } });
+  // The mutation gate rejects read-only members before any record lookup.
+  // This does not reveal whether a foreign attempt exists in the workspace.
+  const viewerResponse = await memberPage.request.post("/api/studio/teach-back", { data: foreignRequest });
+  expect(viewerResponse.status()).toBe(403);
+  expect(await viewerResponse.json()).toMatchObject({ error: "WORKSPACE_WRITE_DENIED" });
+  // For a role with mutation authority, the attempt-level ownership gate
+  // must still hide another user's record behind an opaque 404.
+  await prisma.workspaceMember.update({
+    where: { workspaceId_userId: { workspaceId, userId: member.id } },
+    data: { role: "EDITOR" },
+  });
   await expectPrivate404(await memberPage.request.post("/api/studio/teach-back", { data: foreignRequest }), "TEACH_BACK_ATTEMPT_NOT_FOUND");
   await memberContext.close();
 

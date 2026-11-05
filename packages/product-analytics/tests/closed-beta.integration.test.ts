@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
-import { createBetaInvite, recordClientEvent, redeemBetaInvite } from "../src/index.js";
+import { createBetaInvite, recordClientEvent, redeemBetaInvite, withdrawBetaParticipant } from "../src/index.js";
 
 const userIds: string[] = [], workspaceIds: string[] = [], inviteIds: string[] = [];
 async function participant(email: string) { const user = await prisma.user.create({ data: { email } }); userIds.push(user.id); return user; }
@@ -36,4 +36,19 @@ describe("Phase 17 closed-beta durability", () => {
     await prisma.betaInvite.update({ where: { id: revoked.invite.id }, data: { revokedAt: new Date() } });
     await expect(redeemBetaInvite({ token: revoked.token, userId: user.id, consent: true })).rejects.toThrow("BETA_INVITATION_INVALID");
   });
+});
+
+
+it("serializes withdrawal against telemetry writers and converges on retry", async () => {
+  const user = await participant(`${randomUUID()}@phase17.test`), area = await workspace();
+  const beta = await prisma.betaParticipant.create({ data: { userId: user.id, cohort: "audit", consentVersion: "test", consentedAt: new Date() } });
+  const event = () => ({ eventName: "STUDIO_SESSION_STARTED" as const, clientEventId: randomUUID(), route: "/studio", properties: {} });
+  const identity = { userId: user.id, workspaceId: area.id };
+  const results = await Promise.allSettled([recordClientEvent(event(), identity), withdrawBetaParticipant(user.id), recordClientEvent(event(), identity)]);
+  expect(results[1]!.status).toBe("fulfilled");
+  await withdrawBetaParticipant(user.id);
+  expect(await prisma.productEvent.count({ where: { participantId: beta.id } })).toBe(0);
+  expect(await prisma.betaFeedback.count({ where: { participantId: beta.id } })).toBe(0);
+  await expect(recordClientEvent(event(), identity)).rejects.toThrow();
+  expect(await prisma.productEvent.count({ where: { participantId: beta.id } })).toBe(0);
 });

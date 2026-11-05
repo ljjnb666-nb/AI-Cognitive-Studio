@@ -38,3 +38,4 @@ export * from "./vision/png-vision.js";
 export * from "./vision/pdf-gateway-executor.js";
 export * from "./vision/ocr-model-review.js";
 export * from "./vision/pdf-graph-model-review.js";
+export { PostgresResourceBudget, boundedResourceUnits, DEFAULT_OUTPUT_TOKEN_LIMIT, type ResourceBudgetControl } from "./runtime/resource-budget.js";

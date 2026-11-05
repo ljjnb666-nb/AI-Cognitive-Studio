@@ -1,10 +1,13 @@
+import { ListPagination, listPage } from "@/components/list-pagination";
 import Link from "next/link";
 import { PageHeader } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { podcastList, statusLabel } from "@/lib/product";
 
-export default async function PodcastsPage() {
-  const podcasts = await podcastList();
+export default async function PodcastsPage({ searchParams }: { searchParams: Promise<{ page?: string | string[] }> }) {
+  const page = listPage((await searchParams).page);
+  const records = await podcastList(undefined, { page, pageSize: 20, lookahead: true });
+  const podcasts = records.slice(0, 20);
 
   return (
     <div>
@@ -46,6 +49,7 @@ export default async function PodcastsPage() {
           </p>
         </div>
       )}
+      <ListPagination page={page} hasNext={records.length > 20} path="/studio/podcasts" />
     </div>
   );
 }

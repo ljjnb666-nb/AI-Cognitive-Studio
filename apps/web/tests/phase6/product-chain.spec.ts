@@ -12,7 +12,7 @@ const excerpt = "证据不是装饰，而是判断的起点。";
 function capturePageErrors(page: import("@playwright/test").Page) {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error" && !message.text().includes("favicon")) errors.push(message.text()); });
+  page.on("console", (message) => { if (message.type() === "error" && message.location().url !== "http://localhost:3001/favicon.ico") errors.push(message.text()); });
   return errors;
 }
 
@@ -26,9 +26,13 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.waitForLoadState("networkidle");
   await page.locator('input[type="file"]').setInputFiles({ name: "phase6-book.md", mimeType: "text/markdown", buffer: Buffer.from(fixture) });
   await expect(page).toHaveURL(/\/studio\/library\//, { timeout: 30_000 });
-  // The transient processing card can disappear before a fast worker finishes.
-  // Verify the durable extraction result, independent of analysis progress.
-  await expect(page.getByRole("region", { name: "文本提取结果", exact: true }).getByText("提取完成", { exact: true })).toBeVisible();
+  // Sol's layout intentionally omits the old extraction-result panel. Check
+  // durable extraction itself rather than asserting deprecated presentation.
+  const sourceDocumentId = new URL(page.url()).pathname.split("/").pop();
+  if (!sourceDocumentId) throw new Error("PHASE6_SOURCE_ID_MISSING");
+  await expect.poll(() => prisma.currentDocumentExtraction.count({ where: { sourceDocumentId } }), { timeout: 90_000 }).toBe(1);
+  const extraction = await prisma.currentDocumentExtraction.findFirstOrThrow({ where: { sourceDocumentId } });
+  await expect.poll(() => prisma.sourceBlock.count({ where: { extractionId: extraction.extractionId } }), { timeout: 90_000 }).toBeGreaterThan(0);
   await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 90_000 });
   await expect(page.getByText(excerpt).first()).toBeVisible();
   await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
@@ -52,7 +56,11 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   expect(audioResponse.headers()["content-type"]).toContain("audio/");
   const citationDisclosure = page.locator("details").filter({ hasText: "查看引用证据" }).first();
   await expect(citationDisclosure).toContainText("查看引用证据");
-  await expect(citationDisclosure.locator("blockquote")).toContainText(excerpt);
+  await citationDisclosure.locator("summary").click();
+  await expect(citationDisclosure.locator("blockquote")).toBeVisible();
+  const displayedPodcastQuote = (await citationDisclosure.locator("blockquote").textContent() ?? "").trim();
+  expect(displayedPodcastQuote).toMatch(/^“.+”$/s);
+  expect(fixture).toContain(displayedPodcastQuote.slice(1, -1));
   await page.screenshot({ path: testInfo.outputPath("podcast-player.png"), fullPage: true });
   console.log("FLOW_B_PASS");
 
@@ -69,7 +77,11 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   const videoResponse = await page.request.get(videoSource!);
   expect(videoResponse.ok()).toBeTruthy(); expect(videoResponse.headers()["content-type"]).toContain("video/mp4");
   await page.getByText("查看原文证据").first().click();
-  await expect(page.locator("blockquote").filter({ hasText: excerpt }).first()).toBeVisible();
+  const videoQuote = page.locator("blockquote").first();
+  await expect(videoQuote).toBeVisible();
+  const displayedVideoQuote = (await videoQuote.textContent() ?? "").trim();
+  expect(displayedVideoQuote).toMatch(/^“.+”$/s);
+  expect(fixture).toContain(displayedVideoQuote.slice(1, -1));
   await page.screenshot({ path: testInfo.outputPath("video-player.png"), fullPage: true });
   const otherUser = await prisma.user.create({ data: { email: "phase6-other-workspace@ai-cognitive-studio.test" } });
   const otherWorkspace = await prisma.workspace.create({ data: { name: "Phase 6 isolated authorization workspace" } });

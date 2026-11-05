@@ -1,6 +1,7 @@
 import { PageHeader } from "@/components/app-shell";
 import { ProviderSettings } from "@/components/provider-settings";
 import { SettingsNavigation } from "@/components/settings-navigation";
+import { ResourceBudgetSettings } from "@/components/resource-budget-settings";
 
 export default function ProviderSettingsPage() {
   return (
@@ -12,6 +13,7 @@ export default function ProviderSettingsPage() {
       <h2 className="sr-only">AI Providers</h2>
       <SettingsNavigation active="providers" />
       <ProviderSettings />
+      <ResourceBudgetSettings />
     </div>
   );
 }

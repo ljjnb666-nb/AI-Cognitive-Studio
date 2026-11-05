@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { correctProductIdentityForUser } from "@ai-cognitive/ingestion";
-import { resolveWebIdentity, trustedRequestContext } from "@/lib/identity";
+import { resolveWebMutationIdentity, trustedRequestContext } from "@/lib/identity";
 import { productIdentityApiError, productIdentityMutationOriginAllowed } from "@/lib/product-identity-api-policy";
 
 type Params = { params: Promise<{ sourceDocumentId: string }> };
@@ -45,7 +45,7 @@ export async function POST(request: Request, { params }: Params) {
     return NextResponse.json({ error: "PRODUCT_IDENTITY_INVALID_REQUEST" }, { status: 400, headers: noStore });
   }
   try {
-    const identity = trustedRequestContext(await resolveWebIdentity());
+    const identity = trustedRequestContext(await resolveWebMutationIdentity());
     const result = await correctProductIdentityForUser(identity, { sourceDocumentId: id.data, ...payload });
     return NextResponse.json(result, {
       status: result.status === "APPLIED" || result.status === "NOOP" ? 200 : 409,

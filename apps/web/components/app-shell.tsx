@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { resolveWebIdentity } from "@/lib/identity";
 import { AccountMenu } from "./account-menu";
+import { DraftScope } from "./recoverable-draft";
 import { StudioNavigation } from "./studio-navigation";
 
 import { PageHeader } from "./page-header";
@@ -18,7 +19,8 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
   if (!workspace) throw new Error("WEB_IDENTITY_WORKSPACE_REQUIRED");
 
   return (
-    <div className="shell">
+    <DraftScope scope={`${identity.userId}:${identity.workspaceId}`}><div className="shell">
+      <a className="skip-link" href="#studio-main">跳到主要内容</a>
       <aside className="sidebar">
         <div>
           <div className="brand-lockup">
@@ -40,12 +42,12 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
           <Link href="/studio/library#upload" className="btn btn-primary">导入书籍</Link>
         </header>
 
-        <main className="content-area">
+        <main id="studio-main" className="content-area" tabIndex={-1}>
           {betaTelemetryEnabled ? <BetaSessionTracker /> : null}
           <StudioNavigation mobile />
           {children}
         </main>
       </div>
-    </div>
+    </div></DraftScope>
   );
 }

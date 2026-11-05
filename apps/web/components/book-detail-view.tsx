@@ -5,7 +5,6 @@ import { useState } from "react";
 import { StatusBadge } from "./status-badge";
 import { ProductIdentityPanel } from "./product-identity-panel";
 import { SourceProcessing } from "./source-processing";
-import { SourceTextReader, type SourceTextPreview } from "./source-text-reader";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
 import { cognitionTypeLabels } from "@/lib/cognitions";
 
@@ -50,7 +49,6 @@ type Props = {
     mediaType: string;
     version: number;
     hasIntelligence: boolean;
-    extractionSummary?: { pages: number; blocks: number; characters?: number | null } | null;
     ingestionStatus?: string | null;
     analysisStatus?: string | null;
     bootstrapStatus?: string | null;
@@ -64,10 +62,9 @@ type Props = {
   };
   memories: MemoryItemData[];
   structureNodes: StructureNodeData[];
-  textPreview?: SourceTextPreview | null;
 };
 
-export function BookDetailView({ item, memories, structureNodes, textPreview }: Props) {
+export function BookDetailView({ item, memories, structureNodes }: Props) {
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
 
   // Flatten evidence items from memories for right pane display
@@ -123,22 +120,12 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
           </div>
         )}
 
-        {item.extractionSummary && (
-          <section className="card-panel" style={{ marginBottom: 20 }} aria-label="文本提取结果">
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-              <span className="section-title">文本提取</span><StatusBadge value="提取完成" />
-            </div>
-            <p>正文已识别，可在右侧查看原文。</p>
-            <p className="muted">{item.extractionSummary.pages ? `${item.extractionSummary.pages} 页 · ` : ""}{item.extractionSummary.characters != null ? `${item.extractionSummary.characters.toLocaleString("zh-CN")} 个字符` : `${item.extractionSummary.blocks} 个文本区块`}</p>
-          </section>
-        )}
-
         {/* Processing State */}
         {!item.hasIntelligence && (
           <div className="card-panel" style={{ marginBottom: 32 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-              <span className="section-title">{item.extractionSummary ? "AI 深度理解" : "处理状态"}</span>
-              <StatusBadge value={item.extractionSummary && item.processingStage === "BOOK_ANALYSIS" && item.stageAvailability === "DEGRADED" && ["ANALYSIS_QUEUED", "WAITING_FOR_ANALYSIS"].includes(item.processingState) ? "等待服务" : item.processingState === "WAITING_FOR_PROVIDER" ? "待配置 AI" : item.processingState === "SUCCEEDED" ? "完成" : item.processingState.includes("FAILED") ? "失败" : item.processingState === "PROCESSING_DEGRADED" ? "需处理" : "处理中"} />
+              <span className="section-title">处理状态</span>
+              <StatusBadge value={item.processingState === "SUCCEEDED" ? "完成" : item.processingState.includes("FAILED") ? "失败" : item.processingState === "PROCESSING_DEGRADED" ? "需处理" : "处理中"} />
             </div>
             <SourceProcessing
               sourceDocumentId={item.id}
@@ -224,7 +211,7 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
       {/* Right Pane: Source Evidence (原文证据 - Parchment Surface) */}
       <div className="evidence-pane">
         <div className="evidence-header">
-          <h2 className="evidence-title">{!allEvidence.length && textPreview ? "原文预览" : "原文证据"}</h2>
+          <h2 className="evidence-title">原文证据</h2>
         </div>
 
         <div className="evidence-timeline">
@@ -256,10 +243,7 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
             );
           })}
 
-          {!allEvidence.length && textPreview && (
-            <SourceTextReader key={`${item.id}:${textPreview.pageNumber}`} sourceDocumentId={item.id} preview={textPreview} />
-          )}
-          {!allEvidence.length && !textPreview && (
+          {!allEvidence.length && (
             <div style={{ color: "#787774", fontSize: 14 }}>
               暂无可展示的原文证据。
             </div>

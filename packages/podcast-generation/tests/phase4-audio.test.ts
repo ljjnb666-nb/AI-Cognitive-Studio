@@ -25,3 +25,15 @@ describe("Phase 4 deterministic speech and media boundaries", () => {
   it("keeps reaction and interruption pauses shorter than normal handoffs", () => { const config = { defaultPauseMs: 420, shortReactionPauseMs: 120, interruptionPauseMs: 80 }; expect(pauseFor("REACTION", config).after).toBeLessThan(pauseFor("STATEMENT", config).after); expect(pauseFor("CHALLENGE", config).before).toBeLessThan(pauseFor("STATEMENT", config).before); });
   it("uses the real FFmpeg process to resample, mix channels, trim, and normalize", async () => { const output = await new FfmpegAudioProcessor().canonicalize(wav(), { sampleRate: 16_000, channels: 2, targetLufs: -16, truePeakLimitDb: -1, normalizeLoudness: true, trimLeadingSilence: true, trimTrailingSilence: true }); const view = new DataView(output.bytes.buffer, output.bytes.byteOffset, output.bytes.byteLength); expect(new TextDecoder().decode(output.bytes.slice(0, 4))).toBe("RIFF"); expect(view.getUint16(22, true)).toBe(2); expect(view.getUint32(24, true)).toBe(16_000); expect(output.bytes.length).toBeGreaterThan(44); }, 35_000);
 });
+
+it("preserves the second utterance after an internal silence while trimming only the edges", async () => {
+  const source = wav(), samples = 4000, view = new DataView(source.buffer);
+  for (let i = 0; i < samples; i++) view.setInt16(44+i*2, i < 400 || i >= 3600 || (i >= 1600 && i < 2400) ? 0 : Math.sin(i/9)*3000, true);
+  const output = await new FfmpegAudioProcessor().canonicalize(source, { sampleRate: 8000, channels: 1, targetLufs: -16, truePeakLimitDb: -1, normalizeLoudness: false, trimLeadingSilence: true, trimTrailingSilence: true });
+  const data = Buffer.from(output.bytes), marker = data.indexOf(Buffer.from("data")), length = data.readUInt32LE(marker+4), pcm = data.subarray(marker+8, marker+8+length);
+  const duration = pcm.length / 16;
+  expect(duration).toBeGreaterThan(380); expect(duration).toBeLessThan(450);
+  let secondVoicePeak = 0;
+  for (let i=Math.floor(pcm.length*.7/2)*2;i<pcm.length;i+=2) secondVoicePeak=Math.max(secondVoicePeak,Math.abs(pcm.readInt16LE(i)));
+  expect(secondVoicePeak).toBeGreaterThan(2500);
+});

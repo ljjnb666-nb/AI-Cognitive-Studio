@@ -2,5 +2,21 @@ import { NextResponse } from "next/server";
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { storage } from "@/lib/storage";
+import { mediaResponse } from "@/lib/media-response";
 
-export async function GET(_request:Request,{params}:{params:Promise<{kind:string;id:string}>}){try{const {kind,id}=await params;const identity=await resolveWebIdentity();let key:string|undefined;if(kind==="audio"){key=(await prisma.podcastAudioRevision.findFirst({where:{id,workspaceId:identity.workspaceId},select:{storageKey:true}}))?.storageKey}else if(kind==="video"){key=(await prisma.shortVideoRevision.findFirst({where:{id,workspaceId:identity.workspaceId},select:{storageKey:true}}))?.storageKey}if(!key)return NextResponse.json({error:"MEDIA_ACCESS_DENIED"},{status:404});const bytes=await storage().getObjectBytes(key);const body:BodyInit=new Uint8Array(bytes);return new NextResponse(body,{headers:{"content-type":kind==="audio"?"audio/wav":"video/mp4","content-disposition":"inline","content-length":String(bytes.byteLength)}})}catch{return NextResponse.json({error:"MEDIA_ACCESS_DENIED"},{status:403})}}
+type Context = { params: Promise<{ kind: string; id: string }> };
+export async function GET(request: Request, { params }: Context) {
+  try {
+    const { kind, id } = await params;
+    const identity = await resolveWebIdentity();
+    const where = { id, workspaceId: identity.workspaceId };
+    const revision = kind === "audio"
+      ? await prisma.podcastAudioRevision.findFirst({ where, select: { storageKey: true } })
+      : kind === "video" ? await prisma.shortVideoRevision.findFirst({ where, select: { storageKey: true } }) : null;
+    if (!revision) return NextResponse.json({ error: "MEDIA_ACCESS_DENIED" }, { status: 404, headers: { "cache-control": "private, no-store" } });
+    return await mediaResponse(request, storage(), revision.storageKey, kind === "audio" ? "audio/wav" : "video/mp4");
+  } catch {
+    return NextResponse.json({ error: "MEDIA_ACCESS_DENIED" }, { status: 403, headers: { "cache-control": "private, no-store" } });
+  }
+}
+export async function HEAD(request: Request, context: Context) { return GET(request, context); }

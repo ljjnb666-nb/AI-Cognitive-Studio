@@ -45,5 +45,5 @@ export default defineConfig({
   outputDir: "../../output/playwright/phase6",
   use: { baseURL: "http://localhost:3001", trace: "retain-on-failure", screenshot: "only-on-failure" },
   webServer: { command: "pnpm start -p 3001", url: "http://localhost:3001/api/health", reuseExistingServer: false, env: environment },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}) } }],
 });

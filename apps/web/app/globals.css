@@ -1060,3 +1060,6 @@
   .identity-correction-form { grid-template-columns: minmax(0,1fr); }
   .identity-correction-wide { grid-column: auto; }
 }
+
+.skip-link { position: fixed; left: 12px; top: -80px; z-index: 100; padding: 12px; background: var(--surface); color: var(--on-surface); }
+.skip-link:focus { top: 12px; }

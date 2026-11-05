@@ -691,7 +691,7 @@ test("desktop navigation keeps one clear active destination", async ({
     },
   );
   await page.goto(`/studio/library/${pendingSource.document.id}`);
-  await expect(page.getByRole("paragraph").filter({ hasText: /^正文提取已完成。AI 深度理解等待后台服务启动。$/ })).toBeVisible();
+  await expect(page.getByRole("paragraph").filter({ hasText: /^解析完成，准备进行 AI 深度理解$/ })).toBeVisible();
   const recoverButton = page.getByRole("button", { name: "恢复深度理解" });
   await expect(recoverButton).toBeVisible();
   const recoverResponse = page.waitForResponse(

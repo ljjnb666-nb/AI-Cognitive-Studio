@@ -2,6 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import process from "node:process";
 import { getDocument, PasswordResponses, OPS } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { openLocalPdfRange } from "./pdf-local-range.mjs";
+import { reconstructPdfText } from "./pdf-text-layout.mjs";
 
 const [input, pagesText, outputChars] = process.argv.slice(2);
 const maxPages = Number(pagesText), maxOutputChars = Number(outputChars);
@@ -63,7 +64,7 @@ try {
       if (process.env.PDF_RANGE_DIAGNOSTIC === "1" && (number === 1 || number % 25 === 0)) process.stderr.write("PDF_RANGE_PAGE_RESOLVED=" + number + "\n");
       const content = await page.getTextContent();
       if (process.env.PDF_RANGE_DIAGNOSTIC === "1" && (number === 1 || number % 25 === 0)) process.stderr.write("PDF_RANGE_TEXT_RESOLVED=" + number + "\n");
-      const text = content.items.map((item) => ("str" in item ? item.str : "")).join("");
+      const text = reconstructPdfText(content.items);
       total += text.length;
       if (total > maxOutputChars) {
         send({ type: "error", code: "SOURCE_TOO_LARGE" });
@@ -116,3 +117,4 @@ try {
   if (loadingTask) await loadingTask.destroy().catch(() => {});
   if (fileRange) await fileRange.close().catch(() => {});
 }
+

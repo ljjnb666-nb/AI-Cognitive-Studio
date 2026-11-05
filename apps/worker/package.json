@@ -9,7 +9,7 @@
     "lint": "eslint src tests",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
-    "test:unit": "vitest run tests/book-analysis-bootstrap.test.ts tests/source-ingestion-ocr-runtime.test.ts tests/source-ingestion-scheduler-authority.test.ts tests/docling-layout.test.ts tests/pdf-visual-review.test.ts tests/pdf-visual-review-store.test.ts",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:phase1:e2e": "vitest run --config vitest.phase1-e2e.config.ts",
     "test:phase2:e2e": "vitest run --config vitest.phase2-e2e.config.ts",
@@ -20,7 +20,8 @@
     "test:phase8c:podcast-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-gateway-runtime.test.ts",
     "test:phase8c:podcast-autonomy": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-gateway-runtime.test.ts",
     "test:phase8c:podcast-speech": "vitest run --config vitest.integration.config.ts tests/phase8c-podcast-speech-gateway-runtime.test.ts",
-    "test:phase8c:short-video-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-short-video-gateway-runtime.test.ts"
+    "test:phase8c:short-video-gateway": "vitest run --config vitest.integration.config.ts tests/phase8c-short-video-gateway-runtime.test.ts",
+    "test:isolation": "vitest run --config vitest.worker-isolation.config.ts"
   },
   "dependencies": {
     "@ai-cognitive/book-intelligence": "workspace:*",
@@ -29,8 +30,8 @@
     "@ai-cognitive/ingestion": "workspace:*",
     "@ai-cognitive/podcast-generation": "workspace:*",
     "@ai-cognitive/provider-gateway": "workspace:*",
-    "@ai-cognitive/short-video-generation": "workspace:*",
     "@ai-cognitive/shared": "workspace:*",
+    "@ai-cognitive/short-video-generation": "workspace:*",
     "@ai-cognitive/storage": "workspace:*",
     "bullmq": "^5.61.0"
   },
@@ -42,7 +43,7 @@
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.4",
-    "vitest": "^4.0.8",
+    "vitest": "^4.1.12",
     "@types/pdfkit": "^0.17.6",
     "pdfkit": "^0.19.1"
   }

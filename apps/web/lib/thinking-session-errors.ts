@@ -1,4 +1,5 @@
 const failures: Record<string, { message: string; status: number }> = {
+  WORKSPACE_WRITE_DENIED: { message: "当前工作区为只读权限，无法提交更改。", status: 403 },
   AI_PROVIDER_CONFIGURATION_REQUIRED: { message: "思考功能尚未配置可用的 AI Provider。", status: 400 },
   INVALID_PROVIDER_RESPONSE: { message: "模型返回了空内容或无效响应，请重试。", status: 502 },
   RATE_LIMITED: { message: "模型服务当前请求过多，请稍后重试。", status: 429 },

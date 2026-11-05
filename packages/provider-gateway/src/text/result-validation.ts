@@ -10,7 +10,8 @@ function jsonSafe(value: unknown, seen = new WeakSet<object>()): boolean {
   if (typeof value !== "object" || seen.has(value)) return false;
   if (Object.getPrototypeOf(value) !== Object.prototype && !Array.isArray(value)) return false;
   seen.add(value);
-  return Array.isArray(value) ? value.every(item => jsonSafe(item, seen)) : Object.values(value).every(item => jsonSafe(item, seen));
+  try { return Array.isArray(value) ? value.every(item => jsonSafe(item, seen)) : Object.values(value).every(item => jsonSafe(item, seen)); }
+  finally { seen.delete(value); }
 }
 
 export function validateTextGenerationResponse(value: unknown): TextGenerationResponse {
