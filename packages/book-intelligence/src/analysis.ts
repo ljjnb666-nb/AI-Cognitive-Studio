@@ -31,6 +31,29 @@ export function validateAnalysisResponse(value: unknown): AnalysisResponse {
   for (const item of response.memory ?? []) { if (!item || !memoryTypes.has(item.type) || typeof item.content !== "string" || !item.content.trim() || item.content.length > 20_000 || (item.evidence !== undefined && !Array.isArray(item.evidence))) throw new Error("ANALYSIS_PROVIDER_RESPONSE_INVALID"); for (const evidence of item.evidence ?? []) if (!evidence || typeof evidence.sourceBlockId !== "string" || !Number.isInteger(evidence.startOffset) || !Number.isInteger(evidence.endOffset) || (evidence.quoteText !== undefined && typeof evidence.quoteText !== "string")) throw new Error("ANALYSIS_PROVIDER_RESPONSE_INVALID"); }
   for (const relation of response.relations ?? []) if (!relation || !relationTypes.has(relation.type) || !Number.isInteger(relation.fromOrdinal) || !Number.isInteger(relation.toOrdinal)) throw new Error("ANALYSIS_PROVIDER_RESPONSE_INVALID"); return response;
 }
+/** Validate every generated CHUNK citation against one *sent* source slice.
+ * A correct block ID alone cannot prove an unseen part of the book. */
+export function assertAnalysisEvidenceWithinRequest(
+  response: AnalysisResponse,
+  request: Pick<AnalysisRequest, "stage" | "sourceSlices">,
+): void {
+  if (request.stage !== "CHUNK" || !request.sourceSlices) return;
+  for (const memory of response.memory ?? []) {
+    for (const evidence of memory.evidence ?? []) {
+      const supported = request.sourceSlices.some(slice => {
+        if (slice.sourceBlockId !== evidence.sourceBlockId
+          || !Number.isSafeInteger(evidence.startOffset) || !Number.isSafeInteger(evidence.endOffset)
+          || evidence.startOffset < slice.startOffset || evidence.endOffset <= evidence.startOffset
+          || evidence.endOffset > slice.endOffset) return false;
+        const relativeStart = evidence.startOffset - slice.startOffset;
+        const relativeEnd = evidence.endOffset - slice.startOffset;
+        return evidence.quoteText === undefined
+          || slice.text.slice(relativeStart, relativeEnd) === evidence.quoteText;
+      });
+      if (!supported) throw new Error("CHUNK_EVIDENCE_INVALID");
+    }
+  }
+}
 export async function guardedGenerateStructured(provider: AnalysisProvider, request: AnalysisRequest, blocks: SourceBlockInput[], limit: number): Promise<AnalysisResponse> {
   // Slice authenticity first so forged input fails with the audit-remediation
   // error code before the bounded-payload gate reports the generic code.
@@ -49,6 +72,7 @@ export async function guardedGenerateStructured(provider: AnalysisProvider, requ
     }));
     if (!supported) throw new Error("ANALYSIS_EVIDENCE_REQUIRED");
   }
+  assertAnalysisEvidenceWithinRequest(response, request);
   return response;
 }
 export type ReductionBatchIdentity = { stage: AnalysisStage; parentKey: string; level: number; batchOrdinal: number; inputHash: string };
