@@ -36,9 +36,19 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     // ChatThinking supports disabled; leave all other providers/routes alone.
     const boundedVision = input.snapshot.providerKey === "zhipu" && input.snapshot.modelId === "glm-4.6v" && input.request.routeSlot === "PDF_VISUAL_STRUCTURE";
     // 新任务显式选择此配置，旧快照与其他模型保持原始线上请求格式。
-    const m3Json = input.snapshot.providerKey === "minimax" && input.snapshot.modelId === "MiniMax-M3" &&
-      input.snapshot.configuration.minimaxM3JsonMode === true && mode === "JSON_MODE";
-    const body = { model: input.snapshot.modelId, messages, max_tokens: text.generation?.maxOutputTokens, ...(m3Json ? { thinking: { type: "disabled" }, reasoning_split: true } : { temperature: text.generation?.temperature, top_p: text.generation?.topP }), ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
+    const m3 = input.snapshot.providerKey === "minimax" && input.snapshot.modelId === "MiniMax-M3";
+    // Independent book reviews must never silently consume the entire response
+    // budget in MiniMax's default reasoning mode. A pre-existing route binding
+    // may not carry minimaxM3JsonMode; the dedicated review slot is sufficient
+    // to enforce thinking.disabled WITHOUT changing older analysis snapshots.
+    const m3Review = m3 && input.request.routeSlot === "BOOK_SEMANTIC_REVIEW";
+    if (m3Review && mode !== "JSON_MODE") throw new ProviderGatewayError("CAPABILITY_MISMATCH");
+    const m3Json = m3 && mode === "JSON_MODE" &&
+      (m3Review || input.snapshot.configuration.minimaxM3JsonMode === true);
+    const tokenCap = m3Review
+      ? { max_completion_tokens: text.generation?.maxOutputTokens }
+      : { max_tokens: text.generation?.maxOutputTokens };
+    const body = { model: input.snapshot.modelId, messages, ...tokenCap, ...(m3Json ? { thinking: { type: "disabled" }, reasoning_split: true } : { temperature: text.generation?.temperature, top_p: text.generation?.topP }), ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
     const remote = await this.transport.execute({ url: profile.endpoint, method: "POST", headers: { "content-type": "application/json", ...authHeaders(profile.authScheme, input.credential) }, body: JSON.stringify(body), signal: input.signal });
     if (input.snapshot.providerKey === "zhipu" && remote.status === 400) {
       let businessCode: unknown;
@@ -57,6 +67,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage });
     try {
       if (!message || typeof message.content !== "string") throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
+      // Even a syntactically complete JSON prefix is not a final judgement if
+      // the provider stopped because of the generation limit. Keep the billed
+      // usage, mark this non-retryable and never materialize a false PASS.
+      if (m3 && mode === "JSON_MODE" && finish(choice?.finish_reason) === "LENGTH")
+        throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
       return response(message.content, typeof json.model === "string" ? json.model : undefined, finish(choice?.finish_reason), text, usage, requestId);
     } catch (error) {
       if (!boundedVision && !(["zhipu", "minimax"].includes(input.snapshot.providerKey) && mode === "JSON_MODE")) throw error;
