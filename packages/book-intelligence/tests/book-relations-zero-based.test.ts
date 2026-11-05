@@ -67,10 +67,11 @@ describe("sourceSlices provenance bounds in new Book CHUNK outputs", () => {
     expect(() => assertAnalysisEvidenceWithinRequest(response, { stage: "CHUNK", sourceSlices: slices })).not.toThrow();
     expect(JSON.stringify(response)).toBe(before);
   });
-  it.each([
+  const outOfScopeSpans: Array<[string, number, number]> = [
     ["s1", 5, 18], ["s1", 10, 13], ["s1", 4, 6],
     ["s1", 17, 19], ["other", 5, 10], ["s1", 8, 8],
-  ])("rejects a crossing, missing or out-of-scope span %s:%i-%i", async (id, start, end) => {
+  ];
+  it.each(outOfScopeSpans)("rejects a crossing, missing or out-of-scope span %s:%i-%i", async (id, start, end) => {
     const { assertAnalysisEvidenceWithinRequest } = await import("../src/analysis.js");
     expect(() => assertAnalysisEvidenceWithinRequest(make(id, start, end), { stage: "CHUNK", sourceSlices: slices })).toThrow("CHUNK_EVIDENCE_INVALID");
   });
