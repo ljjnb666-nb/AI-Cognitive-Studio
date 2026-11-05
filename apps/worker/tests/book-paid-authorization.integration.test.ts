@@ -1,6 +1,8 @@
 import { claimBookAnalysisRun, withOwnedAnalysisTransaction } from "@ai-cognitive/book-intelligence";
 import { afterEach, expect, it, vi } from "vitest";
 import { prisma } from "@ai-cognitive/db";
+import { stableHash } from "@ai-cognitive/provider-gateway";
+import { BOOK_CUMULATIVE_CNY_CAP_MICRO } from "../src/book-cumulative-budget.js";
 import { activateBookPaidGrant, bindBookPaidGrant, cancelBookPaidGrant, BOOK_PAID_GRANT_TYPE, createBookPaidResolver, type BookPaidGrant } from "../src/book-paid-authorization.js";
 const owned: Array<{ workspaceId: string; userId: string }> = [];
 async function fixture(maxMicroCny = 5_000_000) {
@@ -203,4 +205,66 @@ it("rejects a lease that expires while the business transaction waits for its ro
  const work=withOwnedAnalysisTransaction(f.bookRun.id,f.context.claimToken,async()=>{wrote=true;});const outcome=work.then(()=>null,error=>error);
  try{let observed=false;for(let i=0;i<100;i++){const rows=await prisma.$queryRaw<Array<{blocked:boolean}>>`SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE ${pid}=ANY(pg_blocking_pids(pid))) AS blocked`;if(rows[0]!.blocked){observed=true;break;}await new Promise(r=>setTimeout(r,5));}expect(observed).toBe(true);await prisma.$queryRaw`SELECT pg_sleep(0.35)::text`;}finally{release.resolve();await blocker;}
  expect(await outcome).toMatchObject({message:"BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST"});expect(wrote).toBe(false);
+});
+
+async function withPrior(f: Awaited<ReturnType<typeof fixture>>, reservedMicroCny: number, status: "FAILED" | "SUCCEEDED" | "CANCELLED" = "FAILED") {
+ const { binding: _binding, cumulativeBudget: _budget, ...original } = f.payload as BookPaidGrant & {binding?:unknown};
+ void _binding; void _budget;
+ const entry = { ordinal:1, kind:"TEXT" as const, reservedMicroCny, inputUpper:100, outputMax:10, state:"REMOTE_OUTCOME_UNKNOWN", operationKey:crypto.randomUUID() };
+ const old = await prisma.job.create({data:{workspaceId:f.w.id,userId:f.u.id,type:BOOK_PAID_GRANT_TYPE,status,payload:{...original,reservedMicroCny,textCalls:1,entries:[entry],stopped:true} as never}});
+ const persisted = await prisma.job.findUniqueOrThrow({where:{id:old.id}});
+ const carried = {grantId:old.id,payloadDigest:stableHash(persisted.payload),reservedMicroCny};
+ return {old,carried};
+}
+function cumulative(carried: {grantId:string;payloadDigest:string;reservedMicroCny:number}[]) {
+ return {version:1 as const,limitMicroCny:BOOK_CUMULATIVE_CNY_CAP_MICRO,carryForward:carried};
+}
+it("pins all terminated prior gross reservations into an exact 10 CNY continuation envelope",async()=>{
+ const f=await fixture(5_000_000),prior=await withPrior(f,788_499);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ await f.adapter.execute(f.input);
+ expect(f.wire).toHaveBeenCalledTimes(1);
+ const payload=(await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}})).payload as unknown as BookPaidGrant;
+ expect(payload.cumulativeBudget?.carryForward).toEqual([prior.carried]);
+ expect(payload.reservedMicroCny).toBeGreaterThan(0);
+ expect(payload.cumulativeBudget!.limitMicroCny).toBe(10_000_000);
+});
+it("denies activation when prior gross plus new maximum exceeds 10 CNY",async()=>{
+ const f=await fixture(5_000_000),prior=await withPrior(f,5_000_001);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("BOOK_PAID_CUMULATIVE_BUDGET_INVALID");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it.each(["omitted","tampered","running","foreign","different-extraction"] as const)(
+ "refuses %s historical fee evidence without sending",async kind=>{
+ const f=await fixture(),prior=await withPrior(f,788_499);
+ const envelope=cumulative(kind==="omitted"?[]:[prior.carried]);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:envelope} as never}});
+ if(kind==="tampered")await prisma.job.update({where:{id:prior.old.id},data:{payload:{...(await prisma.job.findUniqueOrThrow({where:{id:prior.old.id}})).payload as object,stopped:false}}});
+ if(kind==="running")await prisma.job.update({where:{id:prior.old.id},data:{status:"RUNNING"}});
+ if(kind==="foreign")await prisma.job.update({where:{id:prior.old.id},data:{userId:crypto.randomUUID()}});
+ if(kind==="different-extraction")await prisma.job.update({where:{id:prior.old.id},data:{payload:{...(await prisma.job.findUniqueOrThrow({where:{id:prior.old.id}})).payload as object,extractionId:crypto.randomUUID()}}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow();
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("blocks an unlisted peer grant for the same source/extraction, even if no tokens were spent",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499),other=await withPrior(f,0);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("AUTHORIZATION_FAILED");
+ expect(other.old.id).not.toBe(prior.old.id);expect(f.wire).not.toHaveBeenCalled();
+});
+it("rechecks immutable previous grants after reservation and refuses network send if the history changes",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ const resolver=createBookPaidResolver(f.grant.id,{execute:f.wire,executeBinary:vi.fn()},{beforeSendAdmission:async()=>{
+  const old=await prisma.job.findUniqueOrThrow({where:{id:prior.old.id}});
+  await prisma.job.update({where:{id:old.id},data:{payload:{...(old.payload as object),stopped:false}}});
+ }});
+ const adapter=resolver({providerKey:"zhipu",protocol:"OPENAI_COMPATIBLE",family:"TEXT_GENERATION",modelId:"glm-5.3-flash"})!;
+ await expect(adapter.execute(f.input)).rejects.toMatchObject({code:"AUTHORIZATION_FAILED"});
+ expect(f.wire).not.toHaveBeenCalled();
+ const grant=(await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}})).payload as unknown as BookPaidGrant;
+ expect(grant.entries).toHaveLength(1);expect(grant.entries[0]?.reservedMicroCny).toBeGreaterThan(0);
 });
