@@ -11,7 +11,7 @@ const CONSUMER = "BOOK_REVISION_MODEL_REVIEW";
 const LEGACY_REVIEW_PIPELINE = "book-revision-review-v1";
 const REASONING_REVIEW_PIPELINE = "book-revision-review-v2";
 type ReviewPipeline = typeof LEGACY_REVIEW_PIPELINE | typeof REASONING_REVIEW_PIPELINE;
-function savedReviewPipeline(snapshot: { pipelineVersion?: string }): ReviewPipeline {
+function savedReviewPipeline(snapshot: { pipelineVersion?: string | null }): ReviewPipeline {
   // Never invent a historical budget or accept unknown policy versions.
   if (snapshot.pipelineVersion === LEGACY_REVIEW_PIPELINE) return LEGACY_REVIEW_PIPELINE;
   if (snapshot.pipelineVersion === REASONING_REVIEW_PIPELINE) return REASONING_REVIEW_PIPELINE;
@@ -205,7 +205,7 @@ export async function prepareBookRevisionModelReview(actor: Actor, revisionId: s
       analysisModel: { providerKey: p.run.provider, modelId: p.run.model },
       reviewRouteState: binding ? "PINNED" as const : "UNCONFIGURED" as const,
       reviewPipeline: p.request.pipelineVersion,
-      expectedOutputTokens: p.request.budget.maxOutputTokens,
+      expectedOutputTokens: p.request.budget?.maxOutputTokens ?? 0,
       claimIds: p.claims.map(c => c.id) };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
 }
