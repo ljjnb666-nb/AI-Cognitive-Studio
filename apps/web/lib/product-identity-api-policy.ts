@@ -23,7 +23,7 @@ export function productIdentityPromotionHttpStatus(status: ProductIdentityPromot
 export function productIdentityApiError(error: unknown): { error: string; status: number } {
   const code = error instanceof Error ? error.message : "";
   if (code === "WEB_IDENTITY_REQUIRED") return { error: code, status: 401 };
-  if (code === "WORKSPACE_ACCESS_DENIED" || code === "WORKSPACE_WRITE_ACCESS_DENIED" || code === "BETA_ACCESS_REQUIRED") {
+  if (code === "WORKSPACE_ACCESS_DENIED" || code === "WORKSPACE_WRITE_ACCESS_DENIED" || code === "WORKSPACE_WRITE_DENIED" || code === "BETA_ACCESS_REQUIRED") {
     return { error: "PRODUCT_IDENTITY_ACCESS_DENIED", status: 403 };
   }
   if (code === "SOURCE_DOCUMENT_ACCESS_DENIED") return { error: "PRODUCT_IDENTITY_NOT_FOUND", status: 404 };

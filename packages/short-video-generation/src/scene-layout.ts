@@ -28,7 +28,9 @@ export function sceneVisualFilter(input: { width: number; height: number; fps: n
   const titleX = input.motionPreset === "SLIDE" ? `'${x}+${w}*max(0,1-t/0.4)'` : x;
   const alpha = input.motionPreset === "REVEAL" ? ":alpha='min(1,t/0.4)'" : "";
   const fontSize = Math.max(18, Math.floor(w / 13));
-  const titleSize = input.motionPreset === "ZOOM" ? `'${fontSize}*(0.94+0.06*min(1,t/0.5))'` : String(fontSize);
+  // Changing drawtext fontsize every frame can segfault FFmpeg's font renderer
+  // on Linux. Keep glyph rasterization stable and zoom the finished card instead.
+  const titleSize = String(fontSize);
   const filters = [`color=c=${layout.background}:s=${w}x${h}:r=${input.fps}:d=${d}`];
   if (layout.panel) filters.push(`drawbox=x=${margin / 2}:y=${h * .16}:w=${w - margin}:h=${h * .60}:color=white@0.06:t=fill`);
   filters.push(`drawbox=x=${margin}:y=${h * .15}:w=${w - margin * 2}:h=${Math.max(3, w * .008)}:color=${layout.accent}:t=fill`);
@@ -36,5 +38,10 @@ export function sceneVisualFilter(input: { width: number; height: number; fps: n
   filters.push(`drawtext=textfile='${path(input.secondaryPath)}':expansion=none:fontcolor=${layout.accent}:fontsize=${Math.max(12, Math.floor(w / 24))}:x=${x}:y=h*${layout.detailY}:line_spacing=8`);
   if (input.transitionIntent === "FADE") filters.push(`fade=t=in:st=0:d=0.2`, `fade=t=out:st=${Math.max(0, d - .2)}:d=0.2`);
   if (input.transitionIntent === "WIPE") filters.push(`format=gbrp,geq=r='if(lt(X,W*(1-min(1,T/0.25))),0,r(X,Y))':g='if(lt(X,W*(1-min(1,T/0.25))),0,g(X,Y))':b='if(lt(X,W*(1-min(1,T/0.25))),0,b(X,Y))',format=yuv420p`);
+  if (input.motionPreset === "ZOOM") {
+    // pzoom carries the previous input frame's zoom when d=1; using only zoom
+    // would reset each frame and yield a visually static output.
+    filters.push(`zoompan=z='min(max(zoom,pzoom)+0.003,1.06)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${w}x${h}:fps=${input.fps}`);
+  }
   return filters.join(",");
 }

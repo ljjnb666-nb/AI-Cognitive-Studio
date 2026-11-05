@@ -31,6 +31,7 @@ describe("product identity API mutation boundary", () => {
   it("maps access failures without revealing tenant existence or internals", () => {
     expect(productIdentityApiError(new Error("WEB_IDENTITY_REQUIRED"))).toEqual({ error: "WEB_IDENTITY_REQUIRED", status: 401 });
     expect(productIdentityApiError(new Error("WORKSPACE_WRITE_ACCESS_DENIED"))).toEqual({ error: "PRODUCT_IDENTITY_ACCESS_DENIED", status: 403 });
+    expect(productIdentityApiError(new Error("WORKSPACE_WRITE_DENIED"))).toEqual({ error: "PRODUCT_IDENTITY_ACCESS_DENIED", status: 403 });
     expect(productIdentityApiError(new Error("SOURCE_DOCUMENT_ACCESS_DENIED"))).toEqual({ error: "PRODUCT_IDENTITY_NOT_FOUND", status: 404 });
     expect(productIdentityApiError(new Error("PRODUCT_IDENTITY_CANDIDATE_INVALID"))).toEqual({ error: "PRODUCT_IDENTITY_NOT_PROMOTABLE", status: 409 });
     expect(productIdentityApiError(new Error("database secret password=XYZ"))).toEqual({ error: "PRODUCT_IDENTITY_REQUEST_FAILED", status: 500 });
