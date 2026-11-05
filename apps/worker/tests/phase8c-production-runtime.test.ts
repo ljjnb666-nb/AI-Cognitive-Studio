@@ -243,6 +243,17 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       expect(audit.issues).toHaveLength(0);
       expect(audit).toMatchObject({semanticReviewRequired:true,fullBookVerified:false});
       expect(audit.counts.chunks).toBe(leaves.length);
+      // Structural acceptance must fail when a copied CHUNK's source digest
+      // changes, even if the row count and reduction tree remain complete.
+      const originalChunk=await prisma.documentChunk.findFirstOrThrow({where:{chunkSetId:target.run.chunkSetId},orderBy:{ordinal:"asc"}});
+      await prisma.documentChunk.update({where:{id:originalChunk.id},data:{contentHash:"0".repeat(64)}});
+      try {
+        const changed=await inspectBookMergeStructure(target.run.id,f);
+        expect(changed.structuralPass).toBe(false);
+        expect(changed.issues).toEqual(expect.arrayContaining([{code:"CHUNK_SOURCE_INVALID",id:originalChunk.id}]));
+      } finally {
+        await prisma.documentChunk.update({where:{id:originalChunk.id},data:{contentHash:originalChunk.contentHash}});
+      }
       await expect(inspectBookMergeStructure(target.run.id,{workspaceId:f.workspaceId,userId:randomUUID()})).rejects.toThrow("BOOK_MERGE_AUDIT_ACCESS_DENIED");
       expect((await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-target",promptVersion:"target",provider:"fixture",model:"fixture-model",frozenChunks:selection})).run.id).toBe(target.run.id);
     }finally{await r.close();}
