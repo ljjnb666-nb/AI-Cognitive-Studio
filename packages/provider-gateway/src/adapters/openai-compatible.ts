@@ -44,9 +44,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const m3Review = m3 && input.request.routeSlot === "BOOK_SEMANTIC_REVIEW";
     if (m3Review && mode !== "JSON_MODE") throw new ProviderGatewayError("CAPABILITY_MISMATCH");
     const m3ReviewPolicy = m3Review ? input.snapshot.pipelineVersion : undefined;
-    if (m3Review && !["book-revision-review-v1", "book-revision-review-v2"].includes(String(m3ReviewPolicy)))
+    if (m3Review && !["book-revision-review-v1", "book-revision-review-v2", "book-revision-review-v3"].includes(String(m3ReviewPolicy)))
       throw new ProviderGatewayError("CAPABILITY_MISMATCH");
-    const selectedThinking = m3Review && m3ReviewPolicy === "book-revision-review-v2"
+    const selectedThinking = m3Review && m3ReviewPolicy !== "book-revision-review-v1"
       ? input.snapshot.configuration.minimaxM3ReviewThinking ?? "adaptive" : "disabled";
     if (m3Review && selectedThinking !== "adaptive" && selectedThinking !== "disabled")
       throw new ProviderGatewayError("CAPABILITY_MISMATCH");
