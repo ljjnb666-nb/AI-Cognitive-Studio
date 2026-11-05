@@ -97,7 +97,11 @@ export async function processBookAnalysisBootstrap(bootstrapId: string, options:
     // A real process crash has the same shape: the lease expires and BullMQ's
     // stalled-job recovery can safely redeliver the deterministic bootstrap ID.
     if (code === "BOOK_ANALYSIS_BOOTSTRAP_SIMULATED_CRASH") throw error;
-    if (readyErrors.has(code)) { await waitForProvider(bootstrapId, token, code); return; }
+    if (readyErrors.has(code)) {
+      // 保持自动导入持久状态的既有错误契约，细分配置提示由产品入口处理。
+      await waitForProvider(bootstrapId, token, code === "MINIMAX_BOOK_CONFIGURATION_REQUIRED" ? "AI_PROVIDER_CONFIGURATION_REQUIRED" : code);
+      return;
+    }
     if (code === capacityError) { await deferForCapacity(bootstrapId, token); return; }
     if (classifyBootstrapError(error) === "RECOVERABLE") { const retryCount = Number((initial as { retryCount?: number }).retryCount ?? 0) + 1, delay = Math.min(300_000, 5_000 * 2 ** Math.min(retryCount, 6)); await owned(bootstrapId, token, { status: "PENDING", errorCode: code, retryCount, nextAttemptAt: new Date(Date.now() + delay), executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null }); return; }
     await owned(bootstrapId, token, { status: "FAILED_TERMINAL", errorCode: code, completedAt: new Date(), executionClaimToken: null, executionClaimedAt: null, executionLeaseUntil: null });
