@@ -2,7 +2,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { randomUUID } from "node:crypto";
 import { admitWorkspaceExpensiveOperation, Prisma, prisma, type ExpensiveOperationRecoveryTarget } from "@ai-cognitive/db";
-import { buildBookContextForIntelligence, estimateAnalysisTokens, type EmbeddingProvider } from "@ai-cognitive/book-intelligence";
+import { buildBookContextForIntelligence, readPublishedBookRevisionForRun, estimateAnalysisTokens, type EmbeddingProvider } from "@ai-cognitive/book-intelligence";
 import { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "@ai-cognitive/ingestion";
 import { logger } from "@ai-cognitive/shared";
 import { estimateSpokenDurationMs } from "./duration.js";
@@ -101,7 +101,7 @@ async function retrieveContext(run: any, dependencies: ProcessPodcastDependencie
   const perSource = Math.max(200, Math.floor(totalBudget / run.sources.length));
   const packs = [] as PodcastContextItem[][];
   for (const source of run.sources) {
-    const pack = await buildBookContextForIntelligence({ workspaceId: run.workspaceId, sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, task, tokenBudget: perSource, embeddingProvider: dependencies.embeddingProvider!, operationKey: retrievalOperationKey });
+    const pack = await buildBookContextForIntelligence({ workspaceId: run.workspaceId, sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, bookPublicationId: source.bookPublicationId, task, tokenBudget: perSource, embeddingProvider: dependencies.embeddingProvider!, operationKey: retrievalOperationKey });
     if (pack.lineage.sourceDocumentId !== source.sourceDocumentId || pack.lineage.extractionId !== source.extractionId || pack.lineage.chunkSetId !== source.chunkSetId || pack.lineage.analysisRunId !== source.analysisRunId) throw new Error("PODCAST_GENERATION_SOURCE_LINEAGE_MISMATCH");
     const candidates = pack.items.map((item: any) => canonicalContextItem({ ...item, sourceBlockEvidenceSpans: item.evidence }));
     const blocks = await prisma.sourceBlock.findMany({ where: { extractionId: source.extractionId, id: { in: [...new Set(candidates.flatMap(item => item.sourceBlockEvidenceSpans.map(span => span.sourceBlockId)))] } }, select: { id: true, text: true } });
@@ -242,6 +242,31 @@ function expectedDraftProjection(run: any, segment: any, output: DialogueOutput,
   return buildDraftDestinationProjection(run, { ...segment, status: "DRAFTED" }, utterances);
 }
 
+async function loadDraftEvidenceMemory(tx: Prisma.TransactionClient, run: Awaited<ReturnType<typeof loadRun>>, ids: string[]) {
+  const rows = await tx.bookMemoryItem.findMany({
+    where: { id: { in: ids }, workspaceId: run.workspaceId }, include: { evidence: true },
+  });
+  const pins = run.sources.filter(source => source.bookPublicationId && rows.some(row => row.analysisRunId === source.analysisRunId));
+  if (!pins.length) return rows;
+  const snapshots = await Promise.all(pins.map(async source => [
+    source.analysisRunId,
+    (await readPublishedBookRevisionForRun(tx, source, source.bookPublicationId!)).revision,
+  ] as const));
+  const byRun = new Map(snapshots);
+  return rows.map(row => {
+    const change = byRun.get(row.analysisRunId)?.memories.find(memory => memory.id === row.id);
+    if (!change) return row;
+    const evidence = row.evidence.map(item => ({ sourceBlockId: item.sourceBlockId, startOffset: item.startOffset,
+      endOffset: item.endOffset, quoteText: item.quoteText, quoteHash: item.quoteHash }));
+    for (const span of change.addedEvidence) {
+      if (!evidence.some(item => item.sourceBlockId === span.sourceBlockId && item.startOffset === span.startOffset && item.endOffset === span.endOffset)) {
+        evidence.push({ ...span, quoteText: null, quoteHash: null });
+      }
+    }
+    return { ...row, evidence };
+  });
+}
+
 type DraftMode = "RESUME" | "QUALITY_REDRAFT";
 async function draftSegment(run: any, segment: any, token: string, dependencies: ProcessPodcastDependencies, options: { mode?: DraftMode; repairReasons?: string[] } = {}) {
   const mode = options.mode ?? "RESUME";
@@ -258,11 +283,11 @@ async function draftSegment(run: any, segment: any, token: string, dependencies:
   const attempt = currentAttempt + 1;
   const input = { metadata: metadata(run, "SEGMENT_DRAFTING", PODCAST_PROVIDER_INPUT_BUDGETS.SEGMENT_DRAFTING, segment.id, attempt), style: styleRecord(run.styleProfile), hosts: hosts.map(persona), plan: planOutput(plan), narrative: narrativeOutput(narrative), segment: segmentOutput(segment), context, ...(mode === "QUALITY_REDRAFT" ? { repairReasons: options.repairReasons ?? [] } : {}) };
   const allowedHosts = new Set(hosts.map((host) => host.id)), allowedMemory = new Set(context.map((item) => item.memoryItemId));
-  const projectionMemory = await prisma.bookMemoryItem.findMany({ where: { id: { in: [...allowedMemory] } }, include: { evidence: true } });
+  const projectionMemory = await prisma.$transaction(tx => loadDraftEvidenceMemory(tx, run, [...allowedMemory]), { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
   const persist = async (tx: any, output: DialogueOutput) => {
     if (new Set(output.utterances.map((item) => item.ordinal)).size !== output.utterances.length || output.utterances.some((item, index) => item.ordinal !== index + 1) || output.utterances.some((item) => !allowedHosts.has(item.speakerHostId) || item.evidence.some((evidence) => !allowedMemory.has(evidence.memoryItemId)))) throw new Error("PODCAST_DIALOGUE_LINEAGE_INVALID");
     const memoryIds = [...new Set(output.utterances.flatMap((item) => item.evidence.map((evidence) => evidence.memoryItemId)))];
-    const memory: any[] = await tx.bookMemoryItem.findMany({ where: { id: { in: memoryIds } }, include: { evidence: true } });
+    const memory = await loadDraftEvidenceMemory(tx, run, memoryIds);
     const memoryMap = new Map<string, any>(memory.map((item: any): [string, any] => [item.id, item]));
     const current = await tx.episodeSegment.findUniqueOrThrow({ where: { id: segment.id } });
     if (current.generationAttemptCount !== currentAttempt) throw new Error("PODCAST_GENERATION_ATTEMPT_RECONCILIATION_REQUIRED");
