@@ -290,3 +290,20 @@ it("rechecks immutable previous grants after reservation and refuses network sen
  const grant=(await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}})).payload as unknown as BookPaidGrant;
  expect(grant.entries).toHaveLength(1);expect(grant.entries[0]?.reservedMicroCny).toBeGreaterThan(0);
 });
+
+it("refuses a legacy unpinned grant once a cumulative continuation for the same document exists",async()=>{
+ const f=await fixture();
+ const other=await prisma.job.create({data:{workspaceId:f.w.id,userId:f.u.id,type:BOOK_PAID_GRANT_TYPE,status:"FAILED",payload:{...f.payload,cumulativeBudget:cumulative([])} as never}});
+ expect(other.id).not.toBe(f.grant.id);
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("AUTHORIZATION_FAILED");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("refuses a re-pinned historic receipt with a nonexistent extraction even if its hash matches",async()=>{
+ const f=await fixture(),historical=await withPrior(f,788_499);
+ const old=await prisma.job.findUniqueOrThrow({where:{id:historical.old.id}});
+ const changed={...(old.payload as object),extractionId:crypto.randomUUID()};
+ await prisma.job.update({where:{id:old.id},data:{payload:changed as never}});
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([{grantId:old.id,payloadDigest:stableHash(changed),reservedMicroCny:788_499}])} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("AUTHORIZATION_FAILED");
+ expect(f.wire).not.toHaveBeenCalled();
+});

@@ -7,7 +7,7 @@ export const BOOK_CUMULATIVE_CNY_CAP_MICRO = 10_000_000;
 export type BookCumulativeBudget = {
   version: 1;
   limitMicroCny: typeof BOOK_CUMULATIVE_CNY_CAP_MICRO;
-  /** ALL previously reserved paid grants for the SAME book and extraction. */
+  /** ALL previously reserved paid grants for the SAME source document, even across extraction revisions. */
   carryForward: Array<{ grantId: string; payloadDigest: string; reservedMicroCny: number }>;
 };
 
@@ -51,8 +51,7 @@ export async function assertBookCumulativeBudget(
   grant: BookPaidGrant,
 ) {
   const budget = grant.cumulativeBudget;
-  if (!budget) return;
-  try { assertBookCumulativeBudgetShape(grant); } catch { return denied(); }
+  if (budget) try { assertBookCumulativeBudgetShape(grant); } catch { return denied(); }
   if (!job.workspaceId || !job.userId) return denied();
   const all = await tx.job.findMany({
     where: { workspaceId: job.workspaceId, type: BOOK_PAID_GRANT_TYPE },
@@ -61,9 +60,14 @@ export async function assertBookCumulativeBudget(
   const sameBook = all.filter(entry => {
     const payload = entry.payload;
     return payload && typeof payload === "object" && !Array.isArray(payload) &&
-      "sourceDocumentId" in payload && payload.sourceDocumentId === grant.sourceDocumentId &&
-      "extractionId" in payload && payload.extractionId === grant.extractionId;
+      "sourceDocumentId" in payload && payload.sourceDocumentId === grant.sourceDocumentId;
   });
+  // Once any continuation envelope exists, old-style unpinned grants for this
+  // document cannot resume and silently spend outside the cumulative ceiling.
+  if (!budget) {
+    if (sameBook.some(row => row.id !== job.id && row.payload && typeof row.payload === "object" && !Array.isArray(row.payload) && "cumulativeBudget" in row.payload && row.payload.cumulativeBudget !== undefined)) return denied();
+    return;
+  }
   if (sameBook.length !== budget.carryForward.length + 1 ||
       !sameBook.some(row => row.id === job.id) ||
       budget.carryForward.some(row => row.grantId === job.id)) return denied();
@@ -80,6 +84,10 @@ export async function assertBookCumulativeBudget(
         !("sha256" in payload) || payload.sha256 !== grant.sha256 ||
         !("reservedMicroCny" in payload) || payload.reservedMicroCny !== historical.reservedMicroCny ||
         !("entries" in payload) || !Array.isArray(payload.entries)) return denied();
+    // A pinned receipt with a fabricated/missing extraction cannot support
+    // a new budget even when the Job payload digest is internally consistent.
+    const originalExtractionId = "extractionId" in payload ? payload.extractionId : null;
+    if (typeof originalExtractionId !== "string" || !await tx.documentExtraction.findFirst({ where: { id: originalExtractionId, workspaceId: job.workspaceId, sourceDocumentId: grant.sourceDocumentId }, select: { id: true } })) return denied();
     const entries = payload.entries as Array<{ reservedMicroCny?: unknown; kind?: unknown }>;
     if (entries.some(e => !e || !Number.isSafeInteger(e.reservedMicroCny) || (e.reservedMicroCny as number) < 0 ||
       !["TEXT", "EMBEDDING"].includes(String(e.kind))) ||
