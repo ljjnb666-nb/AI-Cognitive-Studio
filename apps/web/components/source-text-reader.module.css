@@ -1,7 +1,7 @@
 .reader { min-width: 0; padding-top: 16px; }
 .meta, .note { color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
 .meta { margin: 0 0 12px; font-variant-numeric: tabular-nums; }
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; padding-bottom: 20px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.toolbar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 0 16px; margin-bottom: 12px; border-bottom: 1px solid var(--border); background: var(--parchment); }
 .modes { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .modes button, .navigation button, .navigation a { font: inherit; font-size: 13px; line-height: 1.4; cursor: pointer; border-radius: 6px; padding: 8px 10px; }
 .modes button { border: 0; background: transparent; color: var(--text-secondary); }

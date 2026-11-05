@@ -2,13 +2,14 @@ import { AccountSettings } from "@/components/account-settings";
 import { PageHeader } from "@/components/app-shell";
 import { resolveWebIdentity } from "@/lib/identity";
 import { SettingsNavigation } from "@/components/settings-navigation";
+import styles from "@/components/account-settings.module.css";
 
 export default async function AccountSettingsPage() {
   const identity = await resolveWebIdentity();
   const workspace = identity.workspaces.find((item) => item.id === identity.workspaceId);
 
   return (
-    <div>
+    <div className={styles.page}>
       <PageHeader title="账户设置" description="管理你的个人信息、密码和当前工作区。" />
       <SettingsNavigation active="account" />
       <AccountSettings name={identity.userName || ""} email={identity.email} workspace={workspace?.name ?? ""} />

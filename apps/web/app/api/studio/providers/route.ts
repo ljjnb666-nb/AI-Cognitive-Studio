@@ -13,12 +13,13 @@ const createConnection = z.object({ action: z.literal("CREATE_CONNECTION"), prov
 const createConnectionWithCredential = z.object({ action: z.literal("CREATE_CONNECTION_WITH_CREDENTIAL"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), displayName: z.string().trim().min(1).max(160), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000), region: z.string().trim().min(1).max(80).optional(), configuration: jsonRecord });
 const setCredential = z.object({ action: z.literal("SET_CREDENTIAL"), connectionId: z.string().cuid(), secret: z.string().trim().min(1).max(10_000) });
 const revokeCredential = z.object({ action: z.literal("REVOKE_CREDENTIAL"), credentialVersionId: z.string().uuid() });
+const deleteConnection = z.object({ action: z.literal("DELETE_CONNECTION"), connectionId: z.string().cuid(), expectedRouteSlots: z.array(z.string().max(100)).max(32), expectedCredentialVersionId: z.string().uuid().nullable() });
 const setEnabled = z.object({ action: z.literal("SET_ENABLED"), connectionId: z.string().cuid(), enabled: z.boolean() });
-const setRoute = z.object({ action: z.literal("SET_ROUTE"), routeSlot: z.enum(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT", "PDF_VISUAL_STRUCTURE"]), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200), configuration: jsonRecord });
+const setRoute = z.object({ applyToBookStages: z.boolean().optional(), action: z.literal("SET_ROUTE"), routeSlot: z.enum(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT", "PDF_VISUAL_STRUCTURE"]), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200), configuration: jsonRecord });
 const testConnection = z.object({ action: z.literal("TEST_CONNECTION"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000) });
 const autoConfigureRoutes = z.object({ action: z.literal("AUTO_CONFIGURE_ROUTES"), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200).optional() });
 const stableBookRoutesInput = z.object({ action: z.literal("APPLY_STABLE_BOOK_ROUTES"), textConnectionId: z.string().cuid(), textModelId: z.string().trim().min(1).max(200), textConfiguration: jsonRecord, embeddingConnectionId: z.string().cuid(), embeddingModelId: z.string().trim().min(1).max(200), embeddingConfiguration: jsonRecord });
-const bodySchema = z.discriminatedUnion("action", [createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection, autoConfigureRoutes, stableBookRoutesInput]);
+const bodySchema = z.discriminatedUnion("action", [deleteConnection, createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection, autoConfigureRoutes, stableBookRoutesInput]);
 
 function safeConnection(connection: { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credentialVersions: { id: string; displayHint: string | null; status: string }[] }) {
   const credential = connection.credentialVersions[0];
@@ -26,7 +27,7 @@ function safeConnection(connection: { id: string; providerKey: string; protocol:
 }
 async function response(workspaceId: string) {
   const [connections, routes, readiness] = await Promise.all([
-    prisma.providerConnection.findMany({ where: { workspaceId }, include: { credentialVersions: { where: { status: { in: ["ACTIVE", "RETIRED"] } }, orderBy: { credentialVersion: "desc" }, take: 1, select: { id: true, displayHint: true, status: true } } }, orderBy: { createdAt: "asc" } }),
+    prisma.providerConnection.findMany({ where: { workspaceId, status: { not: "REVOKED" } }, include: { credentialVersions: { where: { status: { in: ["ACTIVE", "RETIRED"] } }, orderBy: { credentialVersion: "desc" }, take: 1, select: { id: true, displayHint: true, status: true } } }, orderBy: { createdAt: "asc" } }),
     prisma.providerRouteBinding.findMany({ where: { workspaceId }, include: { connection: { select: { id: true, displayName: true, providerKey: true, protocol: true, status: true } } }, orderBy: { routeSlot: "asc" } }),
     providerReadiness(workspaceId),
   ]);
@@ -157,15 +158,35 @@ export async function POST(request: Request) {
       await repository.rotateCredential(context, input.connectionId, input.secret);
     } else if (input.action === "REVOKE_CREDENTIAL") {
       await repository.revokeCredential(context, input.credentialVersionId);
+    } else if (input.action === "DELETE_CONNECTION") {
+      await repository.deleteConnection(context, input.connectionId, { routeSlots: input.expectedRouteSlots, credentialVersionId: input.expectedCredentialVersionId });
     } else if (input.action === "SET_ENABLED") {
       await repository.setConnectionEnabled(context, input.connectionId, input.enabled);
     } else {
       assertSafeConfiguration(input.configuration);
-      const connection = await prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.connectionId, workspaceId: context.workspaceId } }, select: { providerKey: true, protocol: true } });
+      const connection = await prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.connectionId, workspaceId: context.workspaceId } }, select: { id: true, providerKey: true, protocol: true, status: true } });
       if (!connection) throw new Error("AUTHORIZATION_FAILED");
+      if (connection.status !== "ACTIVE") throw new Error("CONNECTION_DISABLED");
+      const provider = manifest.providers.find(item => item.providerKey === connection.providerKey);
+      const family = input.routeSlot === "EMBEDDING" ? "EMBEDDING" : input.routeSlot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION";
+      const protocol = provider?.capabilityProtocols?.[family] ?? provider?.protocol;
+      // Validate before creating a capability-specific connection. Only built-in endpoints are eligible.
+      validateRouteManifestSelection(manifest, { routeSlot: input.routeSlot as RouteSlot, providerKey: connection.providerKey, protocol: protocol ?? connection.protocol, modelId: input.modelId, configuration: input.configuration });
+      let targetConnection = connection;
+      if (protocol && protocol !== connection.protocol) {
+        const endpoint = builtInProviderProfiles.find(profile => profile.providerKey === connection.providerKey && profile.family === family && profile.protocol === protocol)?.endpoint;
+        if (!endpoint) throw new Error("CAPABILITY_MISMATCH");
+        const credential = await prisma.providerCredentialVersion.findFirst({ where: { workspaceId: context.workspaceId, connectionId: connection.id, status: "ACTIVE" }, orderBy: { credentialVersion: "desc" } });
+        if (!credential) throw new Error("AUTHORIZATION_FAILED");
+        const derivedName = `${provider!.displayName}（${family === "SPEECH" ? "语音" : "向量"} ${connection.id}）`;
+        const existing = await prisma.providerConnection.findFirst({ where: { workspaceId: context.workspaceId, displayName:derivedName, providerKey: connection.providerKey, protocol, endpoint, status: "ACTIVE", credentialVersions: { some: { status: "ACTIVE" } } }, orderBy: { createdAt: "asc" } });
+        targetConnection = existing ?? (await repository.createConnectionWithCredential(context, { providerKey: connection.providerKey, protocol, endpoint, displayName: derivedName, secret: cipher.decrypt(credential, { workspaceId: context.workspaceId, connectionId: connection.id, credentialVersionId: credential.id, providerKey: connection.providerKey }) })).connection;
+      }
       assertQwenRouteConfiguration(connection.providerKey, input.routeSlot as RouteSlot, input.configuration);
-      validateRouteManifestSelection(manifest, { routeSlot: input.routeSlot as RouteSlot, providerKey: connection.providerKey, protocol: connection.protocol, modelId: input.modelId, configuration: input.configuration });
-      await repository.setRoute(context, input);
+      validateRouteManifestSelection(manifest, { routeSlot: input.routeSlot as RouteSlot, providerKey: connection.providerKey, protocol: targetConnection.protocol, modelId: input.modelId, configuration: input.configuration });
+      const slots: RouteSlot[] = input.applyToBookStages && input.routeSlot === "BOOK_CHUNK_ANALYSIS" ? ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] : [input.routeSlot as RouteSlot];
+      for (const routeSlot of slots) validateRouteManifestSelection(manifest, { routeSlot, providerKey: connection.providerKey, protocol: targetConnection.protocol, modelId: input.modelId, configuration: input.configuration });
+      await repository.setRoutesAtomically(context, slots.map(routeSlot => ({ ...input, routeSlot, connectionId: targetConnection.id })));
     }
     return response(context.workspaceId);
   } catch (error) { return failure(error); }

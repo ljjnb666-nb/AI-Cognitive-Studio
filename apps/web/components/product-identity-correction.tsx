@@ -115,8 +115,8 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
     <section className="identity-correction" aria-labelledby="identity-correction-heading">
       <h3 id="identity-correction-heading">人工修正正式信息</h3>
       <p className="identity-muted">
-        上方 EPUB 候选仅为原始解析证据。这里修改的是已经保存的 Work / Edition 正式身份；
-        修改不会更改 EPUB 原始元数据或历史确认记录。
+        上方候选信息仅为电子书的原始解析证据。这里修改的是已经保存的正式书籍与版本信息；
+        修改不会更改电子书原始元数据或历史确认记录。
       </p>
       {preview.canWrite ? (
         <button type="button" className="btn btn-secondary" disabled={!canEdit || busy || editing} onClick={begin}>
@@ -126,7 +126,7 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
         <p className="identity-muted">当前角色为只读权限，可查看正式信息和历史修正记录，但不能提交修改。</p>
       )}
       {preview.canWrite && !canEdit && (
-        <p className="identity-muted">当前文件不满足编辑条件，请切换到最新 EPUB 文件并重新检查解析记录。</p>
+        <p className="identity-muted">当前文件不满足编辑条件，请切换到最新的电子书文件并重新检查解析记录。</p>
       )}
       {editing && (
         <form aria-label="人工修正正式信息" onSubmit={(event) => { event.preventDefault(); requestConfirmation(); }}>
@@ -160,7 +160,7 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
             </label>
           </div>
           <p className="identity-muted">
-            只提交发生变化的字段。ISBN、语言等最终有效性以服务端校验为准，不能清空已有字段。
+            只提交发生变化的字段。国际标准书号、语言等最终有效性以服务端校验为准，不能清空已有字段。
           </p>
           <p role={error ? "alert" : "status"} className="identity-muted">
             {error ?? validation ?? "已填写有效修正原因，可核对修改前后内容。"}
@@ -174,7 +174,7 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
       <div className="identity-data-block" aria-labelledby="identity-manual-history-heading">
         <h3 id="identity-manual-history-heading">人工修正历史（最近 10 条）</h3>
         {audit.length === 0 ? (
-          <p className="identity-muted">尚无人工修正记录。解析候选和 EPUB 自动确认记录不属于人工修正。</p>
+          <p className="identity-muted">尚无人工修正记录。解析候选和电子书自动确认记录不属于人工修正。</p>
         ) : (
           <ol className="identity-correction-history">
             {audit.map((item) => (

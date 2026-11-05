@@ -3,9 +3,26 @@ export type ProcessingWorkerAvailability = { ingestion: WorkerAvailability; book
 export type ProcessingState = "NOT_STARTED" | "QUEUED_FOR_INGESTION" | "INGESTING" | "WAITING_FOR_ANALYSIS" | "ANALYSIS_QUEUED" | "ANALYZING" | "WAITING_FOR_PROVIDER" | "BOOTSTRAP_FAILED" | "BOOTSTRAP_SUCCEEDED" | "SUCCEEDED" | "INGESTION_FAILED" | "ANALYSIS_FAILED" | "PROCESSING_DEGRADED";
 export type ProcessingStage = "INGESTION" | "BOOK_ANALYSIS" | "COMPLETE";
 export type RecoveryAction = "NONE" | "RECHECK" | "RETRY_INGESTION" | "RETRY_ANALYSIS" | "REPAIR_CURRENT_INTELLIGENCE";
-export type ProcessingStatus = { state: ProcessingState; stage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability };
+export type ProcessingStatus = { failureReason?: string; state: ProcessingState; stage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability };
 
-type Run = { status?: string | null; createdAt?: Date | null; startedAt?: Date | null; updatedAt?: Date | null; completedAt?: Date | null; executionLeaseUntil?: Date | null } | null | undefined;
+type Run = { routingPlan?: unknown; routingOutcome?: unknown; errorCode?: string | null; status?: string | null; createdAt?: Date | null; startedAt?: Date | null; updatedAt?: Date | null; completedAt?: Date | null; executionLeaseUntil?: Date | null } | null | undefined;
+
+/** One projection for list, detail and polling API; historical ingestion errors cannot mask analysis. */
+export function sourceProcessingSnapshot(input: Parameters<typeof deriveProcessingStatus>[0]) {
+  const processing = deriveProcessingStatus(input);
+  if (processing.state === "INGESTION_FAILED" && input.ingestion?.errorCode === "SOURCE_QUALITY_REJECTED") {
+    const plan = input.ingestion.routingPlan as { schemaVersion?: string; pages?: Array<{ route?: string; physicalPageIndex?: number }> } | null;
+    const outcome = input.ingestion.routingOutcome as { schemaVersion?: string; unresolvedPhysicalPageIndexes?: unknown[] } | null;
+    if (plan?.schemaVersion === "pdf-routing-plan-v1" && outcome?.schemaVersion === "pdf-routing-outcome-v1" && Array.isArray(plan.pages) && Array.isArray(outcome.unresolvedPhysicalPageIndexes)) {
+      const unresolved = new Set(outcome.unresolvedPhysicalPageIndexes.filter((value): value is number => Number.isInteger(value)));
+      const count = plan.pages.filter(page => page.route === "OCR_REQUIRED" && unresolved.has(page.physicalPageIndex!)).length;
+      if (count > 0) processing.failureReason = `这份 PDF 有 ${count} 页需要 OCR 识别，目前这些页面尚未获得可用正文，因此未通过质量检查。请使用可用的 OCR 服务完成识别，或导入带文字层的 PDF；重复直接提取无法读取扫描图片中的文字。`;
+    }
+  }
+  const run = processing.stage === "INGESTION" ? input.ingestion : input.analysis ?? input.bootstrap;
+  const statusError = run?.status === "PASSWORD_REQUIRED" || run?.status === "OCR_REQUIRED" ? run.status : null;
+  return { processing, errorCode: processing.stage === "COMPLETE" ? null : run?.errorCode ?? statusError, processingSince: (run?.startedAt ?? run?.createdAt)?.toISOString() ?? null };
+}
 
 /** Pure, server-derived product state.  A missing durable run is never queued. */
 export function deriveProcessingStatus(input: { ingestion?: Run; analysis?: Run; bootstrap?: Run; hasIntelligence: boolean; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; now?: Date; staleAfterMs?: number }): ProcessingStatus {
@@ -46,7 +63,7 @@ export function deriveProcessingStatus(input: { ingestion?: Run; analysis?: Run;
 export function deriveProcessingState(input: Parameters<typeof deriveProcessingStatus>[0]): ProcessingState { return deriveProcessingStatus(input).state; }
 
 export const processingCopy: Record<ProcessingState, string> = {
-  NOT_STARTED: "文件已经上传，但尚未创建处理任务。", QUEUED_FOR_INGESTION: "正在等待解析", INGESTING: "正在提取正文和书籍结构", WAITING_FOR_ANALYSIS: "解析完成，准备进行 AI 深度理解", ANALYSIS_QUEUED: "正在准备 AI 深度理解", ANALYZING: "正在进行 AI 深度理解", WAITING_FOR_PROVIDER: "AI Provider 尚未配置完成，配置后会自动继续", BOOTSTRAP_FAILED: "AI 深度理解准备失败，可安全地尝试恢复。", BOOTSTRAP_SUCCEEDED: "AI 深度理解准备已完成，正在核对处理结果。", SUCCEEDED: "处理完成", INGESTION_FAILED: "文件解析失败", ANALYSIS_FAILED: "AI 深度理解失败", PROCESSING_DEGRADED: "后台处理服务暂时没有响应。你的文件已经保存，可以稍后重试。",
+  NOT_STARTED: "文件已经上传，但尚未创建处理任务。", QUEUED_FOR_INGESTION: "等待正文提取", INGESTING: "正在提取正文和书籍结构", WAITING_FOR_ANALYSIS: "正文提取完成，准备进行 AI 深度理解", ANALYSIS_QUEUED: "正在准备 AI 深度理解", ANALYZING: "正在进行 AI 深度理解", WAITING_FOR_PROVIDER: "AI 服务商尚未配置完成，配置后会自动继续", BOOTSTRAP_FAILED: "AI 深度理解准备失败，可安全地尝试恢复。", BOOTSTRAP_SUCCEEDED: "AI 深度理解准备已完成，正在核对处理结果。", SUCCEEDED: "处理完成", INGESTION_FAILED: "正文提取失败", ANALYSIS_FAILED: "AI 深度理解失败", PROCESSING_DEGRADED: "后台处理服务暂时没有响应。你的文件已经保存，可以稍后重试。",
 };
 
 export function processingWaitLabel(since: Date | null | undefined, now = new Date()): string | null {
