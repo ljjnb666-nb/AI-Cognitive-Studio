@@ -146,10 +146,14 @@ async function verifiedModelReview(
     // Historical Gateway fingerprints include output token cap and the exact
     // serialized request, so retaining the new 6144 cap would falsely fail
     // old authenticated receipts after a budget-only schema evolution.
+    // v2 adds two explicit reasoning-policy instructions; remove them when
+    // reconstructing an immutable v1 synthesis receipt.
     const legacyText = { ...prepared.request.text!,
+      system: prepared.request.text!.system!.split("\n").slice(0,-2).join("\n"),
       generation: { ...prepared.request.text!.generation, maxOutputTokens: 3800 } };
     prepared.request.text = legacyText;
     prepared.request.inputHash = canonicalTextInputHash(legacyText);
+    prepared.request.pipelineVersion = "book-revision-review-v1";
     prepared.request.budget = { maxInputTokens: 28000, maxOutputTokens: 3800, maxAttempts: 1 };
     prepared.request.estimates = {
       inputTokens: Math.ceil(legacyText.messages[0]!.content.length / 2), outputTokens: 3800,
