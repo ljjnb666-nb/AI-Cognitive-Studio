@@ -37,21 +37,31 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const boundedVision = input.snapshot.providerKey === "zhipu" && input.snapshot.modelId === "glm-4.6v" && input.request.routeSlot === "PDF_VISUAL_STRUCTURE";
     // 新任务显式选择此配置，旧快照与其他模型保持原始线上请求格式。
     const m3 = input.snapshot.providerKey === "minimax" && input.snapshot.modelId === "MiniMax-M3";
-    // Independent book reviews must never silently consume the entire response
-    // budget in MiniMax's default reasoning mode. A pre-existing route binding
-    // may not carry minimaxM3JsonMode; the dedicated review slot is sufficient
-    // to enforce thinking.disabled WITHOUT changing older analysis snapshots.
+    // Legacy v1 review requests remain nonthinking and retain their frozen
+    // fingerprints. Versioned v2 requests use adaptive reasoning by default:
+    // reasoning and final JSON share a finite output budget; LENGTH is invalid.
+    // Workspace owners may opt into disabled reasoning for a controlled A/B run.
     const m3Review = m3 && input.request.routeSlot === "BOOK_SEMANTIC_REVIEW";
     if (m3Review && mode !== "JSON_MODE") throw new ProviderGatewayError("CAPABILITY_MISMATCH");
+    const m3ReviewPolicy = m3Review ? input.snapshot.pipelineVersion : undefined;
+    if (m3Review && !["book-revision-review-v1", "book-revision-review-v2"].includes(String(m3ReviewPolicy)))
+      throw new ProviderGatewayError("CAPABILITY_MISMATCH");
+    const selectedThinking = m3Review && m3ReviewPolicy === "book-revision-review-v2"
+      ? input.snapshot.configuration.minimaxM3ReviewThinking ?? "adaptive" : "disabled";
+    if (m3Review && selectedThinking !== "adaptive" && selectedThinking !== "disabled")
+      throw new ProviderGatewayError("CAPABILITY_MISMATCH");
     const m3Json = m3 && mode === "JSON_MODE" &&
       (m3Review || input.snapshot.configuration.minimaxM3JsonMode === true);
-    // OpenAI-compatible /chat/completions supports max_completion_tokens;
-    // MiniMax's older /text/chatcompletion_v2 endpoint retains max_tokens.
-    // Both count reasoning toward the cap, hence the mandatory nonthinking mode.
+    // Preserve old MiniMax text endpoint's max_tokens; the OpenAI-compatible
+    // chat endpoint uses max_completion_tokens. Neither reserves final tokens.
     const tokenCap = m3Review && profile.endpoint.endsWith("/chat/completions")
       ? { max_completion_tokens: text.generation?.maxOutputTokens }
       : { max_tokens: text.generation?.maxOutputTokens };
-    const body = { model: input.snapshot.modelId, messages, ...tokenCap, ...(m3Json ? { thinking: { type: "disabled" }, reasoning_split: true } : { temperature: text.generation?.temperature, top_p: text.generation?.topP }), ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
+    const m3Options = m3Review
+      ? { thinking: { type: selectedThinking }, reasoning_split: true }
+      : m3Json ? { thinking: { type: "disabled" }, reasoning_split: true }
+      : { temperature: text.generation?.temperature, top_p: text.generation?.topP };
+    const body = { model: input.snapshot.modelId, messages, ...tokenCap, ...m3Options, ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
     const remote = await this.transport.execute({ url: profile.endpoint, method: "POST", headers: { "content-type": "application/json", ...authHeaders(profile.authScheme, input.credential) }, body: JSON.stringify(body), signal: input.signal });
     if (input.snapshot.providerKey === "zhipu" && remote.status === 400) {
       let businessCode: unknown;
