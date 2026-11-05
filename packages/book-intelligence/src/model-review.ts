@@ -10,11 +10,13 @@ export const BOOK_MODEL_REVIEW_RUBRIC = "book-revision-semantic-review-v1";
 const CONSUMER = "BOOK_REVISION_MODEL_REVIEW";
 const LEGACY_REVIEW_PIPELINE = "book-revision-review-v1";
 const REASONING_REVIEW_PIPELINE = "book-revision-review-v2";
-type ReviewPipeline = typeof LEGACY_REVIEW_PIPELINE | typeof REASONING_REVIEW_PIPELINE;
+const ATOMIC_REVIEW_PIPELINE = "book-revision-review-v3";
+type ReviewPipeline = typeof LEGACY_REVIEW_PIPELINE | typeof REASONING_REVIEW_PIPELINE | typeof ATOMIC_REVIEW_PIPELINE;
 function savedReviewPipeline(snapshot: { pipelineVersion?: string | null }): ReviewPipeline {
   // Never invent a historical budget or accept unknown policy versions.
   if (snapshot.pipelineVersion === LEGACY_REVIEW_PIPELINE) return LEGACY_REVIEW_PIPELINE;
   if (snapshot.pipelineVersion === REASONING_REVIEW_PIPELINE) return REASONING_REVIEW_PIPELINE;
+  if (snapshot.pipelineVersion === ATOMIC_REVIEW_PIPELINE) return ATOMIC_REVIEW_PIPELINE;
   throw new Error("BOOK_MODEL_REVIEW_POLICY_UNSUPPORTED");
 }
 type Actor = { workspaceId: string; userId: string };
@@ -33,6 +35,24 @@ const keys = (obj: Record<string, unknown>) => Object.keys(obj).sort().join(",")
 const validSpan = (s: Span) => !!s && typeof s.sourceBlockId === "string" &&
   Number.isSafeInteger(s.startOffset) && Number.isSafeInteger(s.endOffset) &&
   s.startOffset >= 0 && s.endOffset > s.startOffset;
+
+/** Deterministic claim boundaries for a v3 opt-in; never edits the signed revision.
+ * Punctuation/list boundaries are conservative, not a semantic truth guarantee.
+ * Long unsplittable text fails closed instead of receiving a misleading PASS. */
+function atomicSummaryClaims(summary: string) {
+  const parts = summary.replace(/\r\n?/g, "\n").split(/\n+/u)
+    .flatMap(line => line.replace(/^\s*(?:[-*•]|\d{1,2}[.)、])\s+/u, "")
+      .split(/(?<=[。！？!?；;])\s*|(?<=\.)\s+(?=\S)/u))
+    .map(text => text.trim()).filter(Boolean);
+  if (!parts.length || parts.length > 48 ||
+      (parts.length === 1 && summary.trim().length > 200) ||
+      parts.some(text => !validText(text, 2000))) {
+    throw new Error("BOOK_MODEL_REVIEW_SUMMARY_NOT_ATOMIC");
+  }
+  return parts.map((text, index) => ({
+    id: "summary:" + String(index + 1).padStart(3, "0"), text,
+  }));
+}
 
 async function reviewPacket(tx: Prisma.TransactionClient, actor: Actor, revisionId: string, revisionHash: string,
   requestId: string, requireCurrent = true, requireReviewerMembership = true,
@@ -84,8 +104,13 @@ async function reviewPacket(tx: Prisma.TransactionClient, actor: Actor, revision
   ]);
   if (!root || memory.length !== memoryIds.length) throw new Error("BOOK_MODEL_REVIEW_BASE_INVALID");
   const byMemory = new Map(memory.map(m => [m.id, m]));
+  const summaryCandidates = reviewPipeline === ATOMIC_REVIEW_PIPELINE
+    ? atomicSummaryClaims(patch.summary.text as string).map(claim => ({
+      ...claim, evidence: patch.summary!.evidence!,
+    }))
+    : [{ id: "summary", text: patch.summary.text as string, evidence: patch.summary.evidence }];
   const candidates = [
-    { id: "summary", text: patch.summary.text as string, evidence: patch.summary.evidence },
+    ...summaryCandidates,
     ...patch.memories.map(m => ({
       id: "memory:" + m.id, text: m.text ?? byMemory.get(m.id)!.content,
       evidence: [
@@ -113,24 +138,43 @@ async function reviewPacket(tx: Prisma.TransactionClient, actor: Actor, revision
       return { ...span, excerpt: block.text.slice(span.startOffset, span.endOffset) };
     }) };
   });
-  const evidence = {
+  const historicalEvidence = {
     schemaVersion: 1, rubricVersion: BOOK_MODEL_REVIEW_RUBRIC, workspaceId: actor.workspaceId,
     sourceDocumentId: revision.sourceDocumentId, extractionId: revision.extractionId,
     chunkSetId: revision.chunkSetId, analysisRunId: run.id,
     revisionId, revisionHash, originalHash: revision.originalHash,
     rootSummaryHash: sha256(root.summary ?? ""), claims,
   };
+  // In v3 excerpts are stored ONCE; each atom has its own exact allowed span
+  // references. v1/v2 retain the byte-for-byte historical evidence format.
+  const excerptTable = new Map<string, Claim["evidence"][number]>();
+  if (reviewPipeline === ATOMIC_REVIEW_PIPELINE) {
+    for (const claim of claims) for (const span of claim.evidence) {
+      excerptTable.set(JSON.stringify([span.sourceBlockId,span.startOffset,span.endOffset]),span);
+    }
+  }
+  const evidence = reviewPipeline === ATOMIC_REVIEW_PIPELINE ? {
+    ...historicalEvidence, schemaVersion: 2,
+    claims: claims.map(claim => ({
+      id: claim.id, text: claim.text,
+      evidence: claim.evidence.map(({ sourceBlockId,startOffset,endOffset }) =>
+        ({ sourceBlockId,startOffset,endOffset })),
+    })),
+    sourceExcerpts: [...excerptTable.values()].sort((a,b) =>
+      a.sourceBlockId.localeCompare(b.sourceBlockId) ||
+      a.startOffset-b.startOffset || a.endOffset-b.endOffset),
+  } : historicalEvidence;
   const evidenceJson = JSON.stringify(evidence);
   if (evidenceJson.length > 72000) throw new Error("BOOK_MODEL_REVIEW_PACKET_TOO_LARGE");
   const evidenceBundleHash = stableHash(evidence);
   const identity = stableHash({ workspaceId: actor.workspaceId, revisionId, revisionHash, requestId,
     evidenceBundleHash, rubricVersion: BOOK_MODEL_REVIEW_RUBRIC,
     ...(reviewSlot === "BOOK_SEMANTIC_REVIEW" ? { reviewSlot } : {}),
-    ...(reviewPipeline === REASONING_REVIEW_PIPELINE ? { reviewPipeline } : {}) });
+    ...(reviewPipeline !== LEGACY_REVIEW_PIPELINE ? { reviewPipeline } : {}) });
   // The dedicated independent-review request has room for the complete
   // citation-by-citation JSON verdict. Legacy BOOK_SYNTHESIS receipts retain
   // their exact 3800-token request fingerprint and budget.
-  const outputLimit = reviewPipeline === REASONING_REVIEW_PIPELINE ? 16384
+  const outputLimit = reviewPipeline !== LEGACY_REVIEW_PIPELINE ? 16384
     : reviewSlot === "BOOK_SEMANTIC_REVIEW" ? 6144 : 3800;
   const input = {
     system: [
@@ -141,9 +185,13 @@ async function reviewPacket(tx: Prisma.TransactionClient, actor: Actor, revision
       "checks must contain exactly one per claim: claimId,status(SUPPORTED/UNSUPPORTED/UNKNOWN),reason,citations.",
       "Each citation copies a supplied sourceBlockId/startOffset/endOffset triplet for that claim, without changes.",
       "Only PASS when every claim is SUPPORTED with at least one citation. This judgement never itself publishes anything.",
-      ...(reviewPipeline === REASONING_REVIEW_PIPELINE ? [
+      ...(reviewPipeline !== LEGACY_REVIEW_PIPELINE ? [
         "Use concise final JSON reasons and cite only decisive supplied spans. Never include reasoning traces, source prose beyond citations or markdown in the final JSON.",
         "For any unsupported or ambiguous claim, return BLOCKED; do not speculate to force a PASS.",
+      ] : []),
+      ...(reviewPipeline === ATOMIC_REVIEW_PIPELINE ? [
+        "The input uses schemaVersion=2: claim.evidence lists exact span triplets; sourceExcerpts supplies their verbatim text once.",
+        "Evaluate each summary:NNN atom independently, including attribution, factual support, and projection qualifiers. All atoms must pass; a global summary approval is invalid.",
       ] : []),
     ].join("\n"),
     messages: [{ role: "user" as const, content: evidenceJson }],
@@ -170,9 +218,12 @@ async function reviewPacket(tx: Prisma.TransactionClient, actor: Actor, revision
 
 /** Returns a frozen request but never executes a provider or incurs charges. */
 export async function prepareBookRevisionModelReview(actor: Actor, revisionId: string,
-  revisionHash: string, requestId: string) {
+  revisionHash: string, requestId: string, options?: { atomizeSummary?: boolean }) {
   return prisma.$transaction(async tx => {
-    const p = await reviewPacket(tx, actor, revisionId, revisionHash, requestId);
+    // v2 stays the default until v3 evidence quality has independent validation.
+    const pipeline = options?.atomizeSummary === true ? ATOMIC_REVIEW_PIPELINE : REASONING_REVIEW_PIPELINE;
+    const p = await reviewPacket(tx, actor, revisionId, revisionHash, requestId,
+      true, true, "BOOK_SEMANTIC_REVIEW", pipeline);
     const binding = await tx.providerRouteBinding.findUnique({
       where: { workspaceId_routeSlot: { workspaceId: actor.workspaceId, routeSlot: "BOOK_SEMANTIC_REVIEW" } },
       include: { connection: { include: { credentialVersions: { where: { status: "ACTIVE" },
