@@ -19,7 +19,25 @@ observerDatabaseUrl.searchParams.set("connection_limit", "1");
 const observerPrisma = new PrismaClient({ datasourceUrl: observerDatabaseUrl.toString() });
 class AnalysisFixtureProvider implements AnalysisProvider {
   constructor(private readonly blocks: Array<{ id: string; text: string }>) {}
-  async generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> { if (request.stage !== "CHUNK") return { summary: `derived ${request.stage}`, memory: request.stage === "BOOK" ? [{ type: "SUMMARY", content: "A bounded book synthesis" }] : undefined }; const block = this.blocks.find((item) => request.sourceBlockIds.includes(item.id) && item.text.includes(request.content)); const offset = block?.text.indexOf(request.content) ?? -1; return { summary: `chunk ${request.content}`, memory: block && offset >= 0 ? [{ type: "QUOTE", content: request.content, evidence: [{ sourceBlockId: block.id, startOffset: offset, endOffset: offset + request.content.length, quoteText: request.content }] }, { type: "CLAIM", content: `Interpretation of ${request.content}` }] : [{ type: "CLAIM", content: request.content }] }; }
+  async generateStructured(request: AnalysisRequest): Promise<AnalysisResponse> {
+    if (request.stage !== "CHUNK") return {
+      summary: `derived ${request.stage}`,
+      memory: request.stage === "BOOK" ? [{ type: "SUMMARY", content: "A bounded book synthesis" }] : undefined,
+    };
+    // A chunk may span multiple original source blocks. Quote one actually sent
+    // source slice, not the whole reconstructed chunk with fabricated offsets.
+    const slice = request.sourceSlices?.find(item => item.text.length > 0);
+    const block = this.blocks.find(item => request.sourceBlockIds.includes(item.id) && item.text.includes(request.content));
+    const offset = block?.text.indexOf(request.content) ?? -1;
+    const quote = slice
+      ? { sourceBlockId: slice.sourceBlockId, startOffset: slice.startOffset, endOffset: slice.endOffset, quoteText: slice.text }
+      : block && offset >= 0
+        ? { sourceBlockId: block.id, startOffset: offset, endOffset: offset + request.content.length, quoteText: request.content }
+        : undefined;
+    return { summary: `chunk ${request.content}`, memory: quote
+      ? [{ type: "QUOTE", content: quote.quoteText, evidence: [quote] }, { type: "CLAIM", content: `Interpretation of ${request.content}` }]
+      : [{ type: "CLAIM", content: request.content }] };
+  }
 }
 export class PodcastFixtureProvider implements PodcastGenerationProvider {
   readonly identity = { provider: "deterministic-podcast", model: "podcast-test", modelVersion: "1" };
