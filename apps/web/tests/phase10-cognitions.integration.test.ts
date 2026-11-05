@@ -111,7 +111,7 @@ describe("Phase 10 cognition product read model", () => {
       structureVersion: "test", ordinal: 0, content: data.block.text, contentHash: data.suffix,
       characterCount: data.block.text.length, tokenEstimate: 10,
     } });
-    await prisma.chunkSourceSpan.create({ data: { ...span, chunkId: chunk.id, extractionId: data.extraction.id, ordinal: 0 } });
+    await prisma.chunkSourceSpan.create({ data: { ...span, endOffset: data.block.text.length, chunkId: chunk.id, extractionId: data.extraction.id, ordinal: 0 } });
     await sealPublicationBase(data, base);
     const patch = { reason: "Fixture", archiveSha256: "a".repeat(64),
       summary: { text: "Revised summary", evidence: [span] }, memories: [] };
