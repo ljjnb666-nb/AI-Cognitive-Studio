@@ -43,6 +43,7 @@ describe("fresh Book relation contract", () => {
         return { summary: "bounded summary", memory: six, relations: [relation(0, 6)] };
       },
     };
-    await expect(guardedGenerateStructured(provider, request, [], 2048)).rejects.toThrow("ANALYSIS_RELATION_INVALID");
+    const source = [{ id: "original-source", ordinal: 0, kind: "PARAGRAPH" as const, text: "Original material, not the derived parent summary." }];
+    await expect(guardedGenerateStructured(provider, request, source, 2048)).rejects.toThrow("ANALYSIS_RELATION_INVALID");
   });
 });
