@@ -53,6 +53,50 @@ async function makeCurrent(data: Awaited<ReturnType<typeof fixture>>, run: Await
   await prisma.currentBookIntelligence.upsert({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: data.document.id, workspaceId: data.workspace.id } }, create: { workspaceId: data.workspace.id, sourceDocumentId: data.document.id, extractionId: data.extraction.id, chunkSetId: run.chunkSet.id, analysisRunId: run.run.id }, update: { extractionId: data.extraction.id, chunkSetId: run.chunkSet.id, analysisRunId: run.run.id } });
 }
 
+/** Publication fixtures must satisfy the same immutable source/tree/vector
+ * rules as production; a synthetically SUCCEEDED run is not enough. */
+async function sealPublicationBase(
+  data: Awaited<ReturnType<typeof fixture>>,
+  base: Awaited<ReturnType<typeof createRun>>,
+  identity?: { hash: string; provider: string; model: string; embeddingVersion: string; dimensions: number },
+) {
+  const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+  const identityHash = identity?.hash ?? "phase10-fixture-embedding";
+  const dimensions = identity?.dimensions ?? 4;
+  const analysisIdentityHash = sha(JSON.stringify([
+    base.chunkSet.id, base.run.pipelineVersion, base.run.promptVersion,
+    base.run.provider, base.run.model, base.run.modelVersion ?? "",
+  ]));
+  await prisma.bookAnalysisRun.update({ where: { id: base.run.id }, data: { analysisIdentityHash } });
+  await prisma.job.update({ where: { id: base.run.jobId }, data: { result: { embeddingIdentityHash: identityHash } } });
+  await prisma.analysisArtifact.update({ where: { id: base.artifact.id }, data: {
+    summary: "Evidence-grounded fixture book", structuredOutput: { summary: "Evidence-grounded fixture book" },
+  } });
+  const chunks = await prisma.documentChunk.findMany({ where: { chunkSetId: base.chunkSet.id } });
+  if (!chunks.length) throw new Error("PHASE10_PUBLICATION_SOURCE_CHUNK_MISSING");
+  for (const chunk of chunks) {
+    await prisma.documentChunk.update({ where: { id: chunk.id }, data: { contentHash: sha(chunk.content) } });
+    await prisma.analysisArtifact.create({ data: {
+      analysisRunId: base.run.id, workspaceId: data.workspace.id,
+      chunkSetId: base.chunkSet.id, extractionId: data.extraction.id,
+      scope: "CHUNK", ordinal: chunk.ordinal, chunkId: chunk.id,
+      parentId: base.artifact.id, summary: "Evidence-backed fixture chunk",
+      structuredOutput: { summary: "Evidence-backed fixture chunk" },
+    } });
+    await prisma.documentChunkEmbedding.create({ data: {
+      chunkId: chunk.id, workspaceId: data.workspace.id, extractionId: data.extraction.id,
+      provider: identity?.provider ?? "fixture", model: identity?.model ?? "fixture",
+      embeddingVersion: identity?.embeddingVersion ?? "fixture-v1",
+      embeddingIdentityHash: identityHash, dimensions,
+      vector: Array.from({ length: dimensions }, (_, index) => index === 0 ? 1 : 0),
+    } });
+  }
+  const memories = await prisma.bookMemoryItem.findMany({ where: { analysisRunId: base.run.id } });
+  for (const item of memories) {
+    await prisma.bookMemoryItem.update({ where: { id: item.id }, data: { contentHash: sha(item.content) } });
+  }
+}
+
 afterAll(() => prisma.$disconnect());
 
 describe("Phase 10 cognition product read model", () => {
@@ -68,6 +112,7 @@ describe("Phase 10 cognition product read model", () => {
       characterCount: data.block.text.length, tokenEstimate: 10,
     } });
     await prisma.chunkSourceSpan.create({ data: { ...span, chunkId: chunk.id, extractionId: data.extraction.id, ordinal: 0 } });
+    await sealPublicationBase(data, base);
     const patch = { reason: "Fixture", archiveSha256: "a".repeat(64),
       summary: { text: "Revised summary", evidence: [span] }, memories: [] };
     await expect(createBookRevision(actor, base.run.id, {
@@ -168,6 +213,7 @@ describe("Phase 10 cognition product read model", () => {
     } });
     const span = { sourceBlockId: data.block.id, startOffset: 0, endOffset: 14 };
     await prisma.chunkSourceSpan.create({ data: { ...span, endOffset: data.block.text.length, chunkId: chunk.id, extractionId: data.extraction.id, ordinal: 0 } });
+    await sealPublicationBase(data, base, embedding);
     const { revision } = await createBookRevision(actor, base.run.id, {
       reason: "Fixture revision", archiveSha256: "a".repeat(64),
       summary: { text: "Revised summary", evidence: [span] },
