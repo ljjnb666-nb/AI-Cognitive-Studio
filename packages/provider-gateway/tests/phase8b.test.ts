@@ -104,6 +104,41 @@ describe("Phase 8B real text provider adapters", () => {
     await expect(new OpenAICompatibleAdapter(denied).execute({ ...base, snapshot: { ...snapshot, endpoint: "https://api.minimax.cn.evil.test/v1/chat/completions" }, request })).rejects.toMatchObject({ code: "NETWORK_POLICY_REJECTED" });
     expect(denied.calls).toHaveLength(0);
   });
+  it("forces MiniMax M3 nonthinking for semantic review even with an older route binding", async () => {
+    const base = input("minimax", "OPENAI_COMPATIBLE", "https://api.minimax.io/v1/chat/completions");
+    const request = { ...base.request, routeSlot: "BOOK_SEMANTIC_REVIEW" as const,
+      capability: { family: "TEXT_GENERATION" as const, structuredOutput: "JSON_MODE" as const },
+      text: { ...text, structuredOutput: { mode: "JSON_MODE" as const } } };
+    const snapshot = { ...base.snapshot, routeSlot: "BOOK_SEMANTIC_REVIEW" as const,
+      modelId: "MiniMax-M3", configuration: {} };
+    const ok = transport({ model: "MiniMax-M3", choices: [
+      { finish_reason: "stop", message: { content: '{"verdict":"PASS"}' } },
+    ] });
+    await expect(new OpenAICompatibleAdapter(ok).execute({ ...base, snapshot, request }))
+      .resolves.toMatchObject({ response: { type: "STRUCTURED", structured: { verdict: "PASS" } } });
+    const body = JSON.parse(ok.calls[0]!.body);
+    expect(body).toMatchObject({ model: "MiniMax-M3", thinking: { type: "disabled" },
+      reasoning_split: true, max_completion_tokens: 100 });
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.response_format).toBeUndefined();
+    expect(body.temperature).toBeUndefined();
+
+    const truncated = transport({ model: "MiniMax-M3", choices: [
+      { finish_reason: "length", message: { content: '{"verdict":"PASS"}', reasoning_content: "PRIVATE reasoning" } },
+    ], usage: { prompt_tokens: 7631, completion_tokens: 3800 } });
+    await expect(new OpenAICompatibleAdapter(truncated).execute({ ...base, snapshot, request }))
+      .rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE", retryable: false,
+        usage: { inputTokens: 7631, outputTokens: 3800,
+          extra: { textStructuredResponse: { finishReason: "LENGTH", contentCharacters: 18,
+            reasoningCharacters: 17 } } } });
+    expect(truncated.calls).toHaveLength(1);
+
+    const rejectedBeforeBilling = transport({});
+    await expect(new OpenAICompatibleAdapter(rejectedBeforeBilling).execute({ ...base, snapshot,
+      request: { ...request, text: { ...request.text, structuredOutput: { mode: "PROMPT_ONLY" as const } } } }))
+      .rejects.toMatchObject({ code: "CAPABILITY_MISMATCH" });
+    expect(rejectedBeforeBilling.calls).toHaveLength(0);
+  });
   it("locally rejects malformed structured provider output and redirects before retry", async () => { const wire = transport({ choices: [{ message: { content: "not json" } }] }); await expect(new OpenAICompatibleAdapter(wire).execute(input("qwen", "OPENAI_COMPATIBLE"))).rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE" }); const redirect = transport({}, 302); await expect(new OpenAICompatibleAdapter(redirect).execute(input("minimax", "OPENAI_COMPATIBLE"))).rejects.toMatchObject({ code: "NETWORK_POLICY_REJECTED" }); expect(redirect.calls).toHaveLength(1); });
   it("does not allow unknown endpoint or a pre-cancelled request to reach HTTP", async () => { const wire = transport({}); await expect(new OpenAICompatibleAdapter(wire).execute(input("deepseek", "OPENAI_COMPATIBLE", "https://evil.example/v1"))).rejects.toMatchObject({ code: "NETWORK_POLICY_REJECTED" }); const aborted = input("deepseek", "OPENAI_COMPATIBLE"); const controller = new AbortController(); controller.abort(); await expect(new OpenAICompatibleAdapter(wire).execute({ ...aborted, signal: controller.signal })).rejects.toMatchObject({ code: "CANCELLED" }); expect(wire.calls).toHaveLength(0); });
   it.each([["STRICT_JSON_SCHEMA", "STRICT_JSON_SCHEMA", true], ["STRICT_JSON_SCHEMA", "JSON_MODE", false], ["STRICT_JSON_SCHEMA", "PROMPT_ONLY", false], ["JSON_MODE", "STRICT_JSON_SCHEMA", true], ["JSON_MODE", "JSON_MODE", true], ["JSON_MODE", "PROMPT_ONLY", false]] as const)("gates %s against %s through Gateway.execute", async (requested, offered, allowed) => { const registry = new ProviderRegistry(); const capability = { modelId: "m", families: ["TEXT_GENERATION"] as const, confidence: "VERIFIED" as const, structuredOutput: offered }; registry.register({ providerKey: "fixture", displayName: "Fixture", protocol: "TEST", adapterVersion: "1", models: [capability] }); let calls = 0; const gateway = createTestProviderGateway(registry, { resolveWorkspaceRoute: async () => ({ source: "PLATFORM" as const, providerKey: "fixture", protocol: "TEST" as const, modelId: "m", adapterVersion: "1", capability, configuration: {} }) }, { resolve: async () => undefined }, () => ({ execute: async () => { calls++; return { response: { ok: true } }; } })); const request = { workspaceId: "w", routeSlot: "BOOK_CHUNK_ANALYSIS" as const, correlationId: "c", idempotencyKey: `${requested}-${offered}`, inputHash: "a".repeat(64), capability: { family: "TEXT_GENERATION" as const, structuredOutput: requested }, text: { ...text, structuredOutput: requested === "STRICT_JSON_SCHEMA" ? text.structuredOutput : { mode: "JSON_MODE" as const } } }; if (allowed) await expect(gateway.execute(request, { userId: "u" })).resolves.toMatchObject({ status: "SUCCEEDED" }); else await expect(gateway.execute(request, { userId: "u" })).rejects.toMatchObject({ code: "CAPABILITY_MISMATCH" }); expect(calls).toBe(allowed ? 1 : 0); });
