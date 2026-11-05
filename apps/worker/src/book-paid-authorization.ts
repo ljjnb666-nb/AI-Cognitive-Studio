@@ -1,5 +1,6 @@
 import { prisma } from "@ai-cognitive/db";
 import { createHash } from "node:crypto";
+import { stableHash } from "@ai-cognitive/provider-gateway";
 import { BOOK_PAID_GRANT_TYPE, assertBookExecutionAuthority, assertBookJobAuthority, type BookExecutionContext, type BookAuthorityTransaction, isBookAnalysisEmbeddingIdempotencyKey } from "@ai-cognitive/book-intelligence";
 import { FetchProviderHttpTransport, ProviderGatewayError, ProviderAdapterFailure, createProviderAdapterResolver, type ProviderAdapterResolver, type ProviderHttpTransport } from "@ai-cognitive/provider-gateway";
 import { assertBookCumulativeBudget, assertBookCumulativeBudgetShape, type BookCumulativeBudget } from "./book-cumulative-budget.js";
@@ -26,13 +27,15 @@ export async function bindBookPaidGrant(id: string, analysisRunId: string, actor
     const [job, grant] = await Promise.all([tx.job.findUniqueOrThrow({ where: { id: run.jobId } }), tx.job.findUniqueOrThrow({ where: { id } })]);
     const p = parse(grant.payload);
     if (grant.workspaceId !== actor.workspaceId || grant.userId !== actor.userId || grant.type !== BOOK_PAID_GRANT_TYPE || grant.status !== "QUEUED" || grant.attemptCount !== 0 || (p as BookPaidGrant & {binding?:unknown}).binding !== undefined || p.entries.length || run.status !== "QUEUED" || job.status !== "QUEUED" || !job.userId || job.userId !== grant.userId || run.workspaceId !== grant.workspaceId || job.workspaceId !== run.workspaceId || run.sourceDocumentId !== p.sourceDocumentId || run.extractionId !== p.extractionId || (job.payload as { bookPaidGrantId?: string }).bookPaidGrantId) throw new Error("BOOK_PAID_BINDING_DENIED");
-    await assertBookCumulativeBudget(tx, grant, p);
+    const budgetDigest = p.cumulativeBudget ? stableHash(p.cumulativeBudget) : undefined;
+    if ((job.payload as {bookPaidCumulativeBudgetDigest?:unknown}).bookPaidCumulativeBudgetDigest !== undefined) throw new Error("BOOK_PAID_BINDING_DENIED");
+    await assertBookCumulativeBudget(tx, grant, p, budgetDigest);
     await tx.job.update({ where: { id }, data: { payload: { ...p, binding: { analysisRunId: run.id, jobId: run.jobId, dispatchGeneration: run.dispatchGeneration } } } });
-    await tx.job.update({ where: { id: job.id }, data: { payload: { ...(job.payload as object), bookPaidGrantId: id } } });
+    await tx.job.update({ where: { id: job.id }, data: { payload: { ...(job.payload as object), bookPaidGrantId: id, ...(budgetDigest ? {bookPaidCumulativeBudgetDigest:budgetDigest} : {}) } } });
   });
 }
 async function assertBound(tx: BookAuthorityTransaction, grantId: string, context: BookExecutionContext) {
-  try { const state = await assertBookExecutionAuthority(tx, context); if (state.grantId !== grantId) throw new Error(); }
+  try { const state = await assertBookExecutionAuthority(tx, context); if (state.grantId !== grantId) throw new Error(); return state.job; }
   catch { throw new ProviderGatewayError("AUTHORIZATION_FAILED"); }
 }
 export async function cancelBookPaidGrant(id: string, actor: { workspaceId: string; userId: string }) {
@@ -61,7 +64,13 @@ export async function activateBookPaidGrant(id: string, actor: { workspaceId: st
   await tx.$queryRaw`SELECT "id" FROM "Job" WHERE "id"=${id} FOR UPDATE`;
   const fresh=await tx.job.findUniqueOrThrow({where:{id}}),p=parse(fresh.payload);
   if(p.stopped||Date.parse(p.expiresAt)<=Date.now())throw new Error("BOOK_PAID_GRANT_EXPIRED");
-  await assertBookCumulativeBudget(tx, fresh, p);
+  const executionJob=await tx.job.findUniqueOrThrow({where:{id:run.jobId}});
+  const boundDigest=(executionJob.payload as {bookPaidCumulativeBudgetDigest?:unknown}|null)?.bookPaidCumulativeBudgetDigest;
+  const digest=boundDigest===undefined && p.cumulativeBudget ? stableHash(p.cumulativeBudget) : boundDigest;
+  await assertBookCumulativeBudget(tx, fresh, p, digest);
+  // Explicit late operator preparation is allowed only while queued; activation
+  // atomically pins the verified envelope before the authorization becomes live.
+  if (boundDigest===undefined && digest) await tx.job.update({where:{id:executionJob.id},data:{payload:{...(executionJob.payload as object),bookPaidCumulativeBudgetDigest:digest} as never}});
   const claimed=await tx.job.updateMany({where:{id,type:BOOK_PAID_GRANT_TYPE,status:"QUEUED",attemptCount:0},data:{status:"RUNNING",attemptCount:1,startedAt:new Date()}});
   if(claimed.count!==1)throw new Error("BOOK_PAID_GRANT_ALREADY_STARTED");
   const state=await assertBookJobAuthority(tx,run.id,["QUEUED","RUNNING"]);
@@ -84,7 +93,7 @@ export function createBookPaidResolver(grantId: string, upstream: ProviderHttpTr
       if (inputUpper > 65536 || text && (!Number.isSafeInteger(outputMax) || outputMax < 1)) throw new ProviderGatewayError("CONTEXT_LIMIT_EXCEEDED");
       const reservedMicroCny = Math.ceil(inputUpper * (text ? 0.8 : 0.5) + outputMax * 2.8);
       const ordinal = await prisma.$transaction(async tx => {
-        await assertBound(tx, grantId, context);
+        const executionJob = await assertBound(tx, grantId, context);
         await tx.$queryRaw`SELECT "id" FROM "Job" WHERE "id"=${grantId} FOR UPDATE`;
         const job = await tx.job.findUniqueOrThrow({ where: { id: grantId } }), p = parse(job.payload);
         if (job.status !== "RUNNING" || p.stopped || Date.parse(p.expiresAt) <= Date.now()) throw new ProviderGatewayError("BUDGET_EXCEEDED");
@@ -93,7 +102,7 @@ export function createBookPaidResolver(grantId: string, upstream: ProviderHttpTr
         const doc = await tx.sourceDocument.findFirst({ where: { id: p.sourceDocumentId, workspaceId: job.workspaceId!, sha256: p.sha256, source: { archivedAt: null }, currentExtraction: { extractionId: p.extractionId } }, select: { id: true } });
         const member = await tx.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId: job.workspaceId!, userId: job.userId! } } });
         if (!doc || !member || member.role === "VIEWER") throw new ProviderGatewayError("AUTHORIZATION_FAILED");
-        await assertBookCumulativeBudget(tx, job, p);
+        await assertBookCumulativeBudget(tx, job, p, (executionJob.payload as {bookPaidCumulativeBudgetDigest?:unknown}|null)?.bookPaidCumulativeBudgetDigest);
         if (p.reservedMicroCny + reservedMicroCny > p.maxMicroCny || (text ? p.textCalls >= (p.maxTextCalls ?? 200) : p.embeddingCalls >= (p.maxEmbeddingCalls ?? 64))) throw new ProviderGatewayError("BUDGET_EXCEEDED");
         const next: BookPaidGrant = { ...p, reservedMicroCny: p.reservedMicroCny + reservedMicroCny, textCalls: p.textCalls + Number(text), embeddingCalls: p.embeddingCalls + Number(embedding), entries: [...p.entries, { ordinal: p.entries.length + 1, kind: text ? "TEXT" : "EMBEDDING", reservedMicroCny, inputUpper, outputMax, state: "RESERVED", operationKey, requestFingerprint }] };
         await tx.job.update({ where: { id: grantId }, data: { payload: next as never } });
@@ -103,10 +112,10 @@ export function createBookPaidResolver(grantId: string, upstream: ProviderHttpTr
       // with cancellation, and start the HTTP operation while authority is locked.
       await hooks.beforeSendAdmission?.();
       const admitted = await prisma.$transaction(async tx => {
-        await assertBound(tx, grantId, context);
+        const executionJob = await assertBound(tx, grantId, context);
         if(request.signal.aborted)throw new ProviderGatewayError("CANCELLED");
         const grant=await tx.job.findUniqueOrThrow({where:{id:grantId}}),p=parse(grant.payload);
-        await assertBookCumulativeBudget(tx, grant, p);
+        await assertBookCumulativeBudget(tx, grant, p, (executionJob.payload as {bookPaidCumulativeBudgetDigest?:unknown}|null)?.bookPaidCumulativeBudgetDigest);
         await tx.job.update({where:{id:grantId},data:{payload:{...p,entries:p.entries.map(e=>e.ordinal===ordinal?{...e,state:"DISPATCHED"}:e)}as never}});
         return { pending: upstream.execute({ ...request, body: serialized }).then(response => ({ response }), error => ({ error })) };
       });

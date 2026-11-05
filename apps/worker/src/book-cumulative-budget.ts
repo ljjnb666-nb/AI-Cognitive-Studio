@@ -49,8 +49,14 @@ export async function assertBookCumulativeBudget(
   tx: BookAuthorityTransaction,
   job: { id: string; workspaceId: string | null; userId: string | null },
   grant: BookPaidGrant,
+  pinnedDigest: unknown,
 ) {
   const budget = grant.cumulativeBudget;
+  // A separate execution Job pins the budget so deleting the optional grant
+  // envelope cannot revert a paid continuation to the legacy 5 CNY mode.
+  const actualDigest = budget ? stableHash(budget) : undefined;
+  if (pinnedDigest !== undefined && (typeof pinnedDigest !== "string" || !/^[a-f0-9]{64}$/.test(pinnedDigest))) return denied();
+  if (actualDigest !== pinnedDigest) return denied();
   if (budget) try { assertBookCumulativeBudgetShape(grant); } catch { return denied(); }
   if (!job.workspaceId || !job.userId) return denied();
   const all = await tx.job.findMany({

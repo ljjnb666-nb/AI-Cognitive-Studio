@@ -307,3 +307,26 @@ it("refuses a re-pinned historic receipt with a nonexistent extraction even if i
  await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("AUTHORIZATION_FAILED");
  expect(f.wire).not.toHaveBeenCalled();
 });
+
+it("pins a newly activated cumulative budget in a separate execution Job, blocking later stripping",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499),budget=cumulative([prior.carried]);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:budget} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ const executionJob=await prisma.job.findUniqueOrThrow({where:{id:f.bookJob.id}});
+ expect((executionJob.payload as {bookPaidCumulativeBudgetDigest?:string}).bookPaidCumulativeBudgetDigest).toBe(stableHash(budget));
+ const old=await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}});
+ const {cumulativeBudget:_removed,...stripped}=old.payload as unknown as BookPaidGrant;
+ void _removed;
+ await prisma.job.update({where:{id:old.id},data:{payload:stripped as never}});
+ await expect(f.adapter.execute(f.input)).rejects.toMatchObject({code:"AUTHORIZATION_FAILED"});
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("rejects modified cumulativeBudget values after authorization activation even if shape is valid",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499),budget=cumulative([prior.carried]);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:budget} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ const current=await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}});
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...(current.payload as object),cumulativeBudget:cumulative([])} as never}});
+ await expect(f.adapter.execute(f.input)).rejects.toMatchObject({code:"AUTHORIZATION_FAILED"});
+ expect(f.wire).not.toHaveBeenCalled();
+});
