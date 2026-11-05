@@ -373,12 +373,6 @@ export function createBookRevisionPublicationService(dependencies: {
           where: { analysisRunId: run.id }, orderBy: { sequence: "desc" },
         });
         if ((current?.id ?? null) !== command.expectedPublicationId) throw new Error("BOOK_REVISION_PUBLICATION_CONFLICT");
-        // The published revision, its underlying immutable CHUNK sources, memory
-        // hashes, evidence ranges, and embedding coverage must be verified in
-        // this same serializable transaction before an editorial PASS can publish.
-        // Structural acceptance never manufactures a semantic PASS.
-        const structural = await inspectBookMergeStructureInTransaction(tx, run.id, actor);
-        if (!structural.structuralPass) throw new Error("BOOK_REVISION_STRUCTURE_REVIEW_REQUIRED");
         if (command.action === "ROLLBACK") {
           if (!current || current.revisionId === command.revisionId) throw new Error("BOOK_REVISION_ROLLBACK_TARGET_INVALID");
           if (command.revisionId !== null && !await tx.bookRevisionPublication.findFirst({
@@ -407,6 +401,14 @@ export function createBookRevisionPublicationService(dependencies: {
           reviewHash = review.reviewHash;
         }
 
+        // An editorial PASS alone must never publish an invalid source tree.
+        // Preserve the ability to REVOKE a broken publication by rolling back
+        // to the unmodified baseline (revisionId=null); otherwise an incident
+        // could trap unsafe revised content behind a failed structure check.
+        if (command.revisionId !== null) {
+          const structural = await inspectBookMergeStructureInTransaction(tx, run.id, actor);
+          if (!structural.structuralPass) throw new Error("BOOK_REVISION_STRUCTURE_REVIEW_REQUIRED");
+        }
         await dependencies.assertConsumersReady(tx, {
           workspaceId: run.workspaceId, sourceDocumentId: run.sourceDocumentId, analysisRunId: run.id,
         });
