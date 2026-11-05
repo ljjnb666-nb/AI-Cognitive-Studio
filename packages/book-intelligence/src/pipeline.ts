@@ -1,3 +1,4 @@
+import { readPublishedBookRevisionForRun } from "./revisions.js";
 import { frozenChunkSelectionHash, loadFrozenChunks, seedFrozenChunks, assertFrozenChunksUnchanged, type FrozenChunkSelection } from "./frozen-chunks.js";
 import { assertBookOwnedAuthority, type BookExecutionContext } from "./execution-authority.js";
 import { rankedMemoryIds } from "./retrieval-ranking.js";
@@ -18,7 +19,7 @@ import {
   validateQuote,
 } from "./analysis.js";
 import { buildContext } from "./context.js";
-import { embeddingIdentityWithHash, type EmbeddingProvider } from "./embeddings.js";
+import { cosineSimilarity, embeddingIdentityWithHash, type EmbeddingProvider } from "./embeddings.js";
 import { sha256, validateEvidence, type SourceBlockInput } from "./chunking.js";
 import { bookRoutePlanHash, normalizeBookRoutePlan, type BookAnalysisRoutePlan } from "./route-plan.js";
 import { canonicalEmbeddingInputHash, ProviderGatewayError, type ProviderExecutionRepository, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
@@ -910,56 +911,106 @@ RETURNING "id"`;
     throw error;
   }
 }
+function mergeBookEvidence<T extends Pick<EvidenceCandidate, "sourceBlockId" | "startOffset" | "endOffset">>(original: T[], added: EvidenceCandidate[] = []) {
+  const evidence = new Map<string, T | EvidenceCandidate>();
+  for (const span of [...original, ...added]) {
+    const key = JSON.stringify([span.sourceBlockId, span.startOffset, span.endOffset]);
+    if (!evidence.has(key)) evidence.set(key, span);
+  }
+  return [...evidence.values()];
+}
+
 export async function retrieveBookKnowledge(input: { workspaceId: string; sourceDocumentId: string; query: string; limit: number; embeddingProvider: EmbeddingProvider }) {
-  const [current, extraction] = await Promise.all([
-    prisma.currentBookIntelligence.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: input.sourceDocumentId, workspaceId: input.workspaceId } } }),
-    prisma.currentDocumentExtraction.findUniqueOrThrow({ where: { sourceDocumentId_workspaceId: { sourceDocumentId: input.sourceDocumentId, workspaceId: input.workspaceId } } }),
-  ]);
-  if (current.extractionId !== extraction.extractionId) throw new Error("BOOK_INTELLIGENCE_STALE");
   const identity = embeddingIdentity(input.embeddingProvider);
+  const { current, publication } = await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+    const where = { sourceDocumentId_workspaceId: { sourceDocumentId: input.sourceDocumentId, workspaceId: input.workspaceId } };
+    const current = await tx.currentBookIntelligence.findUniqueOrThrow({ where });
+    const extraction = await tx.currentDocumentExtraction.findUniqueOrThrow({ where });
+    if (current.extractionId !== extraction.extractionId) throw new Error("BOOK_INTELLIGENCE_STALE");
+    const publication = await readPublishedBookRevisionForRun(tx, current);
+    if (publication.revision?.memories.some(memory => memory.embedding?.embeddingIdentityHash !== identity.hash)) {
+      throw new Error("BOOK_REVISION_VECTOR_NOT_READY");
+    }
+    return { current, publication };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
   const [query] = await input.embeddingProvider.embed({ texts: [input.query], model: identity.model, correlationId: "retrieval" });
   if (!query) throw new Error("EMBEDDING_PROVIDER_RESPONSE_INVALID");
-  const ranking = await rankedMemoryIds({ workspaceId: input.workspaceId, analysisRunId: current.analysisRunId, embeddingIdentityHash: identity.hash, vector: query, query: input.query, limit: input.limit });
-  const embeddings = await prisma.bookMemoryEmbedding.findMany({ where: { id: { in: ranking.map(row => row.id) }, workspaceId: input.workspaceId, analysisRunId: current.analysisRunId, embeddingIdentityHash: identity.hash }, include: { memoryItem: { include: { evidence: true, sourceArtifact: { select: { chunkId: true } } } } } });
-  return embeddings.map((embedding) => ({
-    artifactId: embedding.memoryItem.sourceArtifactId,
-    memoryItemId: embedding.memoryItemId,
-    chunkId: embedding.memoryItem.sourceArtifact.chunkId,
-    type: embedding.memoryItem.type,
-    content: embedding.memoryItem.content,
-    score: ranking.find(row => row.id === embedding.id)!.score,
-    evidence: embedding.memoryItem.evidence,
-    sourceDocumentId: current.sourceDocumentId,
-    analysisRunId: current.analysisRunId,
-    extractionId: current.extractionId,
-    chunkSetId: current.chunkSetId,
-    embedding: { provider: embedding.provider, model: embedding.model, modelVersion: embedding.modelVersion, embeddingVersion: embedding.embeddingVersion, embeddingIdentityHash: embedding.embeddingIdentityHash },
-  })).sort((a, b) => b.score - a.score || a.memoryItemId.localeCompare(b.memoryItemId)).slice(0, input.limit);
+  // Keep the optimized lexical/semantic SQL ranking on the ordinary path;
+  // only a published revision requires re-ranking against refreshed vectors.
+  const revision = publication.revision;
+  const ranking = revision ? null : await rankedMemoryIds({ workspaceId: input.workspaceId, analysisRunId: current.analysisRunId, embeddingIdentityHash: identity.hash, vector: query, query: input.query, limit: input.limit });
+  const embeddings = await prisma.bookMemoryEmbedding.findMany({
+    where: { ...(ranking ? { id: { in: ranking.map(row => row.id) } } : {}), workspaceId: input.workspaceId, analysisRunId: current.analysisRunId, embeddingIdentityHash: identity.hash },
+    include: { memoryItem: { include: { evidence: true, sourceArtifact: { select: { chunkId: true } } } } },
+  });
+  const byId = new Map(revision?.memories.map(memory => [memory.id, memory]));
+  const rankById = new Map((ranking ?? []).map(row => [row.id, row.score]));
+  return embeddings.map(embedding => {
+    const revised = byId.get(embedding.memoryItemId);
+    return {
+      artifactId: embedding.memoryItem.sourceArtifactId,
+      memoryItemId: embedding.memoryItemId,
+      chunkId: embedding.memoryItem.sourceArtifact.chunkId,
+      type: embedding.memoryItem.type,
+      content: revised?.after ?? embedding.memoryItem.content,
+      score: ranking ? (rankById.get(embedding.id) ?? -Infinity) : cosineSimilarity(query, revised?.refreshedVector ?? embedding.vector as number[]),
+      evidence: mergeBookEvidence(embedding.memoryItem.evidence, revised?.addedEvidence),
+      publicationId: publication.publicationId,
+      revisionHash: revision?.revisionHash ?? null,
+      sourceDocumentId: current.sourceDocumentId,
+      analysisRunId: current.analysisRunId,
+      extractionId: current.extractionId,
+      chunkSetId: current.chunkSetId,
+      embedding: { provider: embedding.provider, model: embedding.model, modelVersion: embedding.modelVersion, embeddingVersion: embedding.embeddingVersion, embeddingIdentityHash: embedding.embeddingIdentityHash },
+    };
+  }).sort((a, b) => b.score - a.score || a.memoryItemId.localeCompare(b.memoryItemId)).slice(0, input.limit);
 }
 
 export type ExactBookIntelligenceLineage = { workspaceId: string; sourceDocumentId: string; extractionId: string; chunkSetId: string; analysisRunId: string };
 
-export async function retrieveBookKnowledgeForIntelligence(input: ExactBookIntelligenceLineage & { query: string; limit: number; embeddingProvider: EmbeddingProvider; operationKey?: string }) {
-  const run = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { id: input.analysisRunId, workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: input.extractionId, chunkSetId: input.chunkSetId, status: "SUCCEEDED" } });
+export async function retrieveBookKnowledgeForIntelligence(input: ExactBookIntelligenceLineage & { query: string; limit: number; embeddingProvider: EmbeddingProvider; operationKey?: string; bookPublicationId?: string | null }) {
   const identity = embeddingIdentity(input.embeddingProvider);
-  const [query] = await input.embeddingProvider.embed({ texts: [input.query], model: identity.model, correlationId: `retrieval:${run.id}`, operationKey: input.operationKey });
+  const { run, publication } = await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+    const run = await tx.bookAnalysisRun.findFirstOrThrow({ where: {
+      id: input.analysisRunId, workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId,
+      extractionId: input.extractionId, chunkSetId: input.chunkSetId, status: "SUCCEEDED",
+    } });
+    const publication = input.bookPublicationId ? await readPublishedBookRevisionForRun(tx, input, input.bookPublicationId) : null;
+    if (publication?.revision?.memories.some(memory => memory.embedding?.embeddingIdentityHash !== identity.hash)) {
+      throw new Error("BOOK_REVISION_VECTOR_NOT_READY");
+    }
+    return { run, publication };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+  const [query] = await input.embeddingProvider.embed({ texts: [input.query], model: identity.model, correlationId: "retrieval:" + run.id, operationKey: input.operationKey });
   if (!query) throw new Error("EMBEDDING_PROVIDER_RESPONSE_INVALID");
-  const ranking = await rankedMemoryIds({ workspaceId: input.workspaceId, analysisRunId: run.id, embeddingIdentityHash: identity.hash, vector: query, query: input.query, limit: input.limit });
-  const embeddings = await prisma.bookMemoryEmbedding.findMany({ where: { id: { in: ranking.map(row => row.id) }, workspaceId: input.workspaceId, analysisRunId: run.id, embeddingIdentityHash: identity.hash }, include: { memoryItem: { include: { evidence: true, sourceArtifact: { select: { chunkId: true } } } } } });
-  return embeddings.map((embedding) => ({
-    artifactId: embedding.memoryItem.sourceArtifactId,
-    memoryItemId: embedding.memoryItemId,
-    chunkId: embedding.memoryItem.sourceArtifact.chunkId,
-    type: embedding.memoryItem.type,
-    content: embedding.memoryItem.content,
-    score: ranking.find(row => row.id === embedding.id)!.score,
-    evidence: embedding.memoryItem.evidence,
-    sourceDocumentId: run.sourceDocumentId,
-    analysisRunId: run.id,
-    extractionId: run.extractionId,
-    chunkSetId: run.chunkSetId,
-    embedding: { provider: embedding.provider, model: embedding.model, modelVersion: embedding.modelVersion, embeddingVersion: embedding.embeddingVersion, embeddingIdentityHash: embedding.embeddingIdentityHash },
-  })).sort((a, b) => b.score - a.score || a.memoryItemId.localeCompare(b.memoryItemId)).slice(0, input.limit);
+  const revision = publication?.revision;
+  const ranking = revision ? null : await rankedMemoryIds({ workspaceId: input.workspaceId, analysisRunId: run.id, embeddingIdentityHash: identity.hash, vector: query, query: input.query, limit: input.limit });
+  const embeddings = await prisma.bookMemoryEmbedding.findMany({
+    where: { ...(ranking ? { id: { in: ranking.map(row => row.id) } } : {}), workspaceId: input.workspaceId, analysisRunId: run.id, embeddingIdentityHash: identity.hash },
+    include: { memoryItem: { include: { evidence: true, sourceArtifact: { select: { chunkId: true } } } } },
+  });
+  const byId = new Map(revision?.memories.map(memory => [memory.id, memory]));
+  const rankById = new Map((ranking ?? []).map(row => [row.id, row.score]));
+  return embeddings.map(embedding => {
+    const revised = byId.get(embedding.memoryItemId);
+    return {
+      artifactId: embedding.memoryItem.sourceArtifactId,
+      memoryItemId: embedding.memoryItemId,
+      chunkId: embedding.memoryItem.sourceArtifact.chunkId,
+      type: embedding.memoryItem.type,
+      content: revised?.after ?? embedding.memoryItem.content,
+      score: ranking ? (rankById.get(embedding.id) ?? -Infinity) : cosineSimilarity(query, revised?.refreshedVector ?? embedding.vector as number[]),
+      evidence: mergeBookEvidence(embedding.memoryItem.evidence, revised?.addedEvidence),
+      publicationId: publication?.publicationId ?? null,
+      sourceDocumentId: run.sourceDocumentId,
+      analysisRunId: run.id,
+      extractionId: run.extractionId,
+      chunkSetId: run.chunkSetId,
+      embedding: { provider: embedding.provider, model: embedding.model, modelVersion: embedding.modelVersion, embeddingVersion: embedding.embeddingVersion, embeddingIdentityHash: embedding.embeddingIdentityHash },
+    };
+  }).sort((a, b) => b.score - a.score || a.memoryItemId.localeCompare(b.memoryItemId)).slice(0, input.limit);
 }
 
 export async function buildBookContext(input: { workspaceId: string; sourceDocumentId: string; task: string; tokenBudget: number; query?: string; embeddingProvider: EmbeddingProvider }) {
@@ -969,7 +1020,7 @@ export async function buildBookContext(input: { workspaceId: string; sourceDocum
   return { ...context, items: context.selected.map((item) => ({ ...item, ...byId.get(item.id), selectionReason: "semantic_score_then_stable_id", tokenEstimate: item.tokenEstimate, sourceBlockEvidenceSpans: item.provenance })) };
 }
 
-export async function buildBookContextForIntelligence(input: ExactBookIntelligenceLineage & { task: string; tokenBudget: number; query?: string; embeddingProvider: EmbeddingProvider; operationKey?: string }) {
+export async function buildBookContextForIntelligence(input: ExactBookIntelligenceLineage & { task: string; tokenBudget: number; query?: string; embeddingProvider: EmbeddingProvider; operationKey?: string; bookPublicationId?: string | null }) {
   const items = await retrieveBookKnowledgeForIntelligence({ ...input, query: input.query ?? input.task, limit: 100 });
   const byId = new Map(items.map((item) => [item.memoryItemId, item]));
   const context = buildContext(items.map((item) => ({ id: item.memoryItemId, content: item.content, type: item.type, score: item.score, tokenEstimate: estimateAnalysisTokens(item.content), provenance: item.evidence.map((evidence) => ({ sourceBlockId: evidence.sourceBlockId, ordinal: 0, startOffset: evidence.startOffset, endOffset: evidence.endOffset })) })), input.tokenBudget);
