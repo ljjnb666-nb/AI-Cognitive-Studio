@@ -134,6 +134,16 @@ describe("Phase 8B real text provider adapters", () => {
     expect(JSON.parse(adaptive.calls[0]!.body)).toMatchObject({
       thinking: { type: "adaptive" }, reasoning_split: true, max_completion_tokens: 100,
     });
+    // v3 atomic-review packets keep adaptive reasoning and the same bounded
+    // completion budget, without changing the frozen v1/v2 behavior.
+    const v3 = { ...snapshot, pipelineVersion: "book-revision-review-v3" };
+    const atomic = transport({ model: "MiniMax-M3", choices: [
+      { finish_reason: "stop", message: { content: '{"verdict":"BLOCKED"}' } },
+    ] });
+    await new OpenAICompatibleAdapter(atomic).execute({ ...base, snapshot: v3, request });
+    expect(JSON.parse(atomic.calls[0]!.body)).toMatchObject({
+      thinking: { type: "adaptive" }, reasoning_split: true, max_completion_tokens: 100,
+    });
     const withoutThinking = transport({ choices: [
       { finish_reason: "stop", message: { content: '{"verdict":"BLOCKED"}' } },
     ] });
