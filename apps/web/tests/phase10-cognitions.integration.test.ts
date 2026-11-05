@@ -20,7 +20,7 @@ import { teachBackAttemptDetail } from "../lib/teach-back";
 import { findCrossBookCognitionConnections } from "../lib/cognition-associations";
 import { createBookAnalysisEmbeddingGatewayFixture } from "../../../packages/book-intelligence/tests/helpers/book-analysis-embedding-gateway";
 import { embeddingIdentityWithHash } from "../../../packages/book-intelligence/src/embeddings";
-import { builtInProviderCatalog, stableHash, workspaceRoutesWithBookDefaults } from "@ai-cognitive/provider-gateway";
+import { builtInProviderCatalog, canonicalTextInputHash, stableHash, workspaceRoutesWithBookDefaults } from "@ai-cognitive/provider-gateway";
 import { createProductionProviderGateway, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, WorkspaceMembershipExecutionAuthorizer, testCipher, type ProviderAdapter } from "@ai-cognitive/provider-gateway";
 
 async function fixture(existing?: { workspace: { id: string }; userA: { id: string }; userB: { id: string } }) {
@@ -142,6 +142,18 @@ async function verifiedModelReview(
     prepared.request.routeSlot = "BOOK_SYNTHESIS";
     prepared.request.correlationId = "book-semantic-review:" + identity.slice(0,16);
     prepared.request.idempotencyKey = "book-semantic-review-v1:" + identity;
+    // Reconstruct the entire legacy BOOK_SYNTHESIS request, not just its slot.
+    // Historical Gateway fingerprints include output token cap and the exact
+    // serialized request, so retaining the new 6144 cap would falsely fail
+    // old authenticated receipts after a budget-only schema evolution.
+    const legacyText = { ...prepared.request.text!,
+      generation: { ...prepared.request.text!.generation, maxOutputTokens: 3800 } };
+    prepared.request.text = legacyText;
+    prepared.request.inputHash = canonicalTextInputHash(legacyText);
+    prepared.request.budget = { maxInputTokens: 28000, maxOutputTokens: 3800, maxAttempts: 1 };
+    prepared.request.estimates = {
+      inputTokens: Math.ceil(legacyText.messages[0]!.content.length / 2), outputTokens: 3800,
+    };
   }
   const adapter: ProviderAdapter = { execute: async ({ request }) => {
     const body = JSON.parse(request.text!.messages[0]!.content) as {
