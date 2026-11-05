@@ -44,7 +44,13 @@ export async function inspectBookMergeStructureInTransaction(tx: Prisma.Transact
       for(let depth=0;depth<4;depth++){if(seen.has(cursor.id)){issues.push({code:"ARTIFACT_CYCLE",id:a.id});break;}seen.add(cursor.id);const parent=cursor.parentId?byId.get(cursor.parentId):undefined;if(!parent||rank[parent.scope]<=rank[cursor.scope])break;if(parent.scope==="BOOK"){reached=true;break;}cursor=parent;}
       if(!reached)issues.push({code:"ARTIFACT_NOT_REACHING_BOOK",id:a.id});
     }
-    for(const item of items){if(item.workspaceId!==run.workspaceId||item.sourceDocumentId!==run.sourceDocumentId||item.extractionId!==run.extractionId||!item.sourceArtifactId||!byId.has(item.sourceArtifactId))issues.push({code:"MEMORY_LINEAGE_INVALID",id:item.id});if(["CLAIM","EXAMPLE","STORY","PERSON","QUOTE"].includes(item.type)&&!evidence.some(e=>e.memoryItemId===item.id))issues.push({code:"FACT_MEMORY_WITHOUT_EVIDENCE",id:item.id});}
+    for(const item of items){
+      if(item.workspaceId!==run.workspaceId||item.sourceDocumentId!==run.sourceDocumentId||item.extractionId!==run.extractionId||!item.sourceArtifactId||!byId.has(item.sourceArtifactId))issues.push({code:"MEMORY_LINEAGE_INVALID",id:item.id});
+      // A vector count alone cannot prove the text persisted for that vector
+      // is still the text that the Book run actually materialized.
+      if(sha256(item.content)!==item.contentHash)issues.push({code:"MEMORY_CONTENT_HASH_INVALID",id:item.id});
+      if(["CLAIM","EXAMPLE","STORY","PERSON","QUOTE"].includes(item.type)&&!evidence.some(e=>e.memoryItemId===item.id))issues.push({code:"FACT_MEMORY_WITHOUT_EVIDENCE",id:item.id});
+    }
     for(const e of evidence){const block=blockById.get(e.sourceBlockId),item=itemById.get(e.memoryItemId);if(!block||!item||e.workspaceId!==run.workspaceId||e.extractionId!==run.extractionId||item.sourceDocumentId!==run.sourceDocumentId||e.startOffset<0||e.endOffset<=e.startOffset||e.endOffset>block.text.length){issues.push({code:"MEMORY_EVIDENCE_INVALID",id:e.id});continue;}if(item.type==="QUOTE")try{validateQuote(block,{sourceBlockId:block.id,startOffset:e.startOffset,endOffset:e.endOffset,...(e.quoteText?{quoteText:e.quoteText}:{})});}catch{issues.push({code:"DIRECT_QUOTE_INVALID",id:e.id});}}
     return{analysisRunId,structuralPass:issues.length===0,issues,counts:{chunks:leaves.length,sections:artifacts.filter(a=>a.scope==="SECTION").length,chapters:artifacts.filter(a=>a.scope==="CHAPTER").length,books:books.length,memoryItems:items.length,memoryEvidence:evidence.length},semanticReviewRequired:true,fullBookVerified:false};
 }
