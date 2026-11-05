@@ -11,6 +11,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ cog
     return NextResponse.json(await recordManualCognitionReview(identity, { memoryItemId: cognitionId, eventId: input.eventId }));
   } catch (error) {
     const code = error instanceof Error ? error.message.split(":")[0] : "COGNITION_REVIEW_FAILED";
-    return NextResponse.json({ error: code }, { status: code === "COGNITION_NOT_FOUND" ? 404 : code === "WEB_IDENTITY_REQUIRED" ? 401 : 400 });
+    return NextResponse.json({ error: code }, { status: code === "COGNITION_NOT_FOUND" ? 404 : code === "WORKSPACE_WRITE_DENIED" ? 403 : code === "WEB_IDENTITY_REQUIRED" ? 401 : 400 });
   }
 }
