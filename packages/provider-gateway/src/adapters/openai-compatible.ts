@@ -53,11 +53,13 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const usage = rawUsage ? { inputTokens: number(rawUsage.prompt_tokens), outputTokens: number(rawUsage.completion_tokens), cachedInputTokens: number((rawUsage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens) } : undefined;
     const requestId = header(remote.headers, "x-request-id") ?? (boundedVision && typeof json.request_id === "string" ? json.request_id : undefined);
     if (input.snapshot.providerKey === "zhipu" && (choice?.finish_reason === "sensitive" || choice?.finish_reason === "content_filter")) throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage: { ...usage, extra: { moderationDiagnostic: zhipuModerationDiagnostic(json, remote.status) } } });
+    if (input.snapshot.providerKey === "minimax" && (choice?.finish_reason === "content_filter" || choice?.finish_reason === "sensitive"))
+      throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage });
     try {
       if (!message || typeof message.content !== "string") throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
       return response(message.content, typeof json.model === "string" ? json.model : undefined, finish(choice?.finish_reason), text, usage, requestId);
     } catch (error) {
-      if (!boundedVision && !(input.snapshot.providerKey === "zhipu" && mode === "JSON_MODE")) throw error;
+      if (!boundedVision && !(["zhipu", "minimax"].includes(input.snapshot.providerKey) && mode === "JSON_MODE")) throw error;
       // A billed 200 response can still be unusable JSON. Preserve reported
       // usage and non-content diagnostics; never copy page/model prose or
       // reasoning into logs or turn a malformed response into a judgement.

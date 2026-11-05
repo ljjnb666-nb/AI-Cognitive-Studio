@@ -89,6 +89,15 @@ describe("Phase 8B real text provider adapters", () => {
     const invalid = transport({ choices: [{ finish_reason: "length", message: { content: "", reasoning_content: '{"answer":"never"}' } }] });
     await expect(new OpenAICompatibleAdapter(invalid).execute({ ...base, snapshot, request })).rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE" });
     expect(invalid.calls).toHaveLength(1);
+    const billedInvalid = transport({ choices: [{ finish_reason: "length", message: { content: "" } }], usage: { prompt_tokens: 55, completion_tokens: 100 } });
+    await expect(new OpenAICompatibleAdapter(billedInvalid).execute({ ...base, snapshot, request }))
+      .rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE", retryable: false, usage: { inputTokens: 55, outputTokens: 100 } });
+    for (const finish_reason of ["content_filter", "sensitive"]) {
+      const rejected = transport({ choices: [{ finish_reason }], usage: { prompt_tokens: 55, completion_tokens: 1 } });
+      await expect(new OpenAICompatibleAdapter(rejected).execute({ ...base, snapshot, request }))
+        .rejects.toMatchObject({ code: "CONTENT_REJECTED", retryable: false, usage: { inputTokens: 55, outputTokens: 1 } });
+      expect(rejected.calls).toHaveLength(1);
+    }
     const filtered = transport({ error: { type: "content_filter" } },400);
     await expect(new OpenAICompatibleAdapter(filtered).execute({ ...base, snapshot, request })).rejects.toMatchObject({ code: "CONTENT_REJECTED" });
     const denied = transport({});
