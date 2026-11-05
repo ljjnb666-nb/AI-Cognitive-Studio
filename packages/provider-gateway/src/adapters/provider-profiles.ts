@@ -32,6 +32,8 @@ export const builtInProviderProfiles: readonly ProviderProfile[] = [
   { providerKey: "zhipu", family: "SPEECH", protocol: "CUSTOM_SPEECH", endpoint: "https://open.bigmodel.cn/api/paas/v4/audio/speech", authScheme: "BEARER" },
   { providerKey: "qwen", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", authScheme: "BEARER" },
   { providerKey: "minimax", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.minimax.io/v1/text/chatcompletion_v2", authScheme: "BEARER" },
+  { providerKey: "minimax", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.minimax.cn/v1/text/chatcompletion_v2", authScheme: "BEARER" },
+  { providerKey: "minimax", family: "TEXT_GENERATION", protocol: "OPENAI_COMPATIBLE", endpoint: "https://api.minimax.cn/v1/chat/completions", authScheme: "BEARER" },
   { providerKey: "cohere", family: "EMBEDDING", protocol: "COHERE_EMBEDDINGS_V2", endpoint: "https://api.cohere.com/v2/embed", authScheme: "BEARER" },
   { providerKey: "voyage", family: "EMBEDDING", protocol: "VOYAGE_EMBEDDINGS", endpoint: "https://api.voyageai.com/v1/embeddings", authScheme: "BEARER" },
 ];
@@ -45,7 +47,7 @@ function qwenProfile(family: CapabilityFamily, configuration: Readonly<Record<st
 }
 export function approvedProfile(providerKey: string, family: CapabilityFamily, endpoint: string | undefined, configuration: Readonly<Record<string, unknown>> = {}): ProviderProfile | undefined {
   if (providerKey === "openai-compatible" && family === "TEXT_GENERATION" && endpoint) return { providerKey, family, protocol: "OPENAI_COMPATIBLE", endpoint, authScheme: "BEARER" };
-  const profile = providerKey === "qwen" ? qwenProfile(family, configuration) : builtInProviderProfiles.find(item => item.providerKey === providerKey && item.family === family);
+  const profile = providerKey === "qwen" ? qwenProfile(family, configuration) : builtInProviderProfiles.find(item => item.providerKey === providerKey && item.family === family && (!endpoint || item.endpoint === endpoint));
   // Qwen's connection stores the provider-owned text endpoint, while the
   // adapter derives the family-specific endpoint from the typed route region
   // and workspace ID.  Never execute a user supplied endpoint for Qwen.

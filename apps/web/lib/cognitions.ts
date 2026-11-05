@@ -1,36 +1,9 @@
+import { readPublishedBookRevisionForRun } from "@ai-cognitive/book-intelligence";
 import { Prisma, prisma } from "@ai-cognitive/db";
 import type { WebIdentityContext } from "./identity";
 
-const supportedTypes = [
-  "SUMMARY",
-  "CONCEPT",
-  "ARGUMENT",
-  "CLAIM",
-  "QUOTE",
-  "QUESTION",
-  "COUNTERPOINT",
-  "EXAMPLE",
-  "STORY",
-] as const;
-export type CognitionType = (typeof supportedTypes)[number];
-
-export const cognitionTypeLabels: Record<CognitionType, string> = {
-  SUMMARY: "核心观点",
-  CONCEPT: "关键概念",
-  ARGUMENT: "主要论证",
-  CLAIM: "关键主张",
-  QUOTE: "原文证据",
-  QUESTION: "值得质疑",
-  COUNTERPOINT: "值得质疑",
-  EXAMPLE: "案例",
-  STORY: "故事",
-};
-
-export function isCognitionType(
-  value: string | undefined,
-): value is CognitionType {
-  return Boolean(value && supportedTypes.includes(value as CognitionType));
-}
+import { isCognitionType, supportedTypes, type CognitionType } from "./cognition-types";
+export { cognitionTypeLabels, isCognitionType, type CognitionType } from "./cognition-types";
 
 type Cursor = { createdAt: string; id: string };
 type CognitionRow = {
@@ -97,10 +70,34 @@ export type CognitionListItem = Omit<CognitionRow, "createdAt"> & {
   createdAt: string;
 };
 
+export async function publishedCognitionChanges(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  analysisRunIds: string[],
+) {
+  const revisions = await Promise.all([...new Set(analysisRunIds)].map((analysisRunId) =>
+    readPublishedBookRevisionForRun(tx, { workspaceId, analysisRunId }),
+  ));
+  return new Map(revisions.flatMap(({ revision }) =>
+    revision?.memories.map((memory) => [memory.id, memory] as const) ?? [],
+  ));
+}
+
 export async function listCognitions(
   identity: Pick<WebIdentityContext, "workspaceId" | "userId">,
   input: { types?: CognitionType[]; cursor?: string; pageSize?: number } = {},
 ): Promise<{ items: CognitionListItem[]; nextCursor?: string }> {
+  return prisma.$transaction(
+    (tx) => readCognitions(tx, identity, input),
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
+}
+
+async function readCognitions(
+  tx: Prisma.TransactionClient,
+  identity: Pick<WebIdentityContext, "workspaceId" | "userId">,
+  input: { types?: CognitionType[]; cursor?: string; pageSize?: number },
+) {
   const pageSize = Math.min(Math.max(input.pageSize ?? 24, 1), 50);
   const cursor = decodeCursor(input.cursor);
   const selectedTypes = input.types?.filter(isCognitionType) ?? [];
@@ -110,8 +107,9 @@ export async function listCognitions(
   const cursorClause = cursor
     ? Prisma.sql`AND (memory."createdAt" < ${new Date(cursor.createdAt)} OR (memory."createdAt" = ${new Date(cursor.createdAt)} AND memory."id" < ${cursor.id}))`
     : Prisma.empty;
-  const rows = await prisma.$queryRaw<CognitionRow[]>(Prisma.sql`
+  const rows = await tx.$queryRaw<Array<CognitionRow & { analysisRunId: string }>>(Prisma.sql`
     SELECT memory."id", memory."type", memory."content", memory."createdAt", memory."sourceDocumentId",
+      memory."analysisRunId",
       source."displayName" AS "sourceTitle", (state."id" IS NOT NULL AND state."state" = 'SAVED'::"UserCognitionStateKind") AS "saved"
     FROM "BookMemoryItem" memory
     ${currentLineageJoin()}
@@ -126,9 +124,11 @@ export async function listCognitions(
     LIMIT ${pageSize + 1}
   `);
   const page = rows.slice(0, pageSize);
+  const changes = await publishedCognitionChanges(tx, identity.workspaceId, page.map((row) => row.analysisRunId));
   return {
-    items: page.map((row) => ({
+    items: page.map(({ analysisRunId: _analysisRunId, ...row }) => ({
       ...row,
+      content: changes.get(row.id)?.after ?? row.content,
       createdAt: row.createdAt.toISOString(),
     })),
     nextCursor:
@@ -152,9 +152,11 @@ export type CognitionDetail = CognitionListItem & {
 async function currentCognitionRow(
   identity: Pick<WebIdentityContext, "workspaceId" | "userId">,
   cognitionId: string,
-): Promise<CognitionRow | null> {
-  const rows = await prisma.$queryRaw<CognitionRow[]>(Prisma.sql`
+  tx: Prisma.TransactionClient = prisma,
+): Promise<(CognitionRow & { analysisRunId: string; extractionId: string }) | null> {
+  const rows = await tx.$queryRaw<Array<CognitionRow & { analysisRunId: string; extractionId: string }>>(Prisma.sql`
     SELECT memory."id", memory."type", memory."content", memory."createdAt", memory."sourceDocumentId",
+      memory."analysisRunId", memory."extractionId",
       source."displayName" AS "sourceTitle", (state."id" IS NOT NULL AND state."state" = 'SAVED'::"UserCognitionStateKind") AS "saved"
     FROM "BookMemoryItem" memory
     ${currentLineageJoin()}
@@ -172,10 +174,23 @@ export async function cognitionDetail(
   identity: Pick<WebIdentityContext, "workspaceId" | "userId">,
   cognitionId: string,
 ): Promise<CognitionDetail | null> {
-  const row = await currentCognitionRow(identity, cognitionId);
+  return prisma.$transaction(
+    (tx) => readCognitionDetail(tx, identity, cognitionId),
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
+}
+
+async function readCognitionDetail(
+  tx: Prisma.TransactionClient,
+  identity: Pick<WebIdentityContext, "workspaceId" | "userId">,
+  cognitionId: string,
+): Promise<CognitionDetail | null> {
+  const row = await currentCognitionRow(identity, cognitionId, tx);
   if (!row) return null;
-  const [evidence, relations] = await Promise.all([
-    prisma.bookMemoryEvidence.findMany({
+  const { analysisRunId, extractionId, ...displayRow } = row;
+  const [{ revision }, evidence, relations] = await Promise.all([
+    readPublishedBookRevisionForRun(tx, { workspaceId: identity.workspaceId, analysisRunId }),
+    tx.bookMemoryEvidence.findMany({
       where: { memoryItemId: row.id, workspaceId: identity.workspaceId },
       include: { sourceBlock: { select: { text: true, ordinal: true } } },
       orderBy: [
@@ -185,7 +200,7 @@ export async function cognitionDetail(
       ],
       take: 24,
     }),
-    prisma.bookMemoryRelation.findMany({
+    tx.bookMemoryRelation.findMany({
       where: {
         workspaceId: identity.workspaceId,
         OR: [{ fromMemoryItemId: row.id }, { toMemoryItemId: row.id }],
@@ -198,7 +213,22 @@ export async function cognitionDetail(
       take: 12,
     }),
   ]);
-  const validEvidence = evidence.flatMap((item) => {
+  const changes = new Map(revision?.memories.map((memory) => [memory.id, memory]));
+  const change = changes.get(row.id);
+  const spans = change?.addedEvidence ?? [];
+  const blocks = spans.length ? await tx.sourceBlock.findMany({
+    where: { extractionId, id: { in: spans.map((span) => span.sourceBlockId) } },
+    select: { id: true, ordinal: true, text: true },
+  }) : [];
+  const byBlockId = new Map(blocks.map((block) => [block.id, block]));
+  const supplements = spans.flatMap((span) => {
+    const sourceBlock = byBlockId.get(span.sourceBlockId);
+    if (!sourceBlock) throw new Error("BOOK_REVISION_EVIDENCE_INVALID");
+    if (evidence.some((item) => item.sourceBlockId === span.sourceBlockId &&
+      item.startOffset === span.startOffset && item.endOffset === span.endOffset)) return [];
+    return [{ ...span, sourceBlock, id: `revision:${span.sourceBlockId}:${span.startOffset}:${span.endOffset}` }];
+  });
+  const validEvidence = [...supplements, ...evidence].slice(0, 24).flatMap((item) => {
     const { text } = item.sourceBlock;
     if (
       item.startOffset < 0 ||
@@ -222,11 +252,12 @@ export async function cognitionDetail(
         ? relation.toMemoryItem
         : relation.fromMemoryItem;
     return isCognitionType(item.type)
-      ? [{ id: item.id, type: item.type, content: item.content }]
+      ? [{ id: item.id, type: item.type, content: changes.get(item.id)?.after ?? item.content }]
       : [];
   });
   return {
-    ...row,
+    ...displayRow,
+    content: change?.after ?? row.content,
     createdAt: row.createdAt.toISOString(),
     evidence: validEvidence,
     related,

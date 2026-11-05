@@ -1,3 +1,4 @@
+import { pinCurrentBookSources } from "@ai-cognitive/book-intelligence";
 import { createHash } from "node:crypto";
 import { admitWorkspaceExpensiveOperation, prisma } from "@ai-cognitive/db";
 import { evaluatePodcastScriptData, type EvaluationUtterance } from "./evaluation.js";
@@ -65,9 +66,9 @@ export async function requestPodcastGeneration(context: TrustedRequestContext, i
   const hosts = await prisma.podcastHost.findMany({ where: { podcastProjectId: episode.podcastProjectId, workspaceId: context.workspaceId, configurationVersion: hostConfigurationVersion }, orderBy: { ordinal: "asc" } });
   if (hosts.length !== episode.styleProfile.hostCount) throw new Error("PODCAST_HOST_COUNT_MISMATCH");
   const sourceIds = episode.project.sources.map((source) => source.sourceDocumentId).sort();
-  const current = await prisma.currentBookIntelligence.findMany({ where: { workspaceId: context.workspaceId, sourceDocumentId: { in: sourceIds } } });
+  const current = await pinCurrentBookSources(context.workspaceId, sourceIds);
   if (current.length !== sourceIds.length) throw new Error("CURRENT_BOOK_INTELLIGENCE_REQUIRED");
-  const sourceIdentity = current.map((item) => [item.sourceDocumentId, item.extractionId, item.chunkSetId, item.analysisRunId]).sort(([a], [b]) => String(a).localeCompare(String(b)));
+  const sourceIdentity = current.map((item) => [item.sourceDocumentId, item.extractionId, item.chunkSetId, item.analysisRunId, ...(item.bookPublicationId ? [item.bookPublicationId] : [])]).sort(([a], [b]) => String(a).localeCompare(String(b)));
   const hostConfigurationHash = sha256(stable(hosts.map((host) => ({ id: host.id, personaVersion: host.personaVersion, configurationVersion: host.configurationVersion, role: host.role, speakingStyle: host.speakingStyle, temperament: host.temperament, skepticism: host.skepticism, verbosity: host.verbosity, questionStyle: host.questionStyle, disagreementStyle: host.disagreementStyle }))));
   const modelVersionKey = input.modelVersion ?? "";
   const generationIdentityHash = sha256(stable([episode.id, sourceIdentity, episode.styleProfile.id, episode.styleProfile.version, hostConfigurationHash, input.pipelineVersion, input.promptVersion, input.provider, input.model, modelVersionKey]));
@@ -79,7 +80,7 @@ export async function requestPodcastGeneration(context: TrustedRequestContext, i
       await admitWorkspaceExpensiveOperation(tx, context.workspaceId, workspaceOperationLimit());
       const job = await tx.job.create({ data: { workspaceId: context.workspaceId, userId: context.userId, type: PODCAST_GENERATION_JOB, payload: { episodeId: episode.id }, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.podcastGenerationRun.create({ data: { workspaceId: context.workspaceId, podcastProjectId: episode.podcastProjectId, episodeId: episode.id, styleProfileId: episode.styleProfileId, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider: input.provider, model: input.model, modelVersion: input.modelVersion, modelVersionKey, hostConfigurationHash, hostConfigurationVersion, generationIdentityHash, idempotencyKey, correlationId: input.correlationId } });
-      await tx.podcastGenerationSource.createMany({ data: current.map((item) => ({ podcastGenerationRunId: run.id, workspaceId: context.workspaceId, episodeId: episode.id, sourceDocumentId: item.sourceDocumentId, extractionId: item.extractionId, chunkSetId: item.chunkSetId, analysisRunId: item.analysisRunId })) });
+      await tx.podcastGenerationSource.createMany({ data: current.map((item) => ({ podcastGenerationRunId: run.id, workspaceId: context.workspaceId, episodeId: episode.id, sourceDocumentId: item.sourceDocumentId, extractionId: item.extractionId, chunkSetId: item.chunkSetId, analysisRunId: item.analysisRunId, bookPublicationId: item.bookPublicationId })) });
       await tx.outboxEvent.create({ data: { topic: input.outboxTopic ?? PODCAST_GENERATION_TOPIC, aggregateId: run.id, payload: { podcastGenerationRunId: run.id, dispatchGeneration: run.dispatchGeneration } } });
       return { run, job };
     });

@@ -17,7 +17,7 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
     throw error;
   }
 
-  const memories = item.currentIntelligence?.analysisRun.memoryItems ?? [];
+
   const structureNodes = item.currentExtraction?.extraction.structureNodes ?? [];
   const ingestionStatus = item.ingestionRuns[0]?.status;
   const analysisStatus = item.analysisRuns[0]?.status;
@@ -53,7 +53,8 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
         processingSince: (item.analysisRuns[0]?.startedAt ?? item.analysisRuns[0]?.createdAt ?? bootstrap?.startedAt ?? bootstrap?.createdAt ?? item.ingestionRuns[0]?.startedAt ?? item.ingestionRuns[0]?.createdAt)?.toISOString() ?? null,
       }}
       textPreview={item.textPreview}
-      memories={memories as any}
+      memories={item.bookMemories}
+      bookSummary={item.bookSummary}
       structureNodes={structureNodes as any}
     />
   );

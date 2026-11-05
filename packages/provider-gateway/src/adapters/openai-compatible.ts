@@ -42,6 +42,16 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       try { businessCode = (JSON.parse(remote.body) as { error?: { code?: unknown } }).error?.code; } catch { /* Keep ordinary malformed-response handling. */ }
       if (String(businessCode) === "1301") throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: header(remote.headers, "x-request-id"), usage: { extra: { moderationDiagnostic: zhipuModerationDiagnostic(JSON.parse(remote.body), remote.status) } } });
     }
+    if (input.snapshot.providerKey === "minimax") {
+      let parsed: { input_sensitive?: boolean; output_sensitive?: boolean; base_resp?: { status_code?: unknown }; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } } | undefined;
+      try { parsed = JSON.parse(remote.body); } catch { /* Ordinary malformed-response handling below. */ }
+      const code = String(parsed?.base_resp?.status_code ?? "0");
+      if (parsed?.input_sensitive === true || parsed?.output_sensitive === true) throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, usage: { inputTokens: number(parsed?.usage?.prompt_tokens), outputTokens: number(parsed?.usage?.completion_tokens), extra: { minimaxDiagnostic: { httpStatus: remote.status, businessCode: code, inputSensitive: parsed.input_sensitive === true, outputSensitive: parsed.output_sensitive === true } } } });
+      if (/^[0-9]{1,6}$/.test(code) && code !== "0") {
+        const mapped = code === "1004" || code === "2049" ? "AUTHENTICATION_FAILED" : code === "1008" || code === "2053" ? "QUOTA_EXCEEDED" : code === "1026" || code === "1027" ? "CONTENT_REJECTED" : code === "2022" ? "MODEL_NOT_FOUND" : code === "1001" ? "TIMEOUT" : code === "1002" ? "RATE_LIMITED" : "INVALID_PROVIDER_REQUEST";
+        throw new ProviderAdapterFailure(mapped, { retryable: mapped === "TIMEOUT" || mapped === "RATE_LIMITED", usage: { inputTokens: number(parsed?.usage?.prompt_tokens), outputTokens: number(parsed?.usage?.completion_tokens), extra: { minimaxDiagnostic: { httpStatus: remote.status, businessCode: code, role: code === "1026" ? "user" : code === "1027" ? "assistant" : "UNKNOWN" } } } });
+      }
+    }
     failureForStatus(remote);
     const json = parseJson(remote);
     const choice = Array.isArray(json.choices) ? json.choices[0] as Record<string, unknown> | undefined : undefined;
@@ -54,7 +64,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       if (!message || typeof message.content !== "string") throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
       return response(message.content, typeof json.model === "string" ? json.model : undefined, finish(choice?.finish_reason), text, usage, requestId);
     } catch (error) {
-      if (!boundedVision && !(input.snapshot.providerKey === "zhipu" && mode === "JSON_MODE")) throw error;
+      if (!boundedVision && !(["zhipu", "minimax"].includes(input.snapshot.providerKey) && mode === "JSON_MODE")) throw error;
       // A billed 200 response can still be unusable JSON. Preserve reported
       // usage and non-content diagnostics; never copy page/model prose or
       // reasoning into logs or turn a malformed response into a judgement.

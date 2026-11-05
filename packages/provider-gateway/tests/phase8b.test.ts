@@ -81,3 +81,23 @@ describe("Phase 8B real text provider adapters", () => {
   it.each([["openai", "OPENAI_RESPONSES", OpenAIResponsesAdapter], ["deepseek", "OPENAI_COMPATIBLE", OpenAICompatibleAdapter], ["qwen", "OPENAI_COMPATIBLE", OpenAICompatibleAdapter], ["minimax", "OPENAI_COMPATIBLE", OpenAICompatibleAdapter], ["anthropic", "ANTHROPIC_COMPATIBLE", AnthropicCompatibleAdapter], ["gemini", "GEMINI_NATIVE", GeminiNativeAdapter]] as const)("normalizes retryable failures once for %s", async (provider, protocol, Adapter) => { const wire = new DeterministicProviderHttpTransport(() => ({ status: 429, headers: { "retry-after": "999999", "x-request-id": "r".repeat(300) }, body: JSON.stringify({ error: { type: "rate_limit_error", message: "hostile" } }) })); await expect(new Adapter(wire).execute(input(provider, protocol))).rejects.toMatchObject({ code: "RATE_LIMITED", retryAfterMs: 86_400_000, remoteRequestId: undefined }); expect(wire.calls).toHaveLength(1); });
   it("keeps absent usage and request IDs undefined", async () => { const wire = transport({ choices: [{ finish_reason: "stop", message: { content: '{"answer":"ok"}' } }] }); wire.execute = async request => { wire.calls.push(request); return { status: 200, headers: {}, body: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"answer":"ok"}' } }] }) }; }; const result = await new OpenAICompatibleAdapter(wire).execute(input("deepseek", "OPENAI_COMPATIBLE")); expect(result.usage).toBeUndefined(); expect(result.remoteRequestId).toBeUndefined(); });
 });
+
+it("accepts only the exact official MiniMax China endpoint",async()=>{
+ const wire=transport({choices:[{message:{content:'{"answer":"ok"}'},finish_reason:"stop"}]});const base=input("minimax","OPENAI_COMPATIBLE","https://api.minimax.cn/v1/text/chatcompletion_v2");
+ await new OpenAICompatibleAdapter(wire).execute(base);expect(wire.calls[0]!.url).toBe("https://api.minimax.cn/v1/text/chatcompletion_v2");
+ await expect(new OpenAICompatibleAdapter(wire).execute({...base,snapshot:{...base.snapshot,endpoint:"https://api.minimax.cn.evil.test/v1/text/chatcompletion_v2"}})).rejects.toMatchObject({code:"NETWORK_POLICY_REJECTED"});expect(wire.calls).toHaveLength(1);
+});
+it.each([[1004,"AUTHENTICATION_FAILED"],[1008,"QUOTA_EXCEEDED"],[1026,"CONTENT_REJECTED"],[1027,"CONTENT_REJECTED"],[2022,"MODEL_NOT_FOUND"],[1001,"TIMEOUT"],[1002,"RATE_LIMITED"]])("classifies MiniMax business error %s without storing supplier prose",async(code,expected)=>{
+ const wire=transport({base_resp:{status_code:code,status_msg:"PRIVATE_KEY_AND_SOURCE"},usage:{prompt_tokens:3,completion_tokens:2}});
+ await expect(new OpenAICompatibleAdapter(wire).execute(input("minimax","OPENAI_COMPATIBLE"))).rejects.toMatchObject({code:expected,usage:{inputTokens:3,outputTokens:2,extra:{minimaxDiagnostic:{businessCode:String(code)}}}});expect(wire.calls).toHaveLength(1);
+});
+
+it.each(["input_sensitive","output_sensitive"])("rejects MiniMax %s even if base_resp is zero",async field=>{
+ const wire=transport({base_resp:{status_code:0},[field]:true,choices:[{message:{content:'{"answer":"untrusted"}'},finish_reason:"stop"}]});await expect(new OpenAICompatibleAdapter(wire).execute(input("minimax","OPENAI_COMPATIBLE"))).rejects.toMatchObject({code:"CONTENT_REJECTED",retryable:false});expect(wire.calls).toHaveLength(1);
+});
+
+it("retains MiniMax token usage and safe diagnostics when the JSON response is truncated",async()=>{
+ const wire=transport({choices:[{finish_reason:"length",message:{content:'{"summary":"PRIVATE',reasoning_content:"PRIVATE_REASONING"}}],usage:{prompt_tokens:1517,completion_tokens:4000}});const base=input("minimax","OPENAI_COMPATIBLE");
+ const request={...base.request,text:{...base.request.text!,structuredOutput:{mode:"JSON_MODE"as const}}};
+ await expect(new OpenAICompatibleAdapter(wire).execute({...base,request})).rejects.toMatchObject({code:"INVALID_PROVIDER_RESPONSE",retryable:false,usage:{inputTokens:1517,outputTokens:4000,extra:{textStructuredResponse:{httpStatus:200,finishReason:"LENGTH"}}}});expect(wire.calls).toHaveLength(1);
+});

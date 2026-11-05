@@ -749,6 +749,7 @@ model ProviderInvocationAttempt {
 }
 
 model ProviderEmbeddingResult {
+  revisionMemoryEmbedding BookRevisionMemoryEmbedding?
   id                  String                    @id @default(cuid())
   workspaceId         String
   invocationId        String                    @unique
@@ -1639,6 +1640,8 @@ model BookAnalysisRun {
   artifacts                AnalysisArtifact[]
   reductionResults         AnalysisReductionResult[]
   memoryItems              BookMemoryItem[]
+  revisions                BookIntelligenceRevision[]
+  revisionPublications     BookRevisionPublication[]
   currentMarkers           CurrentBookIntelligence[] @relation("CurrentIntelligenceRun")
   podcastGenerationSources PodcastGenerationSource[]
   bootstraps               BookAnalysisBootstrap[]
@@ -1729,6 +1732,7 @@ model AnalysisReductionResult {
 }
 
 model BookMemoryItem {
+  revisionEmbeddings    BookRevisionMemoryEmbedding[]
   id                    String                      @id @default(cuid())
   workspaceId           String
   sourceDocumentId      String
@@ -1820,6 +1824,8 @@ model ThinkingSession {
   id           String                   @id @default(cuid())
   workspaceId  String
   userId       String
+  bookPublicationId String?
+  bookPublication BookRevisionPublication? @relation(fields: [bookPublicationId], references: [id], onDelete: Restrict, map: "ThinkingSession_book_publication_fkey")
   memoryItemId String
   status       ThinkingSessionStatus    @default(ACTIVE)
   createdAt    DateTime                 @default(now())
@@ -1865,6 +1871,8 @@ model TeachBackAttempt {
   owner        WorkspaceMember        @relation(fields: [workspaceId, userId], references: [workspaceId, userId], onDelete: Cascade)
   memoryItem   BookMemoryItem         @relation(fields: [memoryItemId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   assessment   TeachBackAssessment?
+  bookPublicationId String?
+  bookPublication BookRevisionPublication? @relation(fields: [bookPublicationId], references: [id], onDelete: Restrict, map: "TeachBackAttempt_book_publication_fkey")
 
   @@unique([id, workspaceId])
   @@index([workspaceId, userId, createdAt])
@@ -2150,6 +2158,8 @@ model PodcastGenerationSource {
   extractionId           String
   chunkSetId             String
   analysisRunId          String
+  bookPublicationId String?
+  bookPublication BookRevisionPublication? @relation(fields: [bookPublicationId, analysisRunId], references: [id, analysisRunId], onDelete: Restrict, map: "PodcastGenerationSource_book_publication_fkey")
   createdAt              DateTime                    @default(now())
   generationRun          PodcastGenerationRun        @relation(fields: [podcastGenerationRunId, workspaceId, episodeId], references: [id, workspaceId, episodeId], onDelete: Cascade)
   sourceDocument         SourceDocument              @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
@@ -2890,6 +2900,8 @@ model ShortVideoGenerationSource {
   extractionId              String
   chunkSetId                String
   analysisRunId             String
+  bookPublicationId String?
+  bookPublication BookRevisionPublication? @relation(fields: [bookPublicationId, analysisRunId], references: [id, analysisRunId], onDelete: Restrict, map: "ShortVideoGenerationSource_book_publication_fkey")
   createdAt                 DateTime                      @default(now())
   run                       ShortVideoGenerationRun       @relation(fields: [shortVideoGenerationRunId, workspaceId, shortVideoProjectId], references: [id, workspaceId, shortVideoProjectId], onDelete: Cascade)
   sourceDocument            SourceDocument                @relation(fields: [sourceDocumentId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
@@ -3239,4 +3251,88 @@ model OcrModelReviewEvent {
   receipt OcrPageExecution @relation(fields:[receiptId],references:[id],onDelete:Cascade,onUpdate:NoAction)
   invocation ProviderInvocation @relation(fields:[invocationId,workspaceId],references:[id,workspaceId],onDelete:Restrict,onUpdate:NoAction)
   @@index([workspaceId,sourceDocumentId,ingestionRunId,physicalPageIndex],map:"OcrModelReviewEvent_scope_page_idx")
+}
+
+/// Immutable editorial patch bound to a completed AI analysis lineage.
+model BookIntelligenceRevision {
+  id               String   @id @default(cuid())
+  workspaceId      String
+  sourceDocumentId String
+  extractionId     String
+  chunkSetId       String
+  analysisRunId    String
+  createdByUserId  String
+  originalHash     String
+  revisionHash     String
+  patch            Json
+  createdAt        DateTime @default(now())
+  analysisRun      BookAnalysisRun @relation(fields: [analysisRunId, workspaceId, sourceDocumentId, extractionId, chunkSetId], references: [id, workspaceId, sourceDocumentId, extractionId, chunkSetId], onDelete: Restrict, map: "BookRevision_run_lineage_fkey")
+  reviews          BookIntelligenceRevisionReview[]
+  publications     BookRevisionPublication[]
+  embeddings       BookRevisionMemoryEmbedding[]
+
+  @@unique([id, analysisRunId])
+  @@unique([analysisRunId, revisionHash])
+  @@index([workspaceId, sourceDocumentId, createdAt], map: "BookRevision_workspace_document_created_idx")
+}
+
+model BookRevisionMemoryEmbedding {
+  revisionId            String
+  memoryItemId          String
+  analysisRunId         String
+  workspaceId           String
+  extractionId          String
+  invocationId          String
+  inputHash             String
+  embeddingIdentityHash String
+  dimensions            Int
+  vector                Json
+  createdAt             DateTime @default(now())
+  revision              BookIntelligenceRevision @relation(fields: [revisionId, analysisRunId], references: [id, analysisRunId], onDelete: Restrict, map: "BookRevisionEmbedding_revision_fkey")
+  memoryItem            BookMemoryItem @relation(fields: [memoryItemId, analysisRunId, workspaceId, extractionId], references: [id, analysisRunId, workspaceId, extractionId], onDelete: Restrict, map: "BookRevisionEmbedding_memory_fkey")
+  receipt               ProviderEmbeddingResult @relation(fields: [invocationId, workspaceId], references: [invocationId, workspaceId], onDelete: Restrict, map: "BookRevisionEmbedding_receipt_fkey")
+
+  @@id([revisionId, memoryItemId])
+  @@unique([invocationId, workspaceId], map: "BookRevisionEmbedding_receipt_key")
+  @@index([memoryItemId, analysisRunId, workspaceId, extractionId], map: "BookRevisionEmbedding_memory_idx")
+}
+
+/// Append-only review evidence, scoped to the precise revision digest.
+model BookIntelligenceRevisionReview {
+  id               String   @id @default(cuid())
+  revisionId       String
+  reviewerUserId   String
+  revisionHash     String
+  reviewHash       String
+  decision         Json
+  vectorReady      Boolean
+  createdAt        DateTime @default(now())
+  revision         BookIntelligenceRevision @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+
+  @@unique([revisionId, reviewHash])
+}
+
+/// Append-only publication journal. The largest sequence is the active revision.
+model BookRevisionPublication {
+  id              String   @id @default(cuid())
+  analysisRunId   String
+  revisionId      String?
+  sequence        Int
+  requestId       String
+  requestHash     String
+  actorUserId     String
+  reviewHash      String?
+  action          String
+  previousId      String?
+  createdAt       DateTime @default(now())
+  analysisRun     BookAnalysisRun @relation(fields: [analysisRunId], references: [id], onDelete: Restrict)
+  revision        BookIntelligenceRevision? @relation(fields: [revisionId, analysisRunId], references: [id, analysisRunId], onDelete: Restrict, map: "BookRevisionPublication_revision_fkey")
+
+  thinkingSessions ThinkingSession[]
+  teachBackAttempts TeachBackAttempt[]
+  podcastSources PodcastGenerationSource[]
+  shortVideoSources ShortVideoGenerationSource[]
+  @@unique([id, analysisRunId])
+  @@unique([analysisRunId, sequence])
+  @@unique([analysisRunId, requestId])
 }

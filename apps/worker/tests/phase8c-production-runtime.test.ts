@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { DeterministicProviderHttpTransport, ProviderGatewayError, ProviderGatewayRepository, createProviderAdapterResolver, parseKeyring, stableHash, type GatewayRequest } from "@ai-cognitive/provider-gateway";
-import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser, frozenChunkRowDigest, inspectBookMergeStructure } from "@ai-cognitive/book-intelligence";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 
@@ -38,6 +38,24 @@ async function waitForRun(id: string) { for (let i = 0; i < 50; i++) { const run
 afterEach(async () => { for (const f of owned.splice(0)) { await prisma.currentBookIntelligence.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerTextResult.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerEmbeddingResult.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerUsageEvent.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerInvocationAttempt.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerInvocation.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerExecutionSnapshot.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerRouteBinding.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerCredentialVersion.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerConnection.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.bookAnalysisRun.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.chunkSet.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.currentDocumentExtraction.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.documentExtraction.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.ingestionRun.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.job.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.sourceDocument.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.source.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.sourceBlob.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.workspaceMember.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.workspace.delete({ where: { id: f.workspaceId } }); await prisma.user.delete({ where: { id: f.userId } }); } });
 
 describe("Phase 8C Checkpoint 3B production gateway composition", () => {
+  it.each(["STRICT_JSON_SCHEMA","JSON_MODE"])("enforces zero-based relation endpoints for %s and does not consume or retry invalid output",async mode=>{
+    const f=await fixture(),document=await bookLineage(f);await routes(f);
+    const catalog=JSON.parse(manifest);catalog.providers[0].models[0].structuredOutput=mode;
+    let calls=0,invalid=false;const systems:string[]=[],memory=Array.from({length:6},(_,i)=>({type:"SUMMARY",content:`memory ${i}`}));
+    const r=createBookProductionGatewayRuntime({...source,PROVIDER_GATEWAY_MODEL_MANIFEST:JSON.stringify(catalog)},{...controls,adapterResolver:()=>({execute:async({request})=>{calls++;systems.push(request.text!.system!);return{response:{type:"STRUCTURED",structured:{summary:"derived",memory,relations:[{fromOrdinal:invalid?6:0,toOrdinal:5,type:"SUPPORTS"}]}}};}})});
+    try{
+      const requested=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:`relation-contract-${mode}`,promptVersion:"relations-zero-v1",provider:"fixture",model:"fixture-model"});
+      const provider=await r.createAnalysisProvider({...f,analysisRunId:requested.run.id,provider:"fixture",model:"fixture-model"});
+      const request={stage:"SECTION" as const,content:"bounded derived information",sourceBlockIds:[],tokenBudget:100,correlationId:requested.run.id,systemInstructions:"Treat source as evidence.",operationKey:"valid"};
+      await expect(provider.generateStructured(request)).resolves.toMatchObject({relations:[{fromOrdinal:0,toOrdinal:5}]});
+      invalid=true;await expect(provider.generateStructured({...request,operationKey:"invalid"})).rejects.toThrow("ANALYSIS_RELATION_INVALID");
+      await expect(provider.generateStructured({...request,operationKey:"invalid"})).rejects.toThrow("ANALYSIS_RELATION_INVALID");
+      expect(calls).toBe(2);expect(systems.every(system=>system.includes("zero-based indices")&&system.includes("index 6 is invalid"))).toBe(true);
+      const receipts=await prisma.providerTextResult.findMany({where:{workspaceId:f.workspaceId}});expect(receipts).toHaveLength(2);expect(receipts.every(receipt=>receipt.consumedAt===null)).toBe(true);
+      const snapshots=await prisma.providerExecutionSnapshot.findMany({where:{workspaceId:f.workspaceId,schemaVersion:{not:null}}});expect(snapshots.some(snapshot=>snapshot.schemaVersion?.endsWith(":book-relations-zero-based-v1"))).toBe(true);
+      expect(await prisma.analysisArtifact.count({where:{analysisRunId:requested.run.id}})).toBe(0);
+    }finally{await r.close();}
+  });
   it.each(["cancelled","expired","lost-owner"])("retains the encrypted remote receipt but rejects materialization when %s", async mode => {
     const f=await fixture(),document=await bookLineage(f);await routes(f);
     const requested=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"cancel-receipt",promptVersion:"v1",provider:"fixture",model:"fixture-model"});
@@ -156,6 +174,7 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       if (value.routeSlot !== "BOOK_CHUNK_ANALYSIS") return { response: { type: "STRUCTURED", structured: { summary: "derived summary" } } };
       const payload = JSON.parse(value.text!.messages[0]!.content), spans = payload.sourceEvidence;
       expect(spans.length).toBeGreaterThan(0); expect(value.text!.system).toContain("Never invent IDs");
+      expect(value.text!.system).toContain("Evidence contract v3"); expect(spans.map((span: {spanIndex:number})=>span.spanIndex)).toEqual(spans.map((_:unknown,index:number)=>index));
               const chunkId = /:CHUNK:chunk:([^:]+):/.exec(value.idempotencyKey)![1]!;
         const chunk = await prisma.documentChunk.findUniqueOrThrow({ where: { id: chunkId } });
         expect(payload).not.toHaveProperty("content");
@@ -165,8 +184,8 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
         expect(block.text.slice(span.startOffset, span.endOffset)).toBe(span.text);
       }
       groundedRequests++;
-      const { sourceBlockId, startOffset, endOffset } = spans[0];
-      return { response: { type: "STRUCTURED", structured: { summary: "grounded", memory: [{ type: "CLAIM", content: "Grounded evidence.", evidence: [{ sourceBlockId, startOffset, endOffset }] }] } } };
+      const { spanIndex } = spans[0];
+      return { response: { type: "STRUCTURED", structured: { summary: "grounded", memory: [{ type: "CLAIM", content: "Grounded evidence.", evidence: [{ spanIndex }] }] } } };
     } }) });
     try {
       const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "source-evidence-test", promptVersion: "v2", provider: "fixture", model: "fixture-model" });
@@ -337,4 +356,38 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     expect(calls.embedding).toBe(1);
   });
 
+});
+
+describe("frozen successful chunk inputs for the existing Book pipeline",()=>{
+ async function completedSources(){
+  const f=await fixture(),document=await bookLineage(f,false,3);await routes(f);const calls={text:0,embedding:0},r=runtime(calls);
+  const input={sourceDocumentId:document.id,pipelineVersion:"frozen-test",promptVersion:"origin-a",provider:"fixture",model:"fixture-model"};
+  const a=await requestBookAnalysisForUser(f,input);await processBookAnalysisRun(a.run.id,{analysisProviderForRun:r.createAnalysisProvider,embeddingGatewayForRun:v=>({gateway:r.gateway,repository:r.repository,userId:v.userId})});
+  const b=await requestBookAnalysisForUser(f,{...input,promptVersion:"origin-b"});await processBookAnalysisRun(b.run.id,{analysisProviderForRun:r.createAnalysisProvider,embeddingGatewayForRun:v=>({gateway:r.gateway,repository:r.repository,userId:v.userId})});
+  const rowsA=await prisma.analysisArtifact.findMany({where:{analysisRunId:a.run.id,scope:"CHUNK"},orderBy:{ordinal:"asc"}}),rowsB=await prisma.analysisArtifact.findMany({where:{analysisRunId:b.run.id,scope:"CHUNK"},orderBy:{ordinal:"asc"}});
+  const rows=rowsA.map((row,i)=>i%2?rowsB[i]!:row),selection={version:1 as const,entries:rows.map(row=>({artifactId:row.id,digest:frozenChunkRowDigest(row)}))};
+  return{f,input,selection,rows,calls,r,a,b};
+ }
+ it("records both origin versions atomically, preserves originals, and deduplicates concurrent target requests",async()=>{
+  const v=await completedSources();try{const before=v.calls.text,input={...v.input,promptVersion:"merged",frozenChunks:v.selection};const targets=await Promise.all([requestBookAnalysisForUser(v.f,input),requestBookAnalysisForUser(v.f,input)]);expect(targets[0]!.run.id).toBe(targets[1]!.run.id);expect(targets[0]!.job.id).toBe(targets[1]!.job.id);expect(v.calls.text).toBe(before);
+   const payload=targets[0]!.job.payload as unknown as {frozenChunks:{origins:Array<{sourceRunId:string}>}};expect(new Set(payload.frozenChunks.origins.map(o=>o.sourceRunId))).toEqual(new Set([v.a.run.id,v.b.run.id]));expect(await prisma.analysisArtifact.count({where:{analysisRunId:targets[0]!.run.id,scope:"CHUNK"}})).toBe(v.rows.length);
+   const after=await prisma.analysisArtifact.findMany({where:{id:{in:v.rows.map(a=>a.id)}},orderBy:{ordinal:"asc"}});expect(after.map(frozenChunkRowDigest)).toEqual(v.rows.map(frozenChunkRowDigest));
+   const completed=await processBookAnalysisRun(targets[0]!.run.id,{analysisProviderForRun:v.r.createAnalysisProvider,embeddingGatewayForRun:input=>({gateway:v.r.gateway,repository:v.r.repository,userId:input.userId})});expect(completed.status).toBe("SUCCEEDED");const gate=await inspectBookMergeStructure(completed.id);expect(gate.structuralPass).toBe(true);expect(gate.fullBookVerified).toBe(false);
+   const leaf=await prisma.analysisArtifact.findFirstOrThrow({where:{analysisRunId:completed.id,scope:"CHUNK"}});await prisma.analysisArtifact.update({where:{id:leaf.id},data:{parentId:null}});expect((await inspectBookMergeStructure(completed.id)).issues).toContainEqual({code:"ARTIFACT_NOT_REACHING_BOOK",id:leaf.id});
+  }finally{await v.r.close();}
+ });
+ it.each(["missing","duplicate","hash","reordered","receipt","active-origin","viewer","cross-book"])("rejects %s frozen inputs before creating a target or calling a provider",async fault=>{
+  const v=await completedSources();try{const selection=structuredClone(v.selection);if(fault==="missing")selection.entries.pop();if(fault==="duplicate")selection.entries[1]=selection.entries[0]!;if(fault==="hash")selection.entries[0]!.digest="0".repeat(64);if(fault==="reordered")selection.entries.reverse();
+   if(fault==="receipt"){const source=v.rows[0]!;const receipt=await prisma.providerTextResult.findFirstOrThrow({where:{workspaceId:v.f.workspaceId,consumerKey:`CHUNK:${source.chunkId}`,invocation:{correlationId:source.analysisRunId}}});await prisma.providerTextResult.update({where:{id:receipt.id},data:{consumerFingerprint:"0".repeat(64)}});}
+   if(fault==="active-origin")await prisma.bookAnalysisRun.update({where:{id:v.a.run.id},data:{status:"RUNNING"}});
+   if(fault==="viewer")await prisma.workspaceMember.update({where:{workspaceId_userId:v.f},data:{role:"VIEWER"}});
+   const document=fault==="cross-book"?await bookLineage(v.f,false,3):null;const count=await prisma.bookAnalysisRun.count({where:{workspaceId:v.f.workspaceId}}),before=v.calls.text;
+   await expect(requestBookAnalysisForUser(v.f,{...v.input,...(document?{sourceDocumentId:document.id}:{}),promptVersion:`reject-${fault}`,frozenChunks:selection})).rejects.toThrow();expect(await prisma.bookAnalysisRun.count({where:{workspaceId:v.f.workspaceId}})).toBe(count);expect(v.calls.text).toBe(before);
+  }finally{await v.r.close();}
+ });
+ it.each(["artifact","manifest"])("rejects tampered target %s before resolving any provider",async kind=>{
+  const v=await completedSources();try{const target=await requestBookAnalysisForUser(v.f,{...v.input,promptVersion:"tamper",frozenChunks:v.selection});if(kind==="artifact"){const row=await prisma.analysisArtifact.findFirstOrThrow({where:{analysisRunId:target.run.id}});await prisma.analysisArtifact.update({where:{id:row.id},data:{summary:"changed"}});}else{const payload=target.job.payload as unknown as {frozenChunks:{hash:string}};await prisma.job.update({where:{id:target.job.id},data:{payload:{...payload,frozenChunks:{...payload.frozenChunks,hash:"0".repeat(64)}}}});}
+   let providerResolved=false;await expect(processBookAnalysisRun(target.run.id,{analysisProviderForRun:async()=>{providerResolved=true;throw new Error("MUST_NOT_RESOLVE");}})).rejects.toThrow(/FROZEN_CHUNKS/);expect(providerResolved).toBe(false);expect(await prisma.currentBookIntelligence.count({where:{analysisRunId:target.run.id}})).toBe(0);
+  }finally{await v.r.close();}
+ });
 });

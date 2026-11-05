@@ -7,7 +7,7 @@ import { ProductIdentityPanel } from "./product-identity-panel";
 import { SourceProcessing } from "./source-processing";
 import { SourceTextReader, type SourceTextPreview } from "./source-text-reader";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
-import { cognitionTypeLabels } from "@/lib/cognitions";
+import { cognitionTypeLabels } from "@/lib/cognition-types";
 
 const categoryNames: Record<string, string> = cognitionTypeLabels;
 
@@ -63,11 +63,12 @@ type Props = {
     processingSince?: string | null;
   };
   memories: MemoryItemData[];
+  bookSummary?: string | null;
   structureNodes: StructureNodeData[];
   textPreview?: SourceTextPreview | null;
 };
 
-export function BookDetailView({ item, memories, structureNodes, textPreview }: Props) {
+export function BookDetailView({ item, memories, structureNodes, textPreview, bookSummary }: Props) {
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
 
   // Flatten evidence items from memories for right pane display
@@ -161,6 +162,7 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
         )}
 
         {/* Memory Items Cards - Fully Keyboard Accessible Buttons */}
+        {bookSummary && <section aria-label="全书摘要"><h2 className="font-serif">全书摘要</h2><p>{bookSummary}</p></section>}
         {memories.map((memory) => {
           const firstEvidence = memory.evidence[0];
           const linkedNode = firstEvidence ? structureNodes.find((n) => n.id === firstEvidence.sourceBlock.structureNodeId) : null;
