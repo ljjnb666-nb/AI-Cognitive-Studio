@@ -32,7 +32,7 @@ export async function inspectBookMergeStructure(analysisRunId: string, actor: {w
         spans.every(span=>span.extractionId===run.extractionId && span.sourceBlock.extractionId===run.extractionId &&
           Number.isSafeInteger(span.startOffset) && Number.isSafeInteger(span.endOffset) &&
           span.startOffset>=0 && span.endOffset>span.startOffset && span.endOffset<=span.sourceBlock.text.length) &&
-        spans.map(span=>span.sourceBlock.text.slice(span.startOffset,span.endOffset)).join("\\n\\n")===chunk.content;
+        spans.map(span=>span.sourceBlock.text.slice(span.startOffset,span.endOffset)).join("\n\n")===chunk.content;
       if(!sourceValid)issues.push({code:"CHUNK_SOURCE_INVALID",id:chunk.id});
     }
     if(leaves.length!==chunks.length||leaves.some((a,i)=>a.ordinal!==chunks[i]?.ordinal||a.chunkId!==chunks[i]?.id))issues.push({code:"CHUNK_COVERAGE_INVALID"});
