@@ -105,22 +105,23 @@ class Analysis implements AnalysisProvider {
               ]
             : undefined,
       };
-    const block = await prisma.sourceBlock.findFirstOrThrow({
-      where: { id: { in: request.sourceBlockIds } },
-    });
+    // The synthesized chunk can contain slices from several original blocks.
+    // Use one actual sent slice: fabricated whole-chunk offsets are not evidence.
+    const sourceSlice = request.sourceSlices?.find((slice: { text: string }) => slice.text.length > 0);
+    if (!sourceSlice) throw new Error("PHASE4_E2E_SOURCE_SLICE_MISSING");
     const content = request.content;
     return {
       summary: content.slice(0, 80),
       memory: [
         {
           type: "QUOTE",
-          content,
+          content: sourceSlice.text,
           evidence: [
             {
-              sourceBlockId: block.id,
-              startOffset: block.text.indexOf(content),
-              endOffset: block.text.indexOf(content) + content.length,
-              quoteText: content,
+              sourceBlockId: sourceSlice.sourceBlockId,
+              startOffset: sourceSlice.startOffset,
+              endOffset: sourceSlice.endOffset,
+              quoteText: sourceSlice.text,
             },
           ],
         },
