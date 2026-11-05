@@ -20,7 +20,7 @@ prepareBookRevisionModelReview 从真实 Run 读取分析模型，检查独立�
 
 消费回执仍核验原分析 provider/model、成功调用、精确请求指纹、证据引用、模型响应身份及消费记录。新路由身份加入路由槽，避免与旧请求混淆。已有 BOOK_SYNTHESIS 审校回执按原槽重建原始身份与指纹，保留旧发布记录的读取和核验能力。
 
-新审校请求将系统指令与完整证据的 UTF-8 字节数加框架预留作为保守输入估算。该值不是供应商 tokenizer 的精确计数。新槽输入预算最多 36000，输出最多 3800，最多一次尝试；旧槽预算和身份保持原样。
+新审校请求将系统指令与完整证据的 UTF-8 字节数加框架预留作为保守输入估算。该值不是供应商 tokenizer 的精确计数。新槽输入预算最多 36000，输出最多 6144，最多一次尝试；旧槽预算和身份保持原样。由于 M3 的思考 token 也会计入输出预算，新独立审校槽必须强制发送 thinking.disabled，即使旧工作区绑定遗漏 minimaxM3JsonMode 也不能回退到默认思考；支持 OpenAI /chat/completions 的端点使用 max_completion_tokens，原生 /text/chatcompletion_v2 保留 max_tokens。HTTP 200 + finish_reason=length 的结果一律不可作为成功审校回执，保留用量诊断并禁止自动重复付费尝试。此前已花费但为空的回执不予重放，需要重新获得单次调用授权并使用新的 requestId。
 
 ## 本地验证
 
