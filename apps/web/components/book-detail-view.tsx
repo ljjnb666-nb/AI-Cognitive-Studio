@@ -6,7 +6,7 @@ import { StatusBadge } from "./status-badge";
 import { ProductIdentityPanel } from "./product-identity-panel";
 import { SourceProcessing } from "./source-processing";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
-import { cognitionTypeLabels } from "@/lib/cognitions";
+import { cognitionTypeLabels } from "@/lib/cognition-types";
 
 const categoryNames: Record<string, string> = cognitionTypeLabels;
 
@@ -61,10 +61,11 @@ type Props = {
     processingSince?: string | null;
   };
   memories: MemoryItemData[];
+  bookSummary?: string | null;
   structureNodes: StructureNodeData[];
 };
 
-export function BookDetailView({ item, memories, structureNodes }: Props) {
+export function BookDetailView({ item, memories, structureNodes, bookSummary }: Props) {
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
 
   // Flatten evidence items from memories for right pane display
@@ -146,6 +147,8 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
         {item.mediaType === "application/epub+zip" && (
           <ProductIdentityPanel key={item.id} sourceDocumentId={item.id} sourceFileName={item.displayName} />
         )}
+
+        {bookSummary && <section aria-label="全书摘要"><h2 className="font-serif">全书摘要</h2><p>{bookSummary}</p></section>}
 
         {/* Memory Items Cards - Fully Keyboard Accessible Buttons */}
         {memories.map((memory) => {
