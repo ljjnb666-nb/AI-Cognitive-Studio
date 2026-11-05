@@ -16,6 +16,15 @@ export function estimateAnalysisTokens(text: string): number { let cjkOrEmoji = 
 
 const memoryTypes = new Set(["SUMMARY", "CONCEPT", "ARGUMENT", "CLAIM", "EXAMPLE", "STORY", "QUOTE", "PERSON", "QUESTION", "COUNTERPOINT"]);
 const relationTypes = new Set(["EXPLAINS", "SUPPORTS", "OPPOSES", "ASSOCIATED_WITH", "DEVELOPS"]);
+export const bookAnalysisRelationsContractVersion = "book-relations-zero-based-v1";
+export const bookAnalysisRelationsInstruction = "Relations contract: fromOrdinal and toOrdinal are zero-based indices into the memory array in THIS response only, never source, chunk or input-memory ordinals. For N memory items, both indices must be integers from 0 through N-1. For 6 items valid indices are 0,1,2,3,4,5 and 6 is invalid. If memory is absent or empty, omit relations or return []. Do not invent a relation when its endpoints are uncertain.";
+/** Enforce relation indices only for newly generated responses; historical artifacts remain unchanged. */
+export function assertAnalysisRelationsWithinMemory(response: Pick<AnalysisResponse, "memory" | "relations">): void {
+  const count = response.memory?.length ?? 0;
+  for (const relation of response.relations ?? []) {
+    if (!relation || !Number.isSafeInteger(relation.fromOrdinal) || !Number.isSafeInteger(relation.toOrdinal) || relation.fromOrdinal < 0 || relation.toOrdinal < 0 || relation.fromOrdinal >= count || relation.toOrdinal >= count) throw new Error("ANALYSIS_RELATION_INVALID");
+  }
+}
 export function validateAnalysisResponse(value: unknown): AnalysisResponse {
   if (!value || typeof value !== "object") throw new Error("ANALYSIS_PROVIDER_RESPONSE_INVALID"); const response = value as AnalysisResponse;
   if (typeof response.summary !== "string" || !response.summary.trim() || response.summary.length > 20_000 || (response.memory !== undefined && !Array.isArray(response.memory)) || (response.relations !== undefined && !Array.isArray(response.relations))) throw new Error("ANALYSIS_PROVIDER_RESPONSE_INVALID");
@@ -32,6 +41,7 @@ export async function guardedGenerateStructured(provider: AnalysisProvider, requ
   if (request.sourceSlices && request.sourceSlices.map(slice => slice.text).join("\n\n") !== request.content) throw new Error("ANALYSIS_SOURCE_SLICE_INVALID");
   assertBoundedProviderRequest(request, blocks, limit);
   const response = validateAnalysisResponse(await provider.generateStructured(request));
+  assertAnalysisRelationsWithinMemory(response);
   if (request.stage === "CHUNK" && request.pipelineVersion === "product-v2-evidence") {
     const supported = response.memory?.some(item => item.evidence?.some(evidence => {
       const block = blocks.find(block => block.id === evidence.sourceBlockId);
