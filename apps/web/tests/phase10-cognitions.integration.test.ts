@@ -160,6 +160,15 @@ describe("Phase 10 cognition product read model", () => {
     await reviewBookRevision(actor, revision.id, revision.revisionHash, {
       verdict: "PASS", notes: "Fixture approval", evidenceSha256: "c".repeat(64),
     });
+    // A genuine editorial PASS must not override an invalid source CHUNK.
+    const unchangedChunk = await prisma.documentChunk.findFirstOrThrow({ where: { chunkSetId: base.chunkSet.id } });
+    await prisma.documentChunk.update({ where: { id: unchangedChunk.id }, data: { contentHash: "0".repeat(64) } });
+    try {
+      await expect(publish(actor, command)).rejects.toThrow("BOOK_REVISION_STRUCTURE_REVIEW_REQUIRED");
+      expect(await prisma.bookRevisionPublication.count({ where: { analysisRunId: base.run.id } })).toBe(0);
+    } finally {
+      await prisma.documentChunk.update({ where: { id: unchangedChunk.id }, data: { contentHash: unchangedChunk.contentHash } });
+    }
     await prisma.bookIntelligenceRevision.update({ where: { id: revision.id }, data: {
       patch: { ...patch, summary: { ...patch.summary, text: "Tampered content" } },
     } });
