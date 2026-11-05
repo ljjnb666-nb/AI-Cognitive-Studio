@@ -111,7 +111,7 @@ async function verifiedModelReview(
   const cipher = testCipher();
   const store = new ProviderGatewayRepository(prisma, cipher);
   const connection = await store.createConnection(actor, {
-    providerKey: "deterministic-test", protocol: "TEST", displayName: "phase10 semantic reviewer",
+    providerKey: "deterministic-test", protocol: "TEST", displayName: "phase10 reviewer " + requestId,
     endpoint: "https://semantic-review.fixture.test/v1",
   });
   await store.rotateCredential(actor, connection.id, "phase10-fixture-secret");
