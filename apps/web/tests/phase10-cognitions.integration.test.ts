@@ -401,6 +401,19 @@ describe("Phase 10 cognition product read model", () => {
       verdict: "BLOCKED", notes: "Later independent review", evidenceSha256: "c".repeat(64),
     });
     expect((await readPublishedBookRevision(actor, data.document.id)).revision?.review?.id).toBe(review.id);
+    // Historical release identity remains independently verifiable after the
+    // reviewer leaves. Other authorized workspace members retain read access;
+    // the departed reviewer cannot issue new reads or model review requests.
+    await prisma.workspaceMember.delete({ where: { workspaceId_userId: actor } });
+    try {
+      const viewer = { workspaceId: actor.workspaceId, userId: data.userB.id };
+      expect((await readPublishedBookRevision(viewer, data.document.id)).revision?.review?.id).toBe(review.id);
+      await expect(readPublishedBookRevision(actor, data.document.id)).rejects.toThrow("BOOK_REVISION_FORBIDDEN");
+      await expect(prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, "revoked-review"))
+        .rejects.toThrow("BOOK_REVISION_FORBIDDEN");
+    } finally {
+      await prisma.workspaceMember.create({ data: { ...actor, role: "OWNER" } });
+    }
     expect((await listCognitions(actor)).items.find(row => row.id === item.id)?.content).toBe("Revised cognition");
     expect((await cognitionDetail(actor, item.id))?.evidence).toHaveLength(2);
     const attempt = await prisma.teachBackAttempt.create({ data: {
