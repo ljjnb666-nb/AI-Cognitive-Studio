@@ -41,9 +41,19 @@ class Analysis implements AnalysisProvider {
         ] };
       }
     }
-    const { sourceBlockId, startOffset, endOffset } = slices[0]!;
+    // This fallback is exercised when the usual fixture quote is absent.
+    // Select a non-empty in-slice quote instead of treating an entire chunk as evidence.
+    // Array.from takes Unicode code points, while offsets remain UTF-16 code units.
+    const slice = slices.find((item) => /\S/u.test(item.text));
+    if (!slice) throw new Error("PHASE6_SOURCE_SLICE_HAS_NO_QUOTABLE_TEXT");
+    const relativeOffset = slice.text.search(/\S/u);
+    const quoteText = Array.from(slice.text.slice(relativeOffset)).slice(0, 32).join("");
+    const startOffset = slice.startOffset + relativeOffset;
     return { summary: request.content.slice(0, 120), memory: [{
-      type: "CLAIM", content: "当前分块保留了可追溯的原文证据。", evidence: [{ sourceBlockId, startOffset, endOffset }],
+      type: "QUOTE", content: quoteText, evidence: [{
+        sourceBlockId: slice.sourceBlockId, startOffset,
+        endOffset: startOffset + quoteText.length, quoteText,
+      }],
     }] };
   }
 }
