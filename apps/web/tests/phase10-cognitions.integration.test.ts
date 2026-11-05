@@ -106,7 +106,7 @@ async function sealPublicationBase(
 async function verifiedModelReview(
   actor: { workspaceId: string; userId: string },
   revision: { id: string; revisionHash: string },
-  opts: { verdict?: "PASS" | "BLOCKED"; requestId?: string; corruptCitation?: boolean; legacySnapshot?: boolean; sameModel?: boolean } = {},
+  opts: { verdict?: "PASS" | "BLOCKED"; requestId?: string; corruptCitation?: boolean; legacySnapshot?: boolean; sameModel?: boolean; atomizeSummary?: boolean; unsupportedSummaryClaim?: boolean } = {},
 ) {
   const requestId = opts.requestId ?? randomUUID();
   const reviewerProvider = opts.sameModel ? "fixture" : "deterministic-test";
@@ -130,7 +130,8 @@ async function verifiedModelReview(
   try {
     process.env.PROVIDER_GATEWAY_MODEL_MANIFEST = JSON.stringify({providers:[...builtInProviderCatalog.providers,
       {providerKey:reviewerProvider,displayName:"隔离审校模型",protocol:"TEST",adapterVersion:"phase10-review-v1",models:[capability]}]});
-    prepared = await prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, requestId);
+    prepared = await prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, requestId,
+      opts.atomizeSummary ? { atomizeSummary: true } : undefined);
   } finally {
     if (previousManifest === undefined) delete process.env.PROVIDER_GATEWAY_MODEL_MANIFEST;
     else process.env.PROVIDER_GATEWAY_MODEL_MANIFEST = previousManifest;
@@ -165,7 +166,7 @@ async function verifiedModelReview(
         id: string; evidence: Array<{ sourceBlockId: string; startOffset: number; endOffset: number }>;
       }>;
     };
-    const verdict = opts.verdict ?? "PASS";
+    const verdict = opts.verdict ?? (opts.unsupportedSummaryClaim ? "BLOCKED" : "PASS");
     return { response: {
       type: "STRUCTURED", finishReason: "STOP", providerModel: capability.modelId,
       structured: {
@@ -173,15 +174,19 @@ async function verifiedModelReview(
         evidenceBundleHash: prepared.evidenceBundleHash,
         rubricVersion: body.rubricVersion, verdict,
         notes: verdict === "PASS" ? "Fixture claims checked against provided source" : "Evidence is insufficient",
-        checks: body.claims.map(claim => ({
-          claimId: claim.id, status: verdict === "PASS" ? "SUPPORTED" : "UNSUPPORTED",
-          reason: "Compared against provided excerpt",
-          citations: verdict === "PASS"
-            ? [{
-              sourceBlockId: opts.corruptCitation ? "forged-evidence" : claim.evidence[0]!.sourceBlockId,
-              startOffset: claim.evidence[0]!.startOffset, endOffset: claim.evidence[0]!.endOffset,
-            }] : [],
-        })),
+        checks: body.claims.map(claim => {
+          const supported = opts.unsupportedSummaryClaim
+            ? claim.id !== "summary:002" : verdict === "PASS";
+          return {
+            claimId: claim.id, status: supported ? "SUPPORTED" : "UNSUPPORTED",
+            reason: "Compared against provided excerpt",
+            citations: supported
+              ? [{
+                sourceBlockId: opts.corruptCitation ? "forged-evidence" : claim.evidence[0]!.sourceBlockId,
+                startOffset: claim.evidence[0]!.startOffset, endOffset: claim.evidence[0]!.endOffset,
+              }] : [],
+          };
+        }),
       },
     } };
   } };
@@ -371,6 +376,87 @@ describe("Phase 10 cognition product read model", () => {
     expect(await restarted(actor, rollback)).toMatchObject({ id: rolledBack.id });
     const republished = await restarted(actor, { ...command, expectedPublicationId: rolledBack.id, requestId: "republish" });
     expect(republished).toMatchObject({ previousId: rolledBack.id, sequence: 3 });
+  });
+
+  it("v3 reviews individual summary atoms and rejects a false global PASS without changing v1/v2 receipts", async () => {
+    const data = await fixture();
+    const base = await createRun(data, "atomic-review");
+    await makeCurrent(data, base);
+    const actor = { workspaceId: data.workspace.id, userId: data.userA.id };
+    const span = { sourceBlockId: data.block.id, startOffset: 0, endOffset: 14 };
+    const chunk = await prisma.documentChunk.create({ data: {
+      workspaceId: actor.workspaceId, chunkSetId: base.chunkSet.id,
+      extractionId: data.extraction.id, structureVersion: "test", ordinal: 0,
+      content: data.block.text, contentHash: data.suffix,
+      characterCount: data.block.text.length, tokenEstimate: 10,
+    } });
+    await prisma.chunkSourceSpan.create({ data: {
+      ...span, endOffset: data.block.text.length, chunkId: chunk.id,
+      extractionId: data.extraction.id, ordinal: 0,
+    } });
+    const { revision } = await createBookRevision(actor, base.run.id, {
+      reason: "Atomic summary audit", archiveSha256: "a".repeat(64),
+      summary: { text: "第一条历史事实。第二条未来预测。第三条作者观点。", evidence: [span] },
+      memories: [],
+    });
+    const v2 = await prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, randomUUID());
+    const v3 = await prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, randomUUID(),
+      { atomizeSummary: true });
+    const historicalPacket = JSON.parse(v2.request.text!.messages[0]!.content);
+    const atomicPacket = JSON.parse(v3.request.text!.messages[0]!.content);
+    expect(v2.reviewPipeline).toBe("book-revision-review-v2");
+    expect(historicalPacket.schemaVersion).toBe(1);
+    expect(historicalPacket.claims.map((claim: { id: string }) => claim.id)).toEqual(["summary"]);
+    expect(v3.reviewPipeline).toBe("book-revision-review-v3");
+    expect(v3.request.budget?.maxAttempts).toBe(1);
+    expect(v3.request.budget?.maxOutputTokens).toBe(16384);
+    expect(atomicPacket.schemaVersion).toBe(2);
+    expect(v3.claimIds).toEqual(["summary:001", "summary:002", "summary:003"]);
+    expect(atomicPacket.claims).toHaveLength(3);
+    expect(atomicPacket.sourceExcerpts).toHaveLength(1);
+    expect(atomicPacket.claims.every((claim: { evidence: unknown[] }) => claim.evidence.length === 1)).toBe(true);
+    expect(atomicPacket.sourceExcerpts[0].excerpt).toBe(data.block.text.slice(0,14));
+    // One unsupported projection must invalidate any global PASS, with no
+    // persisted decision; a genuine BLOCKED can be consumed but cannot publish.
+    await expect(verifiedModelReview(actor, revision,
+      { atomizeSummary: true, unsupportedSummaryClaim: true, verdict: "PASS" }))
+      .rejects.toThrow("BOOK_MODEL_REVIEW_VERDICT_INVALID");
+    expect(await prisma.bookIntelligenceRevisionReview.count({ where: { revisionId: revision.id } })).toBe(0);
+    await verifiedModelReview(actor, revision, { atomizeSummary: true, unsupportedSummaryClaim: true });
+    const row = await prisma.bookIntelligenceRevisionReview.findFirstOrThrow({
+      where: { revisionId: revision.id },
+    });
+    const decision = row.decision as { verdict: string; checks: Array<{ claimId: string; status: string }> };
+    expect(decision.verdict).toBe("BLOCKED");
+    expect(decision.checks).toHaveLength(3);
+    expect(decision.checks.find(check => check.claimId === "summary:002")?.status).toBe("UNSUPPORTED");
+  });
+
+  it("v3 fails closed on an unsplittable long summary without blocking v2 historical preparation", async () => {
+    const data = await fixture();
+    const base = await createRun(data, "atomic-unsplittable");
+    await makeCurrent(data, base);
+    const actor = { workspaceId: data.workspace.id, userId: data.userA.id };
+    const span = { sourceBlockId: data.block.id, startOffset: 0, endOffset: 14 };
+    const chunk = await prisma.documentChunk.create({ data: {
+      workspaceId: actor.workspaceId, chunkSetId: base.chunkSet.id,
+      extractionId: data.extraction.id, structureVersion: "test", ordinal: 0,
+      content: data.block.text, contentHash: data.suffix,
+      characterCount: data.block.text.length, tokenEstimate: 10,
+    } });
+    await prisma.chunkSourceSpan.create({ data: {
+      ...span, endOffset: data.block.text.length, chunkId: chunk.id,
+      extractionId: data.extraction.id, ordinal: 0,
+    } });
+    const { revision } = await createBookRevision(actor, base.run.id, {
+      reason: "Reject unsplittable summary", archiveSha256: "a".repeat(64),
+      summary: { text: "未经断句的长段落".repeat(30), evidence: [span] },
+      memories: [],
+    });
+    await expect(prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, randomUUID(),
+      { atomizeSummary: true })).rejects.toThrow("BOOK_MODEL_REVIEW_SUMMARY_NOT_ATOMIC");
+    expect((await prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, randomUUID())).reviewPipeline)
+      .toBe("book-revision-review-v2");
   });
 
   it("rejects invalid model citations and a genuine BLOCKED receipt without publication", async () => {
