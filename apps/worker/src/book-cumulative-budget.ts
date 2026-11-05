@@ -68,10 +68,22 @@ export async function assertBookCumulativeBudget(
     return payload && typeof payload === "object" && !Array.isArray(payload) &&
       "sourceDocumentId" in payload && payload.sourceDocumentId === grant.sourceDocumentId;
   });
-  // Once any continuation envelope exists, old-style unpinned grants for this
-  // document cannot resume and silently spend outside the cumulative ceiling.
+  // A second SourceDocument can represent the exact same uploaded bytes. Until
+  // independently reconciled, do not let a new ID reset gross reservations.
+  // This is workspace-scoped; we intentionally do not reuse cross-document
+  // chunks or infer that their extraction/evidence identities are equivalent.
+  if (all.some(row => {
+    if (row.id === job.id) return false;
+    const payload = row.payload;
+    return payload && typeof payload === "object" && !Array.isArray(payload) &&
+      "sha256" in payload && payload.sha256 === grant.sha256 &&
+      "sourceDocumentId" in payload && payload.sourceDocumentId !== grant.sourceDocumentId;
+  })) return denied();
+  // Even multiple unpinned legacy grants may jointly exceed the whole-book
+  // cap. Require an explicit, complete carry-forward at the second grant;
+  // otherwise old grants could each spend their own independent 5 CNY cap.
   if (!budget) {
-    if (sameBook.some(row => row.id !== job.id && row.payload && typeof row.payload === "object" && !Array.isArray(row.payload) && "cumulativeBudget" in row.payload && row.payload.cumulativeBudget !== undefined)) return denied();
+    if (sameBook.some(row => row.id !== job.id)) return denied();
     return;
   }
   if (sameBook.length !== budget.carryForward.length + 1 ||
