@@ -45,7 +45,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     if (m3Review && mode !== "JSON_MODE") throw new ProviderGatewayError("CAPABILITY_MISMATCH");
     const m3Json = m3 && mode === "JSON_MODE" &&
       (m3Review || input.snapshot.configuration.minimaxM3JsonMode === true);
-    const tokenCap = m3Review
+    // OpenAI-compatible /chat/completions supports max_completion_tokens;
+    // MiniMax's older /text/chatcompletion_v2 endpoint retains max_tokens.
+    // Both count reasoning toward the cap, hence the mandatory nonthinking mode.
+    const tokenCap = m3Review && profile.endpoint.endsWith("/chat/completions")
       ? { max_completion_tokens: text.generation?.maxOutputTokens }
       : { max_tokens: text.generation?.maxOutputTokens };
     const body = { model: input.snapshot.modelId, messages, ...tokenCap, ...(m3Json ? { thinking: { type: "disabled" }, reasoning_split: true } : { temperature: text.generation?.temperature, top_p: text.generation?.topP }), ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
