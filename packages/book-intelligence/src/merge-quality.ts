@@ -1,11 +1,11 @@
-import { prisma } from "@ai-cognitive/db";
+import { Prisma, prisma } from "@ai-cognitive/db";
 import { assertFrozenChunksUnchanged } from "./frozen-chunks.js";
 import { validateQuote } from "./analysis.js";
 import { sha256 } from "./chunking.js";
-/** This gate proves structure/provenance only; it never certifies a Mock's meaning. */
-export async function inspectBookMergeStructure(analysisRunId: string, actor: {workspaceId:string;userId:string}) {
-  return prisma.$transaction(async tx => {
-    await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+/** This gate proves structure/provenance only; it never certifies a Mock's meaning.
+ * For publication, call this helper inside the SAME locked, serializable DB
+ * transaction as the publication decision; never open a nested transaction. */
+export async function inspectBookMergeStructureInTransaction(tx: Prisma.TransactionClient, analysisRunId: string, actor: {workspaceId:string;userId:string}) {
     const run=await tx.bookAnalysisRun.findFirst({where:{id:analysisRunId,workspaceId:actor.workspaceId}});
     const member=await tx.workspaceMember.findUnique({where:{workspaceId_userId:{workspaceId:actor.workspaceId,userId:actor.userId}}});
     if(!run || !member)throw new Error("BOOK_MERGE_AUDIT_ACCESS_DENIED");
@@ -47,5 +47,13 @@ export async function inspectBookMergeStructure(analysisRunId: string, actor: {w
     for(const item of items){if(item.workspaceId!==run.workspaceId||item.sourceDocumentId!==run.sourceDocumentId||item.extractionId!==run.extractionId||!item.sourceArtifactId||!byId.has(item.sourceArtifactId))issues.push({code:"MEMORY_LINEAGE_INVALID",id:item.id});if(["CLAIM","EXAMPLE","STORY","PERSON","QUOTE"].includes(item.type)&&!evidence.some(e=>e.memoryItemId===item.id))issues.push({code:"FACT_MEMORY_WITHOUT_EVIDENCE",id:item.id});}
     for(const e of evidence){const block=blockById.get(e.sourceBlockId),item=itemById.get(e.memoryItemId);if(!block||!item||e.workspaceId!==run.workspaceId||e.extractionId!==run.extractionId||item.sourceDocumentId!==run.sourceDocumentId||e.startOffset<0||e.endOffset<=e.startOffset||e.endOffset>block.text.length){issues.push({code:"MEMORY_EVIDENCE_INVALID",id:e.id});continue;}if(item.type==="QUOTE")try{validateQuote(block,{sourceBlockId:block.id,startOffset:e.startOffset,endOffset:e.endOffset,...(e.quoteText?{quoteText:e.quoteText}:{})});}catch{issues.push({code:"DIRECT_QUOTE_INVALID",id:e.id});}}
     return{analysisRunId,structuralPass:issues.length===0,issues,counts:{chunks:leaves.length,sections:artifacts.filter(a=>a.scope==="SECTION").length,chapters:artifacts.filter(a=>a.scope==="CHAPTER").length,books:books.length,memoryItems:items.length,memoryEvidence:evidence.length},semanticReviewRequired:true,fullBookVerified:false};
-  },{timeout:15000});
+}
+
+/** External read-only audit; publishing callers must instead use the
+ * transaction-aware helper within their own serializable transaction. */
+export async function inspectBookMergeStructure(analysisRunId: string, actor: {workspaceId:string;userId:string}) {
+  return prisma.$transaction(async tx => {
+    await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+    return inspectBookMergeStructureInTransaction(tx,analysisRunId,actor);
+  }, {isolationLevel:Prisma.TransactionIsolationLevel.RepeatableRead,timeout:15000});
 }
