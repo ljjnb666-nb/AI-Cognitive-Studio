@@ -2,6 +2,7 @@ import { Prisma, prisma } from "@ai-cognitive/db";
 import { canonicalEmbeddingInputHash, canonicalGatewayRequestFingerprint, stableHash, type GatewayRequest, type ProviderExecutionRepository } from "@ai-cognitive/provider-gateway";
 import { sha256, validateEvidence } from "./chunking.js";
 import { embeddingIdentityWithHash } from "./embeddings.js";
+import { inspectBookMergeStructureInTransaction } from "./merge-quality.js";
 
 type Actor = { workspaceId: string; userId: string };
 type Coordinate = { sourceBlockId: string; startOffset: number; endOffset: number };
@@ -372,6 +373,12 @@ export function createBookRevisionPublicationService(dependencies: {
           where: { analysisRunId: run.id }, orderBy: { sequence: "desc" },
         });
         if ((current?.id ?? null) !== command.expectedPublicationId) throw new Error("BOOK_REVISION_PUBLICATION_CONFLICT");
+        // The published revision, its underlying immutable CHUNK sources, memory
+        // hashes, evidence ranges, and embedding coverage must be verified in
+        // this same serializable transaction before an editorial PASS can publish.
+        // Structural acceptance never manufactures a semantic PASS.
+        const structural = await inspectBookMergeStructureInTransaction(tx, run.id, actor);
+        if (!structural.structuralPass) throw new Error("BOOK_REVISION_STRUCTURE_REVIEW_REQUIRED");
         if (command.action === "ROLLBACK") {
           if (!current || current.revisionId === command.revisionId) throw new Error("BOOK_REVISION_ROLLBACK_TARGET_INVALID");
           if (command.revisionId !== null && !await tx.bookRevisionPublication.findFirst({
@@ -408,7 +415,7 @@ export function createBookRevisionPublicationService(dependencies: {
           requestId: command.requestId, requestHash, actorUserId: actor.userId, reviewHash,
           sequence: (current?.sequence ?? 0) + 1, previousId: current?.id ?? null,
         } });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30_000 });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && ["P2034", "P2002"].includes(error.code)) {
         throw new Error("BOOK_REVISION_PUBLICATION_CONFLICT", { cause: error });
