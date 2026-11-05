@@ -35,7 +35,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     // its one 1600-token response for the auditable JSON judgement. Official
     // ChatThinking supports disabled; leave all other providers/routes alone.
     const boundedVision = input.snapshot.providerKey === "zhipu" && input.snapshot.modelId === "glm-4.6v" && input.request.routeSlot === "PDF_VISUAL_STRUCTURE";
-    const body = { model: input.snapshot.modelId, messages, max_tokens: text.generation?.maxOutputTokens, temperature: text.generation?.temperature, top_p: text.generation?.topP, ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
+    // 新任务显式选择此配置，旧快照与其他模型保持原始线上请求格式。
+    const m3Json = input.snapshot.providerKey === "minimax" && input.snapshot.modelId === "MiniMax-M3" &&
+      input.snapshot.configuration.minimaxM3JsonMode === true && mode === "JSON_MODE";
+    const body = { model: input.snapshot.modelId, messages, max_tokens: text.generation?.maxOutputTokens, ...(m3Json ? { thinking: { type: "disabled" }, reasoning_split: true } : { temperature: text.generation?.temperature, top_p: text.generation?.topP }), ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
     const remote = await this.transport.execute({ url: profile.endpoint, method: "POST", headers: { "content-type": "application/json", ...authHeaders(profile.authScheme, input.credential) }, body: JSON.stringify(body), signal: input.signal });
     if (input.snapshot.providerKey === "zhipu" && remote.status === 400) {
       let businessCode: unknown;

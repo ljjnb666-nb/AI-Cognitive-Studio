@@ -1,7 +1,7 @@
 import "server-only";
 
 import { prisma } from "@ai-cognitive/db";
-import { resolveProviderCatalog, routeSlotCapabilities, sanitizedProviderManifest, stableHash, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { workspaceRoutesWithBookDefaults, resolveProviderCatalog, routeSlotCapabilities, sanitizedProviderManifest, stableHash, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
 import { resolveBookProductExecution as resolveSharedBookProductExecution, type BookAnalysisRoutePlan } from "@ai-cognitive/book-intelligence";
 
 const requiredSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"] as const;
@@ -39,7 +39,7 @@ function hasExecutableEndpoint(endpoint: string | null): endpoint is string {
   catch { return false; }
 }
 async function routesForWorkspace(workspaceId: string): Promise<RouteWithConnection[]> {
-  return prisma.providerRouteBinding.findMany({ where: { workspaceId }, include: { connection: { include: { credentialVersions: { where: { status: "ACTIVE" }, select: { id: true, status: true } } } } } }) as Promise<RouteWithConnection[]>;
+  return workspaceRoutesWithBookDefaults(workspaceId);
 }
 
 function routeIdentity(manifest: ReturnType<typeof productManifest>, routes: RouteWithConnection[], routeSlot: RouteSlot): ProductRouteIdentity {
@@ -74,7 +74,7 @@ export async function resolveShortVideoRouteIdentity(workspaceId: string): Promi
 export async function resolveThinkingSessionRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "THINKING_SESSION"); }
 export async function resolveTeachBackAssessmentRouteIdentity(workspaceId: string): Promise<ProductRouteIdentity> { return routeIdentity(productManifest(), await routesForWorkspace(workspaceId), "TEACH_BACK_ASSESSMENT"); }
 function configurationRequired(error: unknown): never {
-  if (error instanceof Error && (error.message === "PODCAST_TTS_CONFIGURATION_REQUIRED" || error.message === "SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED")) throw error;
+  if (error instanceof Error && (error.message === "MINIMAX_BOOK_CONFIGURATION_REQUIRED" || error.message === "PODCAST_TTS_CONFIGURATION_REQUIRED" || error.message === "SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED")) throw error;
   throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
 }
 export async function resolveBookProductExecution(workspaceId: string): Promise<ProductBookExecution> {

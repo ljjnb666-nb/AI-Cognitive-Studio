@@ -14,6 +14,7 @@ type State = { manifest: { providers: Provider[] }; connections: Connection[]; r
 const routeSlots = [
   { slot: "PDF_VISUAL_STRUCTURE", label: "PDF 页面模型审核（按需授权）" },
   { slot: "BOOK_CHUNK_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_REDUCTION_ANALYSIS", label: "书籍理解" }, { slot: "BOOK_SYNTHESIS", label: "书籍理解" },
+  { slot: "BOOK_SEMANTIC_REVIEW", label: "书籍独立语义审校" },
   { slot: "EMBEDDING", label: "向量检索" }, { slot: "THINKING_SESSION", label: "思考" }, { slot: "TEACH_BACK_ASSESSMENT", label: "Teach Back 评估" },
   { slot: "PODCAST_SCRIPT", label: "播客脚本" }, { slot: "PODCAST_TTS", label: "语音合成" }, { slot: "SHORT_VIDEO_SCRIPT", label: "短视频脚本" }, { slot: "SHORT_VIDEO_TTS", label: "短视频语音合成" },
 ];
@@ -198,6 +199,7 @@ export function ProviderSettings() {
           配置用途
         </h2>
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          <p style={{ color: "var(--on-surface-variant)", margin: 0 }}>未单独设置的书籍分析用途默认使用已配置的 MiniMax M3。独立语义审校需要另行选型，且不能与原分析任务使用相同模型。已有任务继续使用其冻结配置。</p>
           {routeSlots.map(({ slot, label }) => (
             <RouteForm
               key={slot}

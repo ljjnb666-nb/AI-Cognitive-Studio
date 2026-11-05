@@ -45,6 +45,12 @@ function qwenProfile(family: CapabilityFamily, configuration: Readonly<Record<st
 }
 export function approvedProfile(providerKey: string, family: CapabilityFamily, endpoint: string | undefined, configuration: Readonly<Record<string, unknown>> = {}): ProviderProfile | undefined {
   if (providerKey === "openai-compatible" && family === "TEXT_GENERATION" && endpoint) return { providerKey, family, protocol: "OPENAI_COMPATIBLE", endpoint, authScheme: "BEARER" };
+  // 仅允许官方文本端点，保留旧快照原有地址，不做跨区域重定向。
+  if (providerKey === "minimax" && family === "TEXT_GENERATION" && endpoint && [
+    "https://api.minimax.io/v1/chat/completions",
+    "https://api.minimax.cn/v1/chat/completions",
+    "https://api.minimax.cn/v1/text/chatcompletion_v2",
+  ].includes(endpoint)) return { providerKey, family, protocol: "OPENAI_COMPATIBLE", endpoint, authScheme: "BEARER" };
   const profile = providerKey === "qwen" ? qwenProfile(family, configuration) : builtInProviderProfiles.find(item => item.providerKey === providerKey && item.family === family);
   // A shared Zhipu connection can store the canonical chat endpoint.
   // Embedding always uses the approved family-specific endpoint.

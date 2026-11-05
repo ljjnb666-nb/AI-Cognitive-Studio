@@ -14,11 +14,13 @@ import {
 } from "@ai-cognitive/book-intelligence";
 import { afterAll, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
+import { resolveBookProductExecution } from "../../../packages/book-intelligence/src/product-execution";
 import { cognitionDetail, listCognitions, updateCognitionUserState } from "../lib/cognitions";
 import { teachBackAttemptDetail } from "../lib/teach-back";
 import { findCrossBookCognitionConnections } from "../lib/cognition-associations";
 import { createBookAnalysisEmbeddingGatewayFixture } from "../../../packages/book-intelligence/tests/helpers/book-analysis-embedding-gateway";
 import { embeddingIdentityWithHash } from "../../../packages/book-intelligence/src/embeddings";
+import { builtInProviderCatalog, stableHash, workspaceRoutesWithBookDefaults } from "@ai-cognitive/provider-gateway";
 import { createProductionProviderGateway, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, WorkspaceMembershipExecutionAuthorizer, testCipher, type ProviderAdapter } from "@ai-cognitive/provider-gateway";
 
 async function fixture(existing?: { workspace: { id: string }; userA: { id: string }; userB: { id: string } }) {
@@ -104,25 +106,43 @@ async function sealPublicationBase(
 async function verifiedModelReview(
   actor: { workspaceId: string; userId: string },
   revision: { id: string; revisionHash: string },
-  opts: { verdict?: "PASS" | "BLOCKED"; requestId?: string; corruptCitation?: boolean } = {},
+  opts: { verdict?: "PASS" | "BLOCKED"; requestId?: string; corruptCitation?: boolean; legacySnapshot?: boolean; sameModel?: boolean } = {},
 ) {
   const requestId = opts.requestId ?? randomUUID();
-  const prepared = await prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, requestId);
+  const reviewerProvider = opts.sameModel ? "fixture" : "deterministic-test";
   const cipher = testCipher();
   const store = new ProviderGatewayRepository(prisma, cipher);
   const connection = await store.createConnection(actor, {
-    providerKey: "deterministic-test", protocol: "TEST", displayName: "phase10 reviewer " + requestId,
+    providerKey: reviewerProvider, protocol: "TEST", displayName: "phase10 reviewer " + requestId,
     endpoint: "https://semantic-review.fixture.test/v1",
   });
   await store.rotateCredential(actor, connection.id, "phase10-fixture-secret");
   const capability = {
-    modelId: "semantic-review-fixture-v1", families: ["TEXT_GENERATION"] as const,
+    modelId: opts.sameModel ? "fixture" : "semantic-review-fixture-v1", families: ["TEXT_GENERATION"] as const,
     confidence: "VERIFIED" as const, structuredOutput: "JSON_MODE" as const,
   };
-  await store.setRoute(actor, { routeSlot: "BOOK_SYNTHESIS", connectionId: connection.id, modelId: capability.modelId });
+  await store.setRoute(actor, { routeSlot: opts.legacySnapshot ? "BOOK_SYNTHESIS" : "BOOK_SEMANTIC_REVIEW", connectionId: connection.id, modelId: capability.modelId });
   const registry = new ProviderRegistry();
-  registry.register({ providerKey: "deterministic-test", displayName: "deterministic reviewer",
+  registry.register({ providerKey: reviewerProvider, displayName: "deterministic reviewer",
     protocol: "TEST", adapterVersion: "phase10-review-v1", models: [capability] });
+  const previousManifest = process.env.PROVIDER_GATEWAY_MODEL_MANIFEST;
+  let prepared: Awaited<ReturnType<typeof prepareBookRevisionModelReview>>;
+  try {
+    process.env.PROVIDER_GATEWAY_MODEL_MANIFEST = JSON.stringify({providers:[...builtInProviderCatalog.providers,
+      {providerKey:reviewerProvider,displayName:"隔离审校模型",protocol:"TEST",adapterVersion:"phase10-review-v1",models:[capability]}]});
+    prepared = await prepareBookRevisionModelReview(actor, revision.id, revision.revisionHash, requestId);
+  } finally {
+    if (previousManifest === undefined) delete process.env.PROVIDER_GATEWAY_MODEL_MANIFEST;
+    else process.env.PROVIDER_GATEWAY_MODEL_MANIFEST = previousManifest;
+  }
+  if (opts.legacySnapshot) {
+    const identity = stableHash({ workspaceId: actor.workspaceId, revisionId: revision.id,
+      revisionHash: revision.revisionHash, requestId, evidenceBundleHash: prepared.evidenceBundleHash,
+      rubricVersion: prepared.request.promptVersion });
+    prepared.request.routeSlot = "BOOK_SYNTHESIS";
+    prepared.request.correlationId = "book-semantic-review:" + identity.slice(0,16);
+    prepared.request.idempotencyKey = "book-semantic-review-v1:" + identity;
+  }
   const adapter: ProviderAdapter = { execute: async ({ request }) => {
     const body = JSON.parse(request.text!.messages[0]!.content) as {
       revisionHash: string; rubricVersion: string; claims: Array<{
@@ -177,6 +197,60 @@ async function verifiedModelReview(
 afterAll(() => prisma.$disconnect());
 
 describe("Phase 10 cognition product read model", () => {
+  it("仅用有效 MiniMax 凭据补齐新任务缺省文本槽，保留显式选择", async () => {
+    const data = await fixture();
+    const actor = { workspaceId: data.workspace.id, userId: data.userA.id };
+    const store = new ProviderGatewayRepository(prisma, testCipher());
+    const connection = await store.createConnection(actor, {
+      providerKey: "minimax", protocol: "OPENAI_COMPATIBLE", displayName: "MiniMax fixture",
+      endpoint: "https://api.minimax.io/v1/chat/completions",
+    });
+    expect(await workspaceRoutesWithBookDefaults(actor.workspaceId)).toEqual([]);
+    const request = { workspaceId: actor.workspaceId, routeSlot: "BOOK_SYNTHESIS" as const,
+      correlationId: "default", idempotencyKey: "default", inputHash: "a".repeat(64),
+      capability: { family: "TEXT_GENERATION" as const } };
+    await expect(store.resolveWorkspaceRoute(request)).rejects.toMatchObject({ code: "ROUTE_UNAVAILABLE" });
+    await store.rotateCredential(actor, connection.id, "synthetic-only-fixture-credential");
+    await expect(store.resolveWorkspaceRoute(request)).rejects.toMatchObject({ code: "ROUTE_UNAVAILABLE" });
+    const routes = await workspaceRoutesWithBookDefaults(actor.workspaceId);
+    expect(routes.map(route => [route.routeSlot, route.modelId])).toEqual([
+      ["BOOK_CHUNK_ANALYSIS", "MiniMax-M3"], ["BOOK_REDUCTION_ANALYSIS", "MiniMax-M3"],
+      ["BOOK_SYNTHESIS", "MiniMax-M3"],
+    ]);
+    expect(await prisma.providerRouteBinding.count({ where: { workspaceId: actor.workspaceId } })).toBe(0);
+    await store.setRoute(actor, { routeSlot: "BOOK_CHUNK_ANALYSIS", connectionId: connection.id, modelId: "explicit-model" });
+    const selected = await workspaceRoutesWithBookDefaults(actor.workspaceId);
+    expect(selected.find(route => route.routeSlot === "BOOK_CHUNK_ANALYSIS")?.modelId).toBe("explicit-model");
+    expect(selected.some(route => route.routeSlot === "EMBEDDING" || route.routeSlot === "BOOK_SEMANTIC_REVIEW")).toBe(false);
+    await store.setConnectionEnabled(actor, connection.id, false);
+    await expect(store.resolveWorkspaceRoute({ ...request, routeSlot: "BOOK_CHUNK_ANALYSIS" })).rejects.toMatchObject({ code: "CONNECTION_DISABLED" });
+    await expect(store.resolveWorkspaceRoute(request)).rejects.toMatchObject({ code: "ROUTE_UNAVAILABLE" });
+  });
+  it("新任务冻结 M3 路由，后续用户切换模型不改写原计划", async () => {
+    const data = await fixture();
+    const actor = { workspaceId: data.workspace.id, userId: data.userA.id };
+    const store = new ProviderGatewayRepository(prisma, testCipher());
+    await expect(resolveBookProductExecution(actor.workspaceId)).rejects.toThrow("MINIMAX_BOOK_CONFIGURATION_REQUIRED");
+    const m3 = await store.createConnection(actor, { providerKey: "minimax", protocol: "OPENAI_COMPATIBLE",
+      displayName: "默认文本", endpoint: "https://api.minimax.cn/v1/chat/completions" });
+    const glm = await store.createConnection(actor, { providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE",
+      displayName: "用户选择", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions" });
+    await store.rotateCredential(actor,m3.id,"synthetic-m3-only");
+    await store.rotateCredential(actor,glm.id,"synthetic-glm-only");
+    const vector = await store.createConnection(actor, { providerKey: "zhipu", protocol: "OPENAI_EMBEDDINGS",
+      displayName: "独立向量服务", endpoint: "https://open.bigmodel.cn/api/paas/v4/embeddings" });
+    await store.rotateCredential(actor,vector.id,"synthetic-vector-only");
+    await store.setRoute(actor,{routeSlot:"EMBEDDING",connectionId:vector.id,modelId:"embedding-3"});
+    const plan = await resolveBookProductExecution(actor.workspaceId);
+    expect(plan.routePlan.routes.BOOK_CHUNK_ANALYSIS).toMatchObject({providerKey:"minimax",modelId:"MiniMax-M3",structuredOutput:"JSON_MODE"});
+    const frozen = JSON.stringify(plan);
+    await store.setRoute(actor,{routeSlot:"BOOK_CHUNK_ANALYSIS",connectionId:glm.id,modelId:"glm-4.7-flash"});
+    const next = await resolveBookProductExecution(actor.workspaceId);
+    expect(next.routePlan.routes.BOOK_CHUNK_ANALYSIS).toMatchObject({providerKey:"zhipu",modelId:"glm-4.7-flash"});
+    expect(next.routePlan.routes.BOOK_SYNTHESIS.modelId).toBe("MiniMax-M3");
+    expect(JSON.stringify(plan)).toBe(frozen);
+    expect(await prisma.bookAnalysisRun.count({where:{workspaceId:actor.workspaceId}})).toBe(0);
+  });
   it("rejects unauthorized, interrupted, and stale publication commands without changing the journal", async () => {
     const data = await fixture();
     const base = await createRun(data, "publication-guards");
@@ -238,7 +312,7 @@ describe("Phase 10 cognition product read model", () => {
       verdict: "PASS", notes: "Fixture approval", evidenceSha256: "c".repeat(64),
     });
     await expect(publish(actor, command)).rejects.toThrow("BOOK_REVISION_MODEL_REVIEW_REQUIRED");
-    const model = await verifiedModelReview(actor, revision);
+    const model = await verifiedModelReview(actor, revision, { legacySnapshot: true });
     await materializeBookRevisionModelReview(model.repository, actor, model.receipt);
     // A valid, independently attested PASS still cannot override bad CHUNK provenance.
     const unchangedChunk = await prisma.documentChunk.findFirstOrThrow({ where: { chunkSetId: base.chunkSet.id } });
@@ -308,6 +382,8 @@ describe("Phase 10 cognition product read model", () => {
     const command = { analysisRunId: base.run.id, expectedPublicationId: null,
       action: "PUBLISH", revisionId: revision.id, revisionHash: revision.revisionHash,
       requestId: randomUUID() } as const;
+    await expect(verifiedModelReview(actor, revision, { sameModel: true }))
+      .rejects.toThrow("BOOK_MODEL_REVIEW_NOT_INDEPENDENT");
     await expect(verifiedModelReview(actor, revision, { corruptCitation: true }))
       .rejects.toThrow("BOOK_MODEL_REVIEW_CITATION_INVALID");
     expect(await prisma.bookIntelligenceRevisionReview.count({ where: { revisionId: revision.id } })).toBe(0);

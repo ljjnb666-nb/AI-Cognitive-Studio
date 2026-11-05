@@ -1,6 +1,7 @@
 /** Product-facing copy for errors returned by Studio APIs. Keep diagnostic codes server-side. */
 const providerCodes = new Set([
   "AI_PROVIDER_CONFIGURATION_REQUIRED",
+  "MINIMAX_BOOK_CONFIGURATION_REQUIRED",
   "BOOK_ROUTE_IDENTITY_INCONSISTENT",
 ]);
 
@@ -10,6 +11,8 @@ export function needsProviderConfiguration(code?: string | null) {
 
 export function bookIntelligenceErrorMessage(code?: string | null) {
   switch (code) {
+    case "MINIMAX_BOOK_CONFIGURATION_REQUIRED":
+      return "尚未配置书籍分析模型。请添加有效的 MiniMax 密钥，或为书籍理解明确选择其他服务商与模型。";
     case "AI_PROVIDER_CONFIGURATION_REQUIRED":
       return "需要先配置 Provider，才能继续理解这本书。";
     case "BOOK_ROUTE_IDENTITY_INCONSISTENT":
