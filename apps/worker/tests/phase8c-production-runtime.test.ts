@@ -84,7 +84,9 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       const oldInvocations=await prisma.providerInvocation.findMany({where:{workspaceId:f.workspaceId},orderBy:{id:"asc"}});
       const oldUsage=await prisma.providerUsageEvent.findMany({where:{workspaceId:f.workspaceId},orderBy:{id:"asc"}});
       expect(oldInvocations.filter(i=>i.status==="FAILED")).toHaveLength(1);
-      const oldGrant=await prisma.job.create({data:{workspaceId:f.workspaceId,userId:f.userId,type:BOOK_PAID_GRANT_TYPE,status:"FAILED",attemptCount:1,payload:{version:1,sourceDocumentId:document.id,extractionId:requested.run.extractionId,reservedMicroCny:2800,textCalls:28,entries:Array.from({length:28},(_,ordinal)=>({ordinal:ordinal+1,reservedMicroCny:100,state:ordinal===27?"REMOTE_REJECTED":"RESPONSE_RECEIVED"}))}}});
+      // A persisted failed paid grant keeps its gross reservations, including the
+      // rejected 28th chunk. The next execution must explicitly carry this ledger.
+      const oldGrant=await prisma.job.create({data:{workspaceId:f.workspaceId,userId:f.userId,type:BOOK_PAID_GRANT_TYPE,status:"FAILED",attemptCount:1,payload:{version:1,sourceDocumentId:document.id,extractionId:requested.run.extractionId,sha256:document.sha256,bootstrapId:"fixture-history",expiresAt:new Date(Date.now()+120000).toISOString(),credentialIds:["fixture"],maxMicroCny:5_000_000,reservedMicroCny:2800,textCalls:28,embeddingCalls:0,entries:Array.from({length:28},(_,ordinal)=>({ordinal:ordinal+1,kind:"TEXT",reservedMicroCny:100,inputUpper:100,outputMax:10,state:ordinal===27?"REMOTE_REJECTED":"RESPONSE_RECEIVED",operationKey:randomUUID()})),stopped:true}}});
       await expect(r.gateway.execute(historical28!,{userId:f.userId})).resolves.toMatchObject({status:"TERMINAL_FAILED"});
       await expect(r.gateway.execute({...historical28!,inputHash:"b".repeat(64),text:{...historical28!.text!,messages:[{role:"user",content:"new deduplicated envelope"}]}},{userId:f.userId})).rejects.toMatchObject({code:"IDEMPOTENCY_CONFLICT"});
       const before=generated.length;await processBookAnalysisRun(requested.run.id,dependencies);expect(generated).toHaveLength(before);
@@ -92,7 +94,10 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       const recover=()=>requestBookAnalysisForUser(f,{sourceDocumentId:document.id,chunkSetId:requested.run.chunkSetId,pipelineVersion:"history-27-plus-1",promptVersion:"old-compatible",provider:"fixture",model:"fixture-model"});
       const outcomes=await Promise.allSettled([recover(),recover()]);expect(outcomes.some(o=>o.status==="fulfilled")).toBe(true);
       const rearmed=await prisma.bookAnalysisRun.findUniqueOrThrow({where:{id:requested.run.id}});expect(rearmed.jobId).not.toBe(oldJobId);expect(rearmed.dispatchGeneration).toBe(1);
-      const newGrant=await prisma.job.create({data:{workspaceId:f.workspaceId,userId:f.userId,type:BOOK_PAID_GRANT_TYPE,payload:{version:1,sourceDocumentId:document.id,extractionId:requested.run.extractionId,sha256:document.sha256,bootstrapId:"fixture-history",expiresAt:new Date(Date.now()+120000).toISOString(),credentialIds:["fixture"],maxMicroCny:5000000,reservedMicroCny:0,textCalls:0,embeddingCalls:0,entries:[]}}});
+      const carried={grantId:oldGrant.id,payloadDigest:stableHash(oldGrant.payload),reservedMicroCny:2800};
+      const cumulativeBudget={version:1,limitMicroCny:10_000_000,carryForward:[carried]};
+      const newGrant=await prisma.job.create({data:{workspaceId:f.workspaceId,userId:f.userId,type:BOOK_PAID_GRANT_TYPE,payload:{version:1,sourceDocumentId:document.id,extractionId:requested.run.extractionId,sha256:document.sha256,bootstrapId:"fixture-history",expiresAt:new Date(Date.now()+120000).toISOString(),credentialIds:["fixture"],maxMicroCny:5_000_000,reservedMicroCny:0,textCalls:0,embeddingCalls:0,entries:[],cumulativeBudget}}});
+      expect((await prisma.job.findUniqueOrThrow({where:{id:newGrant.id}})).payload).toMatchObject({cumulativeBudget:{limitMicroCny:10_000_000,carryForward:[carried]}});
       await bindBookPaidGrant(newGrant.id,rearmed.id,f);await activateBookPaidGrant(newGrant.id,f);
       let paused!:()=>void,resume!:()=>void;const reached=new Promise<void>(r=>{paused=r;}),release=new Promise<void>(r=>{resume=r;});
       const obsolete=processBookAnalysisRun(requested.run.id,{...dependencies,faultInjector:async(point,meta)=>{if(point==="afterChunkPersist"&&meta.ordinal===27){paused();await release;}}},rearmed.dispatchGeneration);
