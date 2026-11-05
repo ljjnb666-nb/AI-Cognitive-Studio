@@ -283,6 +283,39 @@ describe("Phase 10 cognition product read model", () => {
     expect(republished).toMatchObject({ previousId: rolledBack.id, sequence: 3 });
   });
 
+  it("rejects invalid model citations and a genuine BLOCKED receipt without publication", async () => {
+    const data = await fixture();
+    const base = await createRun(data, "semantic-negative");
+    await makeCurrent(data, base);
+    const actor = { workspaceId: data.workspace.id, userId: data.userA.id };
+    const span = { sourceBlockId: data.block.id, startOffset: 0, endOffset: 14 };
+    const chunk = await prisma.documentChunk.create({ data: {
+      workspaceId: actor.workspaceId, chunkSetId: base.chunkSet.id,
+      extractionId: data.extraction.id, structureVersion: "test", ordinal: 0,
+      content: data.block.text, contentHash: data.suffix,
+      characterCount: data.block.text.length, tokenEstimate: 10,
+    } });
+    await prisma.chunkSourceSpan.create({ data: {
+      ...span, endOffset: data.block.text.length, chunkId: chunk.id,
+      extractionId: data.extraction.id, ordinal: 0,
+    } });
+    await sealPublicationBase(data, base);
+    const { revision } = await createBookRevision(actor, base.run.id, {
+      reason: "Fixture negative semantic checks", archiveSha256: "a".repeat(64),
+      summary: { text: "Unverified summary", evidence: [span] }, memories: [],
+    });
+    const publish = createBookRevisionPublicationService({ assertConsumersReady: async () => {} });
+    const command = { analysisRunId: base.run.id, expectedPublicationId: null,
+      action: "PUBLISH", revisionId: revision.id, revisionHash: revision.revisionHash,
+      requestId: randomUUID() } as const;
+    await expect(verifiedModelReview(actor, revision, { corruptCitation: true }))
+      .rejects.toThrow("BOOK_MODEL_REVIEW_CITATION_INVALID");
+    expect(await prisma.bookIntelligenceRevisionReview.count({ where: { revisionId: revision.id } })).toBe(0);
+    await verifiedModelReview(actor, revision, { verdict: "BLOCKED" });
+    await expect(publish(actor, command)).rejects.toThrow("BOOK_REVISION_REVIEW_REQUIRED");
+    expect(await prisma.bookRevisionPublication.count({ where: { analysisRunId: base.run.id } })).toBe(0);
+  });
+
   it("keeps the publication bound to its review until the journal rolls back", async () => {
     const data = await fixture();
     const base = await createRun(data, "revision");
