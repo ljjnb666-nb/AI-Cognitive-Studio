@@ -56,7 +56,9 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   expect(audioResponse.headers()["content-type"]).toContain("audio/");
   const citationDisclosure = page.locator("details").filter({ hasText: "查看引用证据" }).first();
   await expect(citationDisclosure).toContainText("查看引用证据");
-  const displayedPodcastQuote = (await citationDisclosure.locator("blockquote").innerText()).trim();
+  await citationDisclosure.locator("summary").click();
+  await expect(citationDisclosure.locator("blockquote")).toBeVisible();
+  const displayedPodcastQuote = (await citationDisclosure.locator("blockquote").textContent() ?? "").trim();
   expect(displayedPodcastQuote).toMatch(/^“.+”$/s);
   expect(fixture).toContain(displayedPodcastQuote.slice(1, -1));
   await page.screenshot({ path: testInfo.outputPath("podcast-player.png"), fullPage: true });
@@ -77,7 +79,7 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.getByText("查看原文证据").first().click();
   const videoQuote = page.locator("blockquote").first();
   await expect(videoQuote).toBeVisible();
-  const displayedVideoQuote = (await videoQuote.innerText()).trim();
+  const displayedVideoQuote = (await videoQuote.textContent() ?? "").trim();
   expect(displayedVideoQuote).toMatch(/^“.+”$/s);
   expect(fixture).toContain(displayedVideoQuote.slice(1, -1));
   await page.screenshot({ path: testInfo.outputPath("video-player.png"), fullPage: true });
