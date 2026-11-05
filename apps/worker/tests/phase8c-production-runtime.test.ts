@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { prisma } from "@ai-cognitive/db";
 import { DeterministicProviderHttpTransport, ProviderGatewayError, ProviderGatewayRepository, createProviderAdapterResolver, parseKeyring, stableHash, type GatewayRequest } from "@ai-cognitive/provider-gateway";
-import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser, frozenChunkRowDigest, frozenChunkSelectionHash } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser, frozenChunkRowDigest, frozenChunkSelectionHash, inspectBookMergeStructure } from "@ai-cognitive/book-intelligence";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 
@@ -228,8 +228,17 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       const before=await prisma.providerInvocation.count({where:{workspaceId:f.workspaceId,routeSlot:"BOOK_CHUNK_ANALYSIS"}});
       const target=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-target",promptVersion:"target",provider:"fixture",model:"fixture-model",frozenChunks:selection});
       expect(await prisma.analysisArtifact.count({where:{analysisRunId:target.run.id,scope:"CHUNK"}})).toBe(leaves.length);
+      const pendingAudit=await inspectBookMergeStructure(target.run.id,f);
+      expect(pendingAudit.structuralPass).toBe(false);
+      expect(pendingAudit.issues).toEqual(expect.arrayContaining([{code:"RUN_NOT_COMPLETE"}]));
       expect((await processBookAnalysisRun(target.run.id,{analysisProviderForRun:r.createAnalysisProvider,embeddingGatewayForRun:i=>({gateway:r.gateway,repository:r.repository,userId:i.userId})})).status).toBe("SUCCEEDED");
       expect(await prisma.providerInvocation.count({where:{workspaceId:f.workspaceId,routeSlot:"BOOK_CHUNK_ANALYSIS"}})).toBe(before);
+      const audit=await inspectBookMergeStructure(target.run.id,f);
+      expect(audit.structuralPass).toBe(true);
+      expect(audit.issues).toHaveLength(0);
+      expect(audit).toMatchObject({semanticReviewRequired:true,fullBookVerified:false});
+      expect(audit.counts.chunks).toBe(leaves.length);
+      await expect(inspectBookMergeStructure(target.run.id,{workspaceId:f.workspaceId,userId:randomUUID()})).rejects.toThrow("BOOK_MERGE_AUDIT_ACCESS_DENIED");
       expect((await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-target",promptVersion:"target",provider:"fixture",model:"fixture-model",frozenChunks:selection})).run.id).toBe(target.run.id);
     }finally{await r.close();}
   });
