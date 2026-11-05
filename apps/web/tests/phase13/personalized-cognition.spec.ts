@@ -67,7 +67,7 @@ test("real auth keeps personalized cognition private, durable, current, and cros
   const embeddingIdentityHash = `phase13-${randomUUID()}`;
   await prisma.bookMemoryEmbedding.createMany({ data: [
     { workspaceId, memoryItemId: needs.item.id, analysisRunId: needs.run.id, extractionId: needs.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash, dimensions: 3, vector: [1, 0, 0] },
-    { workspaceId, memoryItemId: developing.item.id, analysisRunId: developing.run.id, extractionId: developing.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingIdentityHash, dimensions: 3, vector: [0.9, 0.1, 0] },
+    { workspaceId, memoryItemId: developing.item.id, analysisRunId: developing.run.id, extractionId: developing.run.extractionId, provider: "fixture", model: "embedding", modelVersion: "v1", embeddingVersion: "v1", embeddingIdentityHash, dimensions: 3, vector: [0.9, 0.1, 0] },
   ] });
   await expect(findCrossBookCognitionConnections({ workspaceId, userId: owner.id }, needs.item.id)).resolves.toEqual([expect.objectContaining({ id: developing.item.id })]);
   // Distinct embedding identities must never be compared, even if dimensions
