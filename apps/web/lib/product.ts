@@ -1,3 +1,4 @@
+import { readPublishedBookRevisionForRun } from "@ai-cognitive/book-intelligence";
 import { prisma, Prisma } from "@ai-cognitive/db";
 import type { WebIdentityContext } from "./identity";
 import { projectBookDisplay } from "./book-display";
@@ -139,7 +140,9 @@ export async function dashboard(context?: WebIdentityContext) {
 
 export async function sourceDetail(sourceDocumentId: string, context?: WebIdentityContext, requestedTextPage = 1) {
   const identity = await webIdentity(context);
-  const record = await prisma.sourceDocument.findFirst({
+  const { record, bookSummary, bookPublicationId, bookMemories } = await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+    const record = await tx.sourceDocument.findFirst({
     where: { id: sourceDocumentId, workspaceId: identity.workspaceId },
     include: {
       source: {
@@ -154,8 +157,40 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
       currentExtraction: { include: { extraction: { include: { _count: { select: { pages: true, blocks: true } }, pages: { orderBy: { ordinal: "asc" }, select: { id: true, physicalPageIndex: true } }, structureNodes: { orderBy: { ordinal: "asc" } }, blocks: { orderBy: { ordinal: "asc" }, take: 40 } } } } },
       currentIntelligence: { include: { analysisRun: { include: { memoryItems: { include: { evidence: { include: { sourceBlock: true } } }, orderBy: { ordinal: "asc" }, take: 80 }, artifacts: { where: { scope: "BOOK" }, take: 1 } } } } },
     },
-  });
-  if (!record) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
+    });
+    if (!record) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
+    const marker = record.currentIntelligence;
+    const current = marker && record.currentExtraction?.extractionId === marker.extractionId ? marker : null;
+    const publication = current ? await readPublishedBookRevisionForRun(tx, current) : null;
+    const revision = publication?.revision;
+    const originals = current?.analysisRun.memoryItems ?? [];
+    const changes = new Map(revision?.memories.map(memory => [memory.id, memory]));
+    const visible = new Set(originals.map(memory => memory.id));
+    const extraIds = [...changes.keys()].filter(id => !visible.has(id));
+    const extra = extraIds.length ? await tx.bookMemoryItem.findMany({
+      where: { analysisRunId: current!.analysisRunId, workspaceId: identity.workspaceId, id: { in: extraIds } },
+      include: { evidence: { include: { sourceBlock: true } } }, orderBy: { ordinal: "asc" },
+    }) : [];
+    const displayed = [...originals, ...extra];
+    const sourceIds = [...new Set(displayed.flatMap(memory => changes.get(memory.id)?.addedEvidence.map(span => span.sourceBlockId) ?? []))];
+    const blocks = sourceIds.length ? await tx.sourceBlock.findMany({
+      where: { extractionId: current!.extractionId, id: { in: sourceIds } },
+    }) : [];
+    const byBlock = new Map(blocks.map(block => [block.id, block]));
+    const bookMemories = displayed.map(memory => {
+      const change = changes.get(memory.id);
+      const evidence = memory.evidence.map(({ id, sourceBlock, startOffset, endOffset }) => ({ id, sourceBlock, startOffset, endOffset }));
+      for (const span of change?.addedEvidence ?? []) {
+        if (evidence.some(item => item.sourceBlock.id === span.sourceBlockId && item.startOffset === span.startOffset && item.endOffset === span.endOffset)) continue;
+        const sourceBlock = byBlock.get(span.sourceBlockId);
+        if (!sourceBlock) throw new Error("BOOK_REVISION_EVIDENCE_INVALID");
+        evidence.push({ ...span, sourceBlock, id: `${publication?.publicationId}:${memory.id}:${span.sourceBlockId}:${span.startOffset}:${span.endOffset}` });
+      }
+      return { id: memory.id, type: memory.type, ordinal: memory.ordinal, content: change?.after ?? memory.content, evidence };
+    });
+    return { record, bookMemories, bookPublicationId: publication?.publicationId ?? null,
+      bookSummary: revision?.summary.after ?? current?.analysisRun.artifacts[0]?.summary ?? null };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
   // Preview only the owner's current published extraction, independently of AI
   // memories. Never read unpublished candidates or another document's pages.
   const extraction = record.currentExtraction?.extraction;
@@ -164,5 +199,5 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
   const page = pages[pageNumber - 1];
   const blocks = page ? await prisma.sourceBlock.findMany({ where: { extractionId: extraction!.id, sourcePageId: page.id }, orderBy: { ordinal: "asc" }, take: 41, select: { id: true, ordinal: true, text: true } }) : [];
   const textPreview = page ? { pageNumber, pageCount: pages.length, physicalPageNumber: page.physicalPageIndex === null ? null : page.physicalPageIndex + 1, truncated: blocks.length > 40 || blocks.some(block => block.text.length > 4000), blocks: blocks.slice(0, 40).map(block => ({ ...block, text: block.text.slice(0, 4000) })) } : null;
-  return { ...record, textPreview };
+  return { ...record, textPreview, bookSummary, bookPublicationId, bookMemories };
 }
