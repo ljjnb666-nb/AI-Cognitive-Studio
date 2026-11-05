@@ -123,6 +123,17 @@ describe("Phase 8B real text provider adapters", () => {
     expect(body.response_format).toBeUndefined();
     expect(body.temperature).toBeUndefined();
 
+    // Existing approved MiniMax native-style endpoint cannot be assumed to
+    // support the newer OpenAI max_completion_tokens field.
+    const legacyEndpoint = transport({ model: "MiniMax-M3", choices: [
+      { finish_reason: "stop", message: { content: '{"verdict":"BLOCKED"}' } },
+    ] });
+    await new OpenAICompatibleAdapter(legacyEndpoint).execute({ ...base,
+      snapshot: { ...snapshot, endpoint: "https://api.minimax.io/v1/text/chatcompletion_v2" }, request });
+    const legacyBody = JSON.parse(legacyEndpoint.calls[0]!.body);
+    expect(legacyBody).toMatchObject({ thinking: { type: "disabled" }, max_tokens: 100 });
+    expect(legacyBody.max_completion_tokens).toBeUndefined();
+
     const truncated = transport({ model: "MiniMax-M3", choices: [
       { finish_reason: "length", message: { content: '{"verdict":"PASS"}', reasoning_content: "PRIVATE reasoning" } },
     ], usage: { prompt_tokens: 7631, completion_tokens: 3800 } });
