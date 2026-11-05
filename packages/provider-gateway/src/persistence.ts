@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { VersionedAesGcmCipher, type CredentialCipher } from "./credentials/cipher.js";
 import { redactSecrets } from "./credentials/redaction.js";
 import { ProviderGatewayError } from "./errors.js";
+import { managedProviderGroup } from "./managed-connections.js";
+import { builtInProviderProfiles } from "./adapters/provider-profiles.js";
 import type { ExecutionSnapshot, GatewayRequest, ResolvedRoute } from "./types.js";
 
 type Db = typeof prisma;
@@ -31,6 +33,76 @@ function normalizeConnectionNameConflict(error: unknown): never { if (isProvider
 
 export class ProviderGatewayRepository {
   constructor(private readonly db: Db = prisma, private readonly cipher?: CredentialCipher) {}
+  /** Internal endpoint adaptation is serialized with administration of its parent. */
+  async capabilityConnection(context: OwnerContext, parentId: string, input: { family: "SPEECH" | "EMBEDDING"; protocol: string; endpoint: string; displayName: string }) {
+    await requireOwner(this.db, context);
+    if (!this.cipher) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
+    return this.db.$transaction(async tx => {
+      await lockProviderConnections(tx, context, [parentId]);
+      await requireOwner(tx, context);
+      const parent = await tx.providerConnection.findUniqueOrThrow({ where: { id_workspaceId: { id: parentId, workspaceId: context.workspaceId } } });
+      if (parent.status !== "ACTIVE") throw new ProviderGatewayError("CONNECTION_DISABLED");
+      if (!builtInProviderProfiles.some(profile => profile.providerKey === parent.providerKey && profile.family === input.family && profile.protocol === input.protocol && profile.endpoint === input.endpoint)) throw new ProviderGatewayError("CAPABILITY_MISMATCH");
+      const all = await tx.providerConnection.findMany({ where: { workspaceId: context.workspaceId } });
+      const existing = managedProviderGroup(parent.id, all).find(connection => connection.id !== parent.id && connection.protocol === input.protocol && connection.endpoint === input.endpoint);
+      if (existing) {
+        if (existing.status !== "ACTIVE") throw new ProviderGatewayError("CONNECTION_DISABLED");
+        return existing;
+      }
+      const credential = await tx.providerCredentialVersion.findFirst({ where: { workspaceId: context.workspaceId, connectionId: parent.id, status: "ACTIVE" }, orderBy: { credentialVersion: "desc" } });
+      if (!credential) throw new ProviderGatewayError("AUTHENTICATION_FAILED");
+      const secret = this.cipher!.decrypt(credential, { workspaceId: context.workspaceId, connectionId: parent.id, credentialVersionId: credential.id, providerKey: parent.providerKey });
+      const connection = await tx.providerConnection.create({ data: { workspaceId: context.workspaceId, providerKey: parent.providerKey, protocol: input.protocol, endpoint: input.endpoint, displayName: input.displayName, configuration: { managedCapabilityParentId: parent.id, managedCapabilityFamily: input.family } } });
+      const id = randomUUID(), encrypted = this.cipher!.encrypt(secret, { workspaceId: context.workspaceId, connectionId: connection.id, credentialVersionId: id, providerKey: parent.providerKey });
+      await tx.providerCredentialVersion.create({ data: { id, workspaceId: context.workspaceId, connectionId: connection.id, credentialVersion: 1, ...encrypted, displayHint: hint(secret), status: "ACTIVE" } });
+      await tx.providerAuditEvent.create({ data: { workspaceId: context.workspaceId, actorUserId: context.userId, action: "CONNECTION_CREATED", targetType: "ProviderConnection", targetId: connection.id, metadata: { managedCapabilityParentId: parent.id, family: input.family } } });
+      await tx.providerAuditEvent.create({ data: { workspaceId: context.workspaceId, actorUserId: context.userId, action: "CREDENTIAL_CREATED", targetType: "ProviderCredentialVersion", targetId: id, metadata: { managedCapabilityParentId: parent.id } } });
+      return connection;
+    });
+  }
+  /** One saved provider owns its generated endpoint credentials and route bindings. */
+  async manageProvider(context: OwnerContext, connectionId: string, command: { action: "ROTATE"; secret: string } | { action: "ENABLED"; enabled: boolean } | { action: "REVOKE"; credentialVersionId: string } | { action: "DELETE"; routeSlots: readonly string[]; credentialVersionId: string | null }) {
+    await requireOwner(this.db, context);
+    const before = await this.db.providerConnection.findMany({ where: { workspaceId: context.workspaceId } });
+    const group = managedProviderGroup(connectionId, before), root = group[0];
+    if (!root) throw new ProviderGatewayError("AUTHORIZATION_FAILED");
+    const ids = group.map(connection => connection.id).sort();
+    return this.db.$transaction(async tx => {
+      await lockProviderConnections(tx, context, ids);
+      await requireOwner(tx, context);
+      const fresh = await tx.providerConnection.findMany({ where: { workspaceId: context.workspaceId } });
+      const current = managedProviderGroup(root.id, fresh);
+      if (JSON.stringify(current.map(connection => connection.id).sort()) !== JSON.stringify(ids)) throw new ProviderGatewayError("PROVIDER_CONNECTION_CHANGED");
+      const parent = current[0]!;
+      if (parent.status === "REVOKED") {
+        if (command.action === "DELETE") return;
+        throw new ProviderGatewayError("CONNECTION_DISABLED");
+      }
+      const active = await tx.providerCredentialVersion.findFirst({ where: { workspaceId: context.workspaceId, connectionId: root.id, status: "ACTIVE" }, orderBy: { credentialVersion: "desc" } });
+      const routes = await tx.providerRouteBinding.findMany({ where: { workspaceId: context.workspaceId, connectionId: { in: ids } }, select: { routeSlot: true } });
+      if (command.action === "DELETE" && (JSON.stringify(routes.map(route => route.routeSlot).sort()) !== JSON.stringify([...new Set(command.routeSlots)].sort()) || (active?.id ?? null) !== command.credentialVersionId)) throw new ProviderGatewayError("PROVIDER_CONNECTION_CHANGED");
+      if (command.action === "REVOKE" && active?.id !== command.credentialVersionId) throw new ProviderGatewayError("PROVIDER_CONNECTION_CHANGED");
+      if (command.action === "ROTATE") {
+        if (!this.cipher) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR");
+        for (const connection of current) {
+          const latest = await tx.providerCredentialVersion.aggregate({ where: { workspaceId: context.workspaceId, connectionId: connection.id }, _max: { credentialVersion: true } });
+          const id = randomUUID(), encrypted = this.cipher.encrypt(command.secret, { workspaceId: context.workspaceId, connectionId: connection.id, credentialVersionId: id, providerKey: connection.providerKey });
+          await tx.providerCredentialVersion.updateMany({ where: { workspaceId: context.workspaceId, connectionId: connection.id, status: "ACTIVE" }, data: { status: "RETIRED" } });
+          await tx.providerCredentialVersion.create({ data: { id, workspaceId: context.workspaceId, connectionId: connection.id, credentialVersion: (latest._max.credentialVersion ?? 0) + 1, ...encrypted, displayHint: hint(command.secret), status: "ACTIVE" } });
+          await tx.providerAuditEvent.create({ data: { workspaceId: context.workspaceId, actorUserId: context.userId, action: latest._max.credentialVersion === null ? "CREDENTIAL_CREATED" : "CREDENTIAL_ROTATED", targetType: "ProviderCredentialVersion", targetId: id, metadata: { managedCapabilityParentId: root.id } } });
+        }
+      } else if (command.action === "ENABLED") {
+        await tx.providerConnection.updateMany({ where: { workspaceId: context.workspaceId, id: { in: ids } }, data: { status: command.enabled ? "ACTIVE" : "DISABLED" } });
+      } else {
+        await tx.providerCredentialVersion.updateMany({ where: { workspaceId: context.workspaceId, connectionId: { in: ids }, status: { not: "REVOKED" } }, data: { status: "REVOKED" } });
+        if (command.action === "DELETE") {
+          for (const connection of current) await tx.providerConnection.update({ where: { id: connection.id }, data: { status: "REVOKED", displayName: `${connection.displayName.slice(0, 90)} [deleted:${connection.id}]` } });
+          await tx.providerRouteBinding.deleteMany({ where: { workspaceId: context.workspaceId, connectionId: { in: ids } } });
+        }
+      }
+      await tx.providerAuditEvent.create({ data: { workspaceId: context.workspaceId, actorUserId: context.userId, action: "CONNECTION_UPDATED", targetType: "ProviderConnection", targetId: root.id, metadata: { providerGroupAction: command.action, connectionIds: ids, ...(command.action === "DELETE" ? { deleted: true, unboundSlots: routes.map(route => route.routeSlot) } : {}) } } });
+    });
+  }
   async createConnection(context: OwnerContext, input: { providerKey: string; protocol: string; displayName: string; endpoint?: string; region?: string; configuration?: Record<string, unknown> }) { await requireOwner(this.db, context); try { const connection = await this.db.providerConnection.create({ data: { providerKey: input.providerKey, protocol: input.protocol, displayName: input.displayName, ...(input.endpoint !== undefined ? { endpoint: input.endpoint } : {}), ...(input.region !== undefined ? { region: input.region } : {}), configuration: boundedMetadata(input.configuration ?? {}) as never, workspaceId: context.workspaceId } }); await this.audit(context, "CONNECTION_CREATED", "ProviderConnection", connection.id, { providerKey: input.providerKey }); return connection; } catch (error) { normalizeConnectionNameConflict(error); } }
   async createConnectionWithCredential(context: OwnerContext, input: { providerKey: string; protocol: string; displayName: string; endpoint: string; secret: string; region?: string; configuration?: Record<string, unknown> }) {
     if (!this.cipher) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Credential vault is not configured");

@@ -10,7 +10,7 @@ import { readinessDisplay, type ProviderReadinessView } from "@/lib/provider-rea
 
 type Model = { modelId: string; families: string[]; visionInput?:boolean; speechFormats?: string[]; embeddingDimensionOptions?: number[] };
 type Provider = { providerKey: string; displayName: string; protocol: string; capabilityProtocols?: Record<string, string>; models: Model[] };
-type Connection = { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credential: { id?: string; exists: boolean; displayHint?: string | null; status?: string } };
+type Connection = { managedCapabilities?: string[]; id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credential: { id?: string; exists: boolean; displayHint?: string | null; status?: string } };
 type Route = { id: string; routeSlot: string; connectionId: string; modelId: string; configuration: Record<string, unknown>; connection: { displayName: string; providerKey: string } };
 type RouteFeedback = { tone: "pending" | "success" | "error"; message: string };
 type State = { speechVoices: Record<string, string[]>; manifest: { providers: Provider[] }; connections: Connection[]; routes: Route[]; routeModels: Record<string, Record<string, Model[]>>; readiness: Record<string, ProviderReadinessView> };
@@ -176,6 +176,7 @@ export function ProviderSettings() {
                 API Key: {connection.credential.exists ? `已配置 ${connection.credential.displayHint ?? ""}` : "未配置"}
               </p>
 
+              {Boolean(connection.managedCapabilities?.length) && <p className="muted" style={{fontSize:12,margin:"0 0 14px"}}>已配置用途接口：{connection.managedCapabilities!.join("、")}。密钥与启用状态由此服务商统一管理。</p>}
               <div className={styles.connectionActions}>
                 <CredentialRotation connectionId={connection.id} busy={busy} submit={submit} />
 
@@ -295,7 +296,7 @@ function DeleteService({ connection, routes, busy, submit }: { connection: Conne
     <dialog ref={dialog} className={styles.deleteDialog} aria-labelledby={titleId}>
       <h2 id={titleId}>删除服务商？</h2>
       <p className={styles.deleteName}>{connection.displayName}</p>
-      <p>此服务商将从配置列表中移除，保存在应用内的 API Key 将被撤销。</p>
+      <p>此服务商及其关联的语音、向量接口将从配置列表中移除，保存在应用内的 API Key 将被撤销。</p>
       {routes.length ? <><p>以下 {routes.length} 项用途将解除绑定，需要重新配置：</p><ul>{routes.map(route => <li key={route.routeSlot}>{routeSlots.find(item => item.slot === route.routeSlot)?.label ?? route.routeSlot}</li>)}</ul></> : <p>此服务商没有绑定用途。</p>}
       <p>历史调用记录和已生成内容会保留。已发出的请求可能继续完成；服务商账户中的密钥不会被删除。</p>
       <div className={styles.dialogActions}>

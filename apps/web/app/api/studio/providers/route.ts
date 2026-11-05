@@ -1,7 +1,7 @@
 import { readEnvironment } from "@ai-cognitive/shared/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { ProviderGatewayRepository, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayRepository, managedConnectionParent, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
@@ -31,7 +31,12 @@ async function response(workspaceId: string) {
     prisma.providerRouteBinding.findMany({ where: { workspaceId }, include: { connection: { select: { id: true, displayName: true, providerKey: true, protocol: true, status: true } } }, orderBy: { routeSlot: "asc" } }),
     providerReadiness(workspaceId),
   ]);
-  return NextResponse.json({ manifest: sanitizedProviderManifest(productManifest()), connections: connections.map(safeConnection), routes: routes.map(route => ({ id: route.id, routeSlot: route.routeSlot, connectionId: route.connectionId, modelId: route.modelId, configuration: safeConfiguration(route.configuration), connection: route.connection })), readiness });
+  const parentById = new Map(connections.map(connection => [connection.id, managedConnectionParent(connection, connections)]));
+  const visible = connections.filter(connection => !parentById.get(connection.id));
+  return NextResponse.json({ manifest: sanitizedProviderManifest(productManifest()), connections: visible.map(connection => ({ ...safeConnection(connection), managedCapabilities: connections.filter(child => parentById.get(child.id)?.id === connection.id).map(child => child.protocol === "CUSTOM_SPEECH" ? "语音合成" : "向量检索") })), routes: routes.map(route => {
+    const parent = parentById.get(route.connectionId);
+    return { id: route.id, routeSlot: route.routeSlot, connectionId: parent?.id ?? route.connectionId, modelId: route.modelId, configuration: safeConfiguration(route.configuration), connection: parent ? { id:parent.id,displayName:parent.displayName,providerKey:parent.providerKey,protocol:parent.protocol,status:parent.status } : route.connection };
+  }), readiness });
 }
 async function resolveProviderHostname(hostname: string): Promise<readonly string[]> {
   // The Phase 9 browser harness deliberately uses this non-routable namespace;
@@ -141,9 +146,9 @@ export async function POST(request: Request) {
     const manifest = productManifest();
     if (input.action === "TEST_CONNECTION") return NextResponse.json({ test: await testSubmittedConnection(input, manifest) });
     const cipher = resolveCredentialKeyring(process.env, { initializeLocal: input.action === "CREATE_CONNECTION_WITH_CREDENTIAL" || input.action === "SET_CREDENTIAL" });
-    if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
+    if (!cipher && ["CREATE_CONNECTION_WITH_CREDENTIAL", "SET_CREDENTIAL", "AUTO_CONFIGURE_ROUTES"].includes(input.action)) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
     const repository = new ProviderGatewayRepository(prisma, cipher);
-    if (input.action === "AUTO_CONFIGURE_ROUTES") { const configured = await autoConfigure(context, input, manifest, repository, cipher); return NextResponse.json({ ...(await (await response(context.workspaceId)).json()), autoConfigure: configured }); }
+    if (input.action === "AUTO_CONFIGURE_ROUTES") { const configured = await autoConfigure(context, input, manifest, repository, cipher!); return NextResponse.json({ ...(await (await response(context.workspaceId)).json()), autoConfigure: configured }); }
     if (input.action === "APPLY_STABLE_BOOK_ROUTES") { await applyStableBookRoutes(context, input, manifest, repository); return response(context.workspaceId); }
     if (input.action === "CREATE_CONNECTION" || input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") {
       assertSafeConfiguration(input.configuration);
@@ -155,13 +160,15 @@ export async function POST(request: Request) {
       if (input.action === "CREATE_CONNECTION_WITH_CREDENTIAL") await repository.createConnectionWithCredential(context, input);
       else await repository.createConnection(context, input);
     } else if (input.action === "SET_CREDENTIAL") {
-      await repository.rotateCredential(context, input.connectionId, input.secret);
+      await repository.manageProvider(context, input.connectionId, { action: "ROTATE", secret: input.secret });
     } else if (input.action === "REVOKE_CREDENTIAL") {
-      await repository.revokeCredential(context, input.credentialVersionId);
+      const credential = await prisma.providerCredentialVersion.findUnique({ where: { id_workspaceId: { id: input.credentialVersionId, workspaceId: context.workspaceId } }, select: { connectionId:true } });
+      if (!credential) throw new Error("AUTHORIZATION_FAILED");
+      await repository.manageProvider(context, credential.connectionId, { action: "REVOKE", credentialVersionId: input.credentialVersionId });
     } else if (input.action === "DELETE_CONNECTION") {
-      await repository.deleteConnection(context, input.connectionId, { routeSlots: input.expectedRouteSlots, credentialVersionId: input.expectedCredentialVersionId });
+      await repository.manageProvider(context, input.connectionId, { action:"DELETE", routeSlots: input.expectedRouteSlots, credentialVersionId: input.expectedCredentialVersionId });
     } else if (input.action === "SET_ENABLED") {
-      await repository.setConnectionEnabled(context, input.connectionId, input.enabled);
+      await repository.manageProvider(context, input.connectionId, { action:"ENABLED",enabled:input.enabled });
     } else {
       assertSafeConfiguration(input.configuration);
       const connection = await prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.connectionId, workspaceId: context.workspaceId } }, select: { id: true, providerKey: true, protocol: true, status: true } });
@@ -176,11 +183,8 @@ export async function POST(request: Request) {
       if (protocol && protocol !== connection.protocol) {
         const endpoint = builtInProviderProfiles.find(profile => profile.providerKey === connection.providerKey && profile.family === family && profile.protocol === protocol)?.endpoint;
         if (!endpoint) throw new Error("CAPABILITY_MISMATCH");
-        const credential = await prisma.providerCredentialVersion.findFirst({ where: { workspaceId: context.workspaceId, connectionId: connection.id, status: "ACTIVE" }, orderBy: { credentialVersion: "desc" } });
-        if (!credential) throw new Error("AUTHORIZATION_FAILED");
-        const derivedName = `${provider!.displayName}（${family === "SPEECH" ? "语音" : "向量"} ${connection.id}）`;
-        const existing = await prisma.providerConnection.findFirst({ where: { workspaceId: context.workspaceId, displayName:derivedName, providerKey: connection.providerKey, protocol, endpoint, status: "ACTIVE", credentialVersions: { some: { status: "ACTIVE" } } }, orderBy: { createdAt: "asc" } });
-        targetConnection = existing ?? (await repository.createConnectionWithCredential(context, { providerKey: connection.providerKey, protocol, endpoint, displayName: derivedName, secret: cipher.decrypt(credential, { workspaceId: context.workspaceId, connectionId: connection.id, credentialVersionId: credential.id, providerKey: connection.providerKey }) })).connection;
+        if (!cipher) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
+        targetConnection = await repository.capabilityConnection(context, connection.id, { family:family as "SPEECH" | "EMBEDDING", protocol, endpoint, displayName: `${provider!.displayName}（${family === "SPEECH" ? "语音" : "向量"} ${connection.id}）` });
       }
       assertQwenRouteConfiguration(connection.providerKey, input.routeSlot as RouteSlot, input.configuration);
       validateRouteManifestSelection(manifest, { routeSlot: input.routeSlot as RouteSlot, providerKey: connection.providerKey, protocol: targetConnection.protocol, modelId: input.modelId, configuration: input.configuration });

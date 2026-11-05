@@ -1,6 +1,6 @@
 export const providerErrorMessages: Record<string, string> = {
   PROVIDER_CONNECTION_CHANGED: "服务商配置已变化，请刷新设置后重新确认删除。",
-  CONNECTION_DISABLED: "该服务商已删除，无法继续修改，请刷新设置。",
+  CONNECTION_DISABLED: "该服务商已停用或删除，请刷新设置并检查启用状态。",
   PROVIDER_SETTINGS_INPUT_INVALID: "配置内容无效，请检查服务商或用途设置。模型请在用途配置中选择。",
   PROVIDER_MODEL_SELECTION_USE_ROUTE: "请在模型与用途配置中选择模型，服务商设置不再保存默认模型。",
   PROVIDER_SETTINGS_LOAD_FAILED: "加载 服务商 设置失败，请刷新后重试。",

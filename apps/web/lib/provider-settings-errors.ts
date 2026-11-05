@@ -29,7 +29,7 @@ export function providerSettingsFailure(error: unknown): { code: string; status:
       ? error.message
       : undefined;
   const code = candidate && safeProviderSettingsCodes.has(candidate) ? candidate : "PROVIDER_SETTINGS_REQUEST_FAILED";
-  const status = code === "PROVIDER_CONNECTION_NAME_CONFLICT" ? 409
+  const status = (code === "PROVIDER_CONNECTION_NAME_CONFLICT" || code === "PROVIDER_CONNECTION_CHANGED") ? 409
     : code === "WEB_IDENTITY_REQUIRED" ? 401
     : code === "AUTHORIZATION_FAILED" ? 403
     : code === "PROVIDER_SETTINGS_REQUEST_FAILED" ? 500

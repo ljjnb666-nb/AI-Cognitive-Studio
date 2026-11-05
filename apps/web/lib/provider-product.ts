@@ -55,6 +55,12 @@ const readinessDependencyLabels: Partial<Record<RouteSlot, string>> = {
   BOOK_SYNTHESIS: "全书综合",
   EMBEDDING: "向量检索",
   THINKING_SESSION: "思考",
+  PODCAST_SCRIPT: "播客脚本",
+  PODCAST_TTS: "播客语音",
+  SHORT_VIDEO_SCRIPT: "短视频脚本",
+  SHORT_VIDEO_TTS: "短视频语音",
+  TEACH_BACK_ASSESSMENT: "理解验证",
+  PDF_VISUAL_STRUCTURE: "页面结构审核",
 };
 function readinessDependency(manifest: ReturnType<typeof productManifest>, routes: RouteWithConnection[], slot: RouteSlot, missingError?: string): ProviderReadinessDependency {
   try {
