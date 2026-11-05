@@ -190,7 +190,13 @@ describe("Phase 10 cognition product read model", () => {
     await expect(interrupted(actor, rollback)).rejects.toThrow("FIXTURE_CONSUMER_INTERRUPTED");
     await expect(failAtCommit(rollback.requestId)(actor, rollback)).rejects.toThrow("FIXTURE_COMMIT_REJECTED_AFTER_JOURNAL_WRITE");
     expect((await readPublishedBookRevision(actor, data.document.id)).publicationId).toBe(event.id);
-    const rolledBack = await publish(actor, rollback);
+    // A rollback to the unmodified baseline is revocation: it must remain
+    // available even if the published source has since become inconsistent.
+    const incidentChunk = await prisma.documentChunk.findFirstOrThrow({ where: { chunkSetId: base.chunkSet.id } });
+    await prisma.documentChunk.update({ where: { id: incidentChunk.id }, data: { contentHash: "0".repeat(64) } });
+    const rolledBack = await publish(actor, rollback).finally(async () => {
+      await prisma.documentChunk.update({ where: { id: incidentChunk.id }, data: { contentHash: incidentChunk.contentHash } });
+    });
     const restarted = createBookRevisionPublicationService({ assertConsumersReady: async () => {} });
     expect(await restarted(actor, rollback)).toMatchObject({ id: rolledBack.id });
     const republished = await restarted(actor, { ...command, expectedPublicationId: rolledBack.id, requestId: "republish" });
