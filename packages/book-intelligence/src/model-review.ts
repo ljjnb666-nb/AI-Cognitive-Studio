@@ -247,8 +247,9 @@ export async function verifyBookRevisionModelReview(tx: Prisma.TransactionClient
   selectedReviewHash?: string) {
   const reviews = await tx.bookIntelligenceRevisionReview.findMany({
     where:{revisionId,revisionHash,...(selectedReviewHash?{reviewHash:selectedReviewHash}:{})},
-    orderBy:[{createdAt:"desc"},{id:"desc"}],take:selectedReviewHash?1:8,
+    orderBy:[{createdAt:"desc"},{id:"desc"}],take:1,
   });
+  // Never revive an older PASS after a later BLOCKED or manual decision.
   for (const review of reviews) {
     const decision = review.decision as unknown as ModelDecision;
     const proof = decision?.modelProof;
