@@ -259,6 +259,17 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       } finally {
         await prisma.documentChunk.update({where:{id:originalChunk.id},data:{contentHash:originalChunk.contentHash}});
       }
+      // Memory text is immutable evidence for downstream revisions: a tampered
+      // body must fail even when vector counts and artifact edges still agree.
+      const originalMemory=await prisma.bookMemoryItem.findFirstOrThrow({where:{analysisRunId:target.run.id}});
+      await prisma.bookMemoryItem.update({where:{id:originalMemory.id},data:{content:originalMemory.content+" tampered"}});
+      try {
+        const changed=await inspectBookMergeStructure(target.run.id,f);
+        expect(changed.structuralPass).toBe(false);
+        expect(changed.issues).toEqual(expect.arrayContaining([{code:"MEMORY_CONTENT_HASH_INVALID",id:originalMemory.id}]));
+      } finally {
+        await prisma.bookMemoryItem.update({where:{id:originalMemory.id},data:{content:originalMemory.content}});
+      }
       await expect(inspectBookMergeStructure(target.run.id,{workspaceId:f.workspaceId,userId:randomUUID()})).rejects.toThrow("BOOK_MERGE_AUDIT_ACCESS_DENIED");
       expect((await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-target",promptVersion:"target",provider:"fixture",model:"fixture-model",frozenChunks:selection})).run.id).toBe(target.run.id);
     }finally{await r.close();}
