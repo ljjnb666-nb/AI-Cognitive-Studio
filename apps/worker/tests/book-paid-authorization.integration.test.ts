@@ -230,6 +230,28 @@ it("pins all terminated prior gross reservations into an exact 10 CNY continuati
  expect(payload.reservedMicroCny).toBeGreaterThan(0);
  expect(payload.cumulativeBudget!.limitMicroCny).toBe(10_000_000);
 });
+it("allows the exactly remaining 9.211501 CNY only with explicit pinned historic 10 CNY authorization",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,maxMicroCny:9_211_501,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ await f.adapter.execute(f.input);
+ expect(f.wire).toHaveBeenCalledTimes(1);
+ const grant=(await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}})).payload as unknown as BookPaidGrant;
+ expect(prior.carried.reservedMicroCny+grant.maxMicroCny).toBe(BOOK_CUMULATIVE_CNY_CAP_MICRO);
+ expect(grant.entries).toHaveLength(1);
+});
+it("does not increase the legacy per-grant 5 CNY limit without the cumulative ledger",async()=>{
+ const f=await fixture();
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,maxMicroCny:5_000_001} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("BOOK_PAID_GRANT_INVALID");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("blocks even one micro-CNY above the exact remaining continuation envelope",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,maxMicroCny:9_211_502,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("BOOK_PAID_CUMULATIVE_BUDGET_INVALID");
+ expect(f.wire).not.toHaveBeenCalled();
+});
 it("denies activation when prior gross plus new maximum exceeds 10 CNY",async()=>{
  const f=await fixture(5_000_000),prior=await withPrior(f,5_000_001);
  await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([prior.carried])} as never}});
