@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { CohereEmbeddingAdapter, DeterministicProviderHttpTransport, GeminiEmbeddingAdapter, OpenAIEmbeddingAdapter, ProviderGatewayError, ProviderRegistry, QwenEmbeddingAdapter, VoyageEmbeddingAdapter, canonicalEmbeddingInputHash, createProviderAdapterResolver, validateEmbeddingInput, validateVectors } from "../src/index.js";
 import type { ProtocolFamily, ProviderAdapterResolverInput } from "../src/index.js";
+import { approvedProfile } from "../src/adapters/provider-profiles.js";
 
 const capability = { modelId: "fixture-embedding", families: ["EMBEDDING"] as const, confidence: "VERIFIED" as const, embeddingDimensions: 3, configurableEmbeddingDimensions: true, embeddingDimensionOptions: [3], maxEmbeddingInputs: 4, embeddingPurposes: ["DOCUMENT", "QUERY", "SEMANTIC_SIMILARITY", "CLASSIFICATION", "CLUSTERING"] as const };
 function fixture(providerKey: string, protocol: ProtocolFamily, response: unknown, configuration: Record<string, unknown> = {}) { const transport = new DeterministicProviderHttpTransport(() => ({ status: 200, headers: { "x-request-id": "request-1" }, body: JSON.stringify(response) })); const snapshot = { id: "s", workspaceId: "w", routeSlot: "EMBEDDING" as const, correlationId: "c", source: "PLATFORM" as const, providerKey, protocol, modelId: capability.modelId, adapterVersion: "phase8c", capability, configuration: { embeddingDimensions: 3, ...configuration }, configurationHash: "h", createdAt: new Date() }; const request = { workspaceId: "w", routeSlot: "EMBEDDING" as const, correlationId: "c", idempotencyKey: "i", inputHash: "a".repeat(64), capability: { family: "EMBEDDING" as const }, requestFingerprint: "f", embedding: { texts: ["one", "two"], purpose: "DOCUMENT" as const } }; return { transport, input: { snapshot, request, signal: new AbortController().signal, credential: "credential" } }; }
 describe("Phase 8C embedding contract and real adapter fixtures", () => {
+  it("uses the official Zhipu embedding endpoint for a shared chat connection", () => {
+    expect(approvedProfile("zhipu", "EMBEDDING", "https://open.bigmodel.cn/api/paas/v4/chat/completions")?.endpoint)
+      .toBe("https://open.bigmodel.cn/api/paas/v4/embeddings");
+    expect(approvedProfile("zhipu", "EMBEDDING", "https://other.example/api/paas/v4/chat/completions"))
+      .toBeUndefined();
+  });
   it("hashes ordered runtime text and purpose without retaining it", () => { expect(canonicalEmbeddingInputHash({ texts: ["a", "b"], purpose: "DOCUMENT" })).toBe(canonicalEmbeddingInputHash({ texts: ["a", "b"], purpose: "DOCUMENT" })); expect(canonicalEmbeddingInputHash({ texts: ["a", "b"], purpose: "DOCUMENT" })).not.toBe(canonicalEmbeddingInputHash({ texts: ["b", "a"], purpose: "DOCUMENT" })); expect(canonicalEmbeddingInputHash({ texts: ["a", "b"], purpose: "DOCUMENT" })).not.toBe(canonicalEmbeddingInputHash({ texts: ["a", "b"], purpose: "QUERY" })); });
   it("rejects invalid embedding runtime input before adapter execution", () => { expect(() => validateEmbeddingInput({ texts: ["  "], purpose: "DOCUMENT" }, capability)).toThrow(ProviderGatewayError); expect(() => validateEmbeddingInput({ texts: [], purpose: "DOCUMENT" }, capability)).toThrow(ProviderGatewayError); expect(() => validateEmbeddingInput({ texts: Array.from({ length: 97 }, (_value, index) => `fallback-${index}`), purpose: "DOCUMENT" })).toThrow(ProviderGatewayError); });
   it.each([
