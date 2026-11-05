@@ -109,8 +109,9 @@ describe("Phase 8B real text provider adapters", () => {
     const request = { ...base.request, routeSlot: "BOOK_SEMANTIC_REVIEW" as const,
       capability: { family: "TEXT_GENERATION" as const, structuredOutput: "JSON_MODE" as const },
       text: { ...text, structuredOutput: { mode: "JSON_MODE" as const } } };
+    // This existing fixture intentionally models an already-frozen v1 receipt.
     const snapshot = { ...base.snapshot, routeSlot: "BOOK_SEMANTIC_REVIEW" as const,
-      modelId: "MiniMax-M3", configuration: {} };
+      modelId: "MiniMax-M3", pipelineVersion: "book-revision-review-v1", configuration: {} };
     const ok = transport({ model: "MiniMax-M3", choices: [
       { finish_reason: "stop", message: { content: '{"verdict":"PASS"}' } },
     ] });
@@ -122,6 +123,33 @@ describe("Phase 8B real text provider adapters", () => {
     expect(body.max_tokens).toBeUndefined();
     expect(body.response_format).toBeUndefined();
     expect(body.temperature).toBeUndefined();
+
+    // New v2 review prefers adaptive reasoning; configuration remains opt-in
+    // for a disabled control. No HTTP request occurs in invalid policy cases.
+    const v2 = { ...snapshot, pipelineVersion: "book-revision-review-v2" };
+    const adaptive = transport({ model: "MiniMax-M3", choices: [
+      { finish_reason: "stop", message: { content: '{"verdict":"BLOCKED"}', reasoning_content: "private" } },
+    ] });
+    await new OpenAICompatibleAdapter(adaptive).execute({ ...base, snapshot: v2, request });
+    expect(JSON.parse(adaptive.calls[0]!.body)).toMatchObject({
+      thinking: { type: "adaptive" }, reasoning_split: true, max_completion_tokens: 100,
+    });
+    const withoutThinking = transport({ choices: [
+      { finish_reason: "stop", message: { content: '{"verdict":"BLOCKED"}' } },
+    ] });
+    await new OpenAICompatibleAdapter(withoutThinking).execute({ ...base,
+      snapshot: { ...v2, configuration: { minimaxM3ReviewThinking: "disabled" } }, request });
+    expect(JSON.parse(withoutThinking.calls[0]!.body).thinking).toEqual({ type: "disabled" });
+    const rejectedConfig = transport({});
+    await expect(new OpenAICompatibleAdapter(rejectedConfig).execute({ ...base,
+      snapshot: { ...v2, configuration: { minimaxM3ReviewThinking: "unexpected" } }, request }))
+      .rejects.toMatchObject({ code: "CAPABILITY_MISMATCH" });
+    expect(rejectedConfig.calls).toHaveLength(0);
+    const rejectedPolicy = transport({});
+    await expect(new OpenAICompatibleAdapter(rejectedPolicy).execute({ ...base,
+      snapshot: { ...v2, pipelineVersion: "unrecognized-policy" }, request }))
+      .rejects.toMatchObject({ code: "CAPABILITY_MISMATCH" });
+    expect(rejectedPolicy.calls).toHaveLength(0);
 
     // Existing approved MiniMax native-style endpoint cannot be assumed to
     // support the newer OpenAI max_completion_tokens field.
