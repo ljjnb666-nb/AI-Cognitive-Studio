@@ -3,6 +3,7 @@ import { canonicalEmbeddingInputHash, canonicalGatewayRequestFingerprint, stable
 import { sha256, validateEvidence } from "./chunking.js";
 import { embeddingIdentityWithHash } from "./embeddings.js";
 import { inspectBookMergeStructureInTransaction } from "./merge-quality.js";
+import { verifyBookRevisionModelReview } from "./model-review.js";
 
 type Actor = { workspaceId: string; userId: string };
 type Coordinate = { sourceBlockId: string; startOffset: number; endOffset: number };
@@ -123,12 +124,18 @@ export async function reviewBookRevision(actor: Actor, revisionId: string, expec
     }
     const inspected = await inspectPatch(tx, actor, revision.analysisRunId, revision.patch as unknown as BookRevisionPatch);
     if (inspected.originalHash !== revision.originalHash || inspected.revisionHash !== expectedHash) throw new Error("BOOK_REVISION_CONTENT_CHANGED");
-    const reviewHash = stableHash({ expectedHash, decision, reviewerUserId: actor.userId });
+    // Human/editorial decisions remain recorded, but they can never carry a
+    // model attestation. A model PASS is materialized only through the encrypted
+    // Provider Gateway consumeTextResult transaction.
+    const editorialDecision: BookRevisionDecision = {
+      verdict: decision.verdict, notes: decision.notes, evidenceSha256: decision.evidenceSha256,
+    };
+    const reviewHash = stableHash({ expectedHash, decision: editorialDecision, reviewerUserId: actor.userId });
     const vectorReady = inspected.vectorRefreshMemoryIds.length === 0;
     const review = await tx.bookIntelligenceRevisionReview.upsert({
       where: { revisionId_reviewHash: { revisionId, reviewHash } },
       update: {},
-      create: { revisionId, reviewerUserId: actor.userId, revisionHash: expectedHash, reviewHash, decision, vectorReady },
+      create: { revisionId, reviewerUserId: actor.userId, revisionHash: expectedHash, reviewHash, decision: editorialDecision, vectorReady },
     });
     return { review, vectorRefreshMemoryIds: inspected.vectorRefreshMemoryIds };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
@@ -312,6 +319,11 @@ export async function readPublishedBookRevisionForRun(
       (revision.review?.decision as BookRevisionDecision | undefined)?.verdict !== "PASS") {
     throw new Error("BOOK_REVISION_PUBLICATION_NOT_CONSUMABLE");
   }
+  const proof = await verifyBookRevisionModelReview(
+    tx, { workspaceId: scope.workspaceId, userId: revision.review.reviewerUserId },
+    event.revisionId, event.revision.revisionHash, undefined, event.reviewHash,
+  );
+  if (!proof) throw new Error("BOOK_REVISION_PUBLICATION_NOT_CONSUMABLE");
   return { analysisRunId: scope.analysisRunId, publicationId: event.id, revision };
 
 }
@@ -398,7 +410,14 @@ export function createBookRevisionPublicationService(dependencies: {
           if (!readiness.vectorReady) {
             throw new Error("BOOK_REVISION_VECTOR_NOT_READY");
           }
-          reviewHash = review.reviewHash;
+          // A forged/editorial PASS is never sufficient for automated release.
+          // Verify the gateway invocation, evidence/request fingerprints and
+          // atomically consumed encrypted receipt in THIS locked transaction.
+          const modelReview = await verifyBookRevisionModelReview(
+            tx, actor, revision.id, revision.revisionHash, undefined, review.reviewHash,
+          );
+          if (!modelReview) throw new Error("BOOK_REVISION_MODEL_REVIEW_REQUIRED");
+          reviewHash = modelReview.reviewHash;
         }
 
         // An editorial PASS alone must never publish an invalid source tree.
