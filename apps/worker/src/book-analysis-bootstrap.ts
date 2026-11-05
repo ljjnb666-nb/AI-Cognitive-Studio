@@ -20,7 +20,7 @@ export type ProcessBookAnalysisBootstrapOptions = { source?: NodeJS.ProcessEnv; 
 export function bookAnalysisBootstrapJobId(payload: BookAnalysisBootstrapPayload): string {
   return `book-analysis-bootstrap-${payload.bootstrapId}-g${payload.dispatchGeneration}`;
 }
-const readyErrors = new Set(["AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"]);
+const readyErrors = new Set(["MINIMAX_BOOK_CONFIGURATION_REQUIRED", "AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"]);
 const capacityError = "WORKSPACE_EXPENSIVE_OPERATION_LIMIT_REACHED";
 const errorCode = (error: unknown): string => error instanceof Error ? error.message.split(":")[0] ?? "BOOK_ANALYSIS_BOOTSTRAP_FAILED" : "BOOK_ANALYSIS_BOOTSTRAP_FAILED";
 const assertGatewayRuntimeReady = (source: NodeJS.ProcessEnv = process.env) => { if (!resolveCredentialKeyring(source)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED"); };

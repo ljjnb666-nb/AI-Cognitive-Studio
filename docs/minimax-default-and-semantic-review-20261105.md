@@ -28,8 +28,8 @@ prepareBookRevisionModelReview 从真实 Run 读取分析模型，检查独立�
 - PostgreSQL 预检、零调用保护和文本回执交接：44 项通过。
 - PostgreSQL 新旧审校、发布门禁、默认路由和前端就绪：29 项通过。
 - Book 冻结路由计划：7 项通过。
-- Worker 请求完整性：16 项通过。
-- 合计 153 项通过。未重跑私有全书 141 分块结构验收。
+- Worker 请求完整性与自动建任务缺配保护：53 项通过。
+- 合计 190 项通过。未重跑私有全书 141 分块结构验收。
 - Web 与 Worker TypeScript 通过；受影响模块 ESLint 通过。
 - Web 生产构建通过。首次使用本机 HTTP 登录地址触发既有 HTTPS 校验，改用专用 HTTPS 构建配置后通过；保留既有 ingestion import.meta 编译警告。
 
