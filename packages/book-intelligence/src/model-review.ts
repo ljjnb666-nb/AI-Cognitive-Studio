@@ -25,13 +25,18 @@ const validSpan = (s: Span) => !!s && typeof s.sourceBlockId === "string" &&
   s.startOffset >= 0 && s.endOffset > s.startOffset;
 
 async function reviewPacket(tx: Prisma.TransactionClient, actor: Actor, revisionId: string, revisionHash: string,
-  requestId: string, requireCurrent = true) {
+  requestId: string, requireCurrent = true, requireReviewerMembership = true) {
   if (!validText(requestId, 128)) throw new Error("BOOK_MODEL_REVIEW_REQUEST_INVALID");
-  const [member, revision] = await Promise.all([
-    tx.workspaceMember.findUnique({ where: { workspaceId_userId: actor } }),
-    tx.bookIntelligenceRevision.findFirst({ where: { id: revisionId, revisionHash, workspaceId: actor.workspaceId } }),
-  ]);
-  if (!member || member.role === "VIEWER") throw new Error("BOOK_REVISION_FORBIDDEN");
+  // New requests/materializations require live editor authority. A pinned,
+  // previously authorized publication is independently verified by its immutable
+  // review/receipt, not by the former reviewer's present workspace membership.
+  if (requireReviewerMembership) {
+    const member = await tx.workspaceMember.findUnique({ where: { workspaceId_userId: actor } });
+    if (!member || member.role === "VIEWER") throw new Error("BOOK_REVISION_FORBIDDEN");
+  }
+  const revision = await tx.bookIntelligenceRevision.findFirst({
+    where: { id: revisionId, revisionHash, workspaceId: actor.workspaceId },
+  });
   if (!revision) throw new Error("BOOK_REVISION_CONFLICT");
   const run = await tx.bookAnalysisRun.findFirst({ where: {
     id: revision.analysisRunId, workspaceId: actor.workspaceId, sourceDocumentId: revision.sourceDocumentId,
@@ -263,7 +268,7 @@ export async function verifyBookRevisionModelReview(tx: Prisma.TransactionClient
         stableHash({expectedHash:revisionHash,decision:review.decision,reviewerUserId:review.reviewerUserId}) !== review.reviewHash)
       continue;
     try {
-      const packet = await reviewPacket(tx,actor,revisionId,revisionHash,proof.requestId,!selectedReviewHash);
+      const packet = await reviewPacket(tx,actor,revisionId,revisionHash,proof.requestId,!selectedReviewHash,!selectedReviewHash);
       if (packet.evidenceBundleHash !== proof.evidenceBundleHash) continue;
       const [invocation,snapshot,receipt] = await Promise.all([
         tx.providerInvocation.findFirst({where:{id:proof.invocationId,workspaceId:actor.workspaceId}}),
