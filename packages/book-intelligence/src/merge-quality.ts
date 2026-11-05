@@ -22,7 +22,7 @@ export async function inspectBookMergeStructure(analysisRunId: string, actor: {w
       if(chunkVectors!==chunks.length||memoryVectors!==items.length)issues.push({code:"EMBEDDING_COVERAGE_INVALID"});
     }
     if(run.status!=="SUCCEEDED"||run.analysisStage!=="COMPLETED")issues.push({code:"RUN_NOT_COMPLETE"});
-    if(chunks.some(c=>c.workspaceId!==run.workspaceId||c.extractionId!==run.extractionId||c.sourceDocumentId!==run.sourceDocumentId))issues.push({code:"CHUNK_LINEAGE_INVALID"});
+    if(chunks.some(c=>c.workspaceId!==run.workspaceId||c.extractionId!==run.extractionId))issues.push({code:"CHUNK_LINEAGE_INVALID"});
     if(leaves.length!==chunks.length||leaves.some((a,i)=>a.ordinal!==chunks[i]?.ordinal||a.chunkId!==chunks[i]?.id))issues.push({code:"CHUNK_COVERAGE_INVALID"});
     if(books.length!==1||!books[0]?.summary)issues.push({code:"BOOK_ROOT_INVALID"});
     for(const a of artifacts){
@@ -33,7 +33,7 @@ export async function inspectBookMergeStructure(analysisRunId: string, actor: {w
       if(!reached)issues.push({code:"ARTIFACT_NOT_REACHING_BOOK",id:a.id});
     }
     for(const item of items){if(item.workspaceId!==run.workspaceId||item.sourceDocumentId!==run.sourceDocumentId||item.extractionId!==run.extractionId||!item.sourceArtifactId||!byId.has(item.sourceArtifactId))issues.push({code:"MEMORY_LINEAGE_INVALID",id:item.id});if(["CLAIM","EXAMPLE","STORY","PERSON","QUOTE"].includes(item.type)&&!evidence.some(e=>e.memoryItemId===item.id))issues.push({code:"FACT_MEMORY_WITHOUT_EVIDENCE",id:item.id});}
-    for(const e of evidence){const block=blockById.get(e.sourceBlockId),item=itemById.get(e.memoryItemId);if(!block||!item||e.workspaceId!==run.workspaceId||e.extractionId!==run.extractionId||e.sourceDocumentId!==run.sourceDocumentId||e.startOffset<0||e.endOffset<=e.startOffset||e.endOffset>block.text.length){issues.push({code:"MEMORY_EVIDENCE_INVALID",id:e.id});continue;}if(item.type==="QUOTE")try{validateQuote(block,{sourceBlockId:block.id,startOffset:e.startOffset,endOffset:e.endOffset,...(e.quoteText?{quoteText:e.quoteText}:{})});}catch{issues.push({code:"DIRECT_QUOTE_INVALID",id:e.id});}}
+    for(const e of evidence){const block=blockById.get(e.sourceBlockId),item=itemById.get(e.memoryItemId);if(!block||!item||e.workspaceId!==run.workspaceId||e.extractionId!==run.extractionId||item.sourceDocumentId!==run.sourceDocumentId||e.startOffset<0||e.endOffset<=e.startOffset||e.endOffset>block.text.length){issues.push({code:"MEMORY_EVIDENCE_INVALID",id:e.id});continue;}if(item.type==="QUOTE")try{validateQuote(block,{sourceBlockId:block.id,startOffset:e.startOffset,endOffset:e.endOffset,...(e.quoteText?{quoteText:e.quoteText}:{})});}catch{issues.push({code:"DIRECT_QUOTE_INVALID",id:e.id});}}
     return{analysisRunId,structuralPass:issues.length===0,issues,counts:{chunks:leaves.length,sections:artifacts.filter(a=>a.scope==="SECTION").length,chapters:artifacts.filter(a=>a.scope==="CHAPTER").length,books:books.length,memoryItems:items.length,memoryEvidence:evidence.length},semanticReviewRequired:true,fullBookVerified:false};
   },{timeout:15000});
 }
