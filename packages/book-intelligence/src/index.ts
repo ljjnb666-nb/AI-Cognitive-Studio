@@ -13,5 +13,6 @@ export * from "./analysis-versions.js";
 export * from "./embedding-deferred-recovery.js";
 
 export * from "./execution-authority.js";
+export * from "./revisions.js";
 export * from "./frozen-chunks.js";
 export * from "./merge-quality.js";
