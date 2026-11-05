@@ -20,7 +20,11 @@ prepareBookRevisionModelReview 从真实 Run 读取分析模型，检查独立�
 
 消费回执仍核验原分析 provider/model、成功调用、精确请求指纹、证据引用、模型响应身份及消费记录。新路由身份加入路由槽，避免与旧请求混淆。已有 BOOK_SYNTHESIS 审校回执按原槽重建原始身份与指纹，保留旧发布记录的读取和核验能力。
 
-新审校请求将系统指令与完整证据的 UTF-8 字节数加框架预留作为保守输入估算。该值不是供应商 tokenizer 的精确计数。新槽输入预算最多 36000，输出最多 6144，最多一次尝试；旧槽预算和身份保持原样。由于 M3 的思考 token 也会计入输出预算，新独立审校槽必须强制发送 thinking.disabled，即使旧工作区绑定遗漏 minimaxM3JsonMode 也不能回退到默认思考；支持 OpenAI /chat/completions 的端点使用 max_completion_tokens，原生 /text/chatcompletion_v2 保留 max_tokens。HTTP 200 + finish_reason=length 的结果一律不可作为成功审校回执，保留用量诊断并禁止自动重复付费尝试。此前已花费但为空的回执不予重放，需要重新获得单次调用授权并使用新的 requestId。
+新审校请求将系统指令与完整证据的 UTF-8 字节数加框架预留作为保守输入估算。该值不是供应商 tokenizer 的精确计数。**新增 v2 独立审校策略（book-revision-review-v2）**：输入预算最多 36000、输出上限 16384、最多一次尝试，默认 MiniMax M3 的 `thinking.type=adaptive` 保留复杂原文论证能力；工作区审校专用路由可明确设置 `minimaxM3ReviewThinking=disabled` 做无思考对照。未经明确授权不得自动触发 A/B 两次付费审校。输出上限包含模型内部思考与最终 JSON，并**不等于保证最终 JSON 预留空间**，超长任务优先在后续版本按证据断言分组且保留跨组 BLOCKED 汇总，不得偷偷分段自动重试。
+
+**历史 v1 不变**：旧 `BOOK_SYNTHESIS` 审校请求仍为 3800，已存在 `BOOK_SEMANTIC_REVIEW` v1 为 6144，均保持 thinking.disabled 与原始请求指纹；按数据库已冻结 `pipelineVersion` 选择正确策略重建，不承认未知版本。兼容 OpenAI `/chat/completions` 的端点使用 `max_completion_tokens`，原生 `/text/chatcompletion_v2` 保留 `max_tokens`。HTTP 200 + `finish_reason=length` 即便出现结构正确的 JSON 也一律拒绝作为有效审校回执，保留用量诊断并禁止自动重复付费尝试。此前已花费但为空的回执不予重放，需要重新获得单次调用授权并使用新的 requestId。
+
+**费用和质量门禁**：16,384 是硬输出上限而非实际用量；在真正付费前需核对目标 MiniMax 账户地域、端点、计费模式、准入额度与两种思考策略的每次最大费用。模拟 Adapter 回归只验证请求与回执安全性，**不能证明 adaptive 比 disabled 更准确**；后续若获授权应只在同源原文小样本上做单次、明确预算的质量验证。
 
 ## 本地验证
 
