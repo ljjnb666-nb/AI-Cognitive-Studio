@@ -1,6 +1,7 @@
 import { prisma } from "@ai-cognitive/db";
 import { assertFrozenChunksUnchanged } from "./frozen-chunks.js";
 import { validateQuote } from "./analysis.js";
+import { sha256 } from "./chunking.js";
 /** This gate proves structure/provenance only; it never certifies a Mock's meaning. */
 export async function inspectBookMergeStructure(analysisRunId: string, actor: {workspaceId:string;userId:string}) {
   return prisma.$transaction(async tx => {
@@ -9,7 +10,7 @@ export async function inspectBookMergeStructure(analysisRunId: string, actor: {w
     const member=await tx.workspaceMember.findUnique({where:{workspaceId_userId:{workspaceId:actor.workspaceId,userId:actor.userId}}});
     if(!run || !member)throw new Error("BOOK_MERGE_AUDIT_ACCESS_DENIED");
     const [chunks,artifacts,items,evidence,blocks]=await Promise.all([
-      tx.documentChunk.findMany({where:{chunkSetId:run.chunkSetId,workspaceId:run.workspaceId,extractionId:run.extractionId},orderBy:{ordinal:"asc"}}),
+      tx.documentChunk.findMany({where:{chunkSetId:run.chunkSetId,workspaceId:run.workspaceId,extractionId:run.extractionId},orderBy:{ordinal:"asc"},include:{sourceSpans:{orderBy:{ordinal:"asc"},include:{sourceBlock:true}}}}),
       tx.analysisArtifact.findMany({where:{analysisRunId,workspaceId:run.workspaceId},orderBy:[{scope:"asc"},{ordinal:"asc"}]}),
       tx.bookMemoryItem.findMany({where:{analysisRunId,workspaceId:run.workspaceId}}),tx.bookMemoryEvidence.findMany({where:{analysisRunId,workspaceId:run.workspaceId}}),tx.sourceBlock.findMany({where:{extractionId:run.extractionId}}),
     ]);
@@ -23,6 +24,17 @@ export async function inspectBookMergeStructure(analysisRunId: string, actor: {w
     }
     if(run.status!=="SUCCEEDED"||run.analysisStage!=="COMPLETED")issues.push({code:"RUN_NOT_COMPLETE"});
     if(chunks.some(c=>c.workspaceId!==run.workspaceId||c.extractionId!==run.extractionId))issues.push({code:"CHUNK_LINEAGE_INVALID"});
+    // A complete list of CHUNK rows is not proof that their immutable bytes
+    // still match the original source ranges. Reject broken span provenance.
+    for(const chunk of chunks){
+      const spans=chunk.sourceSpans;
+      const sourceValid=spans.length>0 && sha256(chunk.content)===chunk.contentHash &&
+        spans.every(span=>span.extractionId===run.extractionId && span.sourceBlock.extractionId===run.extractionId &&
+          Number.isSafeInteger(span.startOffset) && Number.isSafeInteger(span.endOffset) &&
+          span.startOffset>=0 && span.endOffset>span.startOffset && span.endOffset<=span.sourceBlock.text.length) &&
+        spans.map(span=>span.sourceBlock.text.slice(span.startOffset,span.endOffset)).join("\\n\\n")===chunk.content;
+      if(!sourceValid)issues.push({code:"CHUNK_SOURCE_INVALID",id:chunk.id});
+    }
     if(leaves.length!==chunks.length||leaves.some((a,i)=>a.ordinal!==chunks[i]?.ordinal||a.chunkId!==chunks[i]?.id))issues.push({code:"CHUNK_COVERAGE_INVALID"});
     if(books.length!==1||!books[0]?.summary)issues.push({code:"BOOK_ROOT_INVALID"});
     for(const a of artifacts){
