@@ -48,8 +48,35 @@ describe("PDF visual images through Workspace Provider Gateway",()=>{
     const user=body.messages.find((m:{role:string})=>m.role==="user");
     expect(user.content[1]).toEqual({type:"image_url",image_url:{url:"data:image/png;base64,"+png.toString("base64")}});
     expect(body.response_format).toEqual({type:"json_object"});
+    const system=body.messages.find((m:{role:string})=>m.role==="system");
+    const prompt=typeof system?.content==="string" ? system.content : JSON.stringify(system?.content);
+    // B31 failure mode: a containing frame was hallucinated as a data edge.
+    // This is a prompt-contract test, NOT a claim the model now reads B31 correctly.
+    expect(prompt).toContain("A container boundary");
+    expect(prompt).toContain("Never convert containment or touching outlines into edges.");
+    expect(prompt).toContain("omit the edge instead of inferring it.");
+    expect(prompt).toContain("Never invent a curve relationship from mere visual proximity.");
     expect(body.thinking).toEqual({type:"disabled"});
     expect(JSON.stringify(body)).not.toContain("test-secret");
+  });
+
+
+
+  it("versions the B31 relation prompt idempotency key to avoid replaying pre-guard model output",async()=>{
+    const requests:GatewayRequest[]=[];
+    const capturedGateway={
+      execute:vi.fn(async (request:GatewayRequest)=>{
+        requests.push(request);
+        throw new Error("CAPTURED_BEFORE_PROVIDER");
+      }),
+    } as unknown as ReturnType<typeof fixture>["gateway"];
+    await expect(createGatewayPdfVisualExecutor(settings(capturedGateway)).inspect(image()))
+      .rejects.toThrow("CAPTURED_BEFORE_PROVIDER");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.idempotencyKey).toMatch(/^pdf-visual-v2:/);
+    expect(requests[0]!.text?.system).toContain("A container boundary");
+    expect(requests[0]!.text?.system).toContain("omit the edge instead of inferring it.");
+    // No real vision provider, B31 image or paid model call is used in this test.
   });
 
   it("enforces membership before any provider request",async()=>{
