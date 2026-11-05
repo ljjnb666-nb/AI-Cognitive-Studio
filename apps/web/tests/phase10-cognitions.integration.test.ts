@@ -237,7 +237,10 @@ describe("Phase 10 cognition product read model", () => {
     await reviewBookRevision(actor, revision.id, revision.revisionHash, {
       verdict: "PASS", notes: "Fixture approval", evidenceSha256: "c".repeat(64),
     });
-    // A genuine editorial PASS must not override an invalid source CHUNK.
+    await expect(publish(actor, command)).rejects.toThrow("BOOK_REVISION_MODEL_REVIEW_REQUIRED");
+    const model = await verifiedModelReview(actor, revision);
+    await materializeBookRevisionModelReview(model.repository, actor, model.receipt);
+    // A valid, independently attested PASS still cannot override bad CHUNK provenance.
     const unchangedChunk = await prisma.documentChunk.findFirstOrThrow({ where: { chunkSetId: base.chunkSet.id } });
     await prisma.documentChunk.update({ where: { id: unchangedChunk.id }, data: { contentHash: "0".repeat(64) } });
     try {
@@ -311,8 +314,8 @@ describe("Phase 10 cognition product read model", () => {
       summary: { text: "Revised summary", evidence: [span] },
       memories: [{ id: item.id, text: "Revised cognition", addEvidence: [{ ...span, startOffset: 14, endOffset: 24 }] }],
     });
-    const { review } = await reviewBookRevision(actor, revision.id, revision.revisionHash, {
-      verdict: "PASS", notes: "Fixture approval", evidenceSha256: "b".repeat(64),
+    await reviewBookRevision(actor, revision.id, revision.revisionHash, {
+      verdict: "PASS", notes: "Legacy editorial approval", evidenceSha256: "b".repeat(64),
     });
     const publish = createBookRevisionPublicationService({ assertConsumersReady: async () => {} });
     const command = {
@@ -349,6 +352,9 @@ describe("Phase 10 cognition product read model", () => {
       vector: relatedVector!,
     } });
     expect(await findCrossBookCognitionConnections(actor, related.id)).toEqual([]);
+    await expect(publish(actor, command)).rejects.toThrow("BOOK_REVISION_MODEL_REVIEW_REQUIRED");
+    const model = await verifiedModelReview(actor, revision);
+    const review = (await previewBookRevision(actor, revision.id, revision.revisionHash)).review!;
     const event = await publish(actor, command);
     expect(await findCrossBookCognitionConnections(actor, related.id)).toMatchObject([
       { id: item.id, content: "Revised cognition", semantics: "SEMANTICALLY_RELATED" },
