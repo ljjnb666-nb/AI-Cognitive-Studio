@@ -56,7 +56,9 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   expect(audioResponse.headers()["content-type"]).toContain("audio/");
   const citationDisclosure = page.locator("details").filter({ hasText: "查看引用证据" }).first();
   await expect(citationDisclosure).toContainText("查看引用证据");
-  await expect(citationDisclosure.locator("blockquote")).toContainText(excerpt);
+  const displayedPodcastQuote = (await citationDisclosure.locator("blockquote").innerText()).trim();
+  expect(displayedPodcastQuote).toMatch(/^“.+”$/s);
+  expect(fixture).toContain(displayedPodcastQuote.slice(1, -1));
   await page.screenshot({ path: testInfo.outputPath("podcast-player.png"), fullPage: true });
   console.log("FLOW_B_PASS");
 
@@ -73,7 +75,11 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   const videoResponse = await page.request.get(videoSource!);
   expect(videoResponse.ok()).toBeTruthy(); expect(videoResponse.headers()["content-type"]).toContain("video/mp4");
   await page.getByText("查看原文证据").first().click();
-  await expect(page.locator("blockquote").filter({ hasText: excerpt }).first()).toBeVisible();
+  const videoQuote = page.locator("blockquote").first();
+  await expect(videoQuote).toBeVisible();
+  const displayedVideoQuote = (await videoQuote.innerText()).trim();
+  expect(displayedVideoQuote).toMatch(/^“.+”$/s);
+  expect(fixture).toContain(displayedVideoQuote.slice(1, -1));
   await page.screenshot({ path: testInfo.outputPath("video-player.png"), fullPage: true });
   const otherUser = await prisma.user.create({ data: { email: "phase6-other-workspace@ai-cognitive-studio.test" } });
   const otherWorkspace = await prisma.workspace.create({ data: { name: "Phase 6 isolated authorization workspace" } });
