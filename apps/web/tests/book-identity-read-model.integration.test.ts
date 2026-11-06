@@ -97,7 +97,7 @@ describe("04C-4C3 authoritative Source/Work read model (real PostgreSQL)", () =>
     const detail = await sourceDetail(documentId, identity, 2);
     expect(detail.currentIntelligence).toBeNull();
     const summary = (await sources(identity)).find(item => item.id === documentId)!;
-    expect(sourceStatusLabel(summary.status, summary.hasIntelligence, summary.errorCode)).toBe("已解析，待理解");
+    expect(sourceStatusLabel(summary.status, summary.hasIntelligence, summary.errorCode)).toBe("正文已提取，待理解");
     expect(detail.textPreview).toMatchObject({ pageNumber: 2, pageCount: 3, physicalPageNumber: 2, truncated: false, blocks: [{ text: "原文第2页" }] });
     expect(JSON.stringify(detail.textPreview)).not.toContain("原文第1页");
     expect((await sourceDetail(documentId, identity, -1)).textPreview?.pageNumber).toBe(1);
