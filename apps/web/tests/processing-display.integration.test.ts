@@ -4,6 +4,9 @@ import { sourceProcessingSnapshot, type ProcessingState } from "../lib/processin
 import { generationStatusLabel } from "../lib/product-labels";
 
 describe("shared product status presentation", () => {
+  it("预算阻断说明处理额度不足，不误称模型或提取失败",()=>{
+    const result=processingDisplay({state:"ANALYSIS_FAILED",stage:"BOOK_ANALYSIS",recoveryAction:"RETRY_ANALYSIS",stageAvailability:"AVAILABLE"},"BUDGET_EXCEEDED");expect(result).toMatchObject({label:"处理额度不足",active:false,description:expect.stringContaining("资源单位不是人民币金额")});expect(result.description).toContain("已完成分块保留");expect(result.description).toContain("不代表服务商账户余额不足");
+  });
   it("模型格式异常明确展示，不混同超时或审核拒绝",()=>{
     const result=processingDisplay({state:"ANALYSIS_FAILED",stage:"BOOK_ANALYSIS",recoveryAction:"RETRY_ANALYSIS",stageAvailability:"AVAILABLE"},"INVALID_PROVIDER_RESPONSE");expect(result).toMatchObject({label:"模型响应异常",active:false,description:expect.stringContaining("未通过格式校验")});expect(result.description).toContain("可能已计费");expect(result.description).not.toContain("审核拒绝");
   });
