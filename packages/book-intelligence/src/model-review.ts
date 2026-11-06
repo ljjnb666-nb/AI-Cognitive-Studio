@@ -145,36 +145,54 @@ async function reviewPacket(tx: Prisma.TransactionClient, actor: Actor, revision
     revisionId, revisionHash, originalHash: revision.originalHash,
     rootSummaryHash: sha256(root.summary ?? ""), claims,
   };
-  // In v3 excerpts are stored ONCE; each atom has its own exact allowed span
-  // references. v1/v2 retain the byte-for-byte historical evidence format.
+  // In v3 excerpts are stored ONCE; each atom's evidence is a list of indices
+  // into sourceExcerpts. Duplicating full coordinate triplets per atom made
+  // real book packets grow O(atoms × spans) and trip the packet limit on
+  // production-scale summaries; indices keep the same allowed-span semantics.
+  // v1 retains the byte-for-byte historical evidence format.
   const excerptTable = new Map<string, Claim["evidence"][number]>();
   if (reviewPipeline === ATOMIC_REVIEW_PIPELINE) {
     for (const claim of claims) for (const span of claim.evidence) {
       excerptTable.set(JSON.stringify([span.sourceBlockId,span.startOffset,span.endOffset]),span);
     }
   }
-  const evidence = reviewPipeline === ATOMIC_REVIEW_PIPELINE ? {
-    ...historicalEvidence, schemaVersion: 2,
-    claims: claims.map(claim => ({
-      id: claim.id, text: claim.text,
-      evidence: claim.evidence.map(({ sourceBlockId,startOffset,endOffset }) =>
-        ({ sourceBlockId,startOffset,endOffset })),
-    })),
-    sourceExcerpts: [...excerptTable.values()].sort((a,b) =>
+  const evidenceWithoutCommitment = reviewPipeline === ATOMIC_REVIEW_PIPELINE ? (() => {
+    const excerpts = [...excerptTable.values()].sort((a,b) =>
       a.sourceBlockId.localeCompare(b.sourceBlockId) ||
-      a.startOffset-b.startOffset || a.endOffset-b.endOffset),
-  } : historicalEvidence;
+      a.startOffset-b.startOffset || a.endOffset-b.endOffset);
+    const index = new Map(excerpts.map((span,i) =>
+      [JSON.stringify([span.sourceBlockId,span.startOffset,span.endOffset]),i]));
+    return { ...historicalEvidence, schemaVersion: 2,
+      claims: claims.map(claim => ({
+        id: claim.id, text: claim.text,
+        evidence: claim.evidence.map(span =>
+          index.get(JSON.stringify([span.sourceBlockId,span.startOffset,span.endOffset]))!),
+      })),
+      sourceExcerpts: excerpts.map(({ sourceBlockId,startOffset,endOffset,excerpt },i) =>
+        ({ i, sourceBlockId, startOffset, endOffset, excerpt })),
+    };
+  })() : historicalEvidence;
+  // The verdict must echo evidenceBundleHash, yet v1/v2 packets never carried
+  // it, so no real model could ever copy it back. v2/v3 now ship the commitment
+  // itself; it is EXCLUDED from the hashed content so the value stays computable
+  // and replay-identical. v1 keeps its frozen byte-for-byte historical packet.
+  const evidenceBundleHash = stableHash(evidenceWithoutCommitment);
+  const evidence = reviewPipeline === LEGACY_REVIEW_PIPELINE
+    ? evidenceWithoutCommitment
+    : { ...evidenceWithoutCommitment, evidenceBundleHash };
   const evidenceJson = JSON.stringify(evidence);
   if (evidenceJson.length > 72000) throw new Error("BOOK_MODEL_REVIEW_PACKET_TOO_LARGE");
-  const evidenceBundleHash = stableHash(evidence);
   const identity = stableHash({ workspaceId: actor.workspaceId, revisionId, revisionHash, requestId,
     evidenceBundleHash, rubricVersion: BOOK_MODEL_REVIEW_RUBRIC,
     ...(reviewSlot === "BOOK_SEMANTIC_REVIEW" ? { reviewSlot } : {}),
     ...(reviewPipeline !== LEGACY_REVIEW_PIPELINE ? { reviewPipeline } : {}) });
   // The dedicated independent-review request has room for the complete
   // citation-by-citation JSON verdict. Legacy BOOK_SYNTHESIS receipts retain
-  // their exact 3800-token request fingerprint and budget.
-  const outputLimit = reviewPipeline !== LEGACY_REVIEW_PIPELINE ? 16384
+  // their exact 3800-token request fingerprint and budget. Adaptive thinking
+  // on production-scale packets (16 atoms × 47 spans) measured a full 16384
+  // budget consumed by reasoning alone (finish=LENGTH), so versioned requests
+  // double the cap; the actual billed usage stays far below it.
+  const outputLimit = reviewPipeline !== LEGACY_REVIEW_PIPELINE ? 32768
     : reviewSlot === "BOOK_SEMANTIC_REVIEW" ? 6144 : 3800;
   const input = {
     system: [
@@ -188,10 +206,13 @@ async function reviewPacket(tx: Prisma.TransactionClient, actor: Actor, revision
       ...(reviewPipeline !== LEGACY_REVIEW_PIPELINE ? [
         "Use concise final JSON reasons and cite only decisive supplied spans. Never include reasoning traces, source prose beyond citations or markdown in the final JSON.",
         "For any unsupported or ambiguous claim, return BLOCKED; do not speculate to force a PASS.",
+        "Copy revisionHash and evidenceBundleHash verbatim from the input's own revisionHash and evidenceBundleHash fields; never substitute another hash from the packet.",
+        "notes and every check's reason are plain strings, never arrays or objects.",
       ] : []),
       ...(reviewPipeline === ATOMIC_REVIEW_PIPELINE ? [
-        "The input uses schemaVersion=2: claim.evidence lists exact span triplets; sourceExcerpts supplies their verbatim text once.",
+        "The input uses schemaVersion=2: sourceExcerpts[i] lists every candidate evidence span once with its exact coordinates and verbatim text; each claim's evidence field lists the indices of that claim's allowed spans.",
         "Evaluate each summary:NNN atom independently, including attribution, factual support, and projection qualifiers. All atoms must pass; a global summary approval is invalid.",
+        "Citations in the response still copy the allowed sourceBlockId/startOffset/endOffset triplet itself, not an index.",
       ] : []),
     ].join("\n"),
     messages: [{ role: "user" as const, content: evidenceJson }],

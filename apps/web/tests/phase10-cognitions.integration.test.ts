@@ -147,10 +147,14 @@ async function verifiedModelReview(
     // Historical Gateway fingerprints include output token cap and the exact
     // serialized request, so retaining the new 6144 cap would falsely fail
     // old authenticated receipts after a budget-only schema evolution.
-    // v2 adds two explicit reasoning-policy instructions; remove them when
-    // reconstructing an immutable v1 synthesis receipt.
+    // v2/v3 add four explicit reasoning-policy, hash-echo and typing
+    // instructions and ship an evidenceBundleHash commitment inside the packet;
+    // strip all of them when reconstructing an immutable v1 synthesis receipt.
+    const legacyPacket = JSON.parse(prepared.request.text!.messages[0]!.content) as Record<string, unknown>;
+    delete legacyPacket.evidenceBundleHash;
     const legacyText = { ...prepared.request.text!,
-      system: prepared.request.text!.system!.split("\n").slice(0,-2).join("\n"),
+      system: prepared.request.text!.system!.split("\n").slice(0,-4).join("\n"),
+      messages: [{ role: "user" as const, content: JSON.stringify(legacyPacket) }],
       generation: { ...prepared.request.text!.generation, maxOutputTokens: 3800 } };
     prepared.request.text = legacyText;
     prepared.request.inputHash = canonicalTextInputHash(legacyText);
@@ -162,10 +166,17 @@ async function verifiedModelReview(
   }
   const adapter: ProviderAdapter = { execute: async ({ request }) => {
     const body = JSON.parse(request.text!.messages[0]!.content) as {
-      revisionHash: string; rubricVersion: string; claims: Array<{
-        id: string; evidence: Array<{ sourceBlockId: string; startOffset: number; endOffset: number }>;
+      revisionHash: string; rubricVersion: string; schemaVersion?: number;
+      sourceExcerpts?: Array<{ sourceBlockId: string; startOffset: number; endOffset: number }>;
+      claims: Array<{
+        id: string; evidence: Array<{ sourceBlockId: string; startOffset: number; endOffset: number } | number>;
       }>;
     };
+    // v3 schemaVersion=2 packs claim evidence as indices into sourceExcerpts.
+    const resolve = (claim: { evidence: Array<{ sourceBlockId: string; startOffset: number; endOffset: number } | number> }) =>
+      typeof claim.evidence[0] === "number"
+        ? body.sourceExcerpts![claim.evidence[0] as number]!
+        : claim.evidence[0] as { sourceBlockId: string; startOffset: number; endOffset: number };
     const verdict = opts.verdict ?? (opts.unsupportedSummaryClaim ? "BLOCKED" : "PASS");
     return { response: {
       type: "STRUCTURED", finishReason: "STOP", providerModel: capability.modelId,
@@ -177,13 +188,14 @@ async function verifiedModelReview(
         checks: body.claims.map(claim => {
           const supported = opts.unsupportedSummaryClaim
             ? claim.id !== "summary:002" : verdict === "PASS";
+          const span = resolve(claim);
           return {
             claimId: claim.id, status: supported ? "SUPPORTED" : "UNSUPPORTED",
             reason: "Compared against provided excerpt",
             citations: supported
               ? [{
-                sourceBlockId: opts.corruptCitation ? "forged-evidence" : claim.evidence[0]!.sourceBlockId,
-                startOffset: claim.evidence[0]!.startOffset, endOffset: claim.evidence[0]!.endOffset,
+                sourceBlockId: opts.corruptCitation ? "forged-evidence" : span.sourceBlockId,
+                startOffset: span.startOffset, endOffset: span.endOffset,
               }] : [],
           };
         }),
@@ -409,13 +421,17 @@ describe("Phase 10 cognition product read model", () => {
     expect(historicalPacket.claims.map((claim: { id: string }) => claim.id)).toEqual(["summary"]);
     expect(v3.reviewPipeline).toBe("book-revision-review-v3");
     expect(v3.request.budget?.maxAttempts).toBe(1);
-    expect(v3.request.budget?.maxOutputTokens).toBe(16384);
+    expect(v3.request.budget?.maxOutputTokens).toBe(32768);
     expect(atomicPacket.schemaVersion).toBe(2);
     expect(v3.claimIds).toEqual(["summary:001", "summary:002", "summary:003"]);
     expect(atomicPacket.claims).toHaveLength(3);
     expect(atomicPacket.sourceExcerpts).toHaveLength(1);
-    expect(atomicPacket.claims.every((claim: { evidence: unknown[] }) => claim.evidence.length === 1)).toBe(true);
+    // schemaVersion=2 packs each atom's allowed evidence as sourceExcerpts indices.
+    expect(atomicPacket.claims.every((claim: { evidence: number[] }) =>
+      Array.isArray(claim.evidence) && claim.evidence.length === 1 &&
+      claim.evidence.every(entry => entry === 0))).toBe(true);
     expect(atomicPacket.sourceExcerpts[0].excerpt).toBe(data.block.text.slice(0,14));
+    expect(atomicPacket.sourceExcerpts[0].i).toBe(0);
     // One unsupported projection must invalidate any global PASS, with no
     // persisted decision; a genuine BLOCKED can be consumed but cannot publish.
     await expect(verifiedModelReview(actor, revision,
