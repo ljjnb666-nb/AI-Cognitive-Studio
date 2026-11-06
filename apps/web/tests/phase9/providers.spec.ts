@@ -292,8 +292,9 @@ test("unconfigured workspace ingests without paid Book work, then automatically 
   const sourceDocumentId = page.url().split("/").at(-1)!;
   await expect.poll(async () => (await prisma.ingestionRun.findFirst({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 90_000 }).toBe("SUCCEEDED");
   await page.reload();
-  await expect(page.getByText("书籍解析完成。配置 AI Provider 后开始深度理解。")).toBeVisible();
-  await expect(page.getByRole("link", { name: "配置 AI Provider" })).toBeVisible();
+  await page.getByRole("button", { name: "书籍概览" }).click();
+  await expect(page.getByText("AI 服务商尚未配置完成，配置后会自动继续")).toBeVisible();
+  await expect(page.getByRole("link", { name: "配置 AI 服务商" })).toBeVisible();
   expect(await prisma.bookAnalysisRun.count({ where: { workspaceId } })).toBe(0);
   const waitingBootstrap = await prisma.bookAnalysisBootstrap.findFirstOrThrow({ where: { sourceDocumentId } });
   expect(waitingBootstrap.status).toBe("WAITING_FOR_PROVIDER");
@@ -327,6 +328,7 @@ test("a real failed Book analysis exposes an explicit browser retry without re-u
   const sourceDocumentId = page.url().split("/").at(-1)!;
   await expect.poll(async () => (await prisma.ingestionRun.findFirst({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 90_000 }).toBe("SUCCEEDED");
   await page.reload();
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await expect.poll(async () => (await prisma.bookAnalysisRun.findFirst({ where: { sourceDocumentId }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 120_000 }).toBe("FAILED");
   await expect(page.getByRole("paragraph").filter({ hasText: /^AI 深度理解失败$/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
@@ -352,6 +354,7 @@ test("a real failed Book analysis exposes an explicit browser retry without re-u
   // create a fresh execution attempt whose Job payload pins the new connection.
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"]) await setRoute(page, slot, good.id, slot === "EMBEDDING" ? "phase9-embed" : "phase9-text");
   await page.reload();
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
   const switchedRetry = page.waitForResponse(response => response.url().includes(`/api/studio/processing/${sourceDocumentId}/recover`) && response.request().method() === "POST");
   await page.getByRole("button", { name: "恢复深度理解" }).click();
@@ -398,6 +401,7 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
   await expect.poll(() => prisma.bookAnalysisRun.count({ where: { sourceDocumentId } }), { timeout: 30_000 }).toBe(1);
   await expect.poll(() => prisma.currentBookIntelligence.count({ where: { workspaceId } }), { timeout: 120_000 }).toBe(1);
   await page.reload();
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible();
   await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
   await expect(page.locator(".evidence-item.active").filter({ hasText: knownEvidence })).toBeVisible();
