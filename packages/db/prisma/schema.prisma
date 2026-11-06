@@ -3245,6 +3245,7 @@ model OcrModelReviewEvent {
 }
 
 model WorkspaceResourcePolicy {
+  runLimitEnabled Boolean @default(true)
   workspaceId String @id
   dailyUnitLimit Int @default(1000000)
   runUnitLimit Int @default(300000)
