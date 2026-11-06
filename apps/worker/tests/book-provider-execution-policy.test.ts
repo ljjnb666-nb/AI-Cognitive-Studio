@@ -3,7 +3,7 @@ import { createTestProviderGateway, ProviderRegistry, canonicalTextInputHash, ty
 import { bookProviderExecutionPolicy, bookProviderGeneration, bookProviderLeaseMs } from "../src/book-provider-execution-policy.js";
 
 afterEach(()=>vi.useRealTimers());
-it("M3 书籍生成具有所有书籍阶段统一的 32000 总输出额度，进入请求指纹且不改变源文",()=>{
+it("M3 书籍生成具有分块及归并保持 32000 总输出额度，进入请求指纹且不改变源文",()=>{
   const text={messages:[{role:"user" as const,content:"原文与引用范围保持不变"}]};
   const generation=bookProviderGeneration({providerKey:"minimax",modelId:"MiniMax-M3"});expect(generation).toEqual({maxOutputTokens:32000});
   expect(canonicalTextInputHash({...text,generation})).not.toBe(canonicalTextInputHash(text));expect(text.messages[0]!.content).toBe("原文与引用范围保持不变");
@@ -30,7 +30,7 @@ it("显式更短的操作时限和取消信号继续有效",async()=>{
   const other=fixture(45_000),controller=new AbortController();other.request.signal=controller.signal;const cancelled=expect(other.gateway.execute(other.request,{userId:"fixture"})).rejects.toMatchObject({code:"CANCELLED"});await vi.advanceTimersByTimeAsync(100);controller.abort();await cancelled;expect(other.execute).toHaveBeenCalledTimes(1);
 });
 it.each(["BOOK_CHUNK_ANALYSIS","BOOK_REDUCTION_ANALYSIS","BOOK_SYNTHESIS"] as const)("仅针对 M3 书籍阶段启用新策略：%s",async slot=>{
-  const f=fixture(1,{},"MiniMax-M3",slot);expect(bookProviderExecutionPolicy(await f.gateway.resolveSnapshot(f.request),f.request)).toEqual({timeoutMs:600_000,maxAttempts:1});
+  const f=fixture(1,{},"MiniMax-M3",slot);expect(bookProviderExecutionPolicy(await f.gateway.resolveSnapshot(f.request),f.request)).toEqual({timeoutMs:slot === "BOOK_SYNTHESIS" ? 900_000 : 600_000,maxAttempts:1});
 });
 it.each([["MiniMax-M3","PODCAST_SCRIPT"],["MiniMax-M2.5","BOOK_CHUNK_ANALYSIS"]] as const)("其他用途和型号沿用原策略：%s %s",async(model,slot)=>{
   const f=fixture(1,{},model,slot);expect(bookProviderExecutionPolicy(await f.gateway.resolveSnapshot(f.request),f.request)).toBeUndefined();
@@ -51,6 +51,20 @@ it.each(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as 
   vi.useFakeTimers(); const f=fixture(320000,{},"MiniMax-M3",slot);
   const done=expect(f.gateway.execute(f.request,{userId:"fixture"})).resolves.toMatchObject({status:"SUCCEEDED",attempt:1});
   await vi.advanceTimersByTimeAsync(320000);await done;
-  expect(f.acquire).toHaveBeenCalledWith(expect.any(String),4,601000);
+  expect(f.acquire).toHaveBeenCalledWith(expect.any(String),4,slot === "BOOK_SYNTHESIS" ? 901000 : 601000);
   expect(f.execute).toHaveBeenCalledTimes(1);
+});
+
+it("综合单独预留思考余量且保持有限预算，其他阶段不变", () => {
+  const snapshot={providerKey:"minimax",modelId:"MiniMax-M3"};
+  expect(bookProviderGeneration(snapshot,"BOOK")).toEqual({maxOutputTokens:128000});
+  expect(bookProviderLeaseMs("BOOK")).toBe(930000);
+  expect(bookProviderGeneration(snapshot,"CHUNK")).toEqual({maxOutputTokens:32000});
+  expect(bookProviderGeneration(snapshot,"SECTION")).toEqual({maxOutputTokens:32000});
+  expect(bookProviderGeneration(snapshot,"BOOK")).not.toHaveProperty("thinking");
+});
+it("综合达到900秒仍只尝试一次", async () => {
+  vi.useFakeTimers();const f=fixture(901000,{},"MiniMax-M3","BOOK_SYNTHESIS");
+  const done=expect(f.gateway.execute(f.request,{userId:"fixture"})).rejects.toMatchObject({code:"TIMEOUT"});
+  await vi.advanceTimersByTimeAsync(900000);await done;expect(f.execute).toHaveBeenCalledTimes(1);
 });
