@@ -9,7 +9,7 @@ import styles from "./provider-settings.module.css";
 import { readableProviderError, providerKeyTestMessage } from "@/lib/provider-settings-ui-errors";
 import { readinessDisplay, type ProviderReadinessView } from "@/lib/provider-readiness-ui";
 
-type Model = { modelId: string; families: string[]; visionInput?:boolean; speechFormats?: string[]; embeddingDimensionOptions?: number[] };
+type Model = { modelId: string; families: string[]; structuredOutput?: string; visionInput?:boolean; speechFormats?: string[]; embeddingDimensionOptions?: number[] };
 type Provider = { providerKey: string; displayName: string; protocol: string; capabilityProtocols?: Record<string, string>; models: Model[] };
 type Connection = { managedCapabilities?: string[]; id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credential: { id?: string; exists: boolean; displayHint?: string | null; status?: string } };
 type Route = { id: string; routeSlot: string; connectionId: string; modelId: string; configuration: Record<string, unknown>; connection: { displayName: string; providerKey: string } };
@@ -39,7 +39,7 @@ function normalizeProviderState(body: State): State {
   const routeModels = body.routeModels ?? Object.fromEntries(body.connections.map(connection => {
     const provider = body.manifest.providers.find(p => p.providerKey === connection.providerKey);
     return [connection.id, Object.fromEntries(routeSlots.map(({slot}) => [slot, provider?.models.filter(model =>
-      model.families.includes(slot === "PDF_OCR" ? "OCR" : slot === "EMBEDDING" ? "EMBEDDING" : slot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION") && (slot !== "PDF_VISUAL_STRUCTURE" || (connection.providerKey === "zhipu" && model.visionInput === true))) ?? []]))];
+      model.families.includes(slot === "PDF_OCR" ? "OCR" : slot === "EMBEDDING" ? "EMBEDDING" : slot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION") && (slot !== "TEACH_BACK_ASSESSMENT" || model.structuredOutput === "STRICT_JSON_SCHEMA") && (slot !== "PDF_VISUAL_STRUCTURE" || (connection.providerKey === "zhipu" && model.visionInput === true))) ?? []]))];
   }));
   return {...body,routeModels,speechVoices:body.speechVoices??{zhipu:["tongtong","xiaochen"],openai:["alloy","echo","fable","onyx","nova","shimmer"]}};
 }
@@ -236,6 +236,7 @@ export function ProviderSettings() {
               slot={slot}
               slotLabel={label}
               feedback={routeFeedback[slot]}
+              onEdit={() => setRouteFeedback(previous => { const next = { ...previous }; delete next[slot]; return next; })}
               speechVoices={state.speechVoices}
               connections={state.connections}
               providers={state.manifest.providers}
@@ -327,6 +328,7 @@ function RouteForm({
   slot,
   slotLabel,
   feedback,
+  onEdit,
   speechVoices,
   connections,
   providers,
@@ -338,6 +340,7 @@ function RouteForm({
   slot: string;
   slotLabel: string;
   feedback?: RouteFeedback;
+  onEdit(): void;
   speechVoices: State["speechVoices"];
   connections: Connection[];
   providers: Provider[];
@@ -360,6 +363,8 @@ function RouteForm({
 
   const capability = slot === "PDF_OCR" ? "OCR" : slot === "EMBEDDING" ? "EMBEDDING" : slot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION";
   const models = routeModels[connectionId]?.[slot] ?? [];
+  const allowCustomModel = connection?.providerKey === "openai-compatible" && capability === "TEXT_GENERATION" && slot !== "PDF_VISUAL_STRUCTURE" && slot !== "TEACH_BACK_ASSESSMENT";
+  const unavailable = !models.length && !allowCustomModel;
 
   const voiceIds = speechVoices[connection?.providerKey ?? ""] ?? [];
   const voiceLabels: Record<string, string> = { tongtong: "彤彤", xiaochen: "小陈", chuichui: "锤锤" };
@@ -367,6 +372,7 @@ function RouteForm({
   return (
     <form
       id={`route-${slot}`}
+      onChange={() => { setValidationError(""); setConfigurationError(false); if (feedback) onEdit(); }}
       onInvalidCapture={event => {
         const field = event.currentTarget.querySelector<HTMLInputElement | HTMLSelectElement>("input:invalid, select:invalid, textarea:invalid");
         if (!field) return;
@@ -374,6 +380,7 @@ function RouteForm({
       }}
       onSubmit={async event => {
         event.preventDefault();
+        if (unavailable) return;
         const form = new FormData(event.currentTarget);
         setValidationError("");
         let configuration: Record<string, unknown>;
@@ -408,14 +415,18 @@ function RouteForm({
           <select id={`route-connection-${slot}`} className="select-control" value={connectionId} onChange={(e) => setSelectedConnectionId(e.target.value)}>
             {connections.map((c) => (
               <option value={c.id} key={c.id}>
-                {c.displayName}
+                {c.displayName}{slot === "TEACH_BACK_ASSESSMENT" && !routeModels[c.id]?.[slot]?.length ? "（暂无兼容模型）" : ""}
               </option>
             ))}
           </select>
         </div>
 
-        <ModelPicker key={`${connectionId}:${existing?.modelId ?? ""}`} name="modelId" models={models} defaultValue={existing?.connectionId === connectionId ? existing.modelId : undefined} allowCustom={connection?.providerKey === "openai-compatible" && capability === "TEXT_GENERATION" && slot !== "PDF_VISUAL_STRUCTURE" && slot !== "TEACH_BACK_ASSESSMENT"} disabled={busy} />
+        <ModelPicker key={`${connectionId}:${existing?.modelId ?? ""}`} name="modelId" models={models} defaultValue={existing?.connectionId === connectionId ? existing.modelId : undefined} allowCustom={allowCustomModel} disabled={busy} />
       </div>
+
+      {slot === "TEACH_BACK_ASSESSMENT" && <p className="muted" role="status" style={{fontSize:13,lineHeight:1.8,margin:"0 0 16px"}}>
+        {models.length ? "仅列出通过理解验证能力检查的模型；生成结果仍需通过结构、准则和来源证据校验。" : "当前服务商没有可用于理解验证的兼容模型。此功能要求严格结构化输出，普通文本或 JSON 模式不满足当前执行要求。请切换到有兼容模型的服务商；无需重新填写当前服务商的密钥。"}
+      </p>}
 
       {slot === "PODCAST_TTS" && <fieldset className={styles.group} disabled={busy || showAdvanced} style={{ marginBottom: 20 }}>
         <legend>主持人音色与语速</legend>
@@ -468,7 +479,7 @@ function RouteForm({
         </div>
       )}
 
-      <button type="submit" className="btn btn-secondary" disabled={busy || !connection || !models.length} style={{ height: 36 }}>
+      <button type="submit" className="btn btn-secondary" disabled={busy || !connection || unavailable} style={{ height: 36 }}>
         {feedback?.tone === "pending" ? "正在保存…" : applyToBookStages ? "保存三个理解阶段" : "保存路由"}
       </button>
       {validationError ? <p className={styles.routeFeedback} data-tone="error" role="alert">{validationError}</p> : feedback && <p className={styles.routeFeedback} data-tone={feedback.tone} role={feedback.tone === "error" ? "alert" : "status"}>{feedback.message}</p>}

@@ -1,7 +1,7 @@
 import { readEnvironment } from "@ai-cognitive/shared/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { ProviderGatewayRepository, managedConnectionParent, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayRepository, managedConnectionParent, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, routeSlotCapabilities, type RouteSlot } from "@ai-cognitive/provider-gateway";
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
@@ -34,7 +34,16 @@ async function response(workspaceId: string) {
   ]);
   const parentById = new Map(connections.map(connection => [connection.id, managedConnectionParent(connection, connections)]));
   const visible = connections.filter(connection => !parentById.get(connection.id));
-  return NextResponse.json({ manifest: sanitizedProviderManifest(productManifest()), connections: visible.map(connection => ({ ...safeConnection(connection), managedCapabilities: connections.filter(child => parentById.get(child.id)?.id === connection.id).map(child => child.protocol === "CUSTOM_SPEECH" ? "语音合成" : "向量检索") })), routes: routes.map(route => {
+  const manifest = productManifest();
+  // Use the same capability gate for displayed choices and saved bindings.
+  const routeModels = Object.fromEntries(visible.map(connection => {
+    const provider = manifest.providers.find(item => item.providerKey === connection.providerKey);
+    return [connection.id, Object.fromEntries((Object.keys(routeSlotCapabilities) as RouteSlot[]).map(routeSlot => [routeSlot, (provider?.models ?? []).filter(model => {
+      try { validateRouteManifestSelection(manifest, { routeSlot, providerKey: connection.providerKey, protocol: provider?.capabilityProtocols?.[routeSlotCapabilities[routeSlot]] ?? provider!.protocol, modelId: model.modelId }); return true; }
+      catch { return false; }
+    })]))];
+  }));
+  return NextResponse.json({ manifest: sanitizedProviderManifest(manifest), routeModels, connections: visible.map(connection => ({ ...safeConnection(connection), managedCapabilities: connections.filter(child => parentById.get(child.id)?.id === connection.id).map(child => child.protocol === "CUSTOM_SPEECH" ? "语音合成" : "向量检索") })), routes: routes.map(route => {
     const parent = parentById.get(route.connectionId);
     return { id: route.id, routeSlot: route.routeSlot, connectionId: parent?.id ?? route.connectionId, modelId: route.modelId, configuration: safeConfiguration(route.configuration), connection: parent ? { id:parent.id,displayName:parent.displayName,providerKey:parent.providerKey,protocol:parent.protocol,status:parent.status } : route.connection };
   }), readiness });

@@ -111,3 +111,21 @@ it.each(["https://api.minimax.cn.evil.test/v1/chat/completions","https://api.min
 it.each([[401,"AUTHENTICATION_FAILED",{}],[403,"AUTHENTICATION_FAILED",{}],[200,"INVALID_TEST_RESPONSE",{base_resp:{status_code:1004}}],[200,"INVALID_TEST_RESPONSE",{object:"list",data:[{}]}],[200,"INVALID_TEST_RESPONSE",null],[429,"PROVIDER_REJECTED",{}]] as const)("MiniMax HTTP %s 不会把异常响应当作验证成功：%s",async(status,state,body)=>{
  await fixture();const remote=vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response(JSON.stringify(body),{status}));try{const result=await post({action:"TEST_CONNECTION",providerKey:"minimax",protocol:"OPENAI_COMPATIBLE",endpoint:miniMaxSites.CN.endpoint,secret:"fixture-key"});expect(await result.json()).toEqual({test:{state}});}finally{remote.mockRestore();}
 });
+it("理解验证的可选模型与保存使用同一能力门禁，普通文本型号不会出现在候选中",async()=>{
+ const {connection}=await fixture();
+ const repository=new ProviderGatewayRepository(prisma,testCipher());
+ const openai=await repository.createConnectionWithCredential(actor,{providerKey:"openai",protocol:"OPENAI_RESPONSES",displayName:"严格结构化服务",endpoint:"https://api.openai.com/v1/responses",secret:"fixture-key"});
+ const minimax=await repository.createConnectionWithCredential(actor,{providerKey:"minimax",protocol:"OPENAI_COMPATIBLE",displayName:"MiniMax",endpoint:miniMaxSites.CN.endpoint,secret:"fixture-key"});
+ const response=await (await GET()).json();
+ expect(response.routeModels[connection.id].TEACH_BACK_ASSESSMENT).toEqual([]);
+ expect(response.routeModels[minimax.connection.id].TEACH_BACK_ASSESSMENT).toEqual([]);
+ expect(response.routeModels[minimax.connection.id].BOOK_CHUNK_ANALYSIS.map((model:{modelId:string})=>model.modelId)).toContain("MiniMax-M3");
+ const compatible=response.routeModels[openai.connection.id].TEACH_BACK_ASSESSMENT;
+ expect(compatible.length).toBeGreaterThan(0);expect(compatible.every((model:{structuredOutput:string})=>model.structuredOutput==="STRICT_JSON_SCHEMA")).toBe(true);
+ const rejected=await post({action:"SET_ROUTE",connectionId:minimax.connection.id,routeSlot:"TEACH_BACK_ASSESSMENT",modelId:"MiniMax-M3",configuration:{}});
+ expect(rejected.status).toBe(400);
+ expect(await prisma.providerRouteBinding.count({where:{workspaceId:actor.workspaceId,routeSlot:"TEACH_BACK_ASSESSMENT"}})).toBe(0);
+ const accepted=await post({action:"SET_ROUTE",connectionId:openai.connection.id,routeSlot:"TEACH_BACK_ASSESSMENT",modelId:compatible[0].modelId,configuration:{}});
+ expect(accepted.status).toBe(200);
+ expect((await prisma.providerRouteBinding.findUniqueOrThrow({where:{workspaceId_routeSlot:{workspaceId:actor.workspaceId,routeSlot:"TEACH_BACK_ASSESSMENT"}}})).modelId).toBe(compatible[0].modelId);
+});
