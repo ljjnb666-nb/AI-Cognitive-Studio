@@ -1,5 +1,6 @@
 import { assertBookOwnedAuthority, type BookExecutionContext } from "./execution-authority.js";
 import { rankedMemoryIds } from "./retrieval-ranking.js";
+import { processConcurrentChunks, validateBookChunkConcurrency } from "./chunk-concurrency.js";
 import { randomUUID } from "node:crypto";
 import { admitWorkspaceExpensiveOperation, Prisma, prisma, type ExpensiveOperationRecoveryTarget } from "../../db/src/index.js";
 import { logger } from "@ai-cognitive/shared";
@@ -55,6 +56,8 @@ type DurableStage = typeof stageOrder[number];
 type FaultPoint = "afterChunkPersist" | "afterReductionPersist" | "afterMemoryPersist" | "afterEmbeddingPersist" | "afterEmbeddingGatewayPersist" | "beforeEmbeddingMaterialization" | "afterEmbeddingMaterialization" | "beforeEmbeddingStageAdvance" | "beforeFinalization" | "afterCurrentExtractionLock";
 export type AnalysisFaultInjector = (point: FaultPoint, metadata: Record<string, unknown>) => Promise<void> | void;
 export type ProcessBookAnalysisDependencies = {
+  chunkConcurrency?: number;
+  chunkConcurrencyForRun?: (input: { workspaceId: string }) => Promise<number>;
   analysisProvider?: AnalysisProvider;
   analysisProviderForRun?: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string; execution?: BookExecutionContext }) => Promise<AnalysisProvider> | AnalysisProvider;
   embeddingProvider?: EmbeddingProvider;
@@ -223,9 +226,9 @@ async function reduce(run: any, token: string, dependencies: ActiveBookAnalysisD
 }
 
 async function runChunkStage(run: any, token: string, dependencies: ActiveBookAnalysisDependencies, context: StageContext) {
-  for (const chunk of context.chunks) {
+  await processConcurrentChunks(context.chunks, dependencies.chunkConcurrency ?? 1, async (chunk, stopped) => {
     const completed = await prisma.analysisArtifact.findFirst({ where: { analysisRunId: run.id, scope: "CHUNK", chunkId: chunk.id } });
-    if (completed) continue;
+    if (completed || stopped()) return;
     const request = {
       stage: "CHUNK" as const,
       content: chunk.content,
@@ -242,6 +245,7 @@ async function runChunkStage(run: any, token: string, dependencies: ActiveBookAn
       boundedChunk: { chunkId: chunk.id, contentHash: chunk.contentHash, sourceBlockIds: chunk.sourceSpans.map((span: any) => span.sourceBlockId) },
     };
     await renewBookAnalysisLease(run.id, token);
+    if (stopped()) return;
     const response = await guardedGenerateStructured(dependencies.analysisProvider, request, context.blocks, contextLimit);
     await persistTextDestination(run, token, dependencies.analysisProvider, response, { kind: "CHUNK", key: chunk.id, lineage: { chunkId: chunk.id, contentHash: chunk.contentHash }, write: async (tx, recovered) => { await tx.analysisArtifact.upsert({
       where: { analysisRunId_scope_ordinal: { analysisRunId: run.id, scope: "CHUNK", ordinal: chunk.ordinal } },
@@ -249,7 +253,7 @@ async function runChunkStage(run: any, token: string, dependencies: ActiveBookAn
       update: {},
     }); } });
     await dependencies.faultInjector?.("afterChunkPersist", { analysisRunId: run.id, chunkId: chunk.id, ordinal: chunk.ordinal });
-  }
+  });
   const count = await prisma.analysisArtifact.count({ where: { analysisRunId: run.id, scope: "CHUNK", chunkId: { in: context.chunks.map((chunk) => chunk.id) } } });
   if (count !== context.chunks.length) throw new Error("CHUNK_ANALYSIS_INCOMPLETE");
   await advanceStage(run, token, "CHUNK_ANALYSIS", "SECTION_ANALYSIS", dependencies.correlationId);
@@ -795,6 +799,7 @@ export async function processBookAnalysisRun(analysisRunId: string, dependencies
       if (!dependencies.analysisProvider) throw new Error("BOOK_ANALYSIS_PROVIDER_NOT_CONFIGURED");
       activeDependencies = dependencies as ActiveBookAnalysisDependencies;
     }
+    activeDependencies = { ...activeDependencies, chunkConcurrency: validateBookChunkConcurrency(dependencies.chunkConcurrency ?? (dependencies.chunkConcurrencyForRun ? await dependencies.chunkConcurrencyForRun({ workspaceId: initial.workspaceId }) : 1)) };
     if (initial.chunkSet.status !== "SUCCEEDED") throw new Error("ANALYSIS_LINEAGE_INVALID");
     const context = await loadStageContext(initial);
     let previousStage: string | undefined;

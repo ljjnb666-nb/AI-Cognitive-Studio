@@ -990,3 +990,53 @@ describe("durable Phase 2 orchestration", () => {
     expect(await claimChunkSetMaterialization(fresh.id, crypto.randomUUID())).toBeNull();
   });
 });
+
+describe("单书并发数据库回归", () => {
+  it("两个分块可同时进入模型，乱序完成仍按原序号持久化，已有块续跑不重复调用", async () => {
+    const data = await fixture();
+    const chunks = await prisma.documentChunk.findMany({where:{chunkSetId:data.chunkSet.id},orderBy:{ordinal:"asc"}});
+    expect(chunks.length).toBeGreaterThan(2);
+    await prisma.$executeRaw`INSERT INTO "WorkspaceResourcePolicy" ("workspaceId","bookChunkConcurrency") VALUES (${data.workspace.id},2)`;
+    const { workspaceBookChunkConcurrency } = await import("../src/chunk-concurrency.js");
+    let configReads = 0;
+    const first = new DeterministicBarrier(), second = new DeterministicBarrier();
+    const seen: string[] = [];
+    const provider: AnalysisProvider = { async generateStructured(request) {
+      expect(request.stage).toBe("CHUNK");
+      seen.push(request.operationKey!);
+      if (request.boundedChunk?.chunkId === chunks[0]!.id) await first.wait();
+      if (request.boundedChunk?.chunkId === chunks[1]!.id) await second.wait();
+      return { summary: "确定性分块理解" };
+    }};
+    const pending = processBookAnalysisRun(data.run.id, deps(data, provider, { chunkConcurrencyForRun: async input => { configReads++; return workspaceBookChunkConcurrency(input); }, faultInjector(point, metadata) {
+      if (point === "afterChunkPersist" && metadata.ordinal === chunks.at(-1)!.ordinal) throw new Error("TEST_STOP_AFTER_CHUNKS");
+    }})).catch(error => error);
+    try {
+      await Promise.all([first.entered, second.entered]);
+      second.unblock();
+      await expect.poll(() => prisma.analysisArtifact.count({where:{analysisRunId:data.run.id,scope:"CHUNK"}})).toBe(chunks.length-1);
+    } finally { first.unblock(); second.unblock(); }
+    expect(await pending).toBeInstanceOf(Error);
+    const saved = await prisma.analysisArtifact.findMany({where:{analysisRunId:data.run.id,scope:"CHUNK"},orderBy:{ordinal:"asc"}});
+    expect(saved.map(x=>x.chunkId)).toEqual(chunks.map(x=>x.id));
+    expect(new Set(seen).size).toBe(chunks.length);
+    expect(configReads).toBe(1);
+    const restored = await requestBookAnalysis({workspaceId:data.workspace.id,sourceDocumentId:data.document.id,pipelineVersion:data.run.pipelineVersion,promptVersion:data.run.promptVersion,provider:"test",model:"test",modelVersion:"1"});
+    const before = saved.map(x=>({id:x.id,output:x.structuredOutput}));
+    const failAtReduction: AnalysisProvider = { async generateStructured(request) { expect(request.stage).not.toBe("CHUNK"); throw new Error("TEST_STOP_REDUCTION"); } };
+    await expect(processBookAnalysisRun(restored.run.id, deps(data, failAtReduction, {chunkConcurrency:2}), restored.run.dispatchGeneration)).rejects.toThrow("TEST_STOP_REDUCTION");
+    const after = await prisma.analysisArtifact.findMany({where:{analysisRunId:data.run.id,scope:"CHUNK"},orderBy:{ordinal:"asc"}});
+    expect(after.map(x=>({id:x.id,output:x.structuredOutput}))).toEqual(before);
+  });
+  it("短租约续期不会覆盖并发请求的长租约，仍拒绝错误所有者", async () => {
+    const { claimBookAnalysisRun, renewBookAnalysisLease } = await import("../src/ownership.js");
+    const data = await fixture(); const token = crypto.randomUUID();
+    expect(await claimBookAnalysisRun(data.run.id, token, data.run.dispatchGeneration)).toBe(true);
+    await renewBookAnalysisLease(data.run.id, token, 330000);
+    const before = (await prisma.bookAnalysisRun.findUniqueOrThrow({where:{id:data.run.id}})).executionLeaseUntil!;
+    await Promise.all([renewBookAnalysisLease(data.run.id, token), renewBookAnalysisLease(data.run.id, token, 200000)]);
+    const after = (await prisma.bookAnalysisRun.findUniqueOrThrow({where:{id:data.run.id}})).executionLeaseUntil!;
+    expect(after.getTime()).toBeGreaterThanOrEqual(before.getTime());
+    await expect(renewBookAnalysisLease(data.run.id, "wrong-owner")).rejects.toThrow("BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST");
+  });
+});

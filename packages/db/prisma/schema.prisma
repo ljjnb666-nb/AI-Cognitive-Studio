@@ -3245,6 +3245,7 @@ model OcrModelReviewEvent {
 }
 
 model WorkspaceResourcePolicy {
+  bookChunkConcurrency Int @default(2)
   runLimitEnabled Boolean @default(true)
   workspaceId String @id
   dailyUnitLimit Int @default(1000000)
