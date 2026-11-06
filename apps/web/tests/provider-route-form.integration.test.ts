@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { podcastConfigurationFromForm, routeFormConfiguration } from "../lib/provider-route-form";
+import { podcastConfigurationFromForm, shortVideoConfigurationFromForm, routeFormConfiguration } from "../lib/provider-route-form";
 
 describe("collapsed route configuration preservation", () => {
+  it("旁白表单独立更新音色语速，保留版本和其他设置",()=>{
+    const form=new FormData();form.set("narratorVoice","xiaochen");form.set("narratorRate","1.25");
+    const saved={voiceVersion:"approved-v2",pitch:0,language:"zh-CN",marker:"retained"};
+    expect(shortVideoConfigurationFromForm(form,saved)).toEqual({...saved,providerVoiceId:"xiaochen",speakingRate:1.25,outputFormat:"wav"});expect(saved.voiceVersion).toBe("approved-v2");
+  });
   it("retains persisted configuration when the JSON control is absent, and distinguishes an explicit empty object", () => {
     const saved = { hostVoices: [{ ordinal: 1, providerVoiceId: "tongtong" }], outputFormat: "wav", marker: "retained" };
     expect(routeFormConfiguration(null, saved)).toEqual(saved);

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { podcastConfigurationFromForm, routeFormConfiguration } from "@/lib/provider-route-form";
+import { podcastConfigurationFromForm, shortVideoConfigurationFromForm, routeFormConfiguration } from "@/lib/provider-route-form";
 import { ModelPicker } from "./model-picker";
 import { miniMaxSites } from "@/lib/minimax-endpoints";
 import { StatusBadge } from "./status-badge";
@@ -142,6 +142,7 @@ export function ProviderSettings() {
               ))}</details>}
               {name === "ocr" && <a className="btn btn-secondary" style={{ marginTop: 12, height: 32, fontSize: 12 }} href="#route-PDF_OCR" onClick={() => { const form = document.getElementById("route-PDF_OCR"); const panel = form?.closest("details"); if (panel) panel.open = true; form?.scrollIntoView({ block: "start", behavior: "smooth" }); }}>设置扫描书识别</a>}
               {name === "podcastAudio" && <a className="btn btn-secondary" style={{ marginTop: 12, height: 32, fontSize: 12 }} href="#route-PODCAST_TTS" onClick={() => { const form = document.getElementById("route-PODCAST_TTS"); const panel = form?.closest("details"); if (panel) panel.open = true; form?.scrollIntoView({ block: "start", behavior: "smooth" }); }}>设置播客音频</a>}
+              {name === "shortVideo" && <a className="btn btn-secondary" style={{ marginTop: 12, height: 32, fontSize: 12 }} href="#route-SHORT_VIDEO_TTS" onClick={() => { const form = document.getElementById("route-SHORT_VIDEO_TTS"); const panel = form?.closest("details"); if (panel) panel.open = true; form?.scrollIntoView({ block: "start", behavior: "smooth" }); }}>设置短视频旁白</a>}
               {detail.completion && detail.completion !== "已就绪" && <p className={styles.completion}>{detail.completion}</p>}
               {!detail.rows.length && item.missing.length > 0 && (
                 <p style={{ fontSize: 12, color: "var(--muted-terracotta)", margin: "8px 0 0 0" }}>
@@ -374,7 +375,7 @@ function RouteForm({
       onInvalidCapture={event => {
         const field = event.currentTarget.querySelector<HTMLInputElement | HTMLSelectElement>("input:invalid, select:invalid, textarea:invalid");
         if (!field) return;
-        setValidationError(field.name === "modelId" ? "请先选择模型，再保存配置。" : field.name.startsWith("hostVoice") ? "请填写两位主持人的音色 ID。" : field.name.startsWith("hostRate") ? "请填写有效语速，并检查允许范围。" : "请完整填写必填项，再保存配置。");
+        setValidationError(field.name === "modelId" ? "请先选择模型，再保存配置。" : field.name === "narratorVoice" ? "请选择或填写旁白音色。" : field.name === "narratorRate" ? "请填写有效的旁白语速，并检查允许范围。" : field.name.startsWith("hostVoice") ? "请填写两位主持人的音色 ID。" : field.name.startsWith("hostRate") ? "请填写有效语速，并检查允许范围。" : "请完整填写必填项，再保存配置。");
       }}
       onSubmit={async event => {
         event.preventDefault();
@@ -385,6 +386,7 @@ function RouteForm({
         try {
           configuration = routeFormConfiguration(form.get("configuration"), existing?.connectionId === connectionId ? existing.configuration : {});
           if (slot === "PODCAST_TTS" && !form.has("configuration")) configuration = podcastConfigurationFromForm(form, configuration);
+          if (slot === "SHORT_VIDEO_TTS" && !form.has("configuration")) configuration = shortVideoConfigurationFromForm(form, configuration);
         } catch { setConfigurationError(true); return; }
         setConfigurationError(false);
         await submit({ action: "SET_ROUTE", routeSlot: slot, ...(slot === "BOOK_CHUNK_ANALYSIS" && applyToBookStages ? { applyToBookStages: true } : {}), connectionId, modelId: form.get("modelId"), configuration: connection?.providerKey === "qwen" ? { ...configuration, ...(capability === "EMBEDDING" ? { embeddingDimensions: Number(qwenDimension) } : {}) } : configuration });
@@ -443,6 +445,21 @@ function RouteForm({
               <input className="input-control" id={`host-rate-${ordinal}`} name={`hostRate${ordinal}`} type="number" step="0.05" min={connection?.providerKey === "zhipu" ? 0.5 : 0.25} max={connection?.providerKey === "zhipu" ? 2 : 4} defaultValue={Number(voice?.speakingRate ?? 1)} required />
             </div>;
           })}
+        </div>
+        {showAdvanced && <p className="muted">当前使用下方高级 JSON 配置。</p>}
+      </fieldset>}
+      {slot === "SHORT_VIDEO_TTS" && <fieldset className={styles.group} disabled={busy || showAdvanced} style={{ marginBottom: 20 }}>
+        <legend>旁白音色与语速</legend>
+        <p className="muted" style={{ fontSize: 12 }}>短视频使用独立的旁白设置，输出为 WAV；保存配置不会生成音频。</p>
+        <div className={styles.fields}>
+          <div className="form-group"><label className="form-label" htmlFor="narrator-voice">旁白音色</label>
+            {voiceIds.length ? <select key={connectionId} className="select-control" id="narrator-voice" name="narratorVoice" defaultValue={existing?.connectionId === connectionId ? String(existing.configuration.providerVoiceId ?? "") : ""} required>
+              <option value="" disabled>请选择旁白音色</option>
+              {existing?.connectionId === connectionId && existing.configuration.providerVoiceId && !voiceIds.includes(String(existing.configuration.providerVoiceId)) ? <option value={String(existing.configuration.providerVoiceId)} disabled>{String(existing.configuration.providerVoiceId)}（不支持，请重新选择）</option> : null}
+              {voiceIds.map(id => <option key={id} value={id}>{voiceLabels[id] ? `${voiceLabels[id]}（${id}）` : id}</option>)}
+            </select> : <input key={connectionId} className="input-control" id="narrator-voice" name="narratorVoice" defaultValue={existing?.connectionId === connectionId ? String(existing.configuration.providerVoiceId ?? "") : ""} required maxLength={160} placeholder="服务商提供的音色 ID" />}
+          </div>
+          <div className="form-group"><label className="form-label" htmlFor="narrator-rate">旁白语速</label><input key={connectionId} className="input-control" id="narrator-rate" name="narratorRate" type="number" min={connection?.providerKey === "zhipu" ? 0.5 : 0.25} max={connection?.providerKey === "zhipu" ? 2 : 4} step="0.05" defaultValue={existing?.connectionId === connectionId ? Number(existing.configuration.speakingRate ?? 1) : 1} required /></div>
         </div>
         {showAdvanced && <p className="muted">当前使用下方高级 JSON 配置。</p>}
       </fieldset>}

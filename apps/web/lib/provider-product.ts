@@ -1,4 +1,5 @@
 import "server-only";
+import { assertShortVideoVoice } from "./short-video-voice";
 
 import { prisma } from "@ai-cognitive/db";
 import { resolveProviderCatalog, routeSlotCapabilities, sanitizedProviderManifest, stableHash, validateRouteManifestSelection, type RouteSlot } from "@ai-cognitive/provider-gateway";
@@ -90,7 +91,7 @@ export async function resolvePodcastProductExecution(workspaceId: string): Promi
   try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(); const script = routeIdentity(manifest, routes, "PODCAST_SCRIPT"); routeIdentity(manifest, routes, "EMBEDDING"); return script; } catch (error) { return configurationRequired(error); }
 }
 export async function resolveShortVideoProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
-  try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(); const script = routeIdentity(manifest, routes, "SHORT_VIDEO_SCRIPT"); routeIdentity(manifest, routes, "EMBEDDING"); const tts = routeIdentity(manifest, routes, "SHORT_VIDEO_TTS"); const configuration = tts.configuration; if (typeof configuration.providerVoiceId !== "string" || !configuration.providerVoiceId.trim() || typeof configuration.voiceVersion !== "string" || !configuration.voiceVersion.trim() || typeof configuration.outputFormat !== "string" || !configuration.outputFormat.trim() || !Number.isFinite(configuration.speakingRate) || !Number.isFinite(configuration.pitch)) throw new Error("SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED"); return script; } catch (error) { return configurationRequired(error); }
+  try { const routes = await routesForWorkspace(workspaceId), manifest = productManifest(); const script = routeIdentity(manifest, routes, "SHORT_VIDEO_SCRIPT"); routeIdentity(manifest, routes, "EMBEDDING"); const tts = routeIdentity(manifest, routes, "SHORT_VIDEO_TTS"); assertShortVideoVoice(tts.provider, tts.configuration); return script; } catch (error) { return configurationRequired(error); }
 }
 export async function resolveThinkingSessionProductExecution(workspaceId: string): Promise<ProductRouteIdentity> {
   try { return await resolveThinkingSessionRouteIdentity(workspaceId); } catch (error) { return configurationRequired(error); }
@@ -109,7 +110,7 @@ export async function resolvePodcastAudioRoute(workspaceId: string): Promise<Pro
 export async function resolveShortVideoTtsRoute(workspaceId: string): Promise<ProductRouteIdentity> {
   const manifest = productManifest(), identity = routeIdentity(manifest, await routesForWorkspace(workspaceId), "SHORT_VIDEO_TTS");
   const configuration = identity.configuration;
-  if (typeof configuration.providerVoiceId !== "string" || !configuration.providerVoiceId.trim() || typeof configuration.voiceVersion !== "string" || !configuration.voiceVersion.trim() || typeof configuration.outputFormat !== "string" || !configuration.outputFormat.trim() || !Number.isFinite(configuration.speakingRate) || !Number.isFinite(configuration.pitch)) throw new Error("SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED");
+  assertShortVideoVoice(identity.provider, configuration);
   return identity;
 }
 
@@ -136,9 +137,12 @@ export async function providerReadiness(workspaceId: string) {
   try { const audio = await resolvePodcastAudioRoute(workspaceId); voiceDependency = { ...voiceDependency, state: "READY", error: undefined, detail: audio.voices.map(voice => `${voice.providerVoiceId}（${voice.speakingRate} 倍速）`).join(" / ") }; } catch { /* Keep the existing voice configuration gate. */ }
   const audioDependencies = [audioModel, voiceDependency];
   const videoDependencies = (["SHORT_VIDEO_SCRIPT", "EMBEDDING", "SHORT_VIDEO_TTS"] as const).map(slot => readinessDependency(manifest, routes, slot));
+  let narrator: ProviderReadinessDependency = { slot: "SHORT_VIDEO_TTS", label: "旁白设置", state: "MISSING", error: "SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED" };
+  try { const tts = await resolveShortVideoTtsRoute(workspaceId); narrator = { ...narrator, state: "READY", error: undefined, detail: `${tts.configuration.providerVoiceId}（${tts.configuration.speakingRate} 倍速） · ${String(tts.configuration.outputFormat).toUpperCase()}` }; } catch { /* Preserve the execution gate and expose the missing configuration. */ }
+  videoDependencies.push(narrator);
   const masteryDependency = readinessDependency(manifest, routes, "TEACH_BACK_ASSESSMENT");
   const bookConfigured = bookDependencies.filter(item => item.state === "READY").length;
-  return { book: { state: bookMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(bookMissing)], configured: bookConfigured, required: bookDependencies.length, dependencies: bookDependencies }, podcast: { state: podcastMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(podcastMissing)], configured:podcastDependencies.filter(item=>item.state==="READY").length,required:podcastDependencies.length,dependencies:podcastDependencies }, podcastAudio: { state: audioMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(audioMissing)], configured:audioDependencies.filter(item=>item.state==="READY").length,required:audioDependencies.length,dependencies:audioDependencies }, shortVideo: { state: videoMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(videoMissing)],dependencies:videoDependencies }, thinking: { state: thinkingMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(thinkingMissing)], dependencies: [thinkingDependency] }, mastery: { state: masteryMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(masteryMissing)],dependencies:[masteryDependency] } } as const;
+  return { book: { state: bookMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(bookMissing)], configured: bookConfigured, required: bookDependencies.length, dependencies: bookDependencies }, podcast: { state: podcastMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(podcastMissing)], configured:podcastDependencies.filter(item=>item.state==="READY").length,required:podcastDependencies.length,dependencies:podcastDependencies }, podcastAudio: { state: audioMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(audioMissing)], configured:audioDependencies.filter(item=>item.state==="READY").length,required:audioDependencies.length,dependencies:audioDependencies }, shortVideo: { state: videoMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(videoMissing)],configured:videoDependencies.filter(item=>item.state==="READY").length,required:videoDependencies.length,dependencies:videoDependencies }, thinking: { state: thinkingMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(thinkingMissing)], dependencies: [thinkingDependency] }, mastery: { state: masteryMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(masteryMissing)],dependencies:[masteryDependency] } } as const;
 }
 
 export function routeCapability(routeSlot: RouteSlot) { return routeSlotCapabilities[routeSlot]; }

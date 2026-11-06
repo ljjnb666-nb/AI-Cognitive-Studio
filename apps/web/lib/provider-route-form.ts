@@ -15,3 +15,7 @@ export function podcastConfigurationFromForm(form: FormData, existing: Record<st
   });
   return { ...existing, outputFormat: "wav", hostVoices: [...updated, ...voices.filter(voice => voice.ordinal !== 1 && voice.ordinal !== 2)] };
 }
+
+export function shortVideoConfigurationFromForm(form: FormData, existing: Record<string, unknown>): Record<string, unknown> {
+  return { ...existing, providerVoiceId: String(form.get("narratorVoice") ?? "").trim(), speakingRate: Number(form.get("narratorRate")), voiceVersion: existing.voiceVersion ?? "1", pitch: existing.pitch ?? 0, outputFormat: "wav" };
+}

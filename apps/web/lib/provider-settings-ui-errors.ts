@@ -14,6 +14,7 @@ export const providerErrorMessages: Record<string, string> = {
   PROVIDER_CONNECTION_PROTOCOL_INVALID: "请选择当前 服务商 支持的协议。",
   PROVIDER_CONFIGURATION_SECRET_FORBIDDEN: "高级配置不能包含密钥或凭据。",
   QWEN_CONFIGURATION_INVALID: "百炼配置无效，请检查区域、工作区 ID 和向量维度。",
+  SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED: "请设置有效的短视频旁白音色、语速与音频格式；智谱旁白须使用支持的音色、0.5～2 倍语速及 WAV 格式。",
   PODCAST_TTS_VOICE_UNSUPPORTED: "智谱 GLM-TTS 不支持该音色，请从音色列表中重新选择。",
   PODCAST_TTS_CONFIGURATION_REQUIRED: "请完整设置主持人音色、有效语速与 WAV 格式，再保存播客音频用途。",
   MODEL_NOT_FOUND: "该型号已停止服务或不在当前目录，请重新选择模型。",

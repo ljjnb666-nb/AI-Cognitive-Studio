@@ -5,6 +5,27 @@ import { ProviderGatewayRepository, testCipher } from "@ai-cognitive/provider-ga
 import { GET, POST } from "../app/api/studio/providers/route";
 import { providerReadiness } from "../lib/provider-product";
 import { miniMaxSites } from "../lib/minimax-endpoints";
+import { readinessDisplay } from "../lib/provider-readiness-ui";
+
+it("短视频模型绑定与旁白设置分别展示，合法保存后四项就绪且不调用模型",async()=>{
+ const {connection}=await fixture();const repository=new ProviderGatewayRepository(prisma,testCipher());
+ await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"SHORT_VIDEO_SCRIPT",modelId:"glm-4.7-flashx",configuration:{}});
+ await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"EMBEDDING",modelId:"embedding-3",configuration:{}});
+ const speech=await repository.capabilityConnection(actor,connection.id,{family:"SPEECH",protocol:"CUSTOM_SPEECH",endpoint:"https://open.bigmodel.cn/api/paas/v4/audio/speech",displayName:"旧旁白"});
+ await repository.setRoute(actor,{connectionId:speech.id,routeSlot:"SHORT_VIDEO_TTS",modelId:"glm-tts",configuration:{}});
+ const before=await providerReadiness(actor.workspaceId);expect(before.shortVideo).toMatchObject({state:"INCOMPLETE",configured:3,required:4});expect(readinessDisplay(before.shortVideo).rows).toContainEqual(expect.objectContaining({label:"旁白设置",configured:false,detail:"待配置｜请设置旁白音色、语速与音频格式"}));
+ const remote=vi.spyOn(globalThis,"fetch");try{
+  expect((await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"SHORT_VIDEO_TTS",modelId:"glm-tts",configuration:{providerVoiceId:"tongtong",voiceVersion:"1",outputFormat:"wav",speakingRate:1,pitch:0}})).status).toBe(200);
+  const after=await providerReadiness(actor.workspaceId);expect(after.shortVideo).toMatchObject({state:"READY",configured:4,required:4,missing:[]});expect(after.shortVideo.dependencies).toContainEqual(expect.objectContaining({label:"旁白设置",state:"READY",detail:"tongtong（1 倍速） · WAV"}));expect(remote).not.toHaveBeenCalled();
+ }finally{remote.mockRestore();}
+});
+it.each([{}, {providerVoiceId:"unsupported"}, {speakingRate:0}, {speakingRate:3}, {outputFormat:"mp3"}, {pitch:2}])("短视频旁白拒绝不完整或不支持的配置并保留旧记录：%j",async override=>{
+ const {connection}=await fixture();const valid={providerVoiceId:"tongtong",voiceVersion:"1",outputFormat:"wav",speakingRate:1,pitch:0};
+ expect((await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"SHORT_VIDEO_TTS",modelId:"glm-tts",configuration:valid})).status).toBe(200);
+ const before=await prisma.providerRouteBinding.findUniqueOrThrow({where:{workspaceId_routeSlot:{workspaceId:actor.workspaceId,routeSlot:"SHORT_VIDEO_TTS"}}});
+ const result=await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"SHORT_VIDEO_TTS",modelId:"glm-tts",configuration:Object.keys(override).length?{...valid,...override}:{}});expect(result.status).toBe(400);expect(await result.json()).toMatchObject({error:"SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED"});
+ expect(await prisma.providerRouteBinding.findUniqueOrThrow({where:{id:before.id}})).toEqual(before);
+});
 let actor: {workspaceId:string;userId:string};
 vi.mock("@/lib/identity",()=>({resolveWebIdentity:async()=>actor}));
 vi.mock("node:dns/promises",()=>({lookup:async()=>[{address:"93.184.216.34",family:4}]}));

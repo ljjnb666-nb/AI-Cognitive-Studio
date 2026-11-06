@@ -7,6 +7,7 @@ import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
 import { providerSettingsFailure } from "@/lib/provider-settings-errors";
 import { miniMaxTestEndpoint, validMiniMaxModelList } from "@/lib/minimax-endpoints";
+import { assertShortVideoVoice } from "@/lib/short-video-voice";
 
 const jsonRecord = z.record(z.string(), z.unknown()).default({});
 const executableEndpoint = z.string().url().max(500).refine(value => { try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.hash && !url.search; } catch { return false; } }, "PROVIDER_CONNECTION_ENDPOINT_INVALID");
@@ -204,6 +205,7 @@ export async function POST(request: Request) {
       if (!connection) throw new Error("AUTHORIZATION_FAILED");
       if (connection.status !== "ACTIVE") throw new Error("CONNECTION_DISABLED");
       input.configuration = inheritedRouteConfiguration(connection, input.configuration);
+      if (input.routeSlot === "SHORT_VIDEO_TTS") assertShortVideoVoice(connection.providerKey, input.configuration);
       const provider = manifest.providers.find(item => item.providerKey === connection.providerKey);
       const family = input.routeSlot === "EMBEDDING" ? "EMBEDDING" : input.routeSlot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION";
       const protocol = provider?.capabilityProtocols?.[family] ?? provider?.protocol;
