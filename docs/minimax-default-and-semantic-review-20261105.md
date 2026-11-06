@@ -20,7 +20,7 @@ prepareBookRevisionModelReview 从真实 Run 读取分析模型，检查独立�
 
 消费回执仍核验原分析 provider/model、成功调用、精确请求指纹、证据引用、模型响应身份及消费记录。新路由身份加入路由槽，避免与旧请求混淆。已有 BOOK_SYNTHESIS 审校回执按原槽重建原始身份与指纹，保留旧发布记录的读取和核验能力。
 
-新审校请求将系统指令与完整证据的 UTF-8 字节数加框架预留作为保守输入估算。该值不是供应商 tokenizer 的精确计数。**新增 v2 独立审校策略（book-revision-review-v2）**：输入预算最多 36000、输出上限 16384、最多一次尝试，默认 MiniMax M3 的 `thinking.type=adaptive` 保留复杂原文论证能力；工作区审校专用路由可明确设置 `minimaxM3ReviewThinking=disabled` 做无思考对照。未经明确授权不得自动触发 A/B 两次付费审校。输出上限包含模型内部思考与最终 JSON，并**不等于保证最终 JSON 预留空间**，超长任务优先在后续版本按证据断言分组且保留跨组 BLOCKED 汇总，不得偷偷分段自动重试。
+新审校请求将系统指令与完整证据的 UTF-8 字节数加框架预留作为保守输入估算。该值不是供应商 tokenizer 的精确计数。**新增 v2 独立审校策略（book-revision-review-v2）**：输入预算最多 36000、初始输出上限 16384（后续于 2026-11-06 的 v2/v3 协议修复中提高至 32768）、最多一次尝试，默认 MiniMax M3 的 `thinking.type=adaptive` 保留复杂原文论证能力；工作区审校专用路由可明确设置 `minimaxM3ReviewThinking=disabled` 做无思考对照。未经明确授权不得自动触发 A/B 两次付费审校。输出上限包含模型内部思考与最终 JSON，并**不等于保证最终 JSON 预留空间**，超长任务优先在后续版本按证据断言分组且保留跨组 BLOCKED 汇总，不得偷偷分段自动重试。
 
 **历史 v1 不变**：旧 `BOOK_SYNTHESIS` 审校请求仍为 3800，已存在 `BOOK_SEMANTIC_REVIEW` v1 为 6144，均保持 thinking.disabled 与原始请求指纹；按数据库已冻结 `pipelineVersion` 选择正确策略重建，不承认未知版本。兼容 OpenAI `/chat/completions` 的端点使用 `max_completion_tokens`，原生 `/text/chatcompletion_v2` 保留 `max_tokens`。HTTP 200 + `finish_reason=length` 即便出现结构正确的 JSON 也一律拒绝作为有效审校回执，保留用量诊断并禁止自动重复付费尝试。此前已花费但为空的回执不予重放，需要重新获得单次调用授权并使用新的 requestId。
 
@@ -36,7 +36,7 @@ v3 使用独立输入 `schemaVersion=2`：`sourceExcerpts[i]` 公用表存储每
 
 v2/v3 证据包内嵌 `evidenceBundleHash` 承诺字段（对该字段以外的包内容取哈希），模型可原样回显；v1 保持冻结的旧格式。版本化请求输出上限为 32,768（真实基准中 adaptive 思考在 16 原子×47 跨度上曾耗满 16,384 致 LENGTH 拒收）。HTTP 成功但截断、格式异常、无真实来源引用的回执均不可放行；任何真实计费执行仍须明确授权和预算。v1 的输入格式、请求标识、消费回执与历史指纹保持原样，消费或回放必须按历史快照冻结策略选择，未知版本拒绝。
 
-2026-11-06 真实样本基准结果见 `docs/v3-semantic-review-benchmark-20261106.md`：38 次真实付费调用、零 False PASS、错误论断拦截率 100%，v3 误拒率 4.8% 且集中在边界表述；glm 系独立模型契约不合规，独立审校槽需要模型资格验收。
+2026-11-06 真实样本基准结果见 `docs/v3-semantic-review-benchmark-20261106.md`：隔离环境 38 次真实付费调用，估算费用约 ¥1.53。M3 adaptive v3 的有效回执拦截 26/26 个错误原子、误拒 2/42 个正确原子；M3 disabled v3 仅四案，拦截 14/14、误拒 5/28。M3 两臂有效回执没有错误放行，但 GLM 不合规原始响应出现一次错误支持判断，最终被协议拒收。此为有限样本结论，尚无合格的独立审校模型用于真实生产候选，不能据此放行或设置 v3 默认。
 
 新增集成测试覆盖：默认 v2 vs 显式 v3、独立摘要项 ID、索引化证据引用表、局部失败不可伪装为整体 PASS、超长未分段原文拒绝；Provider 测试覆盖 v3 adaptive 思考。**测试通过只证明工程门禁，不证明真实阅读判断能力。**
 
