@@ -33,6 +33,9 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await expect.poll(() => prisma.currentDocumentExtraction.count({ where: { sourceDocumentId } }), { timeout: 90_000 }).toBe(1);
   const extraction = await prisma.currentDocumentExtraction.findFirstOrThrow({ where: { sourceDocumentId } });
   await expect.poll(() => prisma.sourceBlock.count({ where: { extractionId: extraction.extractionId } }), { timeout: 90_000 }).toBeGreaterThan(0);
+  // The restored UI defaults to source reading after extraction; the generation
+  // link is intentionally in the overview tab.
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 90_000 });
   await expect(page.getByText(excerpt).first()).toBeVisible();
   await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
@@ -41,6 +44,9 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.screenshot({ path: testInfo.outputPath("book-intelligence.png"), fullPage: true });
   console.log("FLOW_A_PASS");
 
+  // Selecting an evidence card switches to source reading; return to the
+  // overview before following its generation link.
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await page.getByRole("link", { name: "生成播客" }).click();
   await page.locator('input[name="title"]').fill("证据播客");
   await page.locator('input[name="duration"]').fill("1");
