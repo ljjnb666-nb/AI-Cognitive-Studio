@@ -54,6 +54,7 @@ export function SourceProcessing({ failureReason, sourceDocumentId, ingestionSta
     <div className={`processing-notice processing-notice-${display.tone}`} role="status">
       <p>{display.description}</p>
       {state === "INGESTION_FAILED" && errorCode && /^SOURCE_[A-Z0-9_]{1,72}$/.test(errorCode) && <p className="muted">错误编号：{errorCode}</p>}
+      {state === "ANALYSIS_FAILED" && errorCode && /^[A-Z][A-Z0-9_]{0,72}$/.test(errorCode) && <p className="muted">错误编号：{errorCode}</p>}
       {waiting && <p className="muted" suppressHydrationWarning>{waiting}</p>}
       <p className="muted">{state === "SUCCEEDED" ? "全部处理已完成。" : terminal ? "任务已停止，现有文件和已完成的结果保留。" : stageAvailability === "DEGRADED" ? "当前阶段的后台服务未就绪，页面会自动检查状态。" : stageAvailability === "UNKNOWN" ? "暂时无法确认后台服务状态，页面会自动检查，也可手动重新检查。" : display.active || queued ? "页面自动更新任务进度，无需保持页面打开。" : "当前没有正在执行的处理任务。"}</p>
     </div>

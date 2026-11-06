@@ -4,6 +4,10 @@ import { sourceProcessingSnapshot, type ProcessingState } from "../lib/processin
 import { generationStatusLabel } from "../lib/product-labels";
 
 describe("shared product status presentation", () => {
+  it("模型超时与服务离线或审核拒绝分开显示，并提示费用未知",()=>{
+    const result=processingDisplay({state:"ANALYSIS_FAILED",stage:"BOOK_ANALYSIS",recoveryAction:"RETRY_ANALYSIS",stageAvailability:"AVAILABLE"},"TIMEOUT");
+    expect(result).toMatchObject({label:"理解超时",active:false,description:expect.stringContaining("云端模型未在等待时限内返回")});expect(result.description).toContain("是否扣费暂无法确认");expect(result.description).not.toContain("审核拒绝");
+  });
   it("explains a provider content rejection separately from extraction or worker availability", () => {
     const result = processingDisplay({ state: "ANALYSIS_FAILED", stage: "BOOK_ANALYSIS", recoveryAction: "RETRY_ANALYSIS", stageAvailability: "AVAILABLE" }, "CONTENT_REJECTED");
     expect(result).toMatchObject({ label: "理解失败", active: false, description: expect.stringContaining("模型服务商因内容审核拒绝") });
