@@ -1,4 +1,4 @@
-import type { BookExecutionContext } from "@ai-cognitive/book-intelligence";
+import { renewBookAnalysisLease, type BookExecutionContext } from "@ai-cognitive/book-intelligence";
 import { bookAnalysisMessage } from "./book-analysis-request.js";
 import { ProviderGatewayError } from "@ai-cognitive/provider-gateway";
 import { PostgresResourceBudget, boundedResourceUnits } from "@ai-cognitive/provider-gateway";
@@ -9,7 +9,7 @@ import { bookRoutePlanHash, fullBookRoutePlanHash, loadConsumedBookAnalysisEmbed
 import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, resolveCredentialKeyring, resolveProviderCatalog, stableHash, validateProviderEndpoint, type ExecutionSnapshot, type GatewayExecutionDependencies, type ProviderAdapterResolver, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
-import { bookProviderExecutionPolicy } from "./book-provider-execution-policy.js";
+import { bookProviderExecutionPolicy, bookProviderGeneration } from "./book-provider-execution-policy.js";
 
 export type BookGatewayRuntime = { gateway: ProviderGateway; repository: ProviderExecutionRepository; createAnalysisProvider(input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string; execution?: BookExecutionContext }): Promise<AnalysisProvider>; createEmbeddingGatewayForRun(input: { workspaceId: string; userId: string; analysisRunId: string }): Promise<{ gateway: ProviderGateway; repository: ProviderExecutionRepository; userId: string; pinnedRoute?: ResolvedRoute; maxEmbeddingInputs?: number }>; close(): Promise<void>; };
 /** Execution limits also let an explicitly budgeted operator disable deadline retries. */
@@ -57,7 +57,9 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     const objective = request.stage === "CHUNK" ? "\nExtract the author's core claims, facts, supporting evidence, concepts, people and relevant historical examples objectively and concisely. Preserve qualifications and source meaning. Do not invent scenes, extrapolate instructions or add unrelated detail. sourceSlices contain the bounded source text in reading order." : "";
     const system = (structuredOutput === "JSON_MODE" ? `${request.systemInstructions}\n\n${bookAnalysisJsonOutputContract}` : request.systemInstructions) + evidenceInstruction + objective;
     const content = bookAnalysisMessage(request);
-    const text = { system, messages: [{ role: "user" as const, content }], structuredOutput: structuredOutput === "STRICT_JSON_SCHEMA" ? { mode: "STRICT_JSON_SCHEMA" as const, schemaName: "book_analysis_response", schema } : { mode: "JSON_MODE" as const } };
+    const generation = bookProviderGeneration(pinned);
+    if (generation && this.input.execution) await renewBookAnalysisLease(this.input.analysisRunId, this.input.execution.claimToken, 330_000);
+    const text = { system, messages: [{ role: "user" as const, content }], ...(generation ? { generation } : {}), structuredOutput: structuredOutput === "STRICT_JSON_SCHEMA" ? { mode: "STRICT_JSON_SCHEMA" as const, schemaName: "book_analysis_response", schema } : { mode: "JSON_MODE" as const } };
     const inputHash = sha256(JSON.stringify([this.input.workspaceId, routeSlot, this.input.analysisRunId, request.stage, operation, sha256(content), request.pipelineVersion, request.promptVersion, schema]));
     const outcome = await this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion: request.promptVersion, schemaVersion: "book-analysis-v2-evidence" }, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);

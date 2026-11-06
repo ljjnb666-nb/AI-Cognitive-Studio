@@ -1,7 +1,11 @@
 import type { ExecutionSnapshot, GatewayRequest } from "@ai-cognitive/provider-gateway";
 
+export function bookProviderGeneration(snapshot: Pick<ExecutionSnapshot, "providerKey" | "modelId">) {
+  return snapshot.providerKey === "minimax" && snapshot.modelId === "MiniMax-M3" ? { maxOutputTokens: 16_000 } : undefined;
+}
+
 /** Runtime scheduling only: does not rewrite the frozen route or request identity. */
 export function bookProviderExecutionPolicy(snapshot: ExecutionSnapshot, request: GatewayRequest) {
-  if (snapshot.providerKey === "minimax" && snapshot.modelId === "MiniMax-M3" && request.capability.family === "TEXT_GENERATION" && ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"].includes(request.routeSlot)) return { timeoutMs: 120_000, maxAttempts: 1 };
+  if (snapshot.providerKey === "minimax" && snapshot.modelId === "MiniMax-M3" && request.capability.family === "TEXT_GENERATION" && ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"].includes(request.routeSlot)) return { timeoutMs: 300_000, maxAttempts: 1 };
   return undefined;
 }
