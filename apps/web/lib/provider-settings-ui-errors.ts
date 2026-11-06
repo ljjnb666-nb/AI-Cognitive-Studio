@@ -16,6 +16,7 @@ export const providerErrorMessages: Record<string, string> = {
   QWEN_CONFIGURATION_INVALID: "百炼配置无效，请检查区域、工作区 ID 和向量维度。",
   PODCAST_TTS_VOICE_UNSUPPORTED: "智谱 GLM-TTS 不支持该音色，请从音色列表中重新选择。",
   PODCAST_TTS_CONFIGURATION_REQUIRED: "请完整设置主持人音色、有效语速与 WAV 格式，再保存播客音频用途。",
+  MODEL_NOT_FOUND: "该型号已停止服务或不在当前目录，请重新选择模型。",
   CAPABILITY_MISMATCH: "所选模型不支持该用途；理解验证 需要支持严格 JSON 输出的模型。",
   TEST_CONNECTION_FAILED: "连接测试未通过。请检查 API Key、地址和网络后重试。",
 };

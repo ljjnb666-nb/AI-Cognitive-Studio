@@ -11,6 +11,7 @@ export function readinessDisplay(item: ProviderReadinessView) {
       : dependency.error === "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"
         ? "尚未配置｜请选择兼容的向量模型与维度"
         : dependency.error === "PODCAST_TTS_CONFIGURATION_REQUIRED" ? "待配置｜请设置主持人音色、语速与 WAV 格式"
+        : dependency.error === "MODEL_NOT_FOUND" ? "已保存的型号不可用，请重新选择"
         : dependency.error === "PODCAST_TTS_ROUTE_REQUIRED" ? "请先绑定语音模型" : "尚未配置",
   }));
   return {

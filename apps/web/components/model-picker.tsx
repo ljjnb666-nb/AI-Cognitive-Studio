@@ -13,7 +13,7 @@ export function ModelPicker({ name, label = "模型", models, defaultValue, allo
       <small className="muted">支持 OpenAI 兼容的文本模型；填写准确型号，不代表已验证可用。</small>
     </> : <select className="select-control" id={id} name={name} defaultValue={defaultValue ?? ""} disabled={disabled || !options.length} required>
       <option value="" disabled>{options.length ? "请选择模型" : "暂无兼容模型"}</option>
-      {defaultValue && !options.some(model => model.modelId === defaultValue) && <option value={defaultValue} disabled>{defaultValue}（当前不可用）</option>}
+      {defaultValue && !options.some(model => model.modelId === defaultValue) && <option value={defaultValue} disabled>{defaultValue}（不在当前可选列表中）</option>}
       {options.map(model => <option key={model.modelId} value={model.modelId}>{model.modelId}</option>)}
     </select>}
   </div>;

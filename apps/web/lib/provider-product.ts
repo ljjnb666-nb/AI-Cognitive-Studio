@@ -65,7 +65,7 @@ const readinessDependencyLabels: Partial<Record<RouteSlot, string>> = {
 function readinessDependency(manifest: ReturnType<typeof productManifest>, routes: RouteWithConnection[], slot: RouteSlot, missingError?: string): ProviderReadinessDependency {
   try {
     const identity = routeIdentity(manifest, routes, slot), provider = manifest.providers.find(item => item.providerKey === identity.provider);
-    return { slot, label: readinessDependencyLabels[slot] ?? slot, state: "READY", providerKey: identity.provider, providerName: provider?.displayName ?? identity.provider, modelId: identity.model };
+    return { slot, label: readinessDependencyLabels[slot] ?? slot, state: "READY", providerKey: identity.provider, providerName: provider?.displayName ?? identity.provider, modelId: identity.model, ...(provider?.models.find(model => model.modelId === identity.model)?.deprecated ? { detail: `${provider?.displayName ?? identity.provider} · ${identity.model}（旧型号，建议更新）` } : {}) };
   } catch (error) {
     return { slot, label: readinessDependencyLabels[slot] ?? slot, state: "MISSING", error: missingError ?? (error instanceof Error ? error.message : "AI_PROVIDER_CONFIGURATION_REQUIRED") };
   }

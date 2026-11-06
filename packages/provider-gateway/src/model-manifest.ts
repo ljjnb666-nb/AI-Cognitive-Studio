@@ -33,7 +33,7 @@ export function parseProviderModelManifest(source: string | undefined): Provider
 }
 
 function validModel(model: ModelCapability): boolean {
-  return Boolean(model && model.modelId && Array.isArray(model.families) && model.families.length && typeof model.confidence === "string");
+  return Boolean(model && (model.retired === undefined || typeof model.retired === "boolean") && (model.deprecated === undefined || typeof model.deprecated === "boolean") && model.modelId && Array.isArray(model.families) && model.families.length && typeof model.confidence === "string");
 }
 
 export function sanitizedProviderManifest(manifest: ProviderModelManifest): SanitizedProviderManifest {
@@ -49,6 +49,7 @@ export function validateRouteManifestSelection(manifest: ProviderModelManifest, 
   const catalogModel = provider.models.find(item => item.modelId === input.modelId);
   // Custom OpenAI-compatible endpoints accept a user-provided model id, while retaining the catalog's declared capability limits.
   const model: ModelCapability | undefined = catalogModel ?? (provider.providerKey === "openai-compatible" && input.modelId.trim() && provider.models[0] ? { ...provider.models[0], modelId: input.modelId } as ModelCapability : undefined);
+  if (model?.retired) throw new ProviderGatewayError("MODEL_NOT_FOUND", "This model has been retired");
   if (!model || !model.families.includes(family)) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Model is not compatible with route capability");
   if (input.routeSlot === "PDF_VISUAL_STRUCTURE" && (provider.providerKey !== "zhipu" || model.visionInput !== true || model.structuredOutput !== "JSON_MODE")) throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Explicit approved PDF vision model required");
   if (input.routeSlot === "TEACH_BACK_ASSESSMENT" && model.structuredOutput !== "STRICT_JSON_SCHEMA") throw new ProviderGatewayError("CAPABILITY_MISMATCH", "Teach Back requires strict JSON schema support");

@@ -9,7 +9,7 @@ import styles from "./provider-settings.module.css";
 import { readableProviderError, providerKeyTestMessage } from "@/lib/provider-settings-ui-errors";
 import { readinessDisplay, type ProviderReadinessView } from "@/lib/provider-readiness-ui";
 
-type Model = { modelId: string; families: string[]; structuredOutput?: string; visionInput?:boolean; speechFormats?: string[]; embeddingDimensionOptions?: number[] };
+type Model = { modelId: string; families: string[]; structuredOutput?: string; deprecated?: boolean; retired?: boolean; visionInput?:boolean; speechFormats?: string[]; embeddingDimensionOptions?: number[] };
 type Provider = { providerKey: string; displayName: string; protocol: string; capabilityProtocols?: Record<string, string>; models: Model[] };
 type Connection = { managedCapabilities?: string[]; id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credential: { id?: string; exists: boolean; displayHint?: string | null; status?: string } };
 type Route = { id: string; routeSlot: string; connectionId: string; modelId: string; configuration: Record<string, unknown>; connection: { displayName: string; providerKey: string } };
@@ -39,7 +39,7 @@ function normalizeProviderState(body: State): State {
   const routeModels = body.routeModels ?? Object.fromEntries(body.connections.map(connection => {
     const provider = body.manifest.providers.find(p => p.providerKey === connection.providerKey);
     return [connection.id, Object.fromEntries(routeSlots.map(({slot}) => [slot, provider?.models.filter(model =>
-      model.families.includes(slot === "PDF_OCR" ? "OCR" : slot === "EMBEDDING" ? "EMBEDDING" : slot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION") && (slot !== "TEACH_BACK_ASSESSMENT" || model.structuredOutput === "STRICT_JSON_SCHEMA") && (slot !== "PDF_VISUAL_STRUCTURE" || (connection.providerKey === "zhipu" && model.visionInput === true))) ?? []]))];
+      !model.deprecated && !model.retired && model.families.includes(slot === "PDF_OCR" ? "OCR" : slot === "EMBEDDING" ? "EMBEDDING" : slot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION") && (slot !== "TEACH_BACK_ASSESSMENT" || model.structuredOutput === "STRICT_JSON_SCHEMA") && (slot !== "PDF_VISUAL_STRUCTURE" || (connection.providerKey === "zhipu" && model.visionInput === true))) ?? []]))];
   }));
   return {...body,routeModels,speechVoices:body.speechVoices??{zhipu:["tongtong","xiaochen"],openai:["alloy","echo","fable","onyx","nova","shimmer"]}};
 }

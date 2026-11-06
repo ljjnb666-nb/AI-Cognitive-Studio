@@ -39,6 +39,7 @@ async function response(workspaceId: string) {
   const routeModels = Object.fromEntries(visible.map(connection => {
     const provider = manifest.providers.find(item => item.providerKey === connection.providerKey);
     return [connection.id, Object.fromEntries((Object.keys(routeSlotCapabilities) as RouteSlot[]).map(routeSlot => [routeSlot, (provider?.models ?? []).filter(model => {
+      if (model.deprecated || model.retired) return false;
       try { validateRouteManifestSelection(manifest, { routeSlot, providerKey: connection.providerKey, protocol: provider?.capabilityProtocols?.[routeSlotCapabilities[routeSlot]] ?? provider!.protocol, modelId: model.modelId }); return true; }
       catch { return false; }
     })]))];

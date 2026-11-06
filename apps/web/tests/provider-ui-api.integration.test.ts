@@ -129,3 +129,18 @@ it("理解验证的可选模型与保存使用同一能力门禁，普通文本�
  expect(accepted.status).toBe(200);
  expect((await prisma.providerRouteBinding.findUniqueOrThrow({where:{workspaceId_routeSlot:{workspaceId:actor.workspaceId,routeSlot:"TEACH_BACK_ASSESSMENT"}}})).modelId).toBe(compatible[0].modelId);
 });
+it("百炼国内型号可配置理解验证，旧 JSON 模式型号不冒充严格输出",async()=>{
+ await fixture();const repository=new ProviderGatewayRepository(prisma,testCipher());
+ const configuration={qwenRegion:"BEIJING",qwenWorkspaceId:"acceptance"};
+ const {connection}=await repository.createConnectionWithCredential(actor,{providerKey:"qwen",protocol:"OPENAI_COMPATIBLE",displayName:"百炼国内验收",endpoint:"https://acceptance.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",configuration,secret:"fixture-key"});
+ const body=await (await GET()).json();expect(body.routeModels[connection.id].TEACH_BACK_ASSESSMENT.map((item:{modelId:string})=>item.modelId)).toEqual(["qwen3.8-flash","qwen3.8-max","qwen3.7-plus"]);
+ const remote=vi.spyOn(globalThis,"fetch");try{expect((await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"TEACH_BACK_ASSESSMENT",modelId:"qwen3.8-flash",configuration})).status).toBe(200);expect(remote).not.toHaveBeenCalled();}finally{remote.mockRestore();}
+ expect(await prisma.providerInvocation.count({where:{workspaceId:actor.workspaceId}})).toBe(0);
+});
+it("更新候选不覆盖历史型号绑定或冻结快照，停服型号仅阻断新配置",async()=>{
+ await fixture();const repository=new ProviderGatewayRepository(prisma,testCipher());
+ const {connection,credential}=await repository.createConnectionWithCredential(actor,{providerKey:"gemini",protocol:"GEMINI_NATIVE",displayName:"历史配置",endpoint:"https://generativelanguage.googleapis.com/v1beta",secret:"fixture-key"});
+ const route=await repository.setRoute(actor,{connectionId:connection.id,routeSlot:"TEACH_BACK_ASSESSMENT",modelId:"gemini-2.0-flash"});
+ const snapshot=await prisma.providerExecutionSnapshot.create({data:{workspaceId:actor.workspaceId,routeSlot:"TEACH_BACK_ASSESSMENT",providerKey:"gemini",protocol:"GEMINI_NATIVE",modelId:"gemini-2.0-flash",connectionId:connection.id,credentialVersionId:credential.id,capability:{modelId:"gemini-2.0-flash",structuredOutput:"STRICT_JSON_SCHEMA"},configurationHash:"historic-fixture",adapterVersion:"historic-fixture",correlationId:randomUUID()}});
+ try{const body=await (await GET()).json();expect(body.routeModels[connection.id].TEACH_BACK_ASSESSMENT.map((item:{modelId:string})=>item.modelId)).toEqual(["gemini-3.8-flash"]);expect(body.readiness.mastery.state).toBe("INCOMPLETE");expect((await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"TEACH_BACK_ASSESSMENT",modelId:"gemini-2.0-flash",configuration:{}})).status).toBe(400);expect(await prisma.providerRouteBinding.findUnique({where:{id:route.id}})).toEqual(route);expect(await prisma.providerExecutionSnapshot.findUnique({where:{id:snapshot.id}})).toEqual(snapshot);}finally{await prisma.providerExecutionSnapshot.delete({where:{id:snapshot.id}});}
+});
