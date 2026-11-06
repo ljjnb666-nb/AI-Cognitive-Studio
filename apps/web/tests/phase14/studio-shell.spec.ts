@@ -334,7 +334,12 @@ async function expectNoHorizontalOverflow(page: Page) {
 }
 
 async function expectMobileContentClearance(page: Page) {
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  // Restored Studio fixes the outer window and scrolls its bounded workspace.
+  // Scroll the actual user-visible content to the end before testing whether
+  // the bottom navigation overlaps actionable content.
+  await page.locator(".screen-viewport").evaluate((region) => {
+    region.scrollTop = region.scrollHeight;
+  });
   const geometry = await page.evaluate(() => {
     const main = document.querySelector("main");
     const group = document.querySelector(".mobile-group-nav");
@@ -660,7 +665,10 @@ test("desktop navigation keeps one clear active destination", async ({
         await route.fulfill({ status: mode === "transport" ? 500 : 200 });
       });
     }
-    await page.locator('input[type="file"]').setInputFiles(file);
+    await page.waitForLoadState("networkidle");
+    const picker = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "上传内容", exact: true }).click();
+    await (await picker).setFiles(file);
   }
   await uploadWith("start", sentinels[0]!);
   await expect(page.getByText("上传没有完成，请稍后重试。")).toBeVisible();
@@ -992,7 +1000,7 @@ test("captures the final Studio experience evidence", async ({
       await expect(page.getByRole("heading", { name: "证据短视频" })).toBeVisible();
     }
     if (name === "18-provider-settings-desktop.png") {
-      await expect(page.getByRole("navigation", { name: "设置导航" }).locator('a[aria-current="page"]')).toHaveAccessibleName("Provider");
+      await expect(page.getByRole("navigation", { name: "设置导航" }).locator('a[aria-current="page"]')).toHaveAccessibleName("服务商");
       await expect(page.locator('nav[aria-label="主导航"] a[aria-current="page"]')).toHaveAccessibleName("设置");
       await expect(page.getByText("未完成", { exact: false }).first()).toBeVisible();
       await expect(page.locator("body")).not.toContainText("sk-");
