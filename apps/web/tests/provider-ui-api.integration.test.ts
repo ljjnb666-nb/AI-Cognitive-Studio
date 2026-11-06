@@ -142,6 +142,30 @@ it("理解验证的可选模型与保存使用同一能力门禁，普通文本�
  expect(accepted.status).toBe(200);
  expect((await prisma.providerRouteBinding.findUniqueOrThrow({where:{workspaceId_routeSlot:{workspaceId:actor.workspaceId,routeSlot:"TEACH_BACK_ASSESSMENT"}}})).modelId).toBe(compatible[0].modelId);
 });
+it("百炼用途继承服务商配置，切换服务商和向量维度不污染历史快照",async()=>{
+ await fixture();const repository=new ProviderGatewayRepository(prisma,testCipher());
+ const configuration={qwenRegion:"BEIJING",qwenWorkspaceId:"first-workspace"};
+ const {connection,credential}=await repository.createConnectionWithCredential(actor,{providerKey:"qwen",protocol:"OPENAI_COMPATIBLE",displayName:"北京百炼",endpoint:"https://first-workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",configuration,secret:"fixture-key"});
+ const snapshot=await prisma.providerExecutionSnapshot.create({data:{workspaceId:actor.workspaceId,routeSlot:"BOOK_SYNTHESIS",providerKey:"qwen",protocol:"OPENAI_COMPATIBLE",modelId:"qwen-plus",connectionId:connection.id,credentialVersionId:credential.id,capability:{modelId:"qwen-plus"},configurationHash:"unchanged-history",adapterVersion:"builtin-v1",correlationId:randomUUID()}});
+ const remote=vi.spyOn(globalThis,"fetch");try{
+  expect((await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"TEACH_BACK_ASSESSMENT",modelId:"qwen3.8-flash",configuration:{qwenRegion:"SINGAPORE",qwenWorkspaceId:"stale-or-forged",customOption:true}})).status).toBe(200);
+  expect((await prisma.providerRouteBinding.findUniqueOrThrow({where:{workspaceId_routeSlot:{workspaceId:actor.workspaceId,routeSlot:"TEACH_BACK_ASSESSMENT"}}})).configuration).toEqual({...configuration,customOption:true});
+  expect((await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"EMBEDDING",modelId:"text-embedding-v4",configuration:{embeddingDimensions:512}})).status).toBe(200);
+  expect((await prisma.providerRouteBinding.findUniqueOrThrow({where:{workspaceId_routeSlot:{workspaceId:actor.workspaceId,routeSlot:"EMBEDDING"}}})).configuration).toEqual({...configuration,embeddingDimensions:512});
+  expect((await post({action:"APPLY_STABLE_BOOK_ROUTES",textConnectionId:connection.id,textModelId:"qwen3.8-flash",textConfiguration:{},embeddingConnectionId:connection.id,embeddingModelId:"text-embedding-v4",embeddingConfiguration:{embeddingDimensions:512}})).status).toBe(200);
+  const bookRoutes=await prisma.providerRouteBinding.findMany({where:{workspaceId:actor.workspaceId,routeSlot:{in:["BOOK_CHUNK_ANALYSIS","BOOK_REDUCTION_ANALYSIS","BOOK_SYNTHESIS"]}}});expect(bookRoutes).toHaveLength(3);for(const route of bookRoutes)expect(route.configuration).toEqual(configuration);
+  const {connection:second}=await repository.createConnectionWithCredential(actor,{providerKey:"qwen",protocol:"OPENAI_COMPATIBLE",displayName:"新加坡百炼",endpoint:"https://second-workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",configuration:{qwenRegion:"SINGAPORE",qwenWorkspaceId:"second-workspace"},secret:"fixture-key"});
+  expect((await post({action:"SET_ROUTE",connectionId:second.id,routeSlot:"TEACH_BACK_ASSESSMENT",modelId:"qwen3.8-flash",configuration})).status).toBe(200);
+  expect((await prisma.providerRouteBinding.findUniqueOrThrow({where:{workspaceId_routeSlot:{workspaceId:actor.workspaceId,routeSlot:"TEACH_BACK_ASSESSMENT"}}})).configuration).toEqual({qwenRegion:"SINGAPORE",qwenWorkspaceId:"second-workspace"});
+  expect(await prisma.providerExecutionSnapshot.findUniqueOrThrow({where:{id:snapshot.id}})).toEqual(snapshot);expect(remote).not.toHaveBeenCalled();
+ }finally{remote.mockRestore();await prisma.providerExecutionSnapshot.delete({where:{id:snapshot.id}});}
+});
+it("百炼服务商缺少有效区域配置时阻止保存用途，不借用客户端工作区",async()=>{
+ await fixture();const repository=new ProviderGatewayRepository(prisma,testCipher());
+ const {connection}=await repository.createConnectionWithCredential(actor,{providerKey:"qwen",protocol:"OPENAI_COMPATIBLE",displayName:"旧百炼配置",endpoint:"https://missing.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",secret:"fixture-key"});
+ expect((await post({action:"SET_ROUTE",connectionId:connection.id,routeSlot:"TEACH_BACK_ASSESSMENT",modelId:"qwen3.8-flash",configuration:{qwenRegion:"BEIJING",qwenWorkspaceId:"missing"}})).status).toBe(400);
+ expect(await prisma.providerRouteBinding.count({where:{workspaceId:actor.workspaceId}})).toBe(0);
+});
 it("百炼国内型号可配置理解验证，旧 JSON 模式型号不冒充严格输出",async()=>{
  await fixture();const repository=new ProviderGatewayRepository(prisma,testCipher());
  const configuration={qwenRegion:"BEIJING",qwenWorkspaceId:"acceptance"};

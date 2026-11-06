@@ -84,6 +84,12 @@ function assertQwenRouteConfiguration(providerKey: string, routeSlot: RouteSlot,
     if (typeof dimension !== "number" || ![2048, 1536, 1024, 768, 512, 256, 128, 64].includes(dimension)) throw new Error("QWEN_CONFIGURATION_INVALID");
   }
 }
+function inheritedRouteConfiguration(connection: { providerKey: string; endpoint: string | null; configuration: unknown }, configuration: Record<string, unknown>): Record<string, unknown> {
+  if (connection.providerKey !== "qwen") return configuration;
+  const saved = safeConfiguration(connection.configuration);
+  assertQwenConnectionConfiguration(connection.providerKey, connection.endpoint ?? "", saved);
+  return { ...configuration, qwenRegion: saved.qwenRegion, qwenWorkspaceId: saved.qwenWorkspaceId };
+}
 async function testSubmittedConnection(input: z.infer<typeof testConnection>, manifest: ReturnType<typeof productManifest>) {
   const provider = manifest.providers.find(item => item.providerKey === input.providerKey);
   if (!provider || ![provider.protocol, ...Object.values(provider.capabilityProtocols ?? {})].includes(input.protocol as never)) throw new Error("PROVIDER_CONNECTION_PROTOCOL_INVALID");
@@ -144,6 +150,7 @@ async function autoConfigure(context: { workspaceId: string; userId: string }, i
 async function applyStableBookRoutes(context: { workspaceId: string; userId: string }, input: z.infer<typeof stableBookRoutesInput>, manifest: ReturnType<typeof productManifest>, repository: ProviderGatewayRepository) {
   const [text, embedding] = await Promise.all([prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.textConnectionId, workspaceId: context.workspaceId } } }), prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.embeddingConnectionId, workspaceId: context.workspaceId } } })]);
   if (!text || !embedding) throw new Error("AUTHORIZATION_FAILED");
+  input = { ...input, textConfiguration: inheritedRouteConfiguration(text, input.textConfiguration), embeddingConfiguration: inheritedRouteConfiguration(embedding, input.embeddingConfiguration) };
   assertSafeConfiguration(input.textConfiguration); assertSafeConfiguration(input.embeddingConfiguration);
   assertQwenRouteConfiguration(text.providerKey, "BOOK_CHUNK_ANALYSIS", input.textConfiguration); assertQwenRouteConfiguration(embedding.providerKey, "EMBEDDING", input.embeddingConfiguration);
   const textRoutes = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
@@ -193,9 +200,10 @@ export async function POST(request: Request) {
       await repository.manageProvider(context, input.connectionId, { action:"ENABLED",enabled:input.enabled });
     } else {
       assertSafeConfiguration(input.configuration);
-      const connection = await prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.connectionId, workspaceId: context.workspaceId } }, select: { id: true, providerKey: true, protocol: true, status: true } });
+      const connection = await prisma.providerConnection.findUnique({ where: { id_workspaceId: { id: input.connectionId, workspaceId: context.workspaceId } }, select: { id: true, providerKey: true, protocol: true, status: true, endpoint: true, configuration: true } });
       if (!connection) throw new Error("AUTHORIZATION_FAILED");
       if (connection.status !== "ACTIVE") throw new Error("CONNECTION_DISABLED");
+      input.configuration = inheritedRouteConfiguration(connection, input.configuration);
       const provider = manifest.providers.find(item => item.providerKey === connection.providerKey);
       const family = input.routeSlot === "EMBEDDING" ? "EMBEDDING" : input.routeSlot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION";
       const protocol = provider?.capabilityProtocols?.[family] ?? provider?.protocol;

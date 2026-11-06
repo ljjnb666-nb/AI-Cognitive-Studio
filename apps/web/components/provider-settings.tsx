@@ -354,8 +354,6 @@ function RouteForm({
   const [applyToBookStages, setApplyToBookStages] = useState(false);
   const [configurationError, setConfigurationError] = useState(false);
   const [validationError, setValidationError] = useState("");
-  const [qwenRegion, setQwenRegion] = useState(String(existing?.configuration.qwenRegion ?? "BEIJING"));
-  const [qwenWorkspaceId, setQwenWorkspaceId] = useState(String(existing?.configuration.qwenWorkspaceId ?? ""));
   const [qwenDimension, setQwenDimension] = useState(String(existing?.configuration.embeddingDimensions ?? 1024));
   const connectionId = connections.some((c) => c.id === selectedConnectionId) ? selectedConnectionId : existing?.connectionId ?? connections[0]?.id ?? "";
   const connection = connections.find((c) => c.id === connectionId);
@@ -389,7 +387,7 @@ function RouteForm({
           if (slot === "PODCAST_TTS" && !form.has("configuration")) configuration = podcastConfigurationFromForm(form, configuration);
         } catch { setConfigurationError(true); return; }
         setConfigurationError(false);
-        await submit({ action: "SET_ROUTE", routeSlot: slot, ...(slot === "BOOK_CHUNK_ANALYSIS" && applyToBookStages ? { applyToBookStages: true } : {}), connectionId, modelId: form.get("modelId"), configuration: connection?.providerKey === "qwen" ? { ...configuration, qwenRegion, qwenWorkspaceId, ...(capability === "EMBEDDING" ? { embeddingDimensions: Number(qwenDimension) } : {}) } : configuration });
+        await submit({ action: "SET_ROUTE", routeSlot: slot, ...(slot === "BOOK_CHUNK_ANALYSIS" && applyToBookStages ? { applyToBookStages: true } : {}), connectionId, modelId: form.get("modelId"), configuration: connection?.providerKey === "qwen" ? { ...configuration, ...(capability === "EMBEDDING" ? { embeddingDimensions: Number(qwenDimension) } : {}) } : configuration });
       }}
       style={{
         backgroundColor: "var(--surface-container)",
@@ -460,9 +458,8 @@ function RouteForm({
         </button>
       </div>
 
-      {connection?.providerKey === "qwen" && <div style={{ display: "grid", gridTemplateColumns: capability === "EMBEDDING" ? "1fr 1fr 1fr" : "1fr 1fr", gap: 12, marginBottom: 16 }}>
-        <div className="form-group"><label className="form-label">百炼区域</label><select className="select-control" value={qwenRegion} onChange={event => setQwenRegion(event.target.value)}><option value="BEIJING">北京</option><option value="SINGAPORE">新加坡</option></select></div>
-        <div className="form-group"><label className="form-label">百炼工作区 ID</label><input className="input-control" value={qwenWorkspaceId} onChange={event => setQwenWorkspaceId(event.target.value)} required placeholder="workspace-id" /></div>
+      {connection?.providerKey === "qwen" && <div style={{ marginBottom: 16 }}>
+        <p className="muted" style={{ fontSize: 13 }}>百炼区域和工作区自动沿用所选服务商的设置，无需重复填写。</p>
         {capability === "EMBEDDING" && <div className="form-group"><label className="form-label">向量维度</label><select className="select-control" value={qwenDimension} onChange={event => setQwenDimension(event.target.value)}>{(models[0]?.embeddingDimensionOptions ?? [1024]).map(dimension => <option key={dimension} value={dimension}>{dimension}</option>)}</select></div>}
       </div>}
 
