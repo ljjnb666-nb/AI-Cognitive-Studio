@@ -52,6 +52,11 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.locator('input[name="duration"]').fill("1");
   await page.getByRole("button", { name: "开始生成播客" }).click();
   await expect(page).toHaveURL(/\/studio\/podcasts\//, { timeout: 30_000 });
+  // The restored UI keeps script generation separate from billable TTS.
+  // A real click is required before any audio can be generated.
+  const startAudio = page.getByRole("button", { name: "生成音频" });
+  await expect(startAudio).toBeVisible({ timeout: 90_000 });
+  await startAudio.click();
   const audio = page.locator("audio");
   await expect(audio).toBeVisible({ timeout: 90_000 });
   await expect.poll(async () => audio.evaluate((node: HTMLAudioElement) => new Promise<number>((resolve, reject) => { if (Number.isFinite(node.duration) && node.duration > 0) return resolve(node.duration); node.addEventListener("loadedmetadata", () => resolve(node.duration), { once: true }); node.addEventListener("error", () => reject(new Error("audio metadata failed")), { once: true }); node.load(); })), { timeout: 30_000 }).toBeGreaterThan(0);
