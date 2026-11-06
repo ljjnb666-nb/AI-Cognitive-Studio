@@ -17,7 +17,7 @@ import {
 
 type Props = {
   preview: ProductIdentityPreview;
-  onRecheck: (message: string) => void;
+  onRecheck: (message: string, refreshParent?: boolean) => void;
 };
 
 function readableTime(value: string): string {
@@ -85,6 +85,7 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
       reason: reason.trim(),
     };
     let message = "网络异常，无法确认是否已提交。正在读取正式信息，请检查历史记录后再操作。";
+    let outcome: unknown;
     try {
       const response = await fetch(
         "/api/studio/identity/" + encodeURIComponent(preview.sourceDocumentId) + "/corrections",
@@ -98,6 +99,7 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
       try { payload = await response.json(); } catch { /* HTTP status remains authoritative */ }
       const status = payload && typeof payload === "object" && "status" in payload
         ? (payload as { status: unknown }).status : undefined;
+      outcome = status;
       message = manualIdentityOutcomeMessage(status, response.status);
     } catch {
       // A transport failure is an unknown outcome, never a claimed successful write.
@@ -105,7 +107,10 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
       submittingRef.current = false;
       setBusy(false);
       setEditing(false);
-      onRecheck(message);
+      // Stale/superseded edits are rejected, and panel state is re-read by
+      // onRecheck. Avoid a parent refresh that remounts the panel and hides
+      // the authoritative rejection before it can be announced to the user.
+      onRecheck(message, outcome !== "STALE" && outcome !== "SUPERSEDED");
     }
   }
 
