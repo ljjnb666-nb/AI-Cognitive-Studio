@@ -40,7 +40,8 @@ test("library filters and pagination survive repeated query parameters and empty
   await page.getByRole("textbox", { name: "搜索书名或文件名" }).fill("不存在的书籍");
   await page.getByRole("button", { name: "搜索与筛选", exact: true }).click();
   await expect(page.getByText("没有匹配当前搜索和筛选条件的书籍。", { exact: true })).toBeVisible();
-  await expect(page.getByText("第 1 页", { exact: true })).toBeVisible();
+  // A single empty first page deliberately has no redundant pagination control.
+  await expect(page.getByRole("navigation", { name: "列表分页" })).toHaveCount(0);
   await page.getByRole("textbox", { name: "搜索书名或文件名" }).fill("");
   await page.getByRole("combobox", { name: "文件格式" }).selectOption("TXT");
   await page.getByRole("button", { name: "搜索与筛选", exact: true }).click();
@@ -53,7 +54,11 @@ test("library filters and pagination survive repeated query parameters and empty
   await expect(page.getByText("这一页没有书籍，请返回上一页。", { exact: true })).toBeVisible();
   for (const path of ["library", "podcasts", "videos"]) {
     await page.goto(`/studio/${path}?page=invalid&page=2`);
-    await expect(page.getByText("第 1 页", { exact: true })).toBeVisible();
+    // An invalid page value resolves to page 1. When there is no next page,
+    // the restored UI omits the pagination bar entirely.
+    await expect(page.getByRole("link", { name: "上一页", exact: true })).toHaveCount(0);
+    if (path === "library") await expect(page.getByText("第 1 页", { exact: true })).toBeVisible();
+    else await expect(page.getByRole("navigation", { name: "列表分页" })).toHaveCount(0);
   }
 });
 
@@ -446,7 +451,16 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
   await expect(page).toHaveURL(/\/studio\/podcasts\//, { timeout: 30_000 });
   const episodeId = podcastBody.id;
   await expect.poll(async () => (await prisma.podcastGenerationRun.findFirst({ where: { episodeId }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 120_000 }).toBe("SUCCEEDED");
-  await expect(page.getByRole("button", { name: "重试音频生成" })).toBeVisible({ timeout: 30_000 });
+  await page.goto(`/studio/podcasts/${episodeId}`);
+  // Restored Studio never starts billable TTS just because the script finished.
+  await expect(page.getByRole("button", { name: "生成音频" })).toBeVisible({ timeout: 30_000 });
+  expect(await prisma.audioGenerationRun.count({ where: { workspaceId } })).toBe(0);
+  const missingTtsResponse = page.waitForResponse(response => response.url().includes("/api/studio/podcast-audio") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "生成音频" }).click();
+  const missingTts = await missingTtsResponse;
+  expect(missingTts.status()).toBe(400);
+  expect(await missingTts.json()).toMatchObject({ error: "PODCAST_TTS_CONFIGURATION_REQUIRED" });
+  await expect(page.getByRole("button", { name: "重试音频生成" })).toBeVisible();
   expect(await prisma.audioGenerationRun.count({ where: { workspaceId } })).toBe(0);
   const restorePodcastTts = await page.evaluate(async ({ connectionId }) => {
     const response = await fetch("/api/studio/providers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "SET_ROUTE", routeSlot: "PODCAST_TTS", connectionId, modelId: "phase9-speech", configuration: { outputFormat: "wav", hostVoices: [{ ordinal: 1, providerVoiceId: "host-a", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }, { ordinal: 2, providerVoiceId: "host-b", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }] } }) });
@@ -493,6 +507,14 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
       expect(evidence.sourceBlock.extraction).toMatchObject({ workspaceId, sourceDocumentId, id: evidence.extractionId });
     }
   }
+  // A deliberately failing gateway is invoked only after the user explicitly
+  // requests audio; otherwise a successful script must remain free of TTS costs.
+  await page.goto(`/studio/podcasts/${failedPodcastBody.id}`);
+  await expect(page.getByRole("button", { name: "生成音频" })).toBeVisible();
+  expect(await prisma.audioGenerationRun.count({ where: { episodeId: failedPodcastBody.id } })).toBe(0);
+  const failedAudioResponse = page.waitForResponse(response => response.url().includes("/api/studio/podcast-audio") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "生成音频" }).click();
+  expect((await failedAudioResponse).ok()).toBeTruthy();
   await expect.poll(async () => (await prisma.audioGenerationRun.findFirst({ where: { episodeId: failedPodcastBody.id }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 120_000 }).toBe("FAILED");
   expect((await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: scriptRun.id } })).status).toBe("SUCCEEDED");
   await page.goto(`/studio/podcasts/${failedPodcastBody.id}`);
