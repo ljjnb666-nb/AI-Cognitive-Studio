@@ -104,3 +104,12 @@ it("分类不兼容与缺字段分开显示，不伪装为成功", async () => {
   expect(processingDisplay(status,"ANALYSIS_MEMORY_TYPE_UNSUPPORTED")).toMatchObject({label:"记忆分类异常",active:false});
   expect(processingErrorType("ANALYSIS_MEMORY_TYPE_UNSUPPORTED")).toBe("模型返回了不支持的记忆分类");
 });
+
+it("服务商欠费与本机处理额度不足明确区分", async () => {
+  const {processingErrorType}=await import("../lib/product-errors");
+  const status={state:"ANALYSIS_FAILED" as const,stage:"BOOK_ANALYSIS" as const,recoveryAction:"RETRY_ANALYSIS" as const,stageAvailability:"AVAILABLE" as const};
+  expect(processingDisplay(status,"QUOTA_EXCEEDED")).toMatchObject({label:"服务商余额或额度不足",description:expect.stringContaining("计费状态"),active:false});
+  expect(processingErrorType("QUOTA_EXCEEDED")).toBe("服务商余额或计费额度不足");
+  expect(processingDisplay(status,"BUDGET_EXCEEDED").label).toBe("处理额度不足");
+  expect(processingErrorType("INVALID_PROVIDER_REQUEST")).toBe("服务商拒绝了请求参数");
+});

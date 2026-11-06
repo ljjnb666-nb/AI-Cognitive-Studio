@@ -62,7 +62,7 @@ export function processingErrorType(code?: string | null): string {
     ANALYSIS_PROVIDER_RESPONSE_INVALID: "理解结果字段未通过校验", ANALYSIS_MEMORY_TYPE_UNSUPPORTED: "模型返回了不支持的记忆分类", ANALYSIS_EVIDENCE_REQUIRED: "理解结果缺少有效原文引用",
     TIMEOUT: "模型响应超时", BUDGET_EXCEEDED: "处理额度不足", CONTENT_REJECTED: "服务商内容审核拒绝",
     BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED: "任务执行凭证已过期", BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST: "任务执行权限已失效",
-    RATE_LIMITED: "服务商请求过于频繁", QUOTA_EXCEEDED: "服务商额度不足", AUTHENTICATION_FAILED: "服务商密钥验证失败",
+    RATE_LIMITED: "服务商请求过于频繁", QUOTA_EXCEEDED: "服务商余额或计费额度不足", INVALID_PROVIDER_REQUEST: "服务商拒绝了请求参数", AUTHENTICATION_FAILED: "服务商密钥验证失败",
     AUTHORIZATION_FAILED: "服务商权限不足", MODEL_NOT_FOUND: "所选模型不可用", TRANSIENT_UPSTREAM: "服务商暂时异常",
     SOURCE_PARSE_ERROR: "正文提取程序异常", SOURCE_PARSE_TIMEOUT: "正文提取超时", SOURCE_QUALITY_REJECTED: "正文提取质量未通过",
     SOURCE_CORRUPTED: "文件结构校验失败", SOURCE_OCR_REQUIRED: "文件需要文字识别", SOURCE_PASSWORD_REQUIRED: "文件需要密码",

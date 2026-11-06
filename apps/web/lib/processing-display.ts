@@ -48,6 +48,8 @@ export function processingDisplay(processing: ProcessingStatus, errorCode?: stri
       if (code === "ANALYSIS_MEMORY_TYPE_UNSUPPORTED") { label = "记忆分类异常"; description = "模型返回了系统不支持的记忆分类，该分块尚未作为有效理解成果保存。已完成分块保留；需要按约定分类重新生成，已发出的请求可能已计费。"; }
       if (code === "ANALYSIS_PROVIDER_RESPONSE_INVALID") { label = "理解结果校验失败"; description = "模型已返回内容，但其中的字段、分类或数据类型未通过理解结果校验；这不代表正文损坏。已完成分块与原回执保留，请核查具体字段后恢复。"; }
       if (code === "OUTPUT_TRUNCATED") { label = "模型输出不完整"; description = "模型达到单次输出长度限制，答案被截断，未作为有效理解结果保存。已完成分块保留；请在修复生成设置后恢复，已发出的请求可能已计费。"; }
+      if (code === "QUOTA_EXCEEDED") { label = "服务商余额或额度不足"; description = "服务商因账户余额或计费额度不足拒绝了请求，AI 理解已停止。已完成分块与综合结果保留；请检查服务商账户余额、额度和计费状态，处理后再恢复。请勿连续点击恢复。"; }
+      if (code === "INVALID_PROVIDER_REQUEST") { label = "服务商请求被拒绝"; description = "服务商未接受本次请求。任务已停止，已完成成果保留；请核查服务商返回的具体错误后再恢复。"; }
       if (code === "BUDGET_EXCEEDED") { label = "处理额度不足"; description = "当前预算或处理额度不足，AI 理解已停止。正文与已完成分块保留；请核对本机任务额度、当日额度及预算设置后再恢复。资源单位不是人民币金额，此提示不代表服务商账户余额不足。"; }
       if (code === "CONTENT_REJECTED") description = "模型服务商因内容审核拒绝了本次理解请求。已完成结果保留，全书理解尚未完成。请联系服务商核实；重复提交不能保证解决。";
       break;

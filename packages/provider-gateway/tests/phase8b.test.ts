@@ -104,3 +104,13 @@ describe("Phase 8B real text provider adapters", () => {
   it.each([["openai", "OPENAI_RESPONSES", OpenAIResponsesAdapter], ["deepseek", "OPENAI_COMPATIBLE", OpenAICompatibleAdapter], ["qwen", "OPENAI_COMPATIBLE", OpenAICompatibleAdapter], ["minimax", "OPENAI_COMPATIBLE", OpenAICompatibleAdapter], ["anthropic", "ANTHROPIC_COMPATIBLE", AnthropicCompatibleAdapter], ["gemini", "GEMINI_NATIVE", GeminiNativeAdapter]] as const)("normalizes retryable failures once for %s", async (provider, protocol, Adapter) => { const wire = new DeterministicProviderHttpTransport(() => ({ status: 429, headers: { "retry-after": "999999", "x-request-id": "r".repeat(300) }, body: JSON.stringify({ error: { type: "rate_limit_error", message: "hostile" } }) })); await expect(new Adapter(wire).execute(input(provider, protocol))).rejects.toMatchObject({ code: "RATE_LIMITED", retryAfterMs: 86_400_000, remoteRequestId: undefined }); expect(wire.calls).toHaveLength(1); });
   it("keeps absent usage and request IDs undefined", async () => { const wire = transport({ choices: [{ finish_reason: "stop", message: { content: '{"answer":"ok"}' } }] }); wire.execute = async request => { wire.calls.push(request); return { status: 200, headers: {}, body: JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: '{"answer":"ok"}' } }] }) }; }; const result = await new OpenAICompatibleAdapter(wire).execute(input("deepseek", "OPENAI_COMPATIBLE")); expect(result.usage).toBeUndefined(); expect(result.remoteRequestId).toBeUndefined(); });
 });
+
+it.each(["insufficient_balance_error", "payment_required", "unknown_provider_type"])("HTTP402归为计费阻断而非参数错误，诊断不泄露回执：%s", async type => {
+  const wire = new DeterministicProviderHttpTransport(()=>({status:402,headers:{},body:JSON.stringify({error:{type,message:"PRIVATE_BILLING_MESSAGE",http_code:"402"}})}));
+  let failure:unknown;
+  try { await new OpenAICompatibleAdapter(wire).execute(input("minimax","OPENAI_COMPATIBLE")); } catch(error) { failure=error; }
+  expect(failure).toMatchObject({code:"QUOTA_EXCEEDED",retryable:false,usage:{extra:{billingDiagnostic:{httpStatus:402,reason:type==="insufficient_balance_error"?"INSUFFICIENT_BALANCE":"PAYMENT_REQUIRED"}}}});
+  expect(JSON.stringify(failure)).not.toContain("PRIVATE_BILLING_MESSAGE");
+  expect(JSON.stringify(failure)).not.toContain("unknown_provider_type");
+  expect(wire.calls).toHaveLength(1);
+});
