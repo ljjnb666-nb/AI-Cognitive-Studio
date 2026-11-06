@@ -111,6 +111,19 @@ it.each(["https://api.minimax.cn.evil.test/v1/chat/completions","https://api.min
 it.each([[401,"AUTHENTICATION_FAILED",{}],[403,"AUTHENTICATION_FAILED",{}],[200,"INVALID_TEST_RESPONSE",{base_resp:{status_code:1004}}],[200,"INVALID_TEST_RESPONSE",{object:"list",data:[{}]}],[200,"INVALID_TEST_RESPONSE",null],[429,"PROVIDER_REJECTED",{}]] as const)("MiniMax HTTP %s 不会把异常响应当作验证成功：%s",async(status,state,body)=>{
  await fixture();const remote=vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response(JSON.stringify(body),{status}));try{const result=await post({action:"TEST_CONNECTION",providerKey:"minimax",protocol:"OPENAI_COMPATIBLE",endpoint:miniMaxSites.CN.endpoint,secret:"fixture-key"});expect(await result.json()).toEqual({test:{state}});}finally{remote.mockRestore();}
 });
+it.each(["BEIJING", "SINGAPORE"])("百炼 %s 使用已校验的工作区专属目录接口验证，不生成内容或保存密钥",async qwenRegion=>{
+ await fixture();const before=await prisma.providerConnection.count({where:{workspaceId:actor.workspaceId}});
+ const host=`fixture-workspace.${qwenRegion==="BEIJING"?"cn-beijing":"ap-southeast-1"}.maas.aliyuncs.com`;
+ const remote=vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response(JSON.stringify({success:true,output:{models:[{model:"qwen3.8-flash"}]}}),{status:200}));
+ try{const result=await post({action:"TEST_CONNECTION",providerKey:"qwen",protocol:"OPENAI_COMPATIBLE",endpoint:`https://${host}/compatible-mode/v1/chat/completions`,secret:"fixture-key",configuration:{qwenRegion,qwenWorkspaceId:"fixture-workspace"}});expect(await result.json()).toEqual({test:{state:"VALID"}});expect(remote).toHaveBeenCalledExactlyOnceWith(`https://${host}/api/v1/models`,expect.objectContaining({method:"GET",redirect:"error",headers:{authorization:"Bearer fixture-key"}}));expect(await prisma.providerConnection.count({where:{workspaceId:actor.workspaceId}})).toBe(before);}finally{remote.mockRestore();}
+});
+it.each([{success:false,output:{models:[]}},{success:true,output:{models:[{}]}},{success:true},null])("百炼不把 HTTP 200 异常响应视为密钥通过：%j",async body=>{
+ await fixture();const remote=vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response(JSON.stringify(body),{status:200}));
+ try{const result=await post({action:"TEST_CONNECTION",providerKey:"qwen",protocol:"OPENAI_COMPATIBLE",endpoint:"https://fixture-workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",secret:"fixture-key",configuration:{qwenRegion:"BEIJING",qwenWorkspaceId:"fixture-workspace"}});expect(await result.json()).toEqual({test:{state:"INVALID_TEST_RESPONSE"}});}finally{remote.mockRestore();}
+});
+it.each([{}, {qwenRegion:"BEIJING",qwenWorkspaceId:"bad/workspace"}, {qwenRegion:"BEIJING",qwenWorkspaceId:"other-workspace"}])("百炼配置缺失或地址不匹配时不发送密钥：%j",async configuration=>{
+ await fixture();const remote=vi.spyOn(globalThis,"fetch");try{const result=await post({action:"TEST_CONNECTION",providerKey:"qwen",protocol:"OPENAI_COMPATIBLE",endpoint:"https://fixture-workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",secret:"fixture-key",configuration});expect(result.status).toBe(400);expect(remote).not.toHaveBeenCalled();}finally{remote.mockRestore();}
+});
 it("理解验证的可选模型与保存使用同一能力门禁，普通文本型号不会出现在候选中",async()=>{
  const {connection}=await fixture();
  const repository=new ProviderGatewayRepository(prisma,testCipher());

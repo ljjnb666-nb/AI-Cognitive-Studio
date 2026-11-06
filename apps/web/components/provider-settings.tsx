@@ -285,7 +285,7 @@ function ConnectionForm({ providers, busy, submit }: { providers: Provider[]; bu
       <div className="form-group"><label className="form-label" htmlFor="new-provider-region">区域（可选）</label><input id="new-provider-region" className="input-control" name="region" placeholder="例如：us-east-1" /></div>
       <div className="form-group"><label className="form-label" htmlFor="new-provider-configuration">高级配置 JSON</label><textarea id="new-provider-configuration" className="input-control font-mono" name="configuration" defaultValue="{}" rows={3} /></div>
     </div></details>
-    <div className={styles.createActions}><button type="button" className="btn btn-secondary" disabled={busy || !provider} onClick={event => { const form = event.currentTarget.form; if (!form || !form.reportValidity()) return; void submit({ action: "TEST_CONNECTION", providerKey, protocol: provider?.protocol, endpoint, secret: new FormData(form).get("secret") }); }}>验证 API Key</button><button type="submit" className="btn btn-primary" disabled={busy || !provider}>{busy ? "保存中…" : "保存服务商"}</button></div>
+    <div className={styles.createActions}><button type="button" className="btn btn-secondary" disabled={busy || !provider} onClick={event => { const form = event.currentTarget.form; if (!form || !form.reportValidity()) return; void submit({ action: "TEST_CONNECTION", providerKey, protocol: provider?.protocol, endpoint, secret: new FormData(form).get("secret"), configuration: providerKey === "qwen" ? { qwenRegion, qwenWorkspaceId } : {} }); }}>验证 API Key</button><button type="submit" className="btn btn-primary" disabled={busy || !provider}>{busy ? "保存中…" : "保存服务商"}</button></div>
   </form>;
 }
 

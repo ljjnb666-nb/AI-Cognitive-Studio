@@ -17,7 +17,7 @@ const revokeCredential = z.object({ action: z.literal("REVOKE_CREDENTIAL"), cred
 const deleteConnection = z.object({ action: z.literal("DELETE_CONNECTION"), connectionId: z.string().cuid(), expectedRouteSlots: z.array(z.string().max(100)).max(32), expectedCredentialVersionId: z.string().uuid().nullable() });
 const setEnabled = z.object({ action: z.literal("SET_ENABLED"), connectionId: z.string().cuid(), enabled: z.boolean() });
 const setRoute = z.object({ applyToBookStages: z.boolean().optional(), action: z.literal("SET_ROUTE"), routeSlot: z.enum(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT", "PDF_VISUAL_STRUCTURE"]), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200), configuration: jsonRecord });
-const testConnection = z.object({ action: z.literal("TEST_CONNECTION"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000) });
+const testConnection = z.object({ action: z.literal("TEST_CONNECTION"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000), configuration: jsonRecord });
 const autoConfigureRoutes = z.object({ action: z.literal("AUTO_CONFIGURE_ROUTES"), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200).optional() });
 const stableBookRoutesInput = z.object({ action: z.literal("APPLY_STABLE_BOOK_ROUTES"), textConnectionId: z.string().cuid(), textModelId: z.string().trim().min(1).max(200), textConfiguration: jsonRecord, embeddingConnectionId: z.string().cuid(), embeddingModelId: z.string().trim().min(1).max(200), embeddingConfiguration: jsonRecord });
 const bodySchema = z.discriminatedUnion("action", [deleteConnection, createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection, autoConfigureRoutes, stableBookRoutesInput]);
@@ -56,6 +56,12 @@ async function resolveProviderHostname(hostname: string): Promise<readonly strin
   return (await (await import("node:dns/promises")).lookup(hostname, { all: true })).map(item => item.address);
 }
 function connectionTestUrl(input: z.infer<typeof testConnection>): string | undefined {
+  if (input.providerKey === "qwen") {
+    assertQwenConnectionConfiguration(input.providerKey, input.endpoint, input.configuration);
+    const url = new URL(qwenEndpoint(input.configuration));
+    url.pathname = "/api/v1/models";
+    return url.toString();
+  }
   return input.providerKey === "minimax" ? miniMaxTestEndpoint(input.endpoint) : builtInProviderTestEndpoint(input.providerKey);
 }
 function assertFixedMiniMaxEndpoint(providerKey: string, endpoint: string) {
@@ -90,6 +96,10 @@ async function testSubmittedConnection(input: z.infer<typeof testConnection>, ma
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 5_000);
   try { const result = await fetch(url, { method: "GET", headers, signal: controller.signal, redirect: "error" }); if (result.status === 401 || result.status === 403) return { state: "AUTHENTICATION_FAILED" as const }; if (!result.ok) return { state: "PROVIDER_REJECTED" as const };
     if (input.providerKey === "minimax" && !validMiniMaxModelList(await result.json().catch(() => null))) return { state: "INVALID_TEST_RESPONSE" as const };
+    if (input.providerKey === "qwen") {
+      const body = await result.json().catch(() => null);
+      if (body?.success !== true || !Array.isArray(body?.output?.models) || !body.output.models.every((model: unknown) => model && typeof model === "object" && "model" in model && typeof model.model === "string" && model.model.length > 0)) return { state: "INVALID_TEST_RESPONSE" as const };
+    }
     return { state: "VALID" as const }; }
   catch (error) { return { state: error instanceof DOMException && error.name === "AbortError" ? "TIMEOUT" as const : "ENDPOINT_UNREACHABLE" as const }; }
   finally { clearTimeout(timer); }
