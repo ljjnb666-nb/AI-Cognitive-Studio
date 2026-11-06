@@ -38,16 +38,16 @@ test("library filters and pagination survive repeated query parameters and empty
   await expect(page.getByRole("heading", { name: "分页资料22.pdf", exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "下一页", exact: true })).toHaveCount(0);
   await page.getByRole("textbox", { name: "搜索书名或文件名" }).fill("不存在的书籍");
-  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await page.getByRole("button", { name: "搜索与筛选", exact: true }).click();
   await expect(page.getByText("没有匹配当前搜索和筛选条件的书籍。", { exact: true })).toBeVisible();
   await expect(page.getByText("第 1 页", { exact: true })).toBeVisible();
   await page.getByRole("textbox", { name: "搜索书名或文件名" }).fill("");
   await page.getByRole("combobox", { name: "文件格式" }).selectOption("TXT");
-  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await page.getByRole("button", { name: "搜索与筛选", exact: true }).click();
   await expect(page.getByRole("heading", { name: "纯文本资料.txt", exact: true })).toBeVisible();
   await expect(titles).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole("button", { name: "筛选", exact: true })).toBeInViewport();
+  await expect(page.getByRole("button", { name: "搜索与筛选", exact: true })).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   await page.goto("/studio/library?page=10000");
   await expect(page.getByText("这一页没有书籍，请返回上一页。", { exact: true })).toBeVisible();
@@ -83,17 +83,14 @@ async function selectProductBook(page: import("@playwright/test").Page) {
 }
 
 function routeForm(page: import("@playwright/test").Page, slot: string) {
-  return page.locator("form").filter({ has: page.getByRole("heading", { name: new RegExp(`\\(${slot}\\)$`) }) });
+  return page.locator(`form#route-${slot}`);
 }
 
 // The Provider creation form is identified by its field contract (displayName + secret
 // inputs plus its own submit button), never by DOM order: StableBookRouteForm renders
 // an earlier <form> on the same page.
 function providerConnectionForm(page: import("@playwright/test").Page) {
-  return page.locator("form")
-    .filter({ has: page.locator('input[name="displayName"]') })
-    .filter({ has: page.locator('input[name="secret"]') })
-    .filter({ has: page.getByRole("button", { name: "保存 Provider" }) });
+  return page.locator("form").filter({ has: page.getByRole("button", { name: "保存服务商" }) });
 }
 
 function testPdf(lines: string[]) {
@@ -127,16 +124,18 @@ async function configureAllRoutes(page: import("@playwright/test").Page, display
   await page.goto("/studio/settings/providers");
   const connectionForm = providerConnectionForm(page);
   await expect(connectionForm).toHaveCount(1);
+  await connectionForm.getByText("更多服务商设置（可选）").click();
   await connectionForm.locator('input[name="displayName"]').fill(displayName);
-  await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
+  await connectionForm.locator("#new-provider-url").fill("https://phase9-fixture.example.test/v1");
   await connectionForm.locator('input[name="secret"]').fill(secret);
   const created = page.waitForResponse(response => response.url().includes("/api/studio/providers") && response.request().method() === "POST");
-  await connectionForm.getByRole("button", { name: "保存 Provider" }).click();
+  await connectionForm.getByRole("button", { name: "保存服务商" }).click();
   expect((await created).status()).toBe(200);
   await expect(page.getByRole("heading", { name: displayName, exact: true })).toBeVisible();
-  await page.getByText("高级设置", { exact: true }).click();
+  await page.getByText("模型与用途配置（高级设置）").click();
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"]) {
     const route = routeForm(page, slot);
+    await route.locator('select[name="modelId"]').selectOption(slot === "EMBEDDING" ? "phase9-embed" : slot.endsWith("TTS") ? "phase9-speech" : "phase9-text");
     if (slot.endsWith("TTS")) await route.getByRole("button", { name: "展开高级路由配置 JSON" }).click();
     if (slot === "PODCAST_TTS") await route.locator('textarea[name="configuration"]').fill(JSON.stringify({ outputFormat: "wav", hostVoices: [{ ordinal: 1, providerVoiceId: "host-a", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }, { ordinal: 2, providerVoiceId: "host-b", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }] }));
     if (slot === "SHORT_VIDEO_TTS") await route.locator('textarea[name="configuration"]').fill(JSON.stringify({ providerVoiceId: "video", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }));
@@ -186,15 +185,16 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   expect(exported.data).not.toHaveProperty("sessions");
 
   await page.goto("/studio/settings/providers");
-  await expect(page.getByRole("heading", { name: "AI Providers" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "AI 服务商设置" })).toBeVisible();
   const connectionForm = providerConnectionForm(page);
   await expect(connectionForm).toHaveCount(1);
   await expect(connectionForm.locator('input[name="secret"]')).toBeVisible();
+  await connectionForm.getByText("更多服务商设置（可选）").click();
   await connectionForm.locator('input[name="displayName"]').fill("Phase 9 test provider");
-  await connectionForm.locator('input[name="endpoint"]').fill("https://phase9-fixture.example.test/v1");
+  await connectionForm.locator("#new-provider-url").fill("https://phase9-fixture.example.test/v1");
   await connectionForm.locator('input[name="secret"]').fill(secret);
   const createResponse = page.waitForResponse(response => response.url().includes("/api/studio/providers") && response.request().method() === "POST");
-  await connectionForm.getByRole("button", { name: "保存 Provider" }).click();
+  await connectionForm.getByRole("button", { name: "保存服务商" }).click();
   const created = await createResponse;
   expect(created.status()).toBe(200);
   const createdBody = await created.json() as { connections: Array<{ id: string; displayName: string }> };
@@ -209,9 +209,10 @@ test("real Better Auth owner configures encrypted workspace BYOK routes without 
   expect(initialCredential.ciphertext).not.toContain(secret);
   expect(await page.content()).not.toContain(secret);
 
-  await page.getByText("高级设置", { exact: true }).click();
+  await page.getByText("模型与用途配置（高级设置）").click();
   for (const slot of ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS"]) {
     const route = routeForm(page, slot);
+    await route.locator('select[name="modelId"]').selectOption(slot === "EMBEDDING" ? "phase9-embed" : slot.endsWith("TTS") ? "phase9-speech" : "phase9-text");
     if (slot.endsWith("TTS")) await route.getByRole("button", { name: "展开高级路由配置 JSON" }).click();
     if (slot.endsWith("TTS")) await route.locator('textarea[name="configuration"]').fill(slot === "PODCAST_TTS" ? JSON.stringify({ outputFormat: "wav", hostVoices: [{ ordinal: 1, providerVoiceId: "voice-a", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }, { ordinal: 2, providerVoiceId: "voice-b", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }] }) : JSON.stringify({ providerVoiceId: "voice-video", voiceVersion: "v1", speakingRate: 1, pitch: 0, outputFormat: "wav" }));
     const save = route.getByRole("button", { name: "保存路由" });
