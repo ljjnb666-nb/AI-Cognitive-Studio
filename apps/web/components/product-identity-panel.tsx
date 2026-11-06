@@ -120,14 +120,18 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
     setReloadIndex((n) => n + 1);
   }
 
-  function recheckAfterCorrection(message: string) {
+  function recheckAfterCorrection(message: string, refreshParent = true) {
     setNotice(message);
     setLastOutcome(null);
     setLoadError(null);
     setPreview(null);
     setLoading(true);
     setReloadIndex((n) => n + 1);
-    router.refresh();
+    // A stale extraction changes BookDetailView's panel key. Refreshing that
+    // server component here would remount the panel and discard the rejection
+    // notice before the user could see it. The panel independently re-reads
+    // authority above; only refresh the parent when its display also needs it.
+    if (refreshParent) router.refresh();
   }
 
   function openConfirmation() {
