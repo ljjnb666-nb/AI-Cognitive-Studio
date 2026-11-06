@@ -334,32 +334,37 @@ async function expectNoHorizontalOverflow(page: Page) {
 }
 
 async function expectMobileContentClearance(page: Page) {
-  // Restored Studio fixes the outer window and scrolls its bounded workspace.
-  // Scroll the actual user-visible content to the end before testing whether
-  // the bottom navigation overlaps actionable content.
-  await page.locator(".screen-viewport").evaluate((region) => {
-    region.scrollTop = region.scrollHeight;
-  });
+  // Studio has a fixed outer shell. The accessible content is clipped by
+  // .screen-viewport and scrolls independently of window/document.body.
+  const region = page.locator(".screen-viewport");
+  await expect(region).toBeVisible();
+  await region.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   const geometry = await page.evaluate(() => {
-    const main = document.querySelector("main");
+    const content = document.querySelector(".screen-viewport");
     const group = document.querySelector(".mobile-group-nav");
     const bottom = document.querySelector(".mobile-nav");
-    if (!main || !group || !bottom) return null;
-    const bottomOfContent = Array.from(main.querySelectorAll("*"))
-      .filter((element) => {
-        const style = window.getComputedStyle(element);
-        const box = element.getBoundingClientRect();
-        return !element.closest(".mobile-nav, .mobile-group-nav") && style.display !== "none" && style.visibility !== "hidden" && box.height > 0;
-      })
-      .reduce((last, element) => Math.max(last, element.getBoundingClientRect().bottom), 0);
+    if (!content || !group || !bottom) return null;
+    const bounds = content.getBoundingClientRect();
+    const style = window.getComputedStyle(content);
     return {
-      contentBottom: bottomOfContent,
+      contentTop: bounds.top,
+      contentBottom: bounds.bottom,
       bottomTop: bottom.getBoundingClientRect().top,
       groupPosition: window.getComputedStyle(group).position,
+      overflowY: style.overflowY,
+      maxScroll: Math.max(0, content.scrollHeight - content.clientHeight),
+      scrollTop: content.scrollTop,
     };
   });
   expect(geometry).not.toBeNull();
+  // Do not scan the entire scrollable DOM: offscreen descendants can have
+  // arbitrarily large bounding boxes without overlapping the fixed nav.
+  // Assert the REAL clipped viewport ends before navigation and its content
+  // is reachable by scrolling all the way to the end.
+  expect(["auto", "scroll"]).toContain(geometry!.overflowY);
+  expect(geometry!.contentTop).toBeGreaterThanOrEqual(0);
   expect(geometry!.contentBottom).toBeLessThanOrEqual(geometry!.bottomTop);
+  expect(geometry!.scrollTop).toBeGreaterThanOrEqual(geometry!.maxScroll - 2);
   expect(geometry!.groupPosition).not.toBe("fixed");
   const finalButton = page.locator("main button:not([disabled]):visible").last();
   if (await finalButton.count()) {
