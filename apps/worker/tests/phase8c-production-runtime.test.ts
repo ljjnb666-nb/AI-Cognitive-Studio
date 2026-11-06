@@ -346,3 +346,9 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
   });
 
 });
+
+it("事实分类提示明确使用现有CLAIM且不丢弃原文事实", async () => {
+  const {bookAnalysisJsonOutputContract} = await import("../src/provider-gateway-runtime.js");
+  expect(bookAnalysisJsonOutputContract).toContain("factual statements and supporting facts use CLAIM");
+  expect(bookAnalysisJsonOutputContract).toContain("do not omit facts");
+});

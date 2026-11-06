@@ -97,3 +97,10 @@ it("截断输出显示明确中文原因，原始错误编号不进入错误类�
   expect(processingErrorType("OUTPUT_TRUNCATED")).toBe("模型输出被截断");
   expect(processingErrorType("PRIVATE_UNKNOWN_ERROR")).toBe("处理异常，具体原因待核查");
 });
+
+it("分类不兼容与缺字段分开显示，不伪装为成功", async () => {
+  const { processingErrorType } = await import("../lib/product-errors");
+  const status = {state:"ANALYSIS_FAILED" as const,stage:"BOOK_ANALYSIS" as const,recoveryAction:"RETRY_ANALYSIS" as const,stageAvailability:"AVAILABLE" as const};
+  expect(processingDisplay(status,"ANALYSIS_MEMORY_TYPE_UNSUPPORTED")).toMatchObject({label:"记忆分类异常",active:false});
+  expect(processingErrorType("ANALYSIS_MEMORY_TYPE_UNSUPPORTED")).toBe("模型返回了不支持的记忆分类");
+});

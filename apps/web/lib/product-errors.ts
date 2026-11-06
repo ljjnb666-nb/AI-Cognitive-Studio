@@ -59,7 +59,7 @@ export function mediaGenerationErrorMessage(code?: string | null) {
 export function processingErrorType(code?: string | null): string {
   const labels: Record<string, string> = {
     INVALID_PROVIDER_RESPONSE: "模型返回格式异常", OUTPUT_TRUNCATED: "模型输出被截断",
-    ANALYSIS_PROVIDER_RESPONSE_INVALID: "理解结果结构不完整", ANALYSIS_EVIDENCE_REQUIRED: "理解结果缺少有效原文引用",
+    ANALYSIS_PROVIDER_RESPONSE_INVALID: "理解结果字段未通过校验", ANALYSIS_MEMORY_TYPE_UNSUPPORTED: "模型返回了不支持的记忆分类", ANALYSIS_EVIDENCE_REQUIRED: "理解结果缺少有效原文引用",
     TIMEOUT: "模型响应超时", BUDGET_EXCEEDED: "处理额度不足", CONTENT_REJECTED: "服务商内容审核拒绝",
     BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED: "任务执行凭证已过期", BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST: "任务执行权限已失效",
     RATE_LIMITED: "服务商请求过于频繁", QUOTA_EXCEEDED: "服务商额度不足", AUTHENTICATION_FAILED: "服务商密钥验证失败",
