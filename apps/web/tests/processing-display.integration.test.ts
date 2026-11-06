@@ -4,6 +4,9 @@ import { sourceProcessingSnapshot, type ProcessingState } from "../lib/processin
 import { generationStatusLabel } from "../lib/product-labels";
 
 describe("shared product status presentation", () => {
+  it("模型格式异常明确展示，不混同超时或审核拒绝",()=>{
+    const result=processingDisplay({state:"ANALYSIS_FAILED",stage:"BOOK_ANALYSIS",recoveryAction:"RETRY_ANALYSIS",stageAvailability:"AVAILABLE"},"INVALID_PROVIDER_RESPONSE");expect(result).toMatchObject({label:"模型响应异常",active:false,description:expect.stringContaining("未通过格式校验")});expect(result.description).toContain("可能已计费");expect(result.description).not.toContain("审核拒绝");
+  });
   it("模型超时与服务离线或审核拒绝分开显示，并提示费用未知",()=>{
     const result=processingDisplay({state:"ANALYSIS_FAILED",stage:"BOOK_ANALYSIS",recoveryAction:"RETRY_ANALYSIS",stageAvailability:"AVAILABLE"},"TIMEOUT");
     expect(result).toMatchObject({label:"理解超时",active:false,description:expect.stringContaining("云端模型未在等待时限内返回")});expect(result.description).toContain("是否扣费暂无法确认");expect(result.description).not.toContain("审核拒绝");

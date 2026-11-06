@@ -44,6 +44,7 @@ export function processingDisplay(processing: ProcessingStatus, errorCode?: stri
     case "ANALYSIS_FAILED":
       label = "理解失败"; group = "ATTENTION";
       if (code === "TIMEOUT") { label = "理解超时"; description = "云端模型未在等待时限内返回，AI 理解已停止。正文与已完成结果保留；超时请求是否扣费暂无法确认。请勿连续点击恢复。"; }
+      if (code === "INVALID_PROVIDER_RESPONSE") { label = "模型响应异常"; description = "模型返回内容未通过格式校验，不能作为理解结果使用，任务已停止。正文与已完成结果保留；本次请求可能已计费，请勿连续点击恢复。"; }
       if (code === "CONTENT_REJECTED") description = "模型服务商因内容审核拒绝了本次理解请求。已完成结果保留，全书理解尚未完成。请联系服务商核实；重复提交不能保证解决。";
       break;
     case "BOOTSTRAP_FAILED": label = "准备失败"; group = "ATTENTION"; break;

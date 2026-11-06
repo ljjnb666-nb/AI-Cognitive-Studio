@@ -35,7 +35,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     // its one 1600-token response for the auditable JSON judgement. Official
     // ChatThinking supports disabled; leave all other providers/routes alone.
     const boundedVision = input.snapshot.providerKey === "zhipu" && input.snapshot.modelId === "glm-4.6v" && input.request.routeSlot === "PDF_VISUAL_STRUCTURE";
-    const body = { model: input.snapshot.modelId, messages, max_tokens: text.generation?.maxOutputTokens, temperature: text.generation?.temperature, top_p: text.generation?.topP, ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
+    const minimaxM3 = input.snapshot.providerKey === "minimax" && input.snapshot.modelId === "MiniMax-M3";
+    const body = { model: input.snapshot.modelId, messages, ...(minimaxM3 ? { max_completion_tokens: text.generation?.maxOutputTokens, reasoning_split: true } : { max_tokens: text.generation?.maxOutputTokens, temperature: text.generation?.temperature, top_p: text.generation?.topP }), ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
     const remote = await this.transport.execute({ url: profile.endpoint, method: "POST", headers: { "content-type": "application/json", ...authHeaders(profile.authScheme, input.credential) }, body: JSON.stringify(body), signal: input.signal });
     if (input.snapshot.providerKey === "zhipu" && remote.status === 400) {
       let businessCode: unknown;
@@ -43,22 +44,30 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       if (String(businessCode) === "1301") throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: header(remote.headers, "x-request-id"), usage: { extra: { moderationDiagnostic: zhipuModerationDiagnostic(JSON.parse(remote.body), remote.status) } } });
     }
     failureForStatus(remote);
-    const json = parseJson(remote);
+    let json: Record<string, unknown>;
+    try { json = parseJson(remote); } catch (error) {
+      if (!minimaxM3) throw error;
+      throw new ProviderAdapterFailure("INVALID_PROVIDER_RESPONSE", { retryable: false, remoteRequestId: header(remote.headers, "x-request-id"), usage: { extra: { textStructuredResponse: { httpStatus: remote.status, responseJsonValid: false, responseBytes: Buffer.byteLength(remote.body, "utf8"), reportedUsagePresent: false } } } });
+    }
     const choice = Array.isArray(json.choices) ? json.choices[0] as Record<string, unknown> | undefined : undefined;
     const message = choice?.message as Record<string, unknown> | undefined;
     const rawUsage = json.usage as Record<string, unknown> | undefined;
     const usage = rawUsage ? { inputTokens: number(rawUsage.prompt_tokens), outputTokens: number(rawUsage.completion_tokens), cachedInputTokens: number((rawUsage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens) } : undefined;
     const requestId = header(remote.headers, "x-request-id") ?? (boundedVision && typeof json.request_id === "string" ? json.request_id : undefined);
+    if (minimaxM3 && finish(choice?.finish_reason) === "CONTENT_FILTER") throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage });
     if (input.snapshot.providerKey === "zhipu" && (choice?.finish_reason === "sensitive" || choice?.finish_reason === "content_filter")) throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage: { ...usage, extra: { moderationDiagnostic: zhipuModerationDiagnostic(json, remote.status) } } });
     try {
+      if (minimaxM3 && finish(choice?.finish_reason) === "LENGTH") throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
       if (!message || typeof message.content !== "string") throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
       return response(message.content, typeof json.model === "string" ? json.model : undefined, finish(choice?.finish_reason), text, usage, requestId);
     } catch (error) {
-      if (!boundedVision && !(input.snapshot.providerKey === "zhipu" && mode === "JSON_MODE")) throw error;
+      if (!minimaxM3 && !boundedVision && !(input.snapshot.providerKey === "zhipu" && mode === "JSON_MODE")) throw error;
+      let contentJsonValid = false;
+      if (minimaxM3 && typeof message?.content === "string") { try { JSON.parse(message.content); contentJsonValid = true; } catch { /* Diagnostic only: never repair or accept this content. */ } }
       // A billed 200 response can still be unusable JSON. Preserve reported
       // usage and non-content diagnostics; never copy page/model prose or
       // reasoning into logs or turn a malformed response into a judgement.
-      throw new ProviderAdapterFailure("INVALID_PROVIDER_RESPONSE", { remoteRequestId: requestId, retryable: false, usage: { ...usage, extra: { [boundedVision ? "pdfReviewResponse" : "textStructuredResponse"]: { httpStatus: remote.status, finishReason: finish(choice?.finish_reason), contentType: typeof message?.content, contentCharacters: typeof message?.content === "string" ? message.content.length : null, reasoningCharacters: typeof message?.reasoning_content === "string" ? message.reasoning_content.length : null, reportedUsagePresent: Boolean(rawUsage) } } } });
+      throw new ProviderAdapterFailure("INVALID_PROVIDER_RESPONSE", { remoteRequestId: requestId, retryable: false, usage: { ...usage, extra: { [boundedVision ? "pdfReviewResponse" : "textStructuredResponse"]: { httpStatus: remote.status, finishReason: finish(choice?.finish_reason), contentType: typeof message?.content, contentCharacters: typeof message?.content === "string" ? message.content.length : null, reasoningCharacters: typeof message?.reasoning_content === "string" ? message.reasoning_content.length : null, reportedUsagePresent: Boolean(rawUsage), ...(minimaxM3 ? { responseJsonValid: true, contentJsonValid, inlineReasoningPresent: typeof message?.content === "string" && /<\/?think\b/i.test(message.content) } : {}) } } } });
     }
   }
 }
