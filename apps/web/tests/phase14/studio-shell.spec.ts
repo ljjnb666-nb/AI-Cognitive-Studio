@@ -691,7 +691,8 @@ test("desktop navigation keeps one clear active destination", async ({
     },
   );
   await page.goto(`/studio/library/${pendingSource.document.id}`);
-  await expect(page.getByRole("paragraph").filter({ hasText: /^解析完成，准备进行 AI 深度理解$/ })).toBeVisible();
+  await page.getByRole("button", { name: "书籍概览" }).click();
+  await expect(page.getByRole("paragraph").filter({ hasText: /正文提取(已)?完成.*AI 深度理解/ })).toBeVisible();
   const recoverButton = page.getByRole("button", { name: "恢复深度理解" });
   await expect(recoverButton).toBeVisible();
   const recoverResponse = page.waitForResponse(
@@ -713,6 +714,7 @@ test("desktop navigation keeps one clear active destination", async ({
     sentinels[1]!,
   );
   await page.goto(`/studio/library/${terminalFailure}`);
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await expect(page.getByRole("paragraph").filter({ hasText: /^AI 深度理解失败$/ })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(sentinels[1]!);
 
@@ -722,10 +724,9 @@ test("desktop navigation keeps one clear active destination", async ({
     "AI_PROVIDER_CONFIGURATION_REQUIRED",
   );
   await page.goto(`/studio/library/${providerFailure}`);
-  await expect(
-    page.getByText("书籍解析完成。配置 AI Provider 后开始深度理解。"),
-  ).toBeVisible();
-  await expect(page.getByRole("link", { name: "配置 AI Provider" })).toBeVisible();
+  await page.getByRole("button", { name: "书籍概览" }).click();
+  await expect(page.getByRole("paragraph").filter({ hasText: /^AI 深度理解失败$/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: "配置 AI 服务商" })).toBeVisible();
   await expect(
     page.locator("body"),
   ).not.toContainText("AI_PROVIDER_CONFIGURATION_REQUIRED");
