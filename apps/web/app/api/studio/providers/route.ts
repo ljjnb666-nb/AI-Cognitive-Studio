@@ -6,6 +6,7 @@ import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
 import { providerSettingsFailure } from "@/lib/provider-settings-errors";
+import { miniMaxTestEndpoint, validMiniMaxModelList } from "@/lib/minimax-endpoints";
 
 const jsonRecord = z.record(z.string(), z.unknown()).default({});
 const executableEndpoint = z.string().url().max(500).refine(value => { try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.hash && !url.search; } catch { return false; } }, "PROVIDER_CONNECTION_ENDPOINT_INVALID");
@@ -45,12 +46,11 @@ async function resolveProviderHostname(hostname: string): Promise<readonly strin
   return (await (await import("node:dns/promises")).lookup(hostname, { all: true })).map(item => item.address);
 }
 function connectionTestUrl(input: z.infer<typeof testConnection>): string | undefined {
-  return builtInProviderTestEndpoint(input.providerKey);
+  return input.providerKey === "minimax" ? miniMaxTestEndpoint(input.endpoint) : builtInProviderTestEndpoint(input.providerKey);
 }
 function assertFixedMiniMaxEndpoint(providerKey: string, endpoint: string) {
   if (providerKey !== "minimax") return;
-  const expected = builtInProviderProfiles.find(profile => profile.providerKey === "minimax" && profile.family === "TEXT_GENERATION")?.endpoint;
-  if (!expected || endpoint !== expected) throw new Error("PROVIDER_CONNECTION_ENDPOINT_INVALID");
+  if (!miniMaxTestEndpoint(endpoint)) throw new Error("PROVIDER_CONNECTION_ENDPOINT_INVALID");
 }
 function qwenEndpoint(configuration: Record<string, unknown>): string {
   const region = configuration.qwenRegion, workspaceId = configuration.qwenWorkspaceId;
@@ -78,7 +78,9 @@ async function testSubmittedConnection(input: z.infer<typeof testConnection>, ma
   if (process.env.NODE_ENV !== "production" && process.env.BETA_PROVIDER_UX_TEST_CONNECTION_TRANSPORT === "deterministic") return { state: "VALID" as const };
   const headers: Record<string, string> = input.providerKey === "anthropic" ? { "x-api-key": input.secret, "anthropic-version": "2023-06-01" } : input.providerKey === "gemini" ? { "x-goog-api-key": input.secret } : { authorization: `Bearer ${input.secret}` };
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 5_000);
-  try { const result = await fetch(url, { method: "GET", headers, signal: controller.signal, redirect: "error" }); if (result.status === 401 || result.status === 403) return { state: "AUTHENTICATION_FAILED" as const }; if (!result.ok) return { state: "PROVIDER_REJECTED" as const }; return { state: "VALID" as const }; }
+  try { const result = await fetch(url, { method: "GET", headers, signal: controller.signal, redirect: "error" }); if (result.status === 401 || result.status === 403) return { state: "AUTHENTICATION_FAILED" as const }; if (!result.ok) return { state: "PROVIDER_REJECTED" as const };
+    if (input.providerKey === "minimax" && !validMiniMaxModelList(await result.json().catch(() => null))) return { state: "INVALID_TEST_RESPONSE" as const };
+    return { state: "VALID" as const }; }
   catch (error) { return { state: error instanceof DOMException && error.name === "AbortError" ? "TIMEOUT" as const : "ENDPOINT_UNREACHABLE" as const }; }
   finally { clearTimeout(timer); }
 }

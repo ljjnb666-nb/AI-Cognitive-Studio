@@ -4,8 +4,10 @@ import { prisma } from "@ai-cognitive/db";
 import { ProviderGatewayRepository, testCipher } from "@ai-cognitive/provider-gateway";
 import { GET, POST } from "../app/api/studio/providers/route";
 import { providerReadiness } from "../lib/provider-product";
+import { miniMaxSites } from "../lib/minimax-endpoints";
 let actor: {workspaceId:string;userId:string};
 vi.mock("@/lib/identity",()=>({resolveWebIdentity:async()=>actor}));
+vi.mock("node:dns/promises",()=>({lookup:async()=>[{address:"93.184.216.34",family:4}]}));
 vi.mock("@ai-cognitive/provider-gateway",async original=>{const mod=await original<typeof import("@ai-cognitive/provider-gateway")>();return {...mod,resolveCredentialKeyring:()=>mod.testCipher()};});
 const owned:Array<{workspaceId:string;userId:string}>=[];
 async function fixture(){const userId=randomUUID(),workspaceId=randomUUID();actor={userId,workspaceId};owned.push(actor);await prisma.user.create({data:{id:userId,email:`${userId}@ui-restore.test`}});await prisma.workspace.create({data:{id:workspaceId,name:"界面回归"}});await prisma.workspaceMember.create({data:{...actor,role:"OWNER"}});const repository=new ProviderGatewayRepository(prisma,testCipher());return repository.createConnectionWithCredential(actor,{providerKey:"zhipu",protocol:"OPENAI_COMPATIBLE",displayName:"智谱",endpoint:"https://open.bigmodel.cn/api/paas/v4/chat/completions",secret:"fixture-not-a-real-key"});}
@@ -86,4 +88,26 @@ it("并发保存同一用途只创建一条内部记录，权限不足不能管�
  await prisma.workspaceMember.update({where:{workspaceId_userId:actor},data:{role:"VIEWER"}});
  expect((await post({action:"SET_ENABLED",connectionId:connection.id,enabled:false})).status).toBe(403);
  expect(await prisma.providerConnection.count({where:{workspaceId:actor.workspaceId,status:"ACTIVE"}})).toBe(2);
+});
+it.each(Object.entries(miniMaxSites))("MiniMax %s 验证同站点模型列表，保存时保留所选调用地址且不自动绑定用途", async(siteName,site)=>{
+ await fixture();
+ const remote=vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response(JSON.stringify({object:"list",data:[{id:"MiniMax-M3"}]}),{status:200}));
+ try {
+  const input={providerKey:"minimax",protocol:"OPENAI_COMPATIBLE",endpoint:site.endpoint,secret:"fixture-minimax-key"};
+  const response=await post({action:"TEST_CONNECTION",...input});
+  expect(response.status).toBe(200);expect(await response.json()).toEqual({test:{state:"VALID"}});
+  expect(remote).toHaveBeenCalledExactlyOnceWith(site.testEndpoint,expect.objectContaining({method:"GET",redirect:"error",headers:{authorization:"Bearer fixture-minimax-key"}}));
+  remote.mockClear();
+  const saved=await post({action:"CREATE_CONNECTION_WITH_CREDENTIAL",...input,displayName:`MiniMax ${siteName}`,configuration:{}});
+  expect(saved.status).toBe(200);expect(remote).not.toHaveBeenCalled();
+  const connection=await prisma.providerConnection.findFirstOrThrow({where:{workspaceId:actor.workspaceId,providerKey:"minimax"}});
+  expect(connection.endpoint).toBe(site.endpoint);
+  expect(await prisma.providerRouteBinding.count({where:{workspaceId:actor.workspaceId}})).toBe(0);
+ } finally {remote.mockRestore();}
+});
+it.each(["https://api.minimax.cn.evil.test/v1/chat/completions","https://api.minimax.cn:8443/v1/chat/completions","https://api.minimax.cn/v1/chat/completions?key=fixture","https://api.minimax.cn/v1/unknown"])("不向非固定 MiniMax 地址发送密钥：%s",async endpoint=>{
+ await fixture();const remote=vi.spyOn(globalThis,"fetch");try{const result=await post({action:"TEST_CONNECTION",providerKey:"minimax",protocol:"OPENAI_COMPATIBLE",endpoint,secret:"fixture-key"});expect(result.status).toBeGreaterThanOrEqual(400);expect(remote).not.toHaveBeenCalled();}finally{remote.mockRestore();}
+});
+it.each([[401,"AUTHENTICATION_FAILED",{}],[403,"AUTHENTICATION_FAILED",{}],[200,"INVALID_TEST_RESPONSE",{base_resp:{status_code:1004}}],[200,"INVALID_TEST_RESPONSE",{object:"list",data:[{}]}],[200,"INVALID_TEST_RESPONSE",null],[429,"PROVIDER_REJECTED",{}]] as const)("MiniMax HTTP %s 不会把异常响应当作验证成功：%s",async(status,state,body)=>{
+ await fixture();const remote=vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response(JSON.stringify(body),{status}));try{const result=await post({action:"TEST_CONNECTION",providerKey:"minimax",protocol:"OPENAI_COMPATIBLE",endpoint:miniMaxSites.CN.endpoint,secret:"fixture-key"});expect(await result.json()).toEqual({test:{state}});}finally{remote.mockRestore();}
 });

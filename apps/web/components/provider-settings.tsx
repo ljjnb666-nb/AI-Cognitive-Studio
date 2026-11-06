@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { podcastConfigurationFromForm, routeFormConfiguration } from "@/lib/provider-route-form";
 import { ModelPicker } from "./model-picker";
+import { miniMaxSites } from "@/lib/minimax-endpoints";
 import { StatusBadge } from "./status-badge";
 import styles from "./provider-settings.module.css";
 import { readableProviderError, providerKeyTestMessage } from "@/lib/provider-settings-ui-errors";
@@ -268,7 +269,7 @@ function ConnectionForm({ providers, busy, submit }: { providers: Provider[]; bu
   const [qwenRegion, setQwenRegion] = useState("BEIJING");
   const [qwenWorkspaceId, setQwenWorkspaceId] = useState("");
   const provider = providers.find(item => item.providerKey === providerKey);
-  const defaultEndpoints: Record<string, string> = { openai: "https://api.openai.com/v1/responses", anthropic: "https://api.anthropic.com/v1/messages", gemini: "https://generativelanguage.googleapis.com/v1beta", deepseek: "https://api.deepseek.com/chat/completions", zhipu: "https://open.bigmodel.cn/api/paas/v4/chat/completions", minimax: minimaxSite === "CN" ? "https://api.minimax.cn/v1/chat/completions" : "https://api.minimax.io/v1/text/chatcompletion_v2", cohere: "https://api.cohere.com/v2/embed", voyage: "https://api.voyageai.com/v1/embeddings" };
+  const defaultEndpoints: Record<string, string> = { openai: "https://api.openai.com/v1/responses", anthropic: "https://api.anthropic.com/v1/messages", gemini: "https://generativelanguage.googleapis.com/v1beta", deepseek: "https://api.deepseek.com/chat/completions", zhipu: "https://open.bigmodel.cn/api/paas/v4/chat/completions", minimax: miniMaxSites[minimaxSite === "CN" ? "CN" : "GLOBAL"].endpoint, cohere: "https://api.cohere.com/v2/embed", voyage: "https://api.voyageai.com/v1/embeddings" };
   const endpoint = providerKey === "qwen" ? `https://${qwenWorkspaceId}.${qwenRegion === "BEIJING" ? "cn-beijing" : "ap-southeast-1"}.maas.aliyuncs.com/compatible-mode/v1/chat/completions` : defaultEndpoints[providerKey] ?? customEndpoint;
   return <form className={styles.createForm} data-minimax={providerKey === "minimax"} action={form => void submit({ action: "CREATE_CONNECTION_WITH_CREDENTIAL", providerKey, protocol: provider?.protocol, displayName: String(form.get("displayName") ?? "").trim() || provider?.displayName, endpoint, secret: form.get("secret"), region: form.get("region") || undefined, configuration: { ...parseConfiguration(form.get("configuration")), ...(providerKey === "qwen" ? { qwenRegion, qwenWorkspaceId } : {}) } })}>
     <div className="form-group"><label className="form-label" htmlFor="new-provider">服务商</label><select id="new-provider" className="select-control" value={providerKey} onChange={event => setProviderKey(event.target.value)} disabled={busy}>{providers.map(item => <option key={item.providerKey} value={item.providerKey}>{item.displayName}</option>)}</select></div>
