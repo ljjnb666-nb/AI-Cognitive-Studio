@@ -52,6 +52,7 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
         extractionSummary: item.currentExtraction?.extraction.status === "SUCCEEDED" ? {pages:item.currentExtraction.extraction._count.pages,blocks:item.currentExtraction.extraction._count.blocks,characters:item.currentExtraction.extraction.characterCount}:null,
         ingestionStatus,
         analysisStatus,
+        analysisProgress: item.analysisProgress,
         bootstrapStatus: bootstrap?.status,
         errorCode,
         failureReason: processing.failureReason,

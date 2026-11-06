@@ -11,10 +11,11 @@ import { submitProcessingRecovery } from "@/lib/processing-recovery";
 import { processingWaitLabel, type ProcessingStage, type ProcessingState, type ProcessingWorkerAvailability, type RecoveryAction, type WorkerAvailability } from "@/lib/processing-state";
 import { processingDisplay, processingWorkersDisplay } from "@/lib/processing-display";
 import { StatusBadge } from "./status-badge";
+import { bookAnalysisProgressDisplay, type BookAnalysisProgress } from "@/lib/book-analysis-progress";
 
-type Props = { failureReason?: string; sourceDocumentId: string; ingestionStatus?: string | null; analysisStatus?: string | null; bootstrapStatus?: string | null; errorCode?: string | null; processingState: string; processingStage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; processingSince?: string | null };
+type Props = { analysisProgress?: BookAnalysisProgress | null; failureReason?: string; sourceDocumentId: string; ingestionStatus?: string | null; analysisStatus?: string | null; bootstrapStatus?: string | null; errorCode?: string | null; processingState: string; processingStage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; processingSince?: string | null };
 
-export function SourceProcessing({ failureReason, sourceDocumentId, ingestionStatus: _ingestionStatus, analysisStatus: _analysisStatus, bootstrapStatus: _bootstrapStatus, errorCode, processingState, processingStage, recoveryAction, stageAvailability, workerAvailability, processingSince }: Props) {
+export function SourceProcessing({ analysisProgress, failureReason, sourceDocumentId, ingestionStatus: _ingestionStatus, analysisStatus: _analysisStatus, bootstrapStatus: _bootstrapStatus, errorCode, processingState, processingStage, recoveryAction, stageAvailability, workerAvailability, processingSince }: Props) {
   const router = useRouter();
   const [message, setMessage] = useState<string | null>(null);
   const terminal = processingState === "SUCCEEDED" || processingState.includes("FAILED");
@@ -38,6 +39,7 @@ export function SourceProcessing({ failureReason, sourceDocumentId, ingestionSta
   const queued = state === "QUEUED_FOR_INGESTION" || state === "ANALYSIS_QUEUED";
   const waiting = (display.active || queued) && processingSince ? processingWaitLabel(new Date(processingSince))?.replace("已等待", display.active ? "已进行" : "已排队") : null;
   const recoveryCopy = recoveryAction === "RETRY_INGESTION" ? (state === "NOT_STARTED" ? "开始处理" : "重新提取") : "恢复深度理解";
+  const analysisDisplay = analysisProgress ? bookAnalysisProgressDisplay(analysisProgress) : null;
   return <section className="source-processing" aria-label="书籍处理进度" aria-busy={recovering}>
     <div className="processing-workers" aria-label="后台处理服务状态">
       <p className="processing-workers-heading">后台处理服务</p>
@@ -51,6 +53,12 @@ export function SourceProcessing({ failureReason, sourceDocumentId, ingestionSta
       <li data-state={processingStage !== "INGESTION" ? "done" : display.active ? "active" : "waiting"}><span aria-hidden="true">{processingStage !== "INGESTION" ? "✓" : "2"}</span><div>正文提取<small>{processingStage !== "INGESTION" ? "可查看提取原文" : display.label}</small></div></li>
       <li data-state={state === "SUCCEEDED" ? "done" : processingStage === "BOOK_ANALYSIS" && display.active ? "active" : "waiting"}><span aria-hidden="true">{state === "SUCCEEDED" ? "✓" : "3"}</span><div>AI 深度理解<small>{processingStage === "INGESTION" ? "正文提取后进行" : display.label}</small></div></li>
     </ol>
+    {processingStage === "BOOK_ANALYSIS" && analysisProgress && analysisDisplay && <div className="analysis-progress" aria-label="AI 理解进度">
+      <div className="analysis-progress-heading"><strong>分块理解进度</strong><span>{analysisDisplay.percent === null ? "正在准备分块" : `${analysisProgress.completedChunks} / ${analysisProgress.totalChunks} 块 · ${analysisDisplay.percent}%`}</span></div>
+      <progress aria-label="分块理解进度" max={100} value={analysisDisplay.percent ?? undefined} />
+      <p>当前阶段：{analysisDisplay.stage}</p>
+      <p className="muted">{analysisDisplay.chunksComplete && analysisProgress.stage !== "COMPLETED" ? "分块已完成，全书结果仍需后续归并、综合和核验。" : "按已保存的分块结果统计，恢复时复用已有成果。"}</p>
+    </div>}
     <div className={`processing-notice processing-notice-${display.tone}`} role="status">
       <p>{display.description}</p>
       {state === "INGESTION_FAILED" && errorCode && /^SOURCE_[A-Z0-9_]{1,72}$/.test(errorCode) && <p className="muted">错误编号：{errorCode}</p>}

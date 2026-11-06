@@ -9,6 +9,7 @@ import { StatusBadge } from "./status-badge";
 import { ProductIdentityPanel } from "./product-identity-panel";
 import { SourceTextReader, type SourceTextPreview } from "./source-text-reader";
 import { SourceProcessing } from "./source-processing";
+import type { BookAnalysisProgress } from "@/lib/book-analysis-progress";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
 import { cognitionTypeLabels } from "@/lib/cognitions";
 
@@ -59,6 +60,7 @@ type Props = {
     failureReason?: string;
     ingestionStatus?: string | null;
     analysisStatus?: string | null;
+    analysisProgress?: BookAnalysisProgress | null;
     bootstrapStatus?: string | null;
     errorCode?: string | null;
     processingState: string;
@@ -145,6 +147,7 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
               sourceDocumentId={item.id}
               ingestionStatus={item.ingestionStatus}
               analysisStatus={item.analysisStatus}
+              analysisProgress={item.analysisProgress}
               bootstrapStatus={item.bootstrapStatus}
               errorCode={item.errorCode}
               failureReason={item.failureReason}

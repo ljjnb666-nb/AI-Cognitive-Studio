@@ -61,6 +61,10 @@ async function makeSource(workspaceId: string, fileName: string, versionCount: n
 afterEach(async () => {
   if (workspaceIds.length) {
     const where = { workspaceId: { in: workspaceIds } };
+    await prisma.analysisArtifact.deleteMany({ where });
+    await prisma.bookAnalysisRun.deleteMany({ where });
+    await prisma.documentChunk.deleteMany({ where });
+    await prisma.chunkSet.deleteMany({ where });
     await prisma.currentDocumentExtraction.deleteMany({ where });
     await prisma.sourceBlock.deleteMany({ where: { extraction: where } });
     await prisma.sourcePage.deleteMany({ where: { extraction: where } });
@@ -81,6 +85,27 @@ afterEach(async () => {
 });
 
 describe("04C-4C3 authoritative Source/Work read model (real PostgreSQL)", () => {
+  it("按当前提取的最新任务展示真实分块计数，失败保留进度且不混入其他阶段或旧任务",async()=>{
+    const identity=await createWorkspace(),foreign=await createWorkspace(),sample=await makeSource(identity.workspaceId,"progress.epub",1),sourceDocumentId=sample.documents[0]!.id,workspaceId=identity.workspaceId;
+    const ingestJob=await prisma.job.create({data:{workspaceId,type:"source.ingest",payload:{}}});
+    const ingestion=await prisma.ingestionRun.create({data:{sourceDocumentId,workspaceId,jobId:ingestJob.id,parserVersion:"test",normalizationVersion:"test",status:"SUCCEEDED"}});
+    const extraction=await prisma.documentExtraction.create({data:{workspaceId,sourceDocumentId,ingestionRunId:ingestion.id,status:"SUCCEEDED",qualityStatus:"ACCEPTED",parserName:"test",parserVersion:"test",normalizationVersion:"test"}});
+    await prisma.currentDocumentExtraction.create({data:{workspaceId,sourceDocumentId,extractionId:extraction.id}});
+    const chunks=await prisma.chunkSet.create({data:{workspaceId,sourceDocumentId,extractionId:extraction.id,chunkingVersion:"test",configuration:{},configurationHash:"test",status:"SUCCEEDED"}});
+    for(let ordinal=0;ordinal<3;ordinal++)await prisma.documentChunk.create({data:{workspaceId,extractionId:extraction.id,chunkSetId:chunks.id,structureVersion:"test",ordinal,content:"原文",contentHash:`hash-${ordinal}`,characterCount:2,tokenEstimate:2}});
+    const job=await prisma.job.create({data:{workspaceId,type:"book.analysis",payload:{}}});
+    const run=await prisma.bookAnalysisRun.create({data:{workspaceId,sourceDocumentId,extractionId:extraction.id,chunkSetId:chunks.id,jobId:job.id,pipelineVersion:"test",promptVersion:"test",provider:"fixture",model:"fixture",modelVersionKey:"test",idempotencyKey:crypto.randomUUID(),analysisIdentityHash:crypto.randomUUID(),status:"RUNNING",analysisStage:"CHUNK_ANALYSIS"}});
+    expect((await sourceDetail(sourceDocumentId,identity)).analysisProgress).toEqual({runId:run.id,stage:"CHUNK_ANALYSIS",completedChunks:0,totalChunks:3});
+    const firstChunk=await prisma.documentChunk.findFirstOrThrow({where:{chunkSetId:chunks.id},orderBy:{ordinal:"asc"}});
+    for(const scope of ["CHUNK","BOOK"] as const)await prisma.analysisArtifact.create({data:{analysisRunId:run.id,workspaceId,extractionId:extraction.id,chunkSetId:chunks.id,chunkId:scope==="CHUNK"?firstChunk.id:null,scope,ordinal:0,structuredOutput:{summary:"fixture"}}});
+    await prisma.bookAnalysisRun.update({where:{id:run.id},data:{status:"FAILED",errorCode:"TIMEOUT"}});
+    expect((await sourceDetail(sourceDocumentId,identity)).analysisProgress).toMatchObject({completedChunks:1,totalChunks:3});
+    await expect(sourceDetail(sourceDocumentId,foreign)).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");
+    const nextJob=await prisma.job.create({data:{workspaceId,type:"book.analysis",payload:{}}});
+    const next=await prisma.bookAnalysisRun.create({data:{workspaceId,sourceDocumentId,extractionId:extraction.id,chunkSetId:chunks.id,jobId:nextJob.id,pipelineVersion:"next",promptVersion:"test",provider:"fixture",model:"fixture",modelVersionKey:"test",idempotencyKey:crypto.randomUUID(),analysisIdentityHash:crypto.randomUUID(),status:"RUNNING",analysisStage:"CHUNK_ANALYSIS",createdAt:new Date(Date.now()+1000)}});
+    expect((await sourceDetail(sourceDocumentId,identity)).analysisProgress).toMatchObject({runId:next.id,completedChunks:0,totalChunks:3});
+    await prisma.currentDocumentExtraction.delete({where:{sourceDocumentId_workspaceId:{sourceDocumentId,workspaceId}}});expect((await sourceDetail(sourceDocumentId,identity)).analysisProgress).toBeNull();
+  });
   it("previews owner-scoped published PDF text without AI and bounds each requested page", async () => {
     const identity = await createWorkspace(), foreign = await createWorkspace();
     const sample = await makeSource(identity.workspaceId, "native.pdf", 1, "application/pdf");
