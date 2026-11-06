@@ -5,7 +5,7 @@ export type ProcessingStage = "INGESTION" | "BOOK_ANALYSIS" | "COMPLETE";
 export type RecoveryAction = "NONE" | "RECHECK" | "RETRY_INGESTION" | "RETRY_ANALYSIS" | "REPAIR_CURRENT_INTELLIGENCE";
 export type ProcessingStatus = { failureReason?: string; state: ProcessingState; stage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability };
 
-type Run = { routingPlan?: unknown; routingOutcome?: unknown; errorCode?: string | null; status?: string | null; createdAt?: Date | null; startedAt?: Date | null; updatedAt?: Date | null; completedAt?: Date | null; executionLeaseUntil?: Date | null } | null | undefined;
+type Run = { routingPlan?: unknown; routingOutcome?: unknown; errorCode?: string | null; status?: string | null; createdAt?: Date | null; startedAt?: Date | null; updatedAt?: Date | null; completedAt?: Date | null; executionLeaseUntil?: Date | null; executionClaimedAt?: Date | null; job?: { startedAt?: Date | null; createdAt?: Date | null } | null } | null | undefined;
 
 /** One projection for list, detail and polling API; historical ingestion errors cannot mask analysis. */
 export function sourceProcessingSnapshot(input: Parameters<typeof deriveProcessingStatus>[0]) {
@@ -21,7 +21,10 @@ export function sourceProcessingSnapshot(input: Parameters<typeof deriveProcessi
   }
   const run = processing.stage === "INGESTION" ? input.ingestion : input.analysis ?? input.bootstrap;
   const statusError = run?.status === "PASSWORD_REQUIRED" || run?.status === "OCR_REQUIRED" ? run.status : null;
-  return { processing, errorCode: processing.stage === "COMPLETE" ? null : run?.errorCode ?? statusError, processingSince: (run?.startedAt ?? run?.createdAt)?.toISOString() ?? null };
+  const since = processing.stage === "BOOK_ANALYSIS" && input.analysis
+    ? processing.state === "ANALYSIS_QUEUED" ? run?.job?.createdAt ?? run?.createdAt : run?.executionClaimedAt ?? run?.job?.startedAt ?? run?.startedAt ?? run?.job?.createdAt ?? run?.createdAt
+    : run?.startedAt ?? run?.createdAt;
+  return { processing, errorCode: processing.stage === "COMPLETE" ? null : run?.errorCode ?? statusError, processingSince: since?.toISOString() ?? null };
 }
 
 /** Pure, server-derived product state.  A missing durable run is never queued. */

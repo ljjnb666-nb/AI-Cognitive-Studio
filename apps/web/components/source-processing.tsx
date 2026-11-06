@@ -12,7 +12,7 @@ import { submitProcessingRecovery } from "@/lib/processing-recovery";
 import { processingWaitLabel, type ProcessingStage, type ProcessingState, type ProcessingWorkerAvailability, type RecoveryAction, type WorkerAvailability } from "@/lib/processing-state";
 import { processingDisplay, processingWorkersDisplay } from "@/lib/processing-display";
 import { StatusBadge } from "./status-badge";
-import { bookAnalysisProgressDisplay, type BookAnalysisProgress } from "@/lib/book-analysis-progress";
+import { bookAnalysisPhaseDescription, bookAnalysisProgressDisplay, type BookAnalysisProgress } from "@/lib/book-analysis-progress";
 
 type Props = { analysisProgress?: BookAnalysisProgress | null; failureReason?: string; sourceDocumentId: string; ingestionStatus?: string | null; analysisStatus?: string | null; bootstrapStatus?: string | null; errorCode?: string | null; processingState: string; processingStage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability; workerAvailability: WorkerAvailability | ProcessingWorkerAvailability; processingSince?: string | null };
 
@@ -38,9 +38,11 @@ export function SourceProcessing({ analysisProgress, failureReason, sourceDocume
   // differ by a second between SSR and hydration while durable state is equal.
   const display = processingDisplay({ state, stage: processingStage, recoveryAction, stageAvailability, failureReason }, errorCode);
   const queued = state === "QUEUED_FOR_INGESTION" || state === "ANALYSIS_QUEUED";
-  const waiting = (display.active || queued) && processingSince ? processingWaitLabel(new Date(processingSince))?.replace("已等待", display.active ? "已进行" : "已排队") : null;
+  const waiting = (display.active || queued) && processingSince ? processingWaitLabel(new Date(processingSince))?.replace("已等待", display.active ? (processingStage === "BOOK_ANALYSIS" ? "本次执行已进行" : "已进行") : "已排队") : null;
   const recoveryCopy = recoveryAction === "RETRY_INGESTION" ? (state === "NOT_STARTED" ? "开始处理" : "重新提取") : "恢复深度理解";
   const analysisDisplay = analysisProgress ? bookAnalysisProgressDisplay(analysisProgress) : null;
+  const postChunkStage = Boolean(analysisDisplay?.chunksComplete && analysisProgress?.stage !== "CHUNK_ANALYSIS");
+  const currentAnalysisLabel = display.active && analysisDisplay && postChunkStage ? `正在${analysisDisplay.stage}` : display.label;
   return <section className="source-processing" aria-label="书籍处理进度" aria-busy={recovering}>
     <div className="processing-workers" aria-label="后台处理服务状态">
       <p className="processing-workers-heading">后台处理服务</p>
@@ -52,16 +54,17 @@ export function SourceProcessing({ analysisProgress, failureReason, sourceDocume
     <ol className="processing-steps">
       <li data-state="done"><span aria-hidden="true">✓</span><div>文件已保存<small>原文件安全保留</small></div></li>
       <li data-state={processingStage !== "INGESTION" ? "done" : display.active ? "active" : "waiting"}><span aria-hidden="true">{processingStage !== "INGESTION" ? "✓" : "2"}</span><div>正文提取<small>{processingStage !== "INGESTION" ? "可查看提取原文" : display.label}</small></div></li>
-      <li data-state={state === "SUCCEEDED" ? "done" : processingStage === "BOOK_ANALYSIS" && display.active ? "active" : "waiting"}><span aria-hidden="true">{state === "SUCCEEDED" ? "✓" : "3"}</span><div>AI 深度理解<small>{processingStage === "INGESTION" ? "正文提取后进行" : display.label}</small></div></li>
+      <li data-state={state === "SUCCEEDED" ? "done" : processingStage === "BOOK_ANALYSIS" && display.active ? "active" : "waiting"}><span aria-hidden="true">{state === "SUCCEEDED" ? "✓" : "3"}</span><div>AI 深度理解<small>{processingStage === "INGESTION" ? "正文提取后进行" : currentAnalysisLabel}</small></div></li>
     </ol>
     {processingStage === "BOOK_ANALYSIS" && analysisProgress && analysisDisplay && <div className="analysis-progress" aria-label="AI 理解进度">
-      <div className="analysis-progress-heading"><strong>分块理解进度</strong><span>{analysisDisplay.percent === null ? "正在准备分块" : `${analysisProgress.completedChunks} / ${analysisProgress.totalChunks} 块 · ${analysisDisplay.percent}%`}</span></div>
-      <progress aria-label="分块理解进度" max={100} value={analysisDisplay.percent ?? undefined} />
-      <p>当前阶段：{analysisDisplay.stage}</p>
-      <p className="muted">{analysisDisplay.chunksComplete && analysisProgress.stage !== "COMPLETED" ? "分块已完成，全书结果仍需后续归并、综合和核验。" : "按已保存的分块结果统计，恢复时复用已有成果。"}</p>
+      <div className="analysis-progress-heading"><strong>AI 理解进度</strong><span>{postChunkStage ? `分块理解已完成 · ${analysisProgress.completedChunks} / ${analysisProgress.totalChunks} 块` : analysisDisplay.percent === null ? "正在准备分块" : `分块理解 ${analysisProgress.completedChunks} / ${analysisProgress.totalChunks} 块 · ${analysisDisplay.percent}%`}</span></div>
+      {!postChunkStage && <progress aria-label="分块理解进度" max={100} value={analysisDisplay.percent ?? undefined} />}
+      {postChunkStage && display.active && <progress aria-label={`${analysisDisplay.stage}处理中`} max={100} />}
+      <p>当前阶段：<strong>{analysisDisplay.stage}</strong> · {state === "SUCCEEDED" ? "已完成" : display.active ? "进行中" : terminal ? "已停止" : "等待处理"}</p>
+      <p className="muted">{postChunkStage ? bookAnalysisPhaseDescription(analysisProgress.stage) : "这里只统计分块理解进度，不代表全书处理进度；恢复时复用已有成果。"}</p>
     </div>}
     <div className={`processing-notice processing-notice-${display.tone}`} role="status">
-      <p>{display.description}</p>
+      <p>{display.active && postChunkStage ? `${currentAnalysisLabel}，尚未完成全书处理。` : display.description}</p>
       {state === "INGESTION_FAILED" && errorCode && /^SOURCE_[A-Z0-9_]{1,72}$/.test(errorCode) && <p className="muted">错误类型：{processingErrorType(errorCode)}</p>}
       {state === "ANALYSIS_FAILED" && errorCode && /^[A-Z][A-Z0-9_]{0,72}$/.test(errorCode) && <p className="muted">错误类型：{processingErrorType(errorCode)}</p>}
       {waiting && <p className="muted" suppressHydrationWarning>{waiting}</p>}

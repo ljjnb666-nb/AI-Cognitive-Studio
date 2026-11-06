@@ -68,7 +68,7 @@ export async function sources(context?: WebIdentityContext, query: ListQuery = {
         ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, routingPlan:true,routingOutcome:true,createdAt:true, startedAt:true } },
         currentIntelligence: { select: { id: true } },
         bookAnalysisBootstraps: { orderBy: { createdAt: "desc" }, take: 1, select: { status:true,errorCode:true,createdAt:true,startedAt:true,updatedAt:true } },
-        analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, createdAt:true, startedAt:true } },
+        analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, createdAt:true, startedAt:true, executionClaimedAt:true, job: { select: { createdAt:true, startedAt:true } } } },
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     });
@@ -156,7 +156,7 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
       },
       ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1 },
       bookAnalysisBootstraps: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, createdAt: true, startedAt: true, updatedAt: true } },
-      analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, jobId: true, status: true, analysisStage: true, extractionId: true, chunkSetId: true, errorCode: true, createdAt: true, startedAt: true, completedAt: true, executionLeaseUntil: true, chunkSet: { select: { _count: { select: { chunks: true } } } }, _count: { select: { artifacts: { where: { scope: "CHUNK" } } } } } },
+      analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, jobId: true, status: true, analysisStage: true, extractionId: true, chunkSetId: true, errorCode: true, createdAt: true, startedAt: true, completedAt: true, executionLeaseUntil: true, executionClaimedAt: true, job: { select: { createdAt:true, startedAt:true } }, chunkSet: { select: { _count: { select: { chunks: true } } } }, _count: { select: { artifacts: { where: { scope: "CHUNK" } } } } } },
       currentExtraction: { include: { extraction: { include: { _count: { select: { pages: true, blocks: true } }, pages: { orderBy: { ordinal: "asc" }, select: { id: true, physicalPageIndex: true } }, structureNodes: { orderBy: { ordinal: "asc" } }, blocks: { orderBy: { ordinal: "asc" }, take: 40 } } } } },
       currentIntelligence: { include: { analysisRun: { include: { memoryItems: { include: { evidence: { include: { sourceBlock: true } } }, orderBy: { ordinal: "asc" }, take: 80 }, artifacts: { where: { scope: "BOOK" }, take: 1 } } } } },
     },

@@ -113,3 +113,12 @@ it("服务商欠费与本机处理额度不足明确区分", async () => {
   expect(processingDisplay(status,"BUDGET_EXCEEDED").label).toBe("处理额度不足");
   expect(processingErrorType("INVALID_PROVIDER_REQUEST")).toBe("服务商拒绝了请求参数");
 });
+
+it("恢复任务用本次领取或当前Job时间计时，不累计首次启动时间", () => {
+  const first=new Date("2026-11-06T08:00:00Z"), resumed=new Date("2026-11-06T17:23:00Z"), created=new Date("2026-11-06T17:22:59Z");
+  const base={ingestion:{status:"SUCCEEDED"},hasIntelligence:false,workerAvailability:"AVAILABLE" as const,now:new Date("2026-11-06T17:24:00Z")};
+  expect(sourceProcessingSnapshot({...base,analysis:{status:"RUNNING",startedAt:first,executionClaimedAt:resumed,job:{startedAt:resumed,createdAt:created}}}).processingSince).toBe(resumed.toISOString());
+  expect(sourceProcessingSnapshot({...base,analysis:{status:"RUNNING",startedAt:first,job:{startedAt:resumed,createdAt:created}}}).processingSince).toBe(resumed.toISOString());
+  expect(sourceProcessingSnapshot({...base,analysis:{status:"QUEUED",startedAt:first,executionClaimedAt:first,job:{createdAt:created}}}).processingSince).toBe(created.toISOString());
+  expect(sourceProcessingSnapshot({...base,analysis:{status:"RUNNING",startedAt:first}}).processingSince).toBe(first.toISOString());
+});
