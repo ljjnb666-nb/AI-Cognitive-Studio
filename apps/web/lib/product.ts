@@ -166,9 +166,11 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
   // memories. Never read unpublished candidates or another document's pages.
   const extraction = record.currentExtraction?.extraction;
   const pages = extraction?.status === "SUCCEEDED" ? extraction.pages : [];
-  const pageNumber = Math.min(Math.max(1, Number.isSafeInteger(requestedTextPage) ? requestedTextPage : 1), Math.max(1, pages.length));
+  const blockPagination = extraction?.status === "SUCCEEDED" && !pages.length && extraction._count.blocks > 0;
+  const pageCount = blockPagination ? Math.ceil(extraction._count.blocks / 40) : pages.length;
+  const pageNumber = Math.min(Math.max(1, Number.isSafeInteger(requestedTextPage) ? requestedTextPage : 1), Math.max(1, pageCount));
   const page = pages[pageNumber - 1];
-  const blocks = page ? await prisma.sourceBlock.findMany({ where: { extractionId: extraction!.id, sourcePageId: page.id }, orderBy: { ordinal: "asc" }, take: 41, select: { id: true, ordinal: true, text: true } }) : [];
-  const textPreview = page ? { pageNumber, pageCount: pages.length, physicalPageNumber: page.physicalPageIndex === null ? null : page.physicalPageIndex + 1, truncated: blocks.length > 40 || blocks.some(block => block.text.length > 4000), blocks: blocks.slice(0, 40).map(block => ({ ...block, text: block.text.slice(0, 4000) })) } : null;
+  const blocks = page || blockPagination ? await prisma.sourceBlock.findMany({ where: { extractionId: extraction!.id, ...(page ? { sourcePageId: page.id } : {}) }, orderBy: { ordinal: "asc" }, ...(blockPagination ? { skip: (pageNumber - 1) * 40 } : {}), take: blockPagination ? 40 : 41, select: { id: true, ordinal: true, text: true } }) : [];
+  const textPreview = page || blockPagination ? { paginationKind: blockPagination ? "blocks" as const : "physical" as const, pageNumber, pageCount, physicalPageNumber: !page || page.physicalPageIndex === null ? null : page.physicalPageIndex + 1, truncated: blocks.length > 40 || blocks.some(block => block.text.length > 4000), blocks: blocks.slice(0, 40).map(block => ({ ...block, text: block.text.slice(0, 4000) })) } : null;
   return { ...record, textPreview };
 }
