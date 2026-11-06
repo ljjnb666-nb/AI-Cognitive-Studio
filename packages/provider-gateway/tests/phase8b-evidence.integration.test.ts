@@ -21,7 +21,7 @@ describe("Phase 8B final acceptance evidence", () => {
     const model=capability("MiniMax-M3","STRICT_JSON_SCHEMA"),catalog=new ProviderRegistry();catalog.register({providerKey:"minimax",displayName:"MiniMax fixture",protocol:"OPENAI_COMPATIBLE",adapterVersion:"fixture",models:[model]});
     const wire=new DeterministicProviderHttpTransport(()=>({status:200,headers:{},body:JSON.stringify({choices:[{finish_reason:"length",message:{content:"PRIVATE_PARTIAL",reasoning_content:"PRIVATE_THINKING"}}],usage:{prompt_tokens:11,completion_tokens:13}})}));
     const g=gateway(catalog,store,cipher,()=>new OpenAICompatibleAdapter(wire)),req=request(identity.workspaceId,"minimax-invalid-replay",{messages:[{role:"user",content:"fixture-source"}],structuredOutput:{mode:"JSON_MODE"}});
-    await expect(g.execute(req,{userId:identity.userId})).rejects.toMatchObject({code:"INVALID_PROVIDER_RESPONSE"});
+    await expect(g.execute(req,{userId:identity.userId})).rejects.toMatchObject({code:"OUTPUT_TRUNCATED"});
     const usage=await prisma.providerUsageEvent.findFirstOrThrow({where:{workspaceId:identity.workspaceId}});expect(usage).toMatchObject({status:"FAILED",inputTokens:11,outputTokens:13,metadata:{textStructuredResponse:{finishReason:"LENGTH",reportedUsagePresent:true,contentJsonValid:false}}});expect(JSON.stringify(usage)).not.toMatch(/PRIVATE_PARTIAL|PRIVATE_THINKING|fixture-source/);
     await expect(g.execute(req,{userId:identity.userId})).resolves.toMatchObject({status:"TERMINAL_FAILED"});expect(wire.calls).toHaveLength(1);expect(await prisma.providerTextResult.count({where:{workspaceId:identity.workspaceId}})).toBe(0);
   });

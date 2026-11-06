@@ -88,3 +88,12 @@ describe("shared product status presentation", () => {
     expect(generationStatusLabel({ kind: "video", status: "RUNNING", stage: "VIDEO_RENDERING" })).toBe("视频渲染中");
   });
 });
+
+it("截断输出显示明确中文原因，原始错误编号不进入错误类型文案", async () => {
+  const { processingErrorType } = await import("../lib/product-errors");
+  const status = {state:"ANALYSIS_FAILED" as const,stage:"BOOK_ANALYSIS" as const,recoveryAction:"RETRY_ANALYSIS" as const,stageAvailability:"AVAILABLE" as const};
+  expect(processingDisplay(status,"OUTPUT_TRUNCATED")).toMatchObject({label:"模型输出不完整",description:expect.stringContaining("答案被截断")});
+  expect(processingErrorType("INVALID_PROVIDER_RESPONSE")).toBe("模型返回格式异常");
+  expect(processingErrorType("OUTPUT_TRUNCATED")).toBe("模型输出被截断");
+  expect(processingErrorType("PRIVATE_UNKNOWN_ERROR")).toBe("处理异常，具体原因待核查");
+});

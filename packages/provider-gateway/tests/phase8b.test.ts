@@ -78,9 +78,9 @@ describe("Phase 8B real text provider adapters", () => {
     const base=input("minimax","OPENAI_COMPATIBLE"),value={...base,snapshot:{...base.snapshot,modelId:"MiniMax-M3"}};
     const wire=transport({choices:[{finish_reason:reason,message:{content,reasoning_content:"PRIVATE_REASONING"}}],usage:{prompt_tokens:12,completion_tokens:34}});
     let failure:unknown;try{await new OpenAICompatibleAdapter(wire).execute(value);}catch(error){failure=error;}
-    expect(failure).toMatchObject({code:"INVALID_PROVIDER_RESPONSE",retryable:false,usage:{inputTokens:12,outputTokens:34,extra:{textStructuredResponse:{contentJsonValid:jsonValid,inlineReasoningPresent:inline,reportedUsagePresent:true}}}});
+    expect(failure).toMatchObject({code:reason === "length" ? "OUTPUT_TRUNCATED" : "INVALID_PROVIDER_RESPONSE",retryable:false,usage:{inputTokens:12,outputTokens:34,extra:{textStructuredResponse:{contentJsonValid:jsonValid,inlineReasoningPresent:inline,reportedUsagePresent:true}}}});
     expect(JSON.stringify(failure)).not.toContain("PRIVATE_REASONING");expect(wire.calls).toHaveLength(1);
-    const sent=JSON.parse(wire.calls[0]!.body);expect(sent.max_completion_tokens).toBe(100);expect(sent.max_tokens).toBeUndefined();expect(sent.reasoning_split).toBe(true);
+    const sent=JSON.parse(wire.calls[0]!.body);expect(sent.max_completion_tokens).toBe(100);expect(sent.max_tokens).toBeUndefined();expect(sent.reasoning_split).toBe(true);expect(sent.thinking).toBeUndefined();expect(sent.reasoning_effort).toBeUndefined();
   });
   it("MiniMax 外层非 JSON 回执也留下安全诊断，不伪造 Token 用量",async()=>{
     const base=input("minimax","OPENAI_COMPATIBLE"),wire=new DeterministicProviderHttpTransport(()=>({status:200,headers:{},body:"PRIVATE_NON_JSON"}));

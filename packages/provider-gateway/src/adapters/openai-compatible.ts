@@ -57,7 +57,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     if (minimaxM3 && finish(choice?.finish_reason) === "CONTENT_FILTER") throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage });
     if (input.snapshot.providerKey === "zhipu" && (choice?.finish_reason === "sensitive" || choice?.finish_reason === "content_filter")) throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage: { ...usage, extra: { moderationDiagnostic: zhipuModerationDiagnostic(json, remote.status) } } });
     try {
-      if (minimaxM3 && finish(choice?.finish_reason) === "LENGTH") throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
+      if (minimaxM3 && finish(choice?.finish_reason) === "LENGTH") throw new ProviderGatewayError("OUTPUT_TRUNCATED");
       if (!message || typeof message.content !== "string") throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
       return response(message.content, typeof json.model === "string" ? json.model : undefined, finish(choice?.finish_reason), text, usage, requestId);
     } catch (error) {
@@ -67,7 +67,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       // A billed 200 response can still be unusable JSON. Preserve reported
       // usage and non-content diagnostics; never copy page/model prose or
       // reasoning into logs or turn a malformed response into a judgement.
-      throw new ProviderAdapterFailure("INVALID_PROVIDER_RESPONSE", { remoteRequestId: requestId, retryable: false, usage: { ...usage, extra: { [boundedVision ? "pdfReviewResponse" : "textStructuredResponse"]: { httpStatus: remote.status, finishReason: finish(choice?.finish_reason), contentType: typeof message?.content, contentCharacters: typeof message?.content === "string" ? message.content.length : null, reasoningCharacters: typeof message?.reasoning_content === "string" ? message.reasoning_content.length : null, reportedUsagePresent: Boolean(rawUsage), ...(minimaxM3 ? { responseJsonValid: true, contentJsonValid, inlineReasoningPresent: typeof message?.content === "string" && /<\/?think\b/i.test(message.content) } : {}) } } } });
+      throw new ProviderAdapterFailure(minimaxM3 && finish(choice?.finish_reason) === "LENGTH" ? "OUTPUT_TRUNCATED" : "INVALID_PROVIDER_RESPONSE", { remoteRequestId: requestId, retryable: false, usage: { ...usage, extra: { [boundedVision ? "pdfReviewResponse" : "textStructuredResponse"]: { httpStatus: remote.status, finishReason: finish(choice?.finish_reason), contentType: typeof message?.content, contentCharacters: typeof message?.content === "string" ? message.content.length : null, reasoningCharacters: typeof message?.reasoning_content === "string" ? message.reasoning_content.length : null, reportedUsagePresent: Boolean(rawUsage), ...(minimaxM3 ? { responseJsonValid: true, contentJsonValid, inlineReasoningPresent: typeof message?.content === "string" && /<\/?think\b/i.test(message.content) } : {}) } } } });
     }
   }
 }
