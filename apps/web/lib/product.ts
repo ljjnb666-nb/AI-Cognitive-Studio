@@ -1,3 +1,6 @@
+import { sourceProcessingSnapshot, type ProcessingStatus } from "./processing-state";
+import { processingWorkerAvailability } from "./worker-heartbeat";
+import { generationStatusLabel } from "./product-labels";
 import { prisma, Prisma } from "@ai-cognitive/db";
 import type { WebIdentityContext } from "./identity";
 import { projectBookDisplay } from "./book-display";
@@ -5,8 +8,8 @@ import { statusLabel, podcastStageLabel, videoStageLabel } from "./product-label
 
 export { statusLabel, podcastStageLabel, videoStageLabel };
 
-export type SourceSummary = { id: string; title: string; titleOrigin: "WORK" | "FILENAME"; fileName: string; version: number; isLatestVersion: boolean; mediaType: string; createdAt: string; status: string; errorCode?: string; hasIntelligence: boolean };
-export type GenerationSummary = { id: string; title: string; kind: "podcast" | "video"; status: string; stage: string; createdAt: string; updatedAt?: string; href: string; errorCode?: string };
+export type SourceSummary = { id: string; title: string; titleOrigin: "WORK" | "FILENAME"; fileName: string; version: number; isLatestVersion: boolean; mediaType: string; createdAt: string; status: string; errorCode?: string; hasIntelligence: boolean; processing: ProcessingStatus };
+export type GenerationSummary = { id: string; title: string; kind: "podcast" | "video"; status: string; stage: string; createdAt: string; updatedAt?: string; href: string; errorCode?: string; statusText: string };
 
 export const asDate = (value: Date | null | undefined) => value?.toISOString() ?? null;
 
@@ -35,7 +38,7 @@ async function sourceWindow(workspaceId: string, query: ListQuery) {
       LEFT JOIN "CurrentBookIntelligence" ci ON ci."sourceDocumentId"=d."id" AND ci."workspaceId"=d."workspaceId"
       LEFT JOIN LATERAL (SELECT "status" FROM "IngestionRun" WHERE "sourceDocumentId"=d."id" AND "workspaceId"=d."workspaceId" ORDER BY "createdAt" DESC,"id" DESC LIMIT 1) ir ON true
       LEFT JOIN LATERAL (SELECT "status" FROM "BookAnalysisRun" WHERE "sourceDocumentId"=d."id" AND "workspaceId"=d."workspaceId" AND "extractionId"=ce."extractionId" ORDER BY "createdAt" DESC,"id" DESC LIMIT 1) ar ON true
-      WHERE d."workspaceId"=${workspaceId}
+      WHERE d."workspaceId"=${workspaceId} AND s."archivedAt" IS NULL
         AND (${!search} OR strpos(lower(s."displayName"),lower(${search}))>0 OR strpos(lower(w."title"),lower(${search}))>0)
         ${mediaType ? Prisma.sql`AND d."mediaType"=${mediaType}` : Prisma.empty}
     ) state WHERE true
@@ -62,12 +65,14 @@ export async function sources(context?: WebIdentityContext, query: ListQuery = {
             documents: { orderBy: [{ version: "desc" }, { createdAt: "desc" }], take: 1, select: { id: true } },
           },
         },
-        ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true } },
+        ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, routingPlan:true,routingOutcome:true,createdAt:true, startedAt:true } },
         currentIntelligence: { select: { id: true } },
-        analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true } },
+        bookAnalysisBootstraps: { orderBy: { createdAt: "desc" }, take: 1, select: { status:true,errorCode:true,createdAt:true,startedAt:true,updatedAt:true } },
+        analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, createdAt:true, startedAt:true } },
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     });
+    const workerAvailability = await processingWorkerAvailability();
     return records.map((record) => ({
       id: record.id,
       ...projectBookDisplay({
@@ -79,8 +84,9 @@ export async function sources(context?: WebIdentityContext, query: ListQuery = {
       mediaType: record.mediaType,
       createdAt: record.createdAt.toISOString(),
       status: states.find(row => row.id === record.id)!.status,
-      errorCode: record.analysisRuns[0]?.errorCode ?? record.ingestionRuns[0]?.errorCode ?? undefined,
+      errorCode: sourceProcessingSnapshot({ ingestion:record.ingestionRuns[0],analysis:record.analysisRuns[0],bootstrap:record.bookAnalysisBootstraps[0],hasIntelligence:states.find(row=>row.id===record.id)!.status==="INTELLIGENCE_READY",workerAvailability }).errorCode ?? undefined,
       hasIntelligence: states.find(row => row.id === record.id)!.status === "INTELLIGENCE_READY",
+      processing: sourceProcessingSnapshot({ ingestion:record.ingestionRuns[0],analysis:record.analysisRuns[0],bootstrap:record.bookAnalysisBootstraps[0],hasIntelligence:states.find(row=>row.id===record.id)!.status==="INTELLIGENCE_READY",workerAvailability }).processing,
     }));
   } catch {
     throw new Error("PRODUCT_LIST_LOAD_FAILED");
@@ -96,7 +102,7 @@ export async function podcastList(context?: WebIdentityContext, query: ListQuery
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       ...window(query, 6),
     });
-    return episodes.map((episode) => ({ id: episode.id, title: episode.title, kind: "podcast" as const, status: episode.generationRuns[0]?.status ?? episode.status, stage: episode.generationRuns[0]?.stage ?? "QUEUED", createdAt: episode.createdAt.toISOString(), updatedAt: episode.updatedAt.toISOString(), href: `/studio/podcasts/${episode.id}`, errorCode: episode.generationRuns[0]?.errorCode ?? undefined }));
+    return episodes.map((episode) => ({ id: episode.id, title: episode.title, kind: "podcast" as const, statusText:generationStatusLabel({kind:"podcast",status:episode.generationRuns[0]?.status??episode.status,stage:episode.generationRuns[0]?.stage??"QUEUED"}), status: episode.generationRuns[0]?.status ?? episode.status, stage: episode.generationRuns[0]?.stage ?? "QUEUED", createdAt: episode.createdAt.toISOString(), updatedAt: episode.updatedAt.toISOString(), href: `/studio/podcasts/${episode.id}`, errorCode: episode.generationRuns[0]?.errorCode ?? undefined }));
   } catch {
     throw new Error("PRODUCT_LIST_LOAD_FAILED");
   }
@@ -111,7 +117,7 @@ export async function videoList(context?: WebIdentityContext, query: ListQuery =
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       ...window(query, 6),
     });
-    return projects.map((project) => ({ id: project.id, title: project.name, kind: "video" as const, status: project.runs[0]?.status ?? "QUEUED", stage: project.runs[0]?.stage ?? "QUEUED", createdAt: project.createdAt.toISOString(), updatedAt: project.updatedAt.toISOString(), href: `/studio/videos/${project.id}`, errorCode: project.runs[0]?.errorCode ?? undefined }));
+    return projects.map((project) => ({ id: project.id, title: project.name, kind: "video" as const, statusText:generationStatusLabel({kind:"video",status:project.runs[0]?.status??"QUEUED",stage:project.runs[0]?.stage??"QUEUED"}), status: project.runs[0]?.status ?? "QUEUED", stage: project.runs[0]?.stage ?? "QUEUED", createdAt: project.createdAt.toISOString(), updatedAt: project.updatedAt.toISOString(), href: `/studio/videos/${project.id}`, errorCode: project.runs[0]?.errorCode ?? undefined }));
   } catch {
     throw new Error("PRODUCT_LIST_LOAD_FAILED");
   }
@@ -140,7 +146,7 @@ export async function dashboard(context?: WebIdentityContext) {
 export async function sourceDetail(sourceDocumentId: string, context?: WebIdentityContext, requestedTextPage = 1) {
   const identity = await webIdentity(context);
   const record = await prisma.sourceDocument.findFirst({
-    where: { id: sourceDocumentId, workspaceId: identity.workspaceId },
+    where: { id: sourceDocumentId, workspaceId: identity.workspaceId, source: { archivedAt: null } },
     include: {
       source: {
         include: {

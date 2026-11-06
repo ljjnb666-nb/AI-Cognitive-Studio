@@ -234,7 +234,7 @@ test("04C-4C4B browser: OWNER and EDITOR correct authoritative identity, VIEWER 
   const form = panel.getByRole("form", { name: "人工修正正式信息" });
   await expect(form.getByRole("button", { name: "核对修改内容" })).toBeDisabled();
   await form.getByLabel("正式书名").fill("出版社核实的正式书名");
-  await form.getByLabel("ISBN-10").fill("0306406152");
+  await form.getByLabel("国际标准书号（10 位）").fill("0306406152");
   await form.getByLabel(/修正原因/).fill("核对纸质书版权页后纠正");
   await form.getByRole("button", { name: "核对修改内容" }).click();
   const dialog = page.getByRole("dialog", { name: "确认保存这些人工修正？" });
@@ -336,7 +336,7 @@ test("04C-4C4B browser: OWNER and EDITOR correct authoritative identity, VIEWER 
   await page.goto(detail(invalid.documentId));
   await panel.getByRole("button", { name: "编辑正式书籍信息" }).click();
   const invalidForm = panel.getByRole("form", { name: "人工修正正式信息" });
-  await invalidForm.getByLabel("ISBN-13").fill("1234567890123");
+  await invalidForm.getByLabel("国际标准书号（13 位）").fill("1234567890123");
   await invalidForm.getByLabel(/修正原因/).fill("测试非法校验位必须拒绝");
   await invalidForm.getByRole("button", { name: "核对修改内容" }).click();
   await page.getByRole("dialog", { name: "确认保存这些人工修正？" }).getByRole("button", { name: "确认保存人工修正" }).click();

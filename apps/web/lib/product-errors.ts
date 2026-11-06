@@ -11,9 +11,9 @@ export function needsProviderConfiguration(code?: string | null) {
 export function bookIntelligenceErrorMessage(code?: string | null) {
   switch (code) {
     case "AI_PROVIDER_CONFIGURATION_REQUIRED":
-      return "需要先配置 Provider，才能继续理解这本书。";
+      return "需要先配置服务商，才能继续理解这本书。";
     case "BOOK_ROUTE_IDENTITY_INCONSISTENT":
-      return "当前 Provider 配置需要重新确认后才能继续。";
+      return "当前 服务商配置需要重新确认后才能继续。";
     case "BOOK_INTELLIGENCE_REQUEST_FAILED":
       return "暂时无法开始理解，请稍后重试。";
     default:
@@ -23,6 +23,8 @@ export function bookIntelligenceErrorMessage(code?: string | null) {
 
 export function uploadErrorMessage(code?: string | null) {
   const normalized = code?.toUpperCase() ?? "";
+  if (normalized === "UNSUPPORTED_MOBI") return "暂不支持 MOBI 格式，请先转换为 EPUB 或 PDF 后上传。";
+  if (normalized === "UPLOAD_REQUEST_INVALID") return "上传信息不完整或格式无效，请重新选择文件。";
   if (
     normalized.includes("TOO_LARGE") ||
     normalized.includes("FILE_SIZE") ||
@@ -48,7 +50,7 @@ export function mediaGenerationErrorMessage(code?: string | null) {
     code === "AI_PROVIDER_CONFIGURATION_REQUIRED" ||
     code === "PODCAST_TTS_CONFIGURATION_REQUIRED"
   ) {
-    return "需要先配置 Provider，才能继续生成音频。";
+    return "需要先配置服务商，才能继续生成音频。";
   }
   return "暂时无法完成音频生成，请稍后重试。";
 }

@@ -334,27 +334,37 @@ async function expectNoHorizontalOverflow(page: Page) {
 }
 
 async function expectMobileContentClearance(page: Page) {
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  // Studio has a fixed outer shell. The accessible content is clipped by
+  // .screen-viewport and scrolls independently of window/document.body.
+  const region = page.locator(".screen-viewport");
+  await expect(region).toBeVisible();
+  await region.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   const geometry = await page.evaluate(() => {
-    const main = document.querySelector("main");
+    const content = document.querySelector(".screen-viewport");
     const group = document.querySelector(".mobile-group-nav");
     const bottom = document.querySelector(".mobile-nav");
-    if (!main || !group || !bottom) return null;
-    const bottomOfContent = Array.from(main.querySelectorAll("*"))
-      .filter((element) => {
-        const style = window.getComputedStyle(element);
-        const box = element.getBoundingClientRect();
-        return !element.closest(".mobile-nav, .mobile-group-nav") && style.display !== "none" && style.visibility !== "hidden" && box.height > 0;
-      })
-      .reduce((last, element) => Math.max(last, element.getBoundingClientRect().bottom), 0);
+    if (!content || !group || !bottom) return null;
+    const bounds = content.getBoundingClientRect();
+    const style = window.getComputedStyle(content);
     return {
-      contentBottom: bottomOfContent,
+      contentTop: bounds.top,
+      contentBottom: bounds.bottom,
       bottomTop: bottom.getBoundingClientRect().top,
       groupPosition: window.getComputedStyle(group).position,
+      overflowY: style.overflowY,
+      maxScroll: Math.max(0, content.scrollHeight - content.clientHeight),
+      scrollTop: content.scrollTop,
     };
   });
   expect(geometry).not.toBeNull();
+  // Do not scan the entire scrollable DOM: offscreen descendants can have
+  // arbitrarily large bounding boxes without overlapping the fixed nav.
+  // Assert the REAL clipped viewport ends before navigation and its content
+  // is reachable by scrolling all the way to the end.
+  expect(["auto", "scroll"]).toContain(geometry!.overflowY);
+  expect(geometry!.contentTop).toBeGreaterThanOrEqual(0);
   expect(geometry!.contentBottom).toBeLessThanOrEqual(geometry!.bottomTop);
+  expect(geometry!.scrollTop).toBeGreaterThanOrEqual(geometry!.maxScroll - 2);
   expect(geometry!.groupPosition).not.toBe("fixed");
   const finalButton = page.locator("main button:not([disabled]):visible").last();
   if (await finalButton.count()) {
@@ -660,7 +670,10 @@ test("desktop navigation keeps one clear active destination", async ({
         await route.fulfill({ status: mode === "transport" ? 500 : 200 });
       });
     }
-    await page.locator('input[type="file"]').setInputFiles(file);
+    await page.waitForLoadState("networkidle");
+    const picker = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "上传内容", exact: true }).click();
+    await (await picker).setFiles(file);
   }
   await uploadWith("start", sentinels[0]!);
   await expect(page.getByText("上传没有完成，请稍后重试。")).toBeVisible();
@@ -691,7 +704,8 @@ test("desktop navigation keeps one clear active destination", async ({
     },
   );
   await page.goto(`/studio/library/${pendingSource.document.id}`);
-  await expect(page.getByRole("paragraph").filter({ hasText: /^解析完成，准备进行 AI 深度理解$/ })).toBeVisible();
+  await page.getByRole("button", { name: "书籍概览" }).click();
+  await expect(page.getByRole("paragraph").filter({ hasText: /正文提取(已)?完成.*AI 深度理解/ })).toBeVisible();
   const recoverButton = page.getByRole("button", { name: "恢复深度理解" });
   await expect(recoverButton).toBeVisible();
   const recoverResponse = page.waitForResponse(
@@ -713,6 +727,7 @@ test("desktop navigation keeps one clear active destination", async ({
     sentinels[1]!,
   );
   await page.goto(`/studio/library/${terminalFailure}`);
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await expect(page.getByRole("paragraph").filter({ hasText: /^AI 深度理解失败$/ })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(sentinels[1]!);
 
@@ -722,10 +737,9 @@ test("desktop navigation keeps one clear active destination", async ({
     "AI_PROVIDER_CONFIGURATION_REQUIRED",
   );
   await page.goto(`/studio/library/${providerFailure}`);
-  await expect(
-    page.getByText("书籍解析完成。配置 AI Provider 后开始深度理解。"),
-  ).toBeVisible();
-  await expect(page.getByRole("link", { name: "配置 AI Provider" })).toBeVisible();
+  await page.getByRole("button", { name: "书籍概览" }).click();
+  await expect(page.getByRole("paragraph").filter({ hasText: /^AI 深度理解失败$/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: "配置 AI 服务商" })).toBeVisible();
   await expect(
     page.locator("body"),
   ).not.toContainText("AI_PROVIDER_CONFIGURATION_REQUIRED");
@@ -991,7 +1005,7 @@ test("captures the final Studio experience evidence", async ({
       await expect(page.getByRole("heading", { name: "证据短视频" })).toBeVisible();
     }
     if (name === "18-provider-settings-desktop.png") {
-      await expect(page.getByRole("navigation", { name: "设置导航" }).locator('a[aria-current="page"]')).toHaveAccessibleName("Provider");
+      await expect(page.getByRole("navigation", { name: "设置导航" }).locator('a[aria-current="page"]')).toHaveAccessibleName("服务商");
       await expect(page.locator('nav[aria-label="主导航"] a[aria-current="page"]')).toHaveAccessibleName("设置");
       await expect(page.getByText("未完成", { exact: false }).first()).toBeVisible();
       await expect(page.locator("body")).not.toContainText("sk-");

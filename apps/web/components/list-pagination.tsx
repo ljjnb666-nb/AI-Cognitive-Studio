@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 export function ListPagination({ page, hasNext, path, query = {} }: { page: number; hasNext: boolean; path: string; query?: Record<string, string> }) {
+  if (page <= 1 && !hasNext) return null;
   const href = (next: number) => `${path}?${new URLSearchParams({ ...query, page: String(next) })}`;
   return <nav aria-label="列表分页" className="filter-bar">
     {page > 1 && <Link className="btn" href={href(page - 1)}>上一页</Link>}

@@ -27,7 +27,8 @@ export async function POST(request: Request) {
       const document = await service.completeUpload(context, sessionId, outboxTopic ? { outboxTopic } : undefined);
       return NextResponse.json({ sourceDocumentId: document.id });
     }
-    const input = createSchema.parse(body);
+    const normalized = body && typeof body === "object" && "mediaType" in body && body.mediaType === "application/epub" ? { ...body, mediaType: "application/epub+zip" } : body;
+    const input = createSchema.parse(normalized);
     const intent = await service.createUploadIntent(context, input);
     return NextResponse.json({ sessionId: intent.session.id, upload: intent.upload });
   } catch (error) { return errorResponse(error); }

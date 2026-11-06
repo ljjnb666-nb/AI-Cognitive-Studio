@@ -25,36 +25,56 @@ async function ownerWorkspace(value: string) {
   return { userId: user.id, workspaceId: user.memberships[0]!.workspaceId };
 }
 
+/** The restored setup UI saves a provider; explicit model routes are edited separately.
+ * The legacy auto-configuration API remains supported for migration/backward compatibility,
+ * but is deliberately no longer shown as a one-click new-user action. */
+async function saveProviderInRestoredUi(page: import("@playwright/test").Page, providerKey: string, displayName: string, secret: string) {
+  await page.goto("/studio/settings/providers");
+  await expect(page.getByRole("heading", { name: "AI 服务商设置" })).toBeVisible();
+  const form = page.locator("form").filter({ has: page.getByRole("button", { name: "保存服务商" }) });
+  const provider = form.locator("select#new-provider");
+  await expect(provider).toBeVisible();
+  await provider.selectOption(providerKey);
+  await form.getByText("更多服务商设置（可选）").click();
+  await form.locator('input[name="displayName"]').fill(displayName);
+  await form.locator('input[name="secret"]').fill(secret);
+  await form.getByRole("button", { name: "验证 API Key" }).click();
+  await expect(page.getByText("✓ API Key 身份验证通过，可保存服务商；具体模型权限以实际调用为准。")).toBeVisible();
+  await form.getByRole("button", { name: "保存服务商" }).click();
+  await expect(page.getByRole("heading", { name: displayName })).toBeVisible();
+}
+
+async function fillUnboundRoutesViaCompatibilityApi(page: import("@playwright/test").Page, connectionId: string) {
+  const response = await page.request.post("/api/studio/providers", {
+    data: { action: "AUTO_CONFIGURE_ROUTES", connectionId },
+  });
+  expect(response.ok(), await response.text()).toBe(true);
+  const data = await response.json() as { autoConfigure?: { bound?: string[] } };
+  expect(Array.isArray(data.autoConfigure?.bound)).toBe(true);
+}
+
 test("fresh zero-env owner saves an encrypted built-in Provider, configures routes, and a worker independently decrypts it", async ({ page }) => {
   const secret = "beta-browser-secret-never-returned", account = email("openai");
   await signUp(page, account);
   const { userId, workspaceId } = await ownerWorkspace(account);
-  await page.goto("/studio/settings/providers");
-  await expect(page.getByRole("heading", { name: "AI Providers" })).toBeVisible();
-  // The Provider creation form is identified by its business action, not DOM
-  // order: the settings page also hosts the stable-config route form, whose
-  // own selects precede this form in the document.
-  const providerForm = page.locator("form").filter({ has: page.getByRole("button", { name: "保存 Provider" }) });
-  const providerType = providerForm.locator('label:text-is("提供商 (Provider)") + select');
-  await expect(providerType).toHaveValue("openai");
-  await expect(providerType).toContainText("DeepSeek");
+  await saveProviderInRestoredUi(page, "openai", "Zero env OpenAI", secret);
+  await expect(page.locator("#new-provider")).toContainText("DeepSeek");
   await expect(page.getByText("OPENAI_RESPONSES", { exact: true })).toBeHidden();
   await expect(page.getByText("BOOK_CHUNK_ANALYSIS", { exact: false })).toBeHidden();
-
-  await providerForm.locator('input[name="displayName"]').fill("Zero env OpenAI");
-  await providerForm.locator('input[name="secret"]').fill(secret);
-  await providerForm.getByRole("button", { name: "测试连接" }).click();
-  await expect(page.getByText("✓ API Key 可用，确认后点击保存 Provider。")).toBeVisible();
-  await providerForm.getByRole("button", { name: "保存 Provider" }).click();
-  await expect(page.getByRole("heading", { name: "Zero env OpenAI" })).toBeVisible();
 
   const connection = await prisma.providerConnection.findFirstOrThrow({ where: { workspaceId, displayName: "Zero env OpenAI" } });
   const beforeAuto = await prisma.providerCredentialVersion.findFirstOrThrow({ where: { workspaceId, connectionId: connection.id } });
   expect(JSON.stringify({ connection, beforeAuto })).not.toContain(secret);
   expect(beforeAuto.ciphertext).not.toContain(secret);
   expect(beforeAuto.displayHint ?? "").not.toContain(secret);
-  await page.getByRole("button", { name: "填补未绑定的默认路由" }).click();
-  await expect(page.getByText(/已自动配置 8 个推荐用途/)).toBeVisible();
+  // Verify that the new advanced route editor actually binds a selected model.
+  await page.getByText("模型与用途配置（高级设置）").click();
+  const bookRoute = page.locator("form#route-BOOK_CHUNK_ANALYSIS");
+  await bookRoute.locator('select[name="modelId"]').selectOption("gpt-5.4-mini");
+  await bookRoute.getByRole("button", { name: "保存路由" }).click();
+  await expect(bookRoute.getByText("用途配置已保存。")).toBeVisible();
+  // Exercise the supported compatibility API to fill only still-unbound routes.
+  await fillUnboundRoutesViaCompatibilityApi(page, connection.id);
 
   const routes = await prisma.providerRouteBinding.findMany({ where: { workspaceId }, orderBy: { routeSlot: "asc" } });
   expect(routes.map(route => route.routeSlot)).toEqual(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "SHORT_VIDEO_SCRIPT", "TEACH_BACK_ASSESSMENT", "THINKING_SESSION"]);
@@ -82,16 +102,11 @@ test("JSON-mode DeepSeek never auto-binds Teach Back", async ({ page }) => {
   const account = email("deepseek");
   await signUp(page, account);
   const { workspaceId } = await ownerWorkspace(account);
-  await page.goto("/studio/settings/providers");
-  const providerForm = page.locator("form").filter({ has: page.getByRole("button", { name: "保存 Provider" }) });
-  const providerType = providerForm.locator('label:text-is("提供商 (Provider)") + select');
-  await providerType.selectOption("deepseek");
-  await providerForm.locator('input[name="displayName"]').fill("Zero env DeepSeek");
-  await providerForm.locator('input[name="secret"]').fill("beta-deepseek-secret");
-  await providerForm.getByRole("button", { name: "测试连接" }).click();
-  await expect(page.getByText("✓ API Key 可用，确认后点击保存 Provider。")).toBeVisible();
-  await providerForm.getByRole("button", { name: "保存 Provider" }).click();
-  await page.getByRole("button", { name: "填补未绑定的默认路由" }).click();
+  await saveProviderInRestoredUi(page, "deepseek", "Zero env DeepSeek", "beta-deepseek-secret");
+  await page.getByText("模型与用途配置（高级设置）").click();
+  await expect(page.locator("form#route-TEACH_BACK_ASSESSMENT").getByText("当前服务商没有可用于理解验证的兼容模型。", { exact: false })).toBeVisible();
+  const connection = await prisma.providerConnection.findFirstOrThrow({ where: { workspaceId, displayName: "Zero env DeepSeek" } });
+  await fillUnboundRoutesViaCompatibilityApi(page, connection.id);
   expect(await prisma.providerRouteBinding.count({ where: { workspaceId, routeSlot: "TEACH_BACK_ASSESSMENT" } })).toBe(0);
   expect(await prisma.providerRouteBinding.count({ where: { workspaceId, routeSlot: { in: ["PODCAST_TTS", "SHORT_VIDEO_TTS"] } } })).toBe(0);
 });

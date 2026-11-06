@@ -1,9 +1,13 @@
 "use client";
+import { processingDisplay } from "@/lib/processing-display";
+import type { ProcessingState } from "@/lib/processing-state";
+
 
 import Link from "next/link";
 import { useState } from "react";
 import { StatusBadge } from "./status-badge";
 import { ProductIdentityPanel } from "./product-identity-panel";
+import { SourceTextReader, type SourceTextPreview } from "./source-text-reader";
 import { SourceProcessing } from "./source-processing";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
 import { cognitionTypeLabels } from "@/lib/cognitions";
@@ -40,6 +44,7 @@ type StructureNodeData = {
 };
 
 type Props = {
+  textPreview?: SourceTextPreview | null;
   item: {
     id: string;
     displayName: string;
@@ -49,6 +54,9 @@ type Props = {
     mediaType: string;
     version: number;
     hasIntelligence: boolean;
+    extractionSummary?: {pages:number; blocks:number; characters?:number|null;notes?:string[]}|null;
+    currentExtractionId?: string | null;
+    failureReason?: string;
     ingestionStatus?: string | null;
     analysisStatus?: string | null;
     bootstrapStatus?: string | null;
@@ -64,8 +72,10 @@ type Props = {
   structureNodes: StructureNodeData[];
 };
 
-export function BookDetailView({ item, memories, structureNodes }: Props) {
+export function BookDetailView({ item, memories, structureNodes, textPreview }: Props) {
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
+  const [view, setView] = useState<"overview" | "source">(textPreview ? "source" : "overview");
+  const display = processingDisplay({state: item.processingState as ProcessingState, stage:item.processingStage,recoveryAction:item.recoveryAction,stageAvailability:item.stageAvailability,failureReason:item.failureReason},item.errorCode);
 
   // Flatten evidence items from memories for right pane display
   const allEvidence = memories.flatMap((m) =>
@@ -82,16 +92,19 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
 
   function highlightEvidence(evidenceId: string) {
     setActiveEvidenceId(evidenceId);
-    const element = document.getElementById(`evidence-${evidenceId}`);
-    if (element) {
-      element.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
+    setView("source");
+    requestAnimationFrame(() => document.getElementById(`evidence-${evidenceId}`)?.scrollIntoView({ behavior: "instant", block: "nearest", inline: "start" }));
   }
 
   return (
     <div className="book-detail-layout">
+      <div className="book-view-tabs" role="group" aria-label="书籍视图">
+        <span title={item.title}>{item.title}</span>
+        <button type="button" className="btn btn-secondary" aria-pressed={view === "overview"} onClick={() => setView("overview")}>书籍概览</button>
+        <button type="button" className="btn btn-secondary" aria-pressed={view === "source"} onClick={() => setView("source")}>原文阅读</button>
+      </div>
       {/* Left Pane: System Interpretation (系统解读) */}
-      <div className="interpretation-pane">
+      <div className="interpretation-pane" hidden={view !== "overview"}>
         <div className="page-eyebrow">系统解读</div>
         <h1 className="font-serif" style={{ fontSize: 32, fontWeight: 600, color: "var(--on-surface)", margin: "0 0 20px 0" }}>
           {item.title}
@@ -100,6 +113,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
           原文件：{item.displayName} · 文件版本 v{item.version}
           {!item.isLatestVersion && " · 历史版本（显示所属书籍当前正式书名）"}
         </p>
+        <div className="book-state-heading"><StatusBadge value={display.label} tone={display.tone} /><span>以当前保存的处理结果为准</span></div>
 
         {item.hasIntelligence && (
           <div style={{ display: "flex", gap: 12, marginBottom: 32 }}>
@@ -125,7 +139,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
           <div className="card-panel" style={{ marginBottom: 32 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
               <span className="section-title">处理状态</span>
-              <StatusBadge value={item.processingState === "SUCCEEDED" ? "完成" : item.processingState.includes("FAILED") ? "失败" : item.processingState === "PROCESSING_DEGRADED" ? "需处理" : "处理中"} />
+              <StatusBadge value={display.label} tone={display.tone} />
             </div>
             <SourceProcessing
               sourceDocumentId={item.id}
@@ -133,6 +147,7 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
               analysisStatus={item.analysisStatus}
               bootstrapStatus={item.bootstrapStatus}
               errorCode={item.errorCode}
+              failureReason={item.failureReason}
               processingState={item.processingState}
               processingStage={item.processingStage}
               recoveryAction={item.recoveryAction}
@@ -144,7 +159,9 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
         )}
 
         {item.mediaType === "application/epub+zip" && (
-          <ProductIdentityPanel key={item.id} sourceDocumentId={item.id} sourceFileName={item.displayName} />
+          // A newly published extraction invalidates the old advisory preview
+          // and any confirmation dialog based on that previous extraction.
+          <ProductIdentityPanel key={`${item.id}:${item.currentExtractionId ?? "pending"}`} sourceDocumentId={item.id} sourceFileName={item.displayName} />
         )}
 
         {/* Memory Items Cards - Fully Keyboard Accessible Buttons */}
@@ -209,11 +226,12 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
       </div>
 
       {/* Right Pane: Source Evidence (原文证据 - Parchment Surface) */}
-      <div className="evidence-pane">
+      <div className="evidence-pane" hidden={view !== "source"}>
         <div className="evidence-header">
-          <h2 className="evidence-title">原文证据</h2>
+          <h2 className="evidence-title">{textPreview ? "原文预览" : "原文证据"}</h2>
         </div>
 
+        {textPreview && <SourceTextReader sourceDocumentId={item.id} preview={textPreview} />}
         <div className="evidence-timeline">
           {allEvidence.map((ev) => {
             const excerpt = ev.sourceBlock.text.slice(ev.startOffset, ev.endOffset) || ev.sourceBlock.text;
@@ -237,13 +255,13 @@ export function BookDetailView({ item, memories, structureNodes }: Props) {
                 <blockquote className="evidence-text">“{excerpt}”</blockquote>
                 <div className="evidence-meta">
                   {ev.nodeTitle ? `${ev.nodeTitle} · ` : ""}
-                  区块 #{ev.sourceBlock.ordinal + 1} · 字符 offset {ev.startOffset}-{ev.endOffset}
+                  区块 #{ev.sourceBlock.ordinal + 1} · 字符位置 {ev.startOffset}-{ev.endOffset}
                 </div>
               </div>
             );
           })}
 
-          {!allEvidence.length && (
+          {!allEvidence.length && !textPreview && (
             <div style={{ color: "#787774", fontSize: 14 }}>
               暂无可展示的原文证据。
             </div>

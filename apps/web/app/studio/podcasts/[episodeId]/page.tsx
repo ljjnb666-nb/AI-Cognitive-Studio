@@ -8,7 +8,7 @@ import { GenerationProcessing } from "@/components/generation-processing";
 import { PodcastPlayer } from "@/components/podcast-player";
 import { PodcastQualityFeedback } from "@/components/podcast-quality-feedback";
 import { resolveWebIdentity } from "@/lib/identity";
-import { podcastStageLabel, statusLabel } from "@/lib/product";
+import { generationStatusLabel } from "@/lib/product-labels";
 import { betaTelemetryEnabledForUser } from "@ai-cognitive/product-analytics";
 
 export default async function PodcastDetail({ params }: { params: Promise<{ episodeId: string }> }) {
@@ -48,18 +48,14 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
 
   const run = episode.generationRuns[0];
   const audioRun = episode.audioGenerationRuns[0];
-  const statusText = run
-    ? run.status === "FAILED"
-      ? "生成失败，可重新尝试"
-      : podcastStageLabel(run.stage) ?? statusLabel(run.status, run.errorCode)
-    : "等待处理";
+  const statusText = generationStatusLabel({ kind:"podcast", status:run?.status ?? episode.status, stage:run?.stage ?? "QUEUED", hasScript:Boolean(episode.currentScript), hasArtifact:Boolean(episode.currentAudio), audioStatus:audioRun?.status, audioStage:audioRun?.stage });
 
   return (
     <div>
       {run && ["QUEUED", "RUNNING"].includes(run.status) && <CancelJobButton jobId={run.jobId} />}
       {audioRun && ["QUEUED", "RUNNING"].includes(audioRun.status) && <CancelJobButton jobId={audioRun.jobId} />}
       <PageHeader
-        eyebrow="EDITORIAL AUDIO DOCUMENT"
+        eyebrow="双人播客"
         title={episode.title}
         description="有证据支撑的多主持人对话"
         action={
@@ -85,6 +81,7 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
       <GenerationProcessing
         status={run?.status ?? "QUEUED"}
         episodeId={episode.id}
+        hasScript={Boolean(episode.currentScript)}
         hasAudio={Boolean(episode.currentAudio)}
         audioStatus={audioRun?.status}
         audioErrorCode={audioRun?.errorCode}

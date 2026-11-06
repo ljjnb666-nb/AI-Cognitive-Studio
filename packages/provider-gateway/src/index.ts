@@ -14,6 +14,7 @@ export * from "./runtime/platform-credentials.js";
 export * from "./authorization.js";
 export * from "./runtime/redis-controls.js";
 export * from "./persistence.js";
+export * from "./managed-connections.js";
 export * from "./execution-repository.js";
 export * from "./testing/fake-adapter.js";
 export * from "./text/canonical-input.js";

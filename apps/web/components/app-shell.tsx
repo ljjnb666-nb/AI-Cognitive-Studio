@@ -8,6 +8,7 @@ import { PageHeader } from "./page-header";
 import { BetaSessionTracker } from "./beta-session-tracker";
 import { BetaFeedbackButton } from "./beta-feedback-button";
 import { betaTelemetryEnabledForUser } from "@ai-cognitive/product-analytics";
+import { ScreenWorkspace } from "./screen-workspace";
 
 export { PageHeader };
 
@@ -19,7 +20,7 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
   if (!workspace) throw new Error("WEB_IDENTITY_WORKSPACE_REQUIRED");
 
   return (
-    <DraftScope scope={`${identity.userId}:${identity.workspaceId}`}><div className="shell">
+    <DraftScope scope={`${identity.userId}:${identity.workspaceId}`}><div className="shell fixed-screen-studio">
       <a className="skip-link" href="#studio-main">跳到主要内容</a>
       <aside className="sidebar">
         <div>
@@ -45,7 +46,7 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
         <main id="studio-main" className="content-area" tabIndex={-1}>
           {betaTelemetryEnabled ? <BetaSessionTracker /> : null}
           <StudioNavigation mobile />
-          {children}
+          <ScreenWorkspace>{children}</ScreenWorkspace>
         </main>
       </div>
     </div></DraftScope>

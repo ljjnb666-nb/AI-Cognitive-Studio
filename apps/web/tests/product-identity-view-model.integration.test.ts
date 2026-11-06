@@ -57,7 +57,7 @@ describe("04C-4C2 product identity UI presentation policy", () => {
 
   it("never describes candidate identifiers as already verified ISBN", () => {
     const changes = plannedIdentityChanges(preview());
-    expect(changes).toContain("仅在服务端判定为有效 ISBN 时写入对应 ISBN");
+    expect(changes).toContain("仅在服务端判定为有效国际标准书号时写入对应书号");
     expect(changes.join(" ")).not.toContain("覆盖");
   });
 
@@ -85,7 +85,7 @@ describe("04C-4C2 product identity UI presentation policy", () => {
   it("does not interpret arbitrary untrusted JSON as a promotion result", () => {
     expect(isProductIdentityOutcome("not-real")).toBe(false);
     expect(isProductIdentityOutcome({ status: "APPLIED" })).toBe(false);
-    expect(identityFieldLabel("edition.isbn13")).toBe("ISBN-13");
+    expect(identityFieldLabel("edition.isbn13")).toBe("国际标准书号（13 位）");
   });
 });
 

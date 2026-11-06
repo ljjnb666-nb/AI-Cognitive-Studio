@@ -33,7 +33,7 @@ describe("Phase 14 product display helpers", () => {
       expect(uploadErrorMessage(sentinel)).not.toContain(sentinel);
       expect(mediaGenerationErrorMessage(sentinel)).not.toContain(sentinel);
     }
-    expect(bookIntelligenceErrorMessage("AI_PROVIDER_CONFIGURATION_REQUIRED")).toContain("配置 Provider");
+    expect(bookIntelligenceErrorMessage("AI_PROVIDER_CONFIGURATION_REQUIRED")).toContain("配置服务商");
     expect(needsProviderConfiguration("AI_PROVIDER_CONFIGURATION_REQUIRED")).toBe(true);
     expect(needsProviderConfiguration("PROVIDER_INTERNAL_SECRET_ERROR")).toBe(false);
     expect(uploadErrorMessage("FILE_TOO_LARGE")).toBe("文件超过当前允许的大小。");
