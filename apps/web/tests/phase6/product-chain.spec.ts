@@ -53,7 +53,9 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.locator('input[name="title"]').fill("证据播客");
   await page.locator('input[name="duration"]').fill("1");
   await page.getByRole("button", { name: "开始生成播客" }).click();
-  await expect(page).toHaveURL(/\/studio\/podcasts\//, { timeout: 30_000 });
+  // `/studio/podcasts/new` is the form, not a generated episode. Wait for
+  // the actual detail route before deriving a durable episode identifier.
+  await expect(page).toHaveURL(url => /^\/studio\/podcasts\/[^/]+$/.test(url.pathname) && url.pathname !== "/studio/podcasts/new", { timeout: 30_000 });
   // The latest product deliberately separates script generation from paid TTS.
   // In this isolated Phase 6 harness, the configured speech provider is a
   // deterministic local WAV fixture, so exercise the actual user-initiated
@@ -89,7 +91,9 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.locator('input[name="title"]').fill("证据短视频");
   await page.locator('input[name="duration"]').fill("15");
   await page.getByRole("button", { name: "开始生成短视频" }).click();
-  await expect(page).toHaveURL(/\/studio\/videos\//, { timeout: 30_000 });
+  // `/studio/videos/new` also satisfies a loose prefix match. Require a
+  // real project detail route so video rendering checks the created record.
+  await expect(page).toHaveURL(url => /^\/studio\/videos\/[^/]+$/.test(url.pathname) && url.pathname !== "/studio/videos/new", { timeout: 30_000 });
   const video = page.locator("video");
   await expect(video).toBeVisible({ timeout: 120_000 });
   const metadata = await video.evaluate((node: HTMLVideoElement) => new Promise<{ duration: number; width: number; height: number }>((resolve, reject) => { if (Number.isFinite(node.duration) && node.duration > 0) return resolve({ duration: node.duration, width: node.videoWidth, height: node.videoHeight }); node.addEventListener("loadedmetadata", () => resolve({ duration: node.duration, width: node.videoWidth, height: node.videoHeight }), { once: true }); node.addEventListener("error", () => reject(new Error("video metadata failed")), { once: true }); node.load(); }));
