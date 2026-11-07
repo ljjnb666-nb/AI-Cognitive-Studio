@@ -65,7 +65,7 @@ export async function sources(context?: WebIdentityContext, query: ListQuery = {
         },
         ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true } },
         currentIntelligence: { select: { id: true } },
-        analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true } },
+        analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, createdAt: true, startedAt: true, executionClaimedAt: true, job: { select: { createdAt: true, startedAt: true } } } },
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     });
@@ -153,7 +153,7 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
       },
       ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1 },
       bookAnalysisBootstraps: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, errorCode: true, createdAt: true, startedAt: true, updatedAt: true } },
-      analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, jobId: true, status: true, analysisStage: true, extractionId: true, chunkSetId: true, errorCode: true, createdAt: true, startedAt: true, completedAt: true, executionLeaseUntil: true } },
+      analysisRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, jobId: true, status: true, analysisStage: true, extractionId: true, chunkSetId: true, errorCode: true, createdAt: true, startedAt: true, completedAt: true, executionLeaseUntil: true, executionClaimedAt: true, job: { select: { createdAt: true, startedAt: true } }, chunkSet: { select: { _count: { select: { chunks: true } } } }, _count: { select: { artifacts: { where: { scope: "CHUNK" } } } } } },
       currentExtraction: { include: { extraction: { include: { _count: { select: { pages: true, blocks: true } }, pages: { orderBy: { ordinal: "asc" }, select: { id: true, physicalPageIndex: true } }, structureNodes: { orderBy: { ordinal: "asc" } }, blocks: { orderBy: { ordinal: "asc" }, take: 40 } } } } },
       currentIntelligence: { include: { analysisRun: { include: { memoryItems: { include: { evidence: { include: { sourceBlock: true } } }, orderBy: { ordinal: "asc" }, take: 80 }, artifacts: { where: { scope: "BOOK" }, take: 1 } } } } },
     },
@@ -195,9 +195,13 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
   // memories. Never read unpublished candidates or another document's pages.
   const extraction = record.currentExtraction?.extraction;
   const pages = extraction?.status === "SUCCEEDED" ? extraction.pages : [];
-  const pageNumber = Math.min(Math.max(1, Number.isSafeInteger(requestedTextPage) ? requestedTextPage : 1), Math.max(1, pages.length));
+  const blockPagination = extraction?.status === "SUCCEEDED" && pages.length === 0 && extraction._count.blocks > 0;
+  const pageCount = blockPagination ? Math.ceil(extraction._count.blocks / 40) : pages.length;
+  const pageNumber = Math.min(Math.max(1, Number.isSafeInteger(requestedTextPage) ? requestedTextPage : 1), Math.max(1, pageCount));
   const page = pages[pageNumber - 1];
-  const blocks = page ? await prisma.sourceBlock.findMany({ where: { extractionId: extraction!.id, sourcePageId: page.id }, orderBy: { ordinal: "asc" }, take: 41, select: { id: true, ordinal: true, text: true } }) : [];
-  const textPreview = page ? { pageNumber, pageCount: pages.length, physicalPageNumber: page.physicalPageIndex === null ? null : page.physicalPageIndex + 1, truncated: blocks.length > 40 || blocks.some(block => block.text.length > 4000), blocks: blocks.slice(0, 40).map(block => ({ ...block, text: block.text.slice(0, 4000) })) } : null;
-  return { ...record, textPreview, bookSummary, bookPublicationId, bookMemories };
+  const blocks = page || blockPagination ? await prisma.sourceBlock.findMany({ where: { extractionId: extraction!.id, ...(page ? { sourcePageId: page.id } : {}) }, orderBy: { ordinal: "asc" }, ...(blockPagination ? { skip: (pageNumber - 1) * 40 } : {}), take: blockPagination ? 40 : 41, select: { id: true, ordinal: true, text: true } }) : [];
+  const textPreview = page || blockPagination ? { paginationKind: blockPagination ? "blocks" as const : "physical" as const, pageNumber, pageCount, physicalPageNumber: !page || page.physicalPageIndex === null ? null : page.physicalPageIndex + 1, truncated: blocks.length > 40 || blocks.some(block => block.text.length > 4000), blocks: blocks.slice(0, 40).map(block => ({ ...block, text: block.text.slice(0, 4000) })) } : null;
+  const analysis = record.analysisRuns[0];
+  const analysisProgress = analysis && analysis.extractionId === record.currentExtraction?.extractionId ? { runId: analysis.id, stage: analysis.analysisStage, completedChunks: analysis._count.artifacts, totalChunks: analysis.chunkSet._count.chunks } : null;
+  return { ...record, textPreview, bookSummary, bookPublicationId, bookMemories, analysisProgress };
 }
