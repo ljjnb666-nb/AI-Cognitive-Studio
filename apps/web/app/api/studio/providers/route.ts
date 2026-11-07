@@ -66,6 +66,10 @@ async function response(workspaceId: string) {
     return (Object.keys(routeSlotCapabilities) as RouteSlot[]).flatMap(routeSlot =>
       provider.models.flatMap(model => {
         if (model.deprecated || model.retired) return [];
+        // Filter the effective primary (including implicit GLM defaults), not
+        // only the manually persisted ProviderRouteBinding.
+        if (routes.some(route => route.routeSlot === routeSlot &&
+          route.connection.providerKey === connection.providerKey && route.modelId === model.modelId)) return [];
         const family = routeSlotCapabilities[routeSlot];
         try {
           validateRouteManifestSelection(manifest, {
