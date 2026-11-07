@@ -27,7 +27,7 @@ describe("Provider settings public errors", () => {
   });
 
   it("maps duplicate Provider names to the Chinese UI message", () => {
-    expect(readableProviderError("PROVIDER_CONNECTION_NAME_CONFLICT")).toBe("已存在同名 Provider，请换一个名称。");
+    expect(readableProviderError("PROVIDER_CONNECTION_NAME_CONFLICT")).toBe("已存在同名服务商，请换一个名称。");
   });
 
   it("maps invalid Qwen configuration to its safe Chinese UI message", () => {

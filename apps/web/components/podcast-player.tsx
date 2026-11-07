@@ -1,10 +1,18 @@
 "use client";
 
-import { useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 
 const milestones = [[0.25, "PODCAST_PLAYBACK_25"], [0.5, "PODCAST_PLAYBACK_50"], [0.75, "PODCAST_PLAYBACK_75"], [0.9, "PODCAST_PLAYBACK_90"]] as const;
 
 export function PodcastPlayer({ revisionId, telemetryEnabled }: { revisionId: string; telemetryEnabled: boolean }) {
+  const audioElement = useRef<HTMLAudioElement>(null);
+  const [playback, setPlayback] = useState<"loading" | "ready" | "buffering" | "playing" | "paused" | "ended" | "failed">("loading");
+  // Metadata/error events may finish before hydration attaches React handlers.
+  const attachAudio = useCallback((node: HTMLAudioElement | null) => {
+    audioElement.current = node;
+    if (node?.error) setPlayback("failed");
+    else if (node && node.readyState >= 1) setPlayback("ready");
+  }, []);
   const emitted = useRef(new Set<string>());
   const seeking = useRef(false);
   const lastPosition = useRef<number | null>(null);
@@ -36,5 +44,17 @@ export function PodcastPlayer({ revisionId, telemetryEnabled }: { revisionId: st
     }
   }
 
-  return <audio controls preload="metadata" src={`/api/studio/media/audio/${revisionId}`} style={{ width: "100%", borderRadius: 4 }} onLoadedMetadata={(event) => { lastPosition.current = event.currentTarget.currentTime; }} onPlay={(event) => { lastPosition.current = event.currentTarget.currentTime; emit("PODCAST_PLAYBACK_STARTED", { playbackPositionSeconds: event.currentTarget.currentTime, durationSeconds: event.currentTarget.duration }); }} onSeeking={() => { seeking.current = true; }} onSeeked={(event) => { lastPosition.current = event.currentTarget.currentTime; seeking.current = false; }} onTimeUpdate={(event) => { recordProgress(event.currentTarget); }} onEnded={(event) => emit("PODCAST_PLAYBACK_ENDED", { playbackPositionSeconds: event.currentTarget.currentTime, durationSeconds: event.currentTarget.duration })}>你的浏览器不支持音频播放。</audio>;
+  const playbackLabel = { loading: "正在加载音频…", ready: "音频已加载，可以播放", buffering: "音频缓冲中…", playing: "正在播放", paused: "已暂停", ended: "播放结束", failed: "音频加载失败，请检查登录状态与本机存储服务后重试。" }[playback];
+  return <div>
+    <audio ref={attachAudio} controls preload="metadata" src={`/api/studio/media/audio/${revisionId}`} style={{ width: "100%", borderRadius: 4 }}
+      onLoadStart={(event) => setPlayback(event.currentTarget.error ? "failed" : "loading")} onWaiting={() => setPlayback("buffering")} onPlaying={() => setPlayback("playing")}
+      onPause={(event) => { if (!event.currentTarget.ended && !event.currentTarget.error) setPlayback("paused"); }} onError={() => setPlayback("failed")}
+      onLoadedMetadata={(event) => { setPlayback("ready"); lastPosition.current = event.currentTarget.currentTime; }}
+      onPlay={(event) => { lastPosition.current = event.currentTarget.currentTime; emit("PODCAST_PLAYBACK_STARTED", { playbackPositionSeconds: event.currentTarget.currentTime, durationSeconds: event.currentTarget.duration }); }}
+      onSeeking={() => { seeking.current = true; }} onSeeked={(event) => { seeking.current = false; lastPosition.current = event.currentTarget.currentTime; }}
+      onTimeUpdate={(event) => { recordProgress(event.currentTarget); }}
+      onEnded={(event) => { setPlayback("ended"); emit("PODCAST_PLAYBACK_ENDED", { playbackPositionSeconds: event.currentTarget.currentTime, durationSeconds: event.currentTarget.duration }); }}>你的浏览器不支持音频播放。</audio>
+    <p role="status" className={playback === "failed" ? "error" : "muted"} style={{ fontSize: 13 }}>{playbackLabel}</p>
+    {playback === "failed" && <button type="button" className="btn btn-secondary" onClick={() => audioElement.current?.load()}>重新加载音频</button>}
+  </div>;
 }

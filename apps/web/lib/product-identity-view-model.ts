@@ -81,19 +81,19 @@ export function plannedIdentityChanges(preview: ProductIdentityPreview): string[
   const candidate = preview.candidate;
   if (!preview.product) {
     return [
-      "创建一条书籍（Work）与版本（Edition）记录并关联此文件",
+      "创建正式书籍与版本记录并关联此文件",
       "写入有效候选书名",
       ...(candidate?.language ? ["仅在语言格式有效时写入语言"] : []),
-      ...(candidate?.identifier ? ["仅在服务端判定为有效 ISBN 时写入对应 ISBN"] : []),
+      ...(candidate?.identifier ? ["仅在服务端判定为有效国际标准书号时写入对应书号"] : []),
     ];
   }
   const result: string[] = [];
   if (!preview.product.language && candidate?.language) result.push("仅当已有语言为空且候选值有效时，补全语言");
   if ((!preview.product.isbn10 || !preview.product.isbn13) && candidate?.identifier) {
-    result.push("仅当对应 ISBN 字段为空且服务端验证通过时，补全 ISBN");
+    result.push("仅当对应书号字段为空且服务端验证通过时，补全国际标准书号");
   }
   if (result.length === 0) result.push("核对现有信息；若无可补全字段则不修改");
-  result.push("现有书名、语言及 ISBN 不会被自动覆盖；任何字段冲突将整体拒绝写入");
+  result.push("现有书名、语言及国际标准书号不会被自动覆盖；任何字段冲突将整体拒绝写入");
   return result;
 }
 
@@ -117,8 +117,8 @@ export function identityFieldLabel(field: string): string {
     "source.editionId": "文件关联版本",
     "work.title": "书名",
     "edition.language": "语言",
-    "edition.isbn10": "ISBN-10",
-    "edition.isbn13": "ISBN-13",
+    "edition.isbn10": "国际标准书号（10 位）",
+    "edition.isbn13": "国际标准书号（13 位）",
     identifier: "原始标识符",
     language: "语言",
   };
@@ -128,8 +128,8 @@ export function identityFieldLabel(field: string): string {
 export function identityIgnoredReason(reason: string): string {
   const reasons: Record<string, string> = {
     INVALID_LANGUAGE: "语言格式不符合要求",
-    UNCLASSIFIED_IDENTIFIER: "原始标识符无法确认为 ISBN",
-    INVALID_EXPLICIT_ISBN: "ISBN 格式、标签或校验位不合法",
+    UNCLASSIFIED_IDENTIFIER: "原始标识符无法确认为国际标准书号",
+    INVALID_EXPLICIT_ISBN: "国际标准书号的格式、标签或校验位不合法",
   };
   return reasons[reason] ?? "未满足自动写入规则";
 }
@@ -139,8 +139,8 @@ export function identityIgnoredReason(reason: string): string {
 export const manualIdentityFields = [
   { field: "title", label: "正式书名" },
   { field: "language", label: "语言" },
-  { field: "isbn10", label: "ISBN-10" },
-  { field: "isbn13", label: "ISBN-13" },
+  { field: "isbn10", label: "国际标准书号（10 位）" },
+  { field: "isbn13", label: "国际标准书号（13 位）" },
 ] as const;
 export type ManualIdentityField = typeof manualIdentityFields[number]["field"];
 export type ManualIdentityDraft = Record<ManualIdentityField, string>;

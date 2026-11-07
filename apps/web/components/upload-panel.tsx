@@ -3,32 +3,29 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { uploadErrorMessage } from "@/lib/product-errors";
-
-const typeFor = (file: File) =>
-  file.type ||
-  (file.name.endsWith(".md")
-    ? "text/markdown"
-    : file.name.endsWith(".txt")
-    ? "text/plain"
-    : file.name.endsWith(".epub")
-    ? "application/epub+zip"
-    : "application/pdf");
+import { unsupportedUploadCode, uploadMediaType } from "@/lib/upload-input";
 
 export function UploadPanel() {
   const input = useRef<HTMLInputElement>(null);
+  const uploading = useRef(false);
   const router = useRouter();
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function upload(file?: File) {
-    if (!file) return;
+    if (!file || uploading.current) return;
+    const mediaType = uploadMediaType(file);
+    if (!mediaType) { setMessage(uploadErrorMessage(unsupportedUploadCode(file))); return; }
+    if (file.size <= 0) { setMessage("文件为空，请选择有内容的文件。"); return; }
+    if (file.size > 100 * 1024 * 1024) { setMessage(uploadErrorMessage("FILE_TOO_LARGE")); return; }
+    uploading.current = true;
     setBusy(true);
     setMessage(`正在上传 ${file.name}…`);
     try {
       const start = await fetch("/api/studio/upload", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ filename: file.name, mediaType: typeFor(file), sizeBytes: file.size }),
+        body: JSON.stringify({ filename: file.name, mediaType, sizeBytes: file.size }),
       });
       const intent = await start.json();
       if (!start.ok) throw new Error(intent.error);
@@ -40,6 +37,7 @@ export function UploadPanel() {
       });
       if (!put.ok) throw new Error("UPLOAD_FAILED");
 
+      setMessage("文件已上传，正在确认并创建解析任务…");
       const complete = await fetch("/api/studio/upload", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -53,6 +51,7 @@ export function UploadPanel() {
     } catch (error) {
       setMessage(uploadErrorMessage(error instanceof Error ? error.message : undefined));
     } finally {
+      uploading.current = false;
       setBusy(false);
     }
   }
@@ -84,7 +83,7 @@ export function UploadPanel() {
         ref={input}
         type="file"
         accept=".pdf,.epub,.md,.txt,text/plain,text/markdown,application/pdf,application/epub+zip"
-        onChange={(e) => void upload(e.target.files?.[0])}
+        onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; void upload(file); }}
         hidden
       />
 

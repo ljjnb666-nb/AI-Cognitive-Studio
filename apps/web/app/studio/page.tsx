@@ -1,5 +1,6 @@
+import { processingDisplay } from "@/lib/processing-display";
 import Link from "next/link";
-import { dashboard, statusLabel } from "@/lib/product";
+import { dashboard } from "@/lib/product";
 import { IndeterminateProgressBar } from "@/components/status-badge";
 import { resolveWebIdentity } from "@/lib/identity";
 import { getPersonalCognitionOverview, getRecommendedReviews } from "@/lib/personalized-cognition";
@@ -26,7 +27,7 @@ export default async function StudioPage() {
             {latestSource
               ? latestSource.hasIntelligence
                 ? "深度理解已完成。可以查看系统解读与原文证据，或继续生成播客和短视频。"
-                : "正在解析与理解原始文本，提取结构与证据。"
+                : processingDisplay(latestSource.processing, latestSource.errorCode).description
               : "导入一本书，建立属于你的阅读、理解与表达路径。"}
           </p>
 
@@ -67,7 +68,7 @@ export default async function StudioPage() {
         <div className="hero-book-card">
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <span className="font-mono" style={{ fontSize: 11, color: "var(--outline)", textTransform: "uppercase" }}>
-            {latestSource ? `${latestSource.mediaType} / ${latestSource.hasIntelligence ? "解析完毕" : statusLabel(latestSource.status, latestSource.errorCode)}` : "准备开始"}
+            {latestSource ? `${latestSource.mediaType} / ${processingDisplay(latestSource.processing, latestSource.errorCode).label}` : "准备开始"}
             </span>
             {latestSource?.hasIntelligence && (
               <div
@@ -123,7 +124,7 @@ export default async function StudioPage() {
               </div>
               <p style={{ fontSize: 13, color: "var(--on-surface-variant)", margin: 0, lineHeight: 1.6 }}>
                 {latestPodcast
-                  ? `“${latestPodcast.title}”播客生成状态：${statusLabel(latestPodcast.status, latestPodcast.errorCode)}`
+                  ? `“${latestPodcast.title}”播客生成状态：${latestPodcast.statusText}`
                   : "暂无播客记录。可从已理解的书生成播客。"}
               </p>
             </div>
@@ -151,12 +152,12 @@ export default async function StudioPage() {
               </div>
               <p style={{ fontSize: 13, color: "var(--on-surface-variant)", margin: 0, lineHeight: 1.6 }}>
                 {latestSource
-                  ? `《${latestSource.title}》解析状态：${statusLabel(latestSource.status, latestSource.errorCode)}`
+                  ? `《${latestSource.title}》解析状态：${processingDisplay(latestSource.processing, latestSource.errorCode).label}`
                   : "暂无分析中的书籍。上传第一本书，开始深度理解。"}
               </p>
             </div>
             <div style={{ marginTop: 16 }}>
-              {latestSource && latestSource.status === "RUNNING" ? (
+              {latestSource && processingDisplay(latestSource.processing, latestSource.errorCode).active ? (
                 <>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
                     <span className="status-dot processing" />
@@ -191,7 +192,7 @@ export default async function StudioPage() {
               </div>
               <p style={{ fontSize: 13, color: "var(--on-surface-variant)", margin: 0, lineHeight: 1.6 }}>
                 {latestVideo
-                  ? `“${latestVideo.title}”短视频状态：${statusLabel(latestVideo.status, latestVideo.errorCode)}`
+                  ? `“${latestVideo.title}”短视频状态：${latestVideo.statusText}`
                   : "暂无短视频记录。可从已理解的书生成短视频。"}
               </p>
             </div>

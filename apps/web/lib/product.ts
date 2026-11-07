@@ -36,7 +36,7 @@ async function sourceWindow(workspaceId: string, query: ListQuery) {
       LEFT JOIN "CurrentBookIntelligence" ci ON ci."sourceDocumentId"=d."id" AND ci."workspaceId"=d."workspaceId"
       LEFT JOIN LATERAL (SELECT "status" FROM "IngestionRun" WHERE "sourceDocumentId"=d."id" AND "workspaceId"=d."workspaceId" ORDER BY "createdAt" DESC,"id" DESC LIMIT 1) ir ON true
       LEFT JOIN LATERAL (SELECT "status" FROM "BookAnalysisRun" WHERE "sourceDocumentId"=d."id" AND "workspaceId"=d."workspaceId" AND "extractionId"=ce."extractionId" ORDER BY "createdAt" DESC,"id" DESC LIMIT 1) ar ON true
-      WHERE d."workspaceId"=${workspaceId}
+      WHERE d."workspaceId"=${workspaceId} AND s."archivedAt" IS NULL
         AND (${!search} OR strpos(lower(s."displayName"),lower(${search}))>0 OR strpos(lower(w."title"),lower(${search}))>0)
         ${mediaType ? Prisma.sql`AND d."mediaType"=${mediaType}` : Prisma.empty}
     ) state WHERE true
@@ -143,7 +143,7 @@ export async function sourceDetail(sourceDocumentId: string, context?: WebIdenti
   const { record, bookSummary, bookPublicationId, bookMemories } = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SET TRANSACTION READ ONLY`;
     const record = await tx.sourceDocument.findFirst({
-    where: { id: sourceDocumentId, workspaceId: identity.workspaceId },
+    where: { id: sourceDocumentId, workspaceId: identity.workspaceId, source: { archivedAt: null } },
     include: {
       source: {
         include: {

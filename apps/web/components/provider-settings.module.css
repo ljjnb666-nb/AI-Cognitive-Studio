@@ -1,0 +1,114 @@
+.settings { min-width: 0; overflow-wrap: anywhere; }
+.settings > *, .settings :global(.form-group) { min-width: 0; }
+.settings :global(.select-control) { min-width: 0; max-width: 100%; }
+.routeFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 16px; margin-bottom: 16px; }
+.routeFields > :global(.form-group) { align-content: start; margin-bottom: 0; gap: 7px; }
+.routeFields :global(.form-label) { margin: 0; line-height: 1.5; }
+.routeFields :is(select, input) { display: block; box-sizing: border-box; width: 100%; height: 42px; min-height: 42px; margin: 0; font-size: 14px; line-height: 1.4; }
+@media (max-width: 700px) { .routeFields { grid-template-columns: minmax(0, 1fr); } }
+.stablePanel { min-width: 0; }
+.connectionModel { display: flex; flex: 1 1 100%; align-items: flex-end; gap: 12px; flex-wrap: wrap; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.connectionModel > div { flex: 1 1 240px; max-width: 520px; }
+.connectionModel button { flex: 0 0 auto; }
+.summary { cursor: pointer; font-size: 16px; font-weight: 600; line-height: 1.6; }
+.summary span { display: block; margin: 4px 0 0 18px; color: var(--text-secondary); font-size: 12px; font-weight: 400; }
+.summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; border-radius: 4px; }
+.content { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border); }
+.description { margin: 0 0 24px; max-width: 64em; font-size: 13px; line-height: 1.8; color: var(--text-secondary); }
+.notice { margin: 0 0 20px; padding: 12px 14px; border-left: 3px solid var(--warning); background: var(--surface-subtle); font-size: 13px; line-height: 1.7; }
+.stableForm { display: grid; gap: 20px; min-width: 0; }
+.group { min-width: 0; margin: 0; padding: 16px 20px 20px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
+.group legend { padding: 0 8px; color: var(--on-surface); font-size: 14px; font-weight: 600; }
+.fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; }
+.fields label { display: flex; min-width: 0; flex-direction: column; gap: 8px; margin: 0; font-size: 13px; font-weight: 500; line-height: 1.6; color: var(--text-secondary); }
+.fields :is(select, input) { display: block; width: 100%; min-width: 0; max-width: 100%; height: 42px; margin: 0; font-size: 14px; font-weight: 400; color: var(--on-surface); background-color: var(--surface-raised); text-overflow: ellipsis; }
+.fields :is(select, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hint { margin: 14px 0 0; font-size: 12px; line-height: 1.7; color: var(--text-secondary); }
+.footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; padding-top: 18px; border-top: 1px solid var(--border); }
+.footer p { margin: 0; font-size: 12px; line-height: 1.7; color: var(--text-secondary); }
+.footer button { flex: 0 0 auto; min-width: 156px; }
+@media (max-width: 640px) {
+  .group { padding: 12px 14px 16px; }
+  .fields { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .footer { align-items: stretch; flex-direction: column; }
+  .footer button { width: 100%; }
+}
+
+.page { width: min(100%, 1120px); margin: 0 auto; padding: 12px 0 28px; }
+.settings { display: grid; gap: 28px; }
+.sectionNav { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 4px 14px #30221b05; }
+.sectionNav a { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 7px; font-size: 13px; color: var(--text-secondary); text-decoration: none; }
+.sectionNav a:hover, .sectionNav a:focus-visible { color: var(--accent); background: var(--accent-subtle); }
+.sectionNav a span { min-width: 20px; text-align: center; padding: 0 5px; border-radius: 5px; font-size: 11px; background: var(--surface-subtle); }
+.settings [id] { scroll-margin-top: 78px; }
+.sectionHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.sectionHeading h2 { margin: 0; }
+.sectionHeading p { margin: 6px 0 0; font-size: 12px; color: var(--text-secondary); line-height: 1.7; }
+.total { white-space: nowrap; color: var(--text-secondary); font-size: 12px; padding-top: 5px; }
+.readinessGrid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; align-items: stretch; }
+.readinessCard { min-width: 0; min-height: 170px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
+.readinessDetails { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; }
+.readinessDetails summary { cursor: pointer; color: var(--text-secondary); }
+.readinessDetails > div { line-height: 1.7; }
+.completion { font-size: 12px; color: var(--text-secondary); margin: 10px 0 0; }
+.connectionsLayout { display: grid; grid-template-columns: minmax(0,1fr); gap: 24px; }
+.connectionList { min-width: 0; }
+.createPanel { min-width: 0; padding: 20px; }
+.createForm { display: grid; align-items: start; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px 24px; }
+.createForm > :global(.form-group) { margin: 0; gap: 8px; }
+.createForm > :global(.form-group) > label { margin: 0; font-size: 13px; }
+.createForm :is(input,select) { height: 42px; font-size: 14px; }
+.createAdvanced { grid-column: 1 / -1; padding-top: 16px; border-top: 1px solid var(--border); }
+.createAdvanced > summary { font-size: 13px; }
+.createActions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 12px; }
+.createActions button { height: 38px; font-size: 13px; }
+.connectionActions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border); }
+.connectionCards { display: grid; gap: 14px; }
+.connectionCard { padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
+.connectionHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+.connectionHeading > div { min-width: 0; }
+.endpoint { margin-top: 6px; font-size: 11px; color: var(--text-muted); line-height: 1.8; overflow-wrap: anywhere; }
+.connectionModel { padding-block: 12px 16px; border-top: 1px solid var(--border); }
+.connectionModel > div { flex-basis: 180px; }
+.routingSection { display: grid; gap: 16px; }
+.routingSection > .sectionHeading { margin-bottom: 0; }
+.feedback { position: sticky; bottom: 0; z-index: 5; margin: 0; padding: 14px 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); box-shadow: 0 -4px 16px #30221b08; }
+.feedback[data-tone=success] { color: var(--success); }
+.feedback[data-tone=neutral] { color: var(--text-secondary); }
+@media (max-width: 1050px) {
+  .readinessGrid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
+@media (max-width: 640px) {
+  .page { padding-top: 4px; }
+  .settings { gap: 22px; }
+  .sectionNav { padding: 6px; gap: 2px; }
+  .sectionNav a { padding: 7px 9px; font-size: 12px; }
+  .readinessGrid { grid-template-columns: minmax(0,1fr); }
+  .readinessCard { min-height: 0; }
+  .sectionHeading { flex-wrap: wrap; gap: 6px; }
+  .createForm { grid-template-columns: minmax(0,1fr); }
+  .createPanel { padding: 16px; }
+  .createActions { justify-content: flex-start; }
+  .connectionHeading { gap: 8px; }
+}
+
+.deleteButton { height: 36px; font-size: 13px; color: var(--error, #a33932); }
+.deleteDialog { position: fixed; inset: 0; margin: auto; width: min(480px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); overflow-y: auto; box-sizing: border-box; padding: 24px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-raised); color: var(--on-surface); box-shadow: 0 20px 80px #30221b30; }
+.deleteDialog::backdrop { background: #201c1866; }
+.deleteDialog h2 { margin: 0 0 12px; font-size: 22px; }
+.deleteDialog p, .deleteDialog li { font-size: 14px; line-height: 1.8; }
+.deleteDialog ul { padding-left: 22px; }
+.deleteName { font-weight: 600; overflow-wrap: anywhere; }
+.dialogActions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+
+.routeFeedback { margin: 12px 0 0; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.routeFeedback[data-tone=success] { color: var(--success); }
+.routeFeedback[data-tone=error] { color: var(--error, #a33932); }
+.routeFeedback[data-tone=pending] { color: var(--text-secondary); }
+
+.sharedBookModel { margin: 0 0 18px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.sharedBookModel label { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.sharedBookModel input { width: 16px; height: 16px; flex: 0 0 auto; accent-color: var(--accent); }
+.sharedBookModel p { margin: 8px 0 0 26px; font-size: 12px; line-height: 1.7; color: var(--text-secondary); }
+
+@media (min-width: 900px) { .createForm[data-minimax=true] { grid-template-columns: minmax(0,1fr) minmax(0,1fr) minmax(0,2fr); } }
