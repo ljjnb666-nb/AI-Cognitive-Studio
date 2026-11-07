@@ -1,4 +1,5 @@
 import { prisma, type Prisma } from "@ai-cognitive/db";
+import { defaultBookTextModelId, defaultBookTextSlots } from "./book-defaults.js";
 import { ProviderGatewayError } from "./errors.js";
 import { routeSlotCapabilities, validateRouteManifestSelection, type ProviderModelManifest } from "./model-manifest.js";
 import { stableHash } from "./routing/snapshot.js";
@@ -110,6 +111,17 @@ export async function saveWorkspaceFailoverPreference(
       where: { workspaceId_routeSlot: { workspaceId: context.workspaceId, routeSlot: input.routeSlot } },
       include: { connection: { select: { providerKey: true } } },
     });
+    // The new-book GLM default is an effective primary even when no explicit
+    // ProviderRouteBinding exists. Otherwise it could be saved as its own backup.
+    const implicitPrimary = !primary && defaultBookTextSlots.some(slot => slot === input.routeSlot)
+      ? await tx.providerConnection.findFirst({
+          where: { workspaceId: context.workspaceId, providerKey: "zhipu",
+            protocol: "OPENAI_COMPATIBLE", status: "ACTIVE",
+            credentialVersions: { some: { status: "ACTIVE" } } },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          select: { id: true },
+        })
+      : null;
     const selected = new Set<string>();
     for (const candidate of input.candidates) {
       const connection = byId.get(candidate.connectionId);
@@ -127,7 +139,8 @@ export async function saveWorkspaceFailoverPreference(
         throw new ProviderGatewayError("CAPABILITY_MISMATCH");
       const identity = connection.providerKey + "\u0000" + candidate.modelId;
       if (selected.has(identity) ||
-          (primary && primary.connection.providerKey === connection.providerKey && primary.modelId === candidate.modelId))
+          (primary && primary.connection.providerKey === connection.providerKey && primary.modelId === candidate.modelId) ||
+          (implicitPrimary && connection.providerKey === "zhipu" && candidate.modelId === defaultBookTextModelId))
         throw new ProviderGatewayError("CAPABILITY_MISMATCH");
       selected.add(identity);
     }
