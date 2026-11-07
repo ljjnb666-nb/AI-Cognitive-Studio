@@ -1,3 +1,4 @@
+import { defaultBookTextSlots } from "./book-defaults.js";
 import { prisma } from "@ai-cognitive/db";
 import { randomUUID } from "node:crypto";
 import { VersionedAesGcmCipher, type CredentialCipher } from "./credentials/cipher.js";
@@ -64,7 +65,31 @@ export class ProviderGatewayRepository {
       return routes;
     });
   }
-  async resolveWorkspaceRoute(request: GatewayRequest): Promise<ResolvedRoute | undefined> { const route = await this.db.providerRouteBinding.findUnique({ where: { workspaceId_routeSlot: { workspaceId: request.workspaceId, routeSlot: request.routeSlot } }, include: { connection: true } }); if (!route) return undefined; if (route.connection.status !== "ACTIVE") throw new ProviderGatewayError("CONNECTION_DISABLED"); const credential = await this.db.providerCredentialVersion.findFirst({ where: { connectionId: route.connectionId, workspaceId: request.workspaceId, status: "ACTIVE" }, orderBy: { credentialVersion: "desc" } }); if (!credential) throw new ProviderGatewayError("AUTHENTICATION_FAILED", "No active workspace credential"); return { source: "WORKSPACE", providerKey: route.connection.providerKey, protocol: route.connection.protocol as ResolvedRoute["protocol"], modelId: route.modelId, adapterVersion: "phase8a", connectionId: route.connectionId, credentialVersionId: credential.id, endpoint: route.connection.endpoint ?? undefined, region: route.connection.region ?? undefined, capability: { modelId: route.modelId, families: [], confidence: "DECLARED" }, configuration: route.configuration as Record<string, unknown> }; }
+  async resolveWorkspaceRoute(request: GatewayRequest): Promise<ResolvedRoute | undefined> {
+    const route = await this.db.providerRouteBinding.findUnique({
+      where: { workspaceId_routeSlot: { workspaceId: request.workspaceId, routeSlot: request.routeSlot } },
+      include: { connection: true },
+    });
+    if (!route && (defaultBookTextSlots.some(slot => slot === request.routeSlot) || request.routeSlot === "BOOK_SEMANTIC_REVIEW")) {
+      // 新任务在创建时冻结默认路由。运行期不得给缺少快照的旧任务补配模型。
+      throw new ProviderGatewayError("ROUTE_UNAVAILABLE", "MINIMAX_BOOK_CONFIGURATION_REQUIRED");
+    }
+    if (!route) return undefined;
+    if (route.connection.status !== "ACTIVE") throw new ProviderGatewayError("CONNECTION_DISABLED");
+    const credential = await this.db.providerCredentialVersion.findFirst({
+      where: { connectionId: route.connectionId, workspaceId: request.workspaceId, status: "ACTIVE" },
+      orderBy: { credentialVersion: "desc" },
+    });
+    if (!credential) throw new ProviderGatewayError("AUTHENTICATION_FAILED", "No active workspace credential");
+    return {
+      source: "WORKSPACE", providerKey: route.connection.providerKey,
+      protocol: route.connection.protocol as ResolvedRoute["protocol"], modelId: route.modelId,
+      adapterVersion: "phase8a", connectionId: route.connectionId, credentialVersionId: credential.id,
+      endpoint: route.connection.endpoint ?? undefined, region: route.connection.region ?? undefined,
+      capability: { modelId: route.modelId, families: [], confidence: "DECLARED" },
+      configuration: route.configuration as Record<string, unknown>,
+    };
+  }
   async persistSnapshot(snapshot: ExecutionSnapshot) { return this.db.providerExecutionSnapshot.create({ data: { id: snapshot.id, workspaceId: snapshot.workspaceId, routeSlot: snapshot.routeSlot, providerKey: snapshot.providerKey, protocol: snapshot.protocol, modelId: snapshot.modelId, connectionId: snapshot.connectionId, credentialVersionId: snapshot.credentialVersionId, endpoint: snapshot.endpoint, region: snapshot.region, capability: snapshot.capability as never, configuration: snapshot.configuration as never, configurationHash: snapshot.configurationHash, adapterVersion: snapshot.adapterVersion, promptVersion: snapshot.promptVersion, schemaVersion: snapshot.schemaVersion, pipelineVersion: snapshot.pipelineVersion, correlationId: snapshot.correlationId, createdAt: snapshot.createdAt } }); }
   async assertSnapshotCredentialUsable(workspaceId: string, snapshotId: string): Promise<void> { const snapshot = await this.db.providerExecutionSnapshot.findUnique({ where: { id_workspaceId: { id: snapshotId, workspaceId } }, include: { credentialVersion: true, connection: true } }); if (!snapshot) throw new ProviderGatewayError("AUTHORIZATION_FAILED"); if (snapshot.connection && snapshot.connection.status !== "ACTIVE") throw new ProviderGatewayError("CONNECTION_DISABLED"); if (snapshot.credentialVersion?.status === "REVOKED") throw new ProviderGatewayError("CREDENTIAL_REVOKED"); }
   /** Validates a resolved workspace route before its execution snapshot is persisted. */

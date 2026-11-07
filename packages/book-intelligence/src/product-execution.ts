@@ -1,5 +1,4 @@
-import { prisma } from "@ai-cognitive/db";
-import { resolveProviderCatalog, stableHash, validateRouteManifestSelection } from "@ai-cognitive/provider-gateway";
+import { resolveProviderCatalog, stableHash, validateRouteManifestSelection, workspaceRoutesWithBookDefaults } from "@ai-cognitive/provider-gateway";
 import { normalizeBookRoutePlan, type BookAnalysisRoutePlan } from "./route-plan.js";
 
 const slots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"] as const;
@@ -10,11 +9,12 @@ const endpoint = (value: string | null): value is string => { try { const url = 
 /** Shared, pinned Book route-plan builder for Web requests and durable Workers. */
 export async function resolveBookProductExecution(workspaceId: string): Promise<{ provider: string; model: string; modelVersion?: string; configuration: Record<string, unknown>; routePlan: BookAnalysisRoutePlan }> {
   const manifest = resolveProviderCatalog(process.env.PROVIDER_GATEWAY_MODEL_MANIFEST);
-  const routes = await prisma.providerRouteBinding.findMany({ where: { workspaceId }, include: { connection: { include: { credentialVersions: { where: { status: "ACTIVE" }, select: { id: true, status: true } } } } } }) as Route[];
+  const routes = await workspaceRoutesWithBookDefaults(workspaceId) as Route[];
   const entries = {} as BookAnalysisRoutePlan["routes"];
   try {
     for (const routeSlot of slots) {
       const route = routes.find(item => item.routeSlot === routeSlot);
+      if (!route && routeSlot !== "EMBEDDING") throw new Error("MINIMAX_BOOK_CONFIGURATION_REQUIRED");
       if (!route || route.connection.status !== "ACTIVE" || !endpoint(route.connection.endpoint)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
       const credential = route.connection.credentialVersions[0], configuration = record(route.configuration);
       if (!credential) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
@@ -29,5 +29,5 @@ export async function resolveBookProductExecution(workspaceId: string): Promise<
     const routePlan = normalizeBookRoutePlan({ version: 1, routes: entries });
     const chunk = routePlan.routes.BOOK_CHUNK_ANALYSIS;
     return { provider: chunk.providerKey, model: chunk.modelId, modelVersion: chunk.modelVersion, configuration: chunk.configuration, routePlan };
-  } catch (error) { if (error instanceof Error && ["AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED"].includes(error.message)) throw error; throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED"); }
+  } catch (error) { if (error instanceof Error && ["AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED", "MINIMAX_BOOK_CONFIGURATION_REQUIRED"].includes(error.message)) throw error; throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED"); }
 }

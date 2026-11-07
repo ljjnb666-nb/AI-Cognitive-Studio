@@ -1,7 +1,7 @@
 import { readEnvironment } from "@ai-cognitive/shared/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { ProviderGatewayRepository, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayRepository, routeSlots, workspaceRoutesWithBookDefaults, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, type RouteSlot } from "@ai-cognitive/provider-gateway";
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
@@ -14,7 +14,7 @@ const createConnectionWithCredential = z.object({ action: z.literal("CREATE_CONN
 const setCredential = z.object({ action: z.literal("SET_CREDENTIAL"), connectionId: z.string().cuid(), secret: z.string().trim().min(1).max(10_000) });
 const revokeCredential = z.object({ action: z.literal("REVOKE_CREDENTIAL"), credentialVersionId: z.string().uuid() });
 const setEnabled = z.object({ action: z.literal("SET_ENABLED"), connectionId: z.string().cuid(), enabled: z.boolean() });
-const setRoute = z.object({ action: z.literal("SET_ROUTE"), routeSlot: z.enum(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT", "PDF_VISUAL_STRUCTURE"]), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200), configuration: jsonRecord });
+const setRoute = z.object({ action: z.literal("SET_ROUTE"), routeSlot: z.enum(routeSlots), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200), configuration: jsonRecord });
 const testConnection = z.object({ action: z.literal("TEST_CONNECTION"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000) });
 const autoConfigureRoutes = z.object({ action: z.literal("AUTO_CONFIGURE_ROUTES"), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200).optional() });
 const stableBookRoutesInput = z.object({ action: z.literal("APPLY_STABLE_BOOK_ROUTES"), textConnectionId: z.string().cuid(), textModelId: z.string().trim().min(1).max(200), textConfiguration: jsonRecord, embeddingConnectionId: z.string().cuid(), embeddingModelId: z.string().trim().min(1).max(200), embeddingConfiguration: jsonRecord });
@@ -27,10 +27,10 @@ function safeConnection(connection: { id: string; providerKey: string; protocol:
 async function response(workspaceId: string) {
   const [connections, routes, readiness] = await Promise.all([
     prisma.providerConnection.findMany({ where: { workspaceId }, include: { credentialVersions: { where: { status: { in: ["ACTIVE", "RETIRED"] } }, orderBy: { credentialVersion: "desc" }, take: 1, select: { id: true, displayHint: true, status: true } } }, orderBy: { createdAt: "asc" } }),
-    prisma.providerRouteBinding.findMany({ where: { workspaceId }, include: { connection: { select: { id: true, displayName: true, providerKey: true, protocol: true, status: true } } }, orderBy: { routeSlot: "asc" } }),
+    workspaceRoutesWithBookDefaults(workspaceId),
     providerReadiness(workspaceId),
   ]);
-  return NextResponse.json({ manifest: sanitizedProviderManifest(productManifest()), connections: connections.map(safeConnection), routes: routes.map(route => ({ id: route.id, routeSlot: route.routeSlot, connectionId: route.connectionId, modelId: route.modelId, configuration: safeConfiguration(route.configuration), connection: route.connection })), readiness });
+  return NextResponse.json({ manifest: sanitizedProviderManifest(productManifest()), connections: connections.map(safeConnection), routes: routes.map(route => ({ id: route.id, routeSlot: route.routeSlot, connectionId: route.connectionId, modelId: route.modelId, configuration: safeConfiguration(route.configuration), connection: { id: route.connection.id, displayName: route.connection.displayName, providerKey: route.connection.providerKey, protocol: route.connection.protocol, status: route.connection.status } })), readiness });
 }
 async function resolveProviderHostname(hostname: string): Promise<readonly string[]> {
   // The Phase 9 browser harness deliberately uses this non-routable namespace;

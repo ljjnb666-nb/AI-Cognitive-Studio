@@ -20,18 +20,43 @@ echo "CI_MEDIA_SETUP_PLATFORM=$(uname -s)/$(uname -m)"
 echo "CI_MEDIA_SETUP_OS=$ID-$VERSION_ID"
 
 # Bound the ENTIRE network+installation phase, including any apt retries.
-# No || true, skipping missing tools, or bypassing downstream release gates.
+# A slow Azure apt mirror exhausted this budget twice on Ubuntu 26.04.
+# Give the default mirror a short chance, then fail over to signed official
+# Ubuntu archives; never skip FFmpeg, redis-cli, or downstream tests.
 if timeout --kill-after=15s "$max_seconds"s bash -euo pipefail -c '
-  sudo apt-get \
-    -o Acquire::Retries=2 \
-    -o Acquire::http::Timeout=45 \
-    -o Acquire::https::Timeout=45 \
-    update
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get \
-    -o Acquire::Retries=2 \
-    -o Acquire::http::Timeout=45 \
-    -o Acquire::https::Timeout=45 \
-    install --yes --no-install-recommends ffmpeg redis-tools
+  apt_options=(
+    -o Acquire::Retries=1
+    -o Acquire::http::Timeout=30
+    -o Acquire::https::Timeout=30
+  )
+  sudo apt-get "${apt_options[@]}" update
+  if timeout --kill-after=5s 100s sudo env DEBIAN_FRONTEND=noninteractive \
+    apt-get "${apt_options[@]}" install --yes --no-install-recommends \
+    ffmpeg redis-tools; then
+    echo "CI_MEDIA_SETUP_APT_SOURCE=runner-default"
+  else
+    failure=$?
+    echo "::warning::Runner apt mirror failed or was too slow (exit $failure); trying official Ubuntu archives."
+    . /etc/os-release
+    test "$ID" = ubuntu
+    test -n "$VERSION_CODENAME"
+    sources="$(mktemp)"
+    trap "rm -f -- \"$sources\"" EXIT
+    cat > "$sources" <<EOF
+deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu $VERSION_CODENAME main restricted universe multiverse
+deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu $VERSION_CODENAME-updates main restricted universe multiverse
+deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu $VERSION_CODENAME-security main restricted universe multiverse
+EOF
+    apt_sources=(
+      -o "Dir::Etc::sourcelist=$sources"
+      -o Dir::Etc::sourceparts=-
+    )
+    sudo apt-get "${apt_sources[@]}" "${apt_options[@]}" update
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get \
+      "${apt_sources[@]}" "${apt_options[@]}" \
+      install --yes --no-install-recommends ffmpeg redis-tools
+    echo "CI_MEDIA_SETUP_APT_SOURCE=official-ubuntu-fallback"
+  fi
 '; then
   echo "CI_MEDIA_SETUP_PACKAGE_INSTALL=SUCCESS"
 else

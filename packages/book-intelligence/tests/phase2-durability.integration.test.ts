@@ -176,11 +176,14 @@ async function waitForBlockedBookUpdates(blockerPid: number, expectedCount: numb
 }
 
 async function waitForSignal(signal: () => boolean, message: string) {
-  for (let attempt = 0; attempt < 10_000; attempt++) {
+  // An event-loop iteration count can expire before a PostgreSQL claim
+  // completes under CI contention; poll by elapsed time without weakening the assertion.
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
     if (signal()) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await sleep(10);
   }
-  throw new Error(message);
+  if (!signal()) throw new Error(message);
 }
 
 afterEach(async () => {

@@ -61,6 +61,13 @@ describe("BookAnalysisBootstrap fault boundaries", () => {
     expect(bookAnalysisBootstrapBlockingReason({ status: "PENDING" }, now)).toBe("NONE");
   });
 
+  it("缺少默认 MiniMax 配置时等待用户配置，不反复创建分析任务", async () => {
+    vi.mocked(resolveBookProductExecution).mockRejectedValue(new Error("MINIMAX_BOOK_CONFIGURATION_REQUIRED"));
+    await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 });
+    expect(state.updates).toEqual(expect.arrayContaining([expect.objectContaining({data:expect.objectContaining({status:"WAITING_FOR_PROVIDER",errorCode:"AI_PROVIDER_CONFIGURATION_REQUIRED"})})]));
+    expect(requestBookAnalysisForUser).not.toHaveBeenCalled();
+  });
+
   it("releases ownership into WAITING_FOR_PROVIDER without invoking chunking", async () => {
     state.keyring = false;
     await processBookAnalysisBootstrap("bootstrap-1", { expectedDispatchGeneration: 1 });

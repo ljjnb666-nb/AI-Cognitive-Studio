@@ -1,8 +1,11 @@
 import { claimBookAnalysisRun, withOwnedAnalysisTransaction } from "@ai-cognitive/book-intelligence";
 import { afterEach, expect, it, vi } from "vitest";
 import { prisma } from "@ai-cognitive/db";
+import { stableHash } from "@ai-cognitive/provider-gateway";
+import { BOOK_CUMULATIVE_CNY_CAP_MICRO } from "../src/book-cumulative-budget.js";
 import { activateBookPaidGrant, bindBookPaidGrant, cancelBookPaidGrant, BOOK_PAID_GRANT_TYPE, createBookPaidResolver, type BookPaidGrant } from "../src/book-paid-authorization.js";
 const owned: Array<{ workspaceId: string; userId: string }> = [];
+const foreignUsers: string[] = [];
 async function fixture(maxMicroCny = 5_000_000) {
   const w = await prisma.workspace.create({ data: { name: "paid-book-fixture" } }), u = await prisma.user.create({ data: { email: crypto.randomUUID()+"@book-budget.test" } });
   owned.push({workspaceId:w.id,userId:u.id});
@@ -30,7 +33,7 @@ async function fixture(maxMicroCny = 5_000_000) {
   const input={snapshot:{id:crypto.randomUUID(),workspaceId:w.id,providerKey:"zhipu",protocol:"OPENAI_COMPATIBLE",modelId:"glm-5.3-flash",routeSlot:"BOOK_CHUNK_ANALYSIS",credentialVersionId:"fixture-key-version",endpoint:"https://open.bigmodel.cn/api/paas/v4/chat/completions",capability:{families:["TEXT_GENERATION"]}},request:{workspaceId:w.id,bookExecution:context,idempotencyKey:`book-analysis-text:${bookRun.id}:${bookJob.id}:CHUNK:fixture`,requestFingerprint:"a".repeat(64),capability:{family:"TEXT_GENERATION"},text:{messages:[{role:"user",content:"original test"}],structuredOutput:{mode:"JSON_MODE"}}},signal:new AbortController().signal,credential:"fake-key"} as unknown as Parameters<typeof adapter.execute>[0];
   return {w,u,source,doc,grant,payload,wire,adapter,input,context,bookRun,bookJob};
 }
-afterEach(async()=>{for(const item of owned.splice(0)){const where={workspaceId:item.workspaceId};await prisma.bookAnalysisRun.deleteMany({where});await prisma.chunkSet.deleteMany({where});await prisma.currentDocumentExtraction.deleteMany({where});await prisma.documentExtraction.deleteMany({where});await prisma.ingestionRun.deleteMany({where});await prisma.job.deleteMany({where});await prisma.sourceDocument.deleteMany({where});await prisma.source.deleteMany({where});await prisma.sourceBlob.deleteMany({where});await prisma.workspaceMember.deleteMany({where});await prisma.workspace.delete({where:{id:item.workspaceId}});await prisma.user.delete({where:{id:item.userId}});}});
+afterEach(async()=>{for(const item of owned.splice(0)){const where={workspaceId:item.workspaceId};await prisma.bookAnalysisRun.deleteMany({where});await prisma.chunkSet.deleteMany({where});await prisma.currentDocumentExtraction.deleteMany({where});await prisma.documentExtraction.deleteMany({where});await prisma.ingestionRun.deleteMany({where});await prisma.job.deleteMany({where});await prisma.sourceDocument.deleteMany({where});await prisma.source.deleteMany({where});await prisma.sourceBlob.deleteMany({where});await prisma.workspaceMember.deleteMany({where});await prisma.workspace.delete({where:{id:item.workspaceId}});await prisma.user.delete({where:{id:item.userId}});}for(const userId of foreignUsers.splice(0))await prisma.user.delete({where:{id:userId}});});
 it("requires explicit activation, caps output and durably reserves the complete request before the network",async()=>{
  const f=await fixture();await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("ALREADY_STARTED");
  await f.adapter.execute(f.input);expect(f.wire).toHaveBeenCalledTimes(1);
@@ -203,4 +206,149 @@ it("rejects a lease that expires while the business transaction waits for its ro
  const work=withOwnedAnalysisTransaction(f.bookRun.id,f.context.claimToken,async()=>{wrote=true;});const outcome=work.then(()=>null,error=>error);
  try{let observed=false;for(let i=0;i<100;i++){const rows=await prisma.$queryRaw<Array<{blocked:boolean}>>`SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE ${pid}=ANY(pg_blocking_pids(pid))) AS blocked`;if(rows[0]!.blocked){observed=true;break;}await new Promise(r=>setTimeout(r,5));}expect(observed).toBe(true);await prisma.$queryRaw`SELECT pg_sleep(0.35)::text`;}finally{release.resolve();await blocker;}
  expect(await outcome).toMatchObject({message:"BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST"});expect(wrote).toBe(false);
+});
+
+async function withPrior(f: Awaited<ReturnType<typeof fixture>>, reservedMicroCny: number, status: "FAILED" | "SUCCEEDED" | "CANCELLED" = "FAILED") {
+ const { binding: _binding, cumulativeBudget: _budget, ...original } = f.payload as BookPaidGrant & {binding?:unknown};
+ void _binding; void _budget;
+ const entry = { ordinal:1, kind:"TEXT" as const, reservedMicroCny, inputUpper:100, outputMax:10, state:"REMOTE_OUTCOME_UNKNOWN", operationKey:crypto.randomUUID() };
+ const old = await prisma.job.create({data:{workspaceId:f.w.id,userId:f.u.id,type:BOOK_PAID_GRANT_TYPE,status,payload:{...original,reservedMicroCny,textCalls:1,entries:[entry],stopped:true} as never}});
+ const persisted = await prisma.job.findUniqueOrThrow({where:{id:old.id}});
+ const carried = {grantId:old.id,payloadDigest:stableHash(persisted.payload),reservedMicroCny};
+ return {old,carried};
+}
+function cumulative(carried: {grantId:string;payloadDigest:string;reservedMicroCny:number}[]) {
+ return {version:1 as const,limitMicroCny:BOOK_CUMULATIVE_CNY_CAP_MICRO,carryForward:carried};
+}
+it("pins all terminated prior gross reservations into an exact 10 CNY continuation envelope",async()=>{
+ const f=await fixture(5_000_000),prior=await withPrior(f,788_499);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ await f.adapter.execute(f.input);
+ expect(f.wire).toHaveBeenCalledTimes(1);
+ const payload=(await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}})).payload as unknown as BookPaidGrant;
+ expect(payload.cumulativeBudget?.carryForward).toEqual([prior.carried]);
+ expect(payload.reservedMicroCny).toBeGreaterThan(0);
+ expect(payload.cumulativeBudget!.limitMicroCny).toBe(10_000_000);
+});
+it("allows the exactly remaining 9.211501 CNY only with explicit pinned historic 10 CNY authorization",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,maxMicroCny:9_211_501,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ await f.adapter.execute(f.input);
+ expect(f.wire).toHaveBeenCalledTimes(1);
+ const grant=(await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}})).payload as unknown as BookPaidGrant;
+ expect(prior.carried.reservedMicroCny+grant.maxMicroCny).toBe(BOOK_CUMULATIVE_CNY_CAP_MICRO);
+ expect(grant.entries).toHaveLength(1);
+});
+it("does not increase the legacy per-grant 5 CNY limit without the cumulative ledger",async()=>{
+ const f=await fixture();
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,maxMicroCny:5_000_001} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("BOOK_PAID_GRANT_INVALID");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("blocks even one micro-CNY above the exact remaining continuation envelope",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,maxMicroCny:9_211_502,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("BOOK_PAID_CUMULATIVE_BUDGET_INVALID");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("denies activation when prior gross plus new maximum exceeds 10 CNY",async()=>{
+ const f=await fixture(5_000_000),prior=await withPrior(f,5_000_001);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("BOOK_PAID_CUMULATIVE_BUDGET_INVALID");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it.each(["omitted","tampered","running","foreign","different-extraction"] as const)(
+ "refuses %s historical fee evidence without sending",async kind=>{
+ const f=await fixture(),prior=await withPrior(f,788_499);
+ const envelope=cumulative(kind==="omitted"?[]:[prior.carried]);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:envelope} as never}});
+ if(kind==="tampered")await prisma.job.update({where:{id:prior.old.id},data:{payload:{...(await prisma.job.findUniqueOrThrow({where:{id:prior.old.id}})).payload as object,stopped:false}}});
+ if(kind==="running")await prisma.job.update({where:{id:prior.old.id},data:{status:"RUNNING"}});
+ if(kind==="foreign"){const foreign=await prisma.user.create({data:{email:crypto.randomUUID()+"@foreign-book-budget.test"}});foreignUsers.push(foreign.id);await prisma.job.update({where:{id:prior.old.id},data:{userId:foreign.id}});}
+ if(kind==="different-extraction")await prisma.job.update({where:{id:prior.old.id},data:{payload:{...(await prisma.job.findUniqueOrThrow({where:{id:prior.old.id}})).payload as object,extractionId:crypto.randomUUID()}}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow();
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("blocks an unlisted peer grant for the same source/extraction, even if no tokens were spent",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499),other=await withPrior(f,0);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("AUTHORIZATION_FAILED");
+ expect(other.old.id).not.toBe(prior.old.id);expect(f.wire).not.toHaveBeenCalled();
+});
+it("rechecks immutable previous grants after reservation and refuses network send if the history changes",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([prior.carried])} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ const resolver=createBookPaidResolver(f.grant.id,{execute:f.wire,executeBinary:vi.fn()},{beforeSendAdmission:async()=>{
+  const old=await prisma.job.findUniqueOrThrow({where:{id:prior.old.id}});
+  await prisma.job.update({where:{id:old.id},data:{payload:{...(old.payload as object),stopped:false}}});
+ }});
+ const adapter=resolver({providerKey:"zhipu",protocol:"OPENAI_COMPATIBLE",family:"TEXT_GENERATION",modelId:"glm-5.3-flash"})!;
+ await expect(adapter.execute(f.input)).rejects.toMatchObject({code:"AUTHORIZATION_FAILED"});
+ expect(f.wire).not.toHaveBeenCalled();
+ const grant=(await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}})).payload as unknown as BookPaidGrant;
+ expect(grant.entries).toHaveLength(1);expect(grant.entries[0]?.reservedMicroCny).toBeGreaterThan(0);
+});
+
+it("refuses a legacy unpinned grant once a cumulative continuation for the same document exists",async()=>{
+ const f=await fixture();
+ const other=await prisma.job.create({data:{workspaceId:f.w.id,userId:f.u.id,type:BOOK_PAID_GRANT_TYPE,status:"FAILED",payload:{...f.payload,cumulativeBudget:cumulative([])} as never}});
+ expect(other.id).not.toBe(f.grant.id);
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("AUTHORIZATION_FAILED");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("refuses a re-pinned historic receipt with a nonexistent extraction even if its hash matches",async()=>{
+ const f=await fixture(),historical=await withPrior(f,788_499);
+ const old=await prisma.job.findUniqueOrThrow({where:{id:historical.old.id}});
+ const changed={...(old.payload as object),extractionId:crypto.randomUUID()};
+ await prisma.job.update({where:{id:old.id},data:{payload:changed as never}});
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([{grantId:old.id,payloadDigest:stableHash(changed),reservedMicroCny:788_499}])} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("AUTHORIZATION_FAILED");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+
+it("blocks three legacy authorizations whose combined potential exceeds 10 CNY",async()=>{
+ const f=await fixture(),prior1=await withPrior(f,5_000_000),prior2=await withPrior(f,5_000_000);
+ expect(prior1.old.id).not.toBe(prior2.old.id);
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("AUTHORIZATION_FAILED");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("rejects a new paid grant when the identical SHA-256 was previously billed under a different SourceDocument ID",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499);
+ const duplicate=await prisma.sourceDocument.create({data:{workspaceId:f.w.id,sourceId:f.doc.sourceId,sourceBlobId:f.doc.sourceBlobId,version:f.doc.version+1,sha256:f.doc.sha256,sizeBytes:f.doc.sizeBytes,mediaType:f.doc.mediaType,storageKey:f.doc.storageKey}});
+ const duplicateJob=await prisma.job.create({data:{workspaceId:f.w.id,userId:f.u.id,type:"fixture",payload:{}}});
+ const ingestion=await prisma.ingestionRun.create({data:{workspaceId:f.w.id,sourceDocumentId:duplicate.id,jobId:duplicateJob.id,status:"SUCCEEDED",parserVersion:"fixture",normalizationVersion:"fixture"}});
+ const extraction=await prisma.documentExtraction.create({data:{workspaceId:f.w.id,sourceDocumentId:duplicate.id,ingestionRunId:ingestion.id,status:"SUCCEEDED",parserName:"fixture",parserVersion:"fixture",normalizationVersion:"fixture"}});
+ await prisma.currentDocumentExtraction.create({data:{workspaceId:f.w.id,sourceDocumentId:duplicate.id,extractionId:extraction.id}});
+ const old=await prisma.job.findUniqueOrThrow({where:{id:prior.old.id}});
+ const otherPayload={...(old.payload as object),sourceDocumentId:duplicate.id,extractionId:extraction.id};
+ await prisma.job.update({where:{id:old.id},data:{payload:otherPayload as never}});
+ const carried={grantId:old.id,payloadDigest:stableHash(otherPayload),reservedMicroCny:788_499};
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:cumulative([carried])} as never}});
+ await expect(activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id})).rejects.toThrow("AUTHORIZATION_FAILED");
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("pins a newly activated cumulative budget in a separate execution Job, blocking later stripping",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499),budget=cumulative([prior.carried]);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:budget} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ const executionJob=await prisma.job.findUniqueOrThrow({where:{id:f.bookJob.id}});
+ expect((executionJob.payload as {bookPaidCumulativeBudgetDigest?:string}).bookPaidCumulativeBudgetDigest).toBe(stableHash(budget));
+ const old=await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}});
+ const {cumulativeBudget:_removed,...stripped}=old.payload as unknown as BookPaidGrant;
+ void _removed;
+ await prisma.job.update({where:{id:old.id},data:{payload:stripped as never}});
+ await expect(f.adapter.execute(f.input)).rejects.toMatchObject({code:"AUTHORIZATION_FAILED"});
+ expect(f.wire).not.toHaveBeenCalled();
+});
+it("rejects modified cumulativeBudget values after authorization activation even if shape is valid",async()=>{
+ const f=await fixture(),prior=await withPrior(f,788_499),budget=cumulative([prior.carried]);
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...f.payload,cumulativeBudget:budget} as never}});
+ await activateBookPaidGrant(f.grant.id,{workspaceId:f.w.id,userId:f.u.id});
+ const current=await prisma.job.findUniqueOrThrow({where:{id:f.grant.id}});
+ await prisma.job.update({where:{id:f.grant.id},data:{payload:{...(current.payload as object),cumulativeBudget:cumulative([])} as never}});
+ await expect(f.adapter.execute(f.input)).rejects.toMatchObject({code:"AUTHORIZATION_FAILED"});
+ expect(f.wire).not.toHaveBeenCalled();
 });

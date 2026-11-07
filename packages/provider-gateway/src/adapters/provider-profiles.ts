@@ -45,10 +45,20 @@ function qwenProfile(family: CapabilityFamily, configuration: Readonly<Record<st
 }
 export function approvedProfile(providerKey: string, family: CapabilityFamily, endpoint: string | undefined, configuration: Readonly<Record<string, unknown>> = {}): ProviderProfile | undefined {
   if (providerKey === "openai-compatible" && family === "TEXT_GENERATION" && endpoint) return { providerKey, family, protocol: "OPENAI_COMPATIBLE", endpoint, authScheme: "BEARER" };
+  // 仅允许官方文本端点，保留旧快照原有地址，不做跨区域重定向。
+  if (providerKey === "minimax" && family === "TEXT_GENERATION" && endpoint && [
+    "https://api.minimax.io/v1/chat/completions",
+    "https://api.minimax.cn/v1/chat/completions",
+    "https://api.minimax.cn/v1/text/chatcompletion_v2",
+  ].includes(endpoint)) return { providerKey, family, protocol: "OPENAI_COMPATIBLE", endpoint, authScheme: "BEARER" };
   const profile = providerKey === "qwen" ? qwenProfile(family, configuration) : builtInProviderProfiles.find(item => item.providerKey === providerKey && item.family === family);
+  // A shared Zhipu connection can store the canonical chat endpoint.
+  // Embedding always uses the approved family-specific endpoint.
+  const zhipuSharedConnection = providerKey === "zhipu" && family === "EMBEDDING" &&
+    endpoint === "https://open.bigmodel.cn/api/paas/v4/chat/completions";
   // Qwen's connection stores the provider-owned text endpoint, while the
   // adapter derives the family-specific endpoint from the typed route region
   // and workspace ID.  Never execute a user supplied endpoint for Qwen.
-  return profile && (providerKey === "qwen" || !endpoint || endpoint === profile.endpoint) ? profile : undefined;
+  return profile && (providerKey === "qwen" || zhipuSharedConnection || !endpoint || endpoint === profile.endpoint) ? profile : undefined;
 }
 export function authHeaders(scheme: AuthScheme, credential: string | undefined): Record<string, string> { if (!credential) throw new ProviderGatewayError("AUTHENTICATION_FAILED"); return scheme === "BEARER" ? { authorization: `Bearer ${credential}` } : scheme === "X_API_KEY" ? { "x-api-key": credential } : { "x-goog-api-key": credential }; }

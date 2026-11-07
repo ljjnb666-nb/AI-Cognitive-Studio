@@ -28,6 +28,7 @@ export {
 import { admitWorkspaceExpensiveOperation, Prisma, prisma, type ExpensiveOperationRecoveryTarget } from "@ai-cognitive/db";
 import {
   buildBookContextForIntelligence,
+  pinCurrentBookSources,
   estimateAnalysisTokens,
   type EmbeddingProvider,
 } from "@ai-cognitive/book-intelligence";
@@ -277,12 +278,7 @@ export async function requestShortVideoGeneration(
     : project.styleProfiles[0];
   if (!style) throw new Error("SHORT_VIDEO_STYLE_REQUIRED");
   const sourceIds = project.sources.map((x) => x.sourceDocumentId).sort();
-  const current = await prisma.currentBookIntelligence.findMany({
-    where: {
-      workspaceId: context.workspaceId,
-      sourceDocumentId: { in: sourceIds },
-    },
-  });
+  const current = await pinCurrentBookSources(context.workspaceId, sourceIds);
   if (current.length !== sourceIds.length)
     throw new Error("CURRENT_BOOK_INTELLIGENCE_REQUIRED");
   const identity = sha256(
@@ -296,6 +292,7 @@ export async function requestShortVideoGeneration(
           x.extractionId,
           x.chunkSetId,
           x.analysisRunId,
+          ...(x.bookPublicationId ? [x.bookPublicationId] : []),
         ])
         .sort(),
       input.provider,
@@ -364,6 +361,7 @@ export async function requestShortVideoGeneration(
           extractionId: x.extractionId,
           chunkSetId: x.chunkSetId,
           analysisRunId: x.analysisRunId,
+          bookPublicationId: x.bookPublicationId,
         })),
       });
       await tx.outboxEvent.create({
@@ -625,6 +623,7 @@ async function context(run: any, embeddingProvider: EmbeddingProvider, stageName
       extractionId: source.extractionId,
       chunkSetId: source.chunkSetId,
       analysisRunId: source.analysisRunId,
+      bookPublicationId: source.bookPublicationId,
       task: `Create a grounded short video about ${run.project.name}`,
       tokenBudget: Math.floor(
         SHORT_VIDEO_PROVIDER_INPUT_BUDGET / run.sources.length,

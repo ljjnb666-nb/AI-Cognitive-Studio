@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { prisma } from "@ai-cognitive/db";
+import { Prisma, prisma } from "@ai-cognitive/db";
 import { DeterministicProviderHttpTransport, ProviderGatewayError, ProviderGatewayRepository, createProviderAdapterResolver, parseKeyring, stableHash, type GatewayRequest } from "@ai-cognitive/provider-gateway";
-import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser } from "@ai-cognitive/book-intelligence";
+import { materializeChunkSet, processBookAnalysisRun, requestBookAnalysisForUser, frozenChunkRowDigest, frozenChunkSelectionHash, inspectBookMergeStructure, inspectBookMergeStructureInTransaction } from "@ai-cognitive/book-intelligence";
 import { createBookProductionGatewayRuntime } from "../src/provider-gateway-runtime.js";
 import { startWorkerRuntime } from "../src/runtime.js";
 
@@ -84,7 +84,9 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       const oldInvocations=await prisma.providerInvocation.findMany({where:{workspaceId:f.workspaceId},orderBy:{id:"asc"}});
       const oldUsage=await prisma.providerUsageEvent.findMany({where:{workspaceId:f.workspaceId},orderBy:{id:"asc"}});
       expect(oldInvocations.filter(i=>i.status==="FAILED")).toHaveLength(1);
-      const oldGrant=await prisma.job.create({data:{workspaceId:f.workspaceId,userId:f.userId,type:BOOK_PAID_GRANT_TYPE,status:"FAILED",attemptCount:1,payload:{version:1,sourceDocumentId:document.id,extractionId:requested.run.extractionId,reservedMicroCny:2800,textCalls:28,entries:Array.from({length:28},(_,ordinal)=>({ordinal:ordinal+1,reservedMicroCny:100,state:ordinal===27?"REMOTE_REJECTED":"RESPONSE_RECEIVED"}))}}});
+      // A persisted failed paid grant keeps its gross reservations, including the
+      // rejected 28th chunk. The next execution must explicitly carry this ledger.
+      const oldGrant=await prisma.job.create({data:{workspaceId:f.workspaceId,userId:f.userId,type:BOOK_PAID_GRANT_TYPE,status:"FAILED",attemptCount:1,payload:{version:1,sourceDocumentId:document.id,extractionId:requested.run.extractionId,sha256:document.sha256,bootstrapId:"fixture-history",expiresAt:new Date(Date.now()+120000).toISOString(),credentialIds:["fixture"],maxMicroCny:5_000_000,reservedMicroCny:2800,textCalls:28,embeddingCalls:0,entries:Array.from({length:28},(_,ordinal)=>({ordinal:ordinal+1,kind:"TEXT",reservedMicroCny:100,inputUpper:100,outputMax:10,state:ordinal===27?"REMOTE_REJECTED":"RESPONSE_RECEIVED",operationKey:randomUUID()})),stopped:true}}});
       await expect(r.gateway.execute(historical28!,{userId:f.userId})).resolves.toMatchObject({status:"TERMINAL_FAILED"});
       await expect(r.gateway.execute({...historical28!,inputHash:"b".repeat(64),text:{...historical28!.text!,messages:[{role:"user",content:"new deduplicated envelope"}]}},{userId:f.userId})).rejects.toMatchObject({code:"IDEMPOTENCY_CONFLICT"});
       const before=generated.length;await processBookAnalysisRun(requested.run.id,dependencies);expect(generated).toHaveLength(before);
@@ -92,7 +94,10 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       const recover=()=>requestBookAnalysisForUser(f,{sourceDocumentId:document.id,chunkSetId:requested.run.chunkSetId,pipelineVersion:"history-27-plus-1",promptVersion:"old-compatible",provider:"fixture",model:"fixture-model"});
       const outcomes=await Promise.allSettled([recover(),recover()]);expect(outcomes.some(o=>o.status==="fulfilled")).toBe(true);
       const rearmed=await prisma.bookAnalysisRun.findUniqueOrThrow({where:{id:requested.run.id}});expect(rearmed.jobId).not.toBe(oldJobId);expect(rearmed.dispatchGeneration).toBe(1);
-      const newGrant=await prisma.job.create({data:{workspaceId:f.workspaceId,userId:f.userId,type:BOOK_PAID_GRANT_TYPE,payload:{version:1,sourceDocumentId:document.id,extractionId:requested.run.extractionId,sha256:document.sha256,bootstrapId:"fixture-history",expiresAt:new Date(Date.now()+120000).toISOString(),credentialIds:["fixture"],maxMicroCny:5000000,reservedMicroCny:0,textCalls:0,embeddingCalls:0,entries:[]}}});
+      const carried={grantId:oldGrant.id,payloadDigest:stableHash(oldGrant.payload),reservedMicroCny:2800};
+      const cumulativeBudget={version:1,limitMicroCny:10_000_000,carryForward:[carried]};
+      const newGrant=await prisma.job.create({data:{workspaceId:f.workspaceId,userId:f.userId,type:BOOK_PAID_GRANT_TYPE,payload:{version:1,sourceDocumentId:document.id,extractionId:requested.run.extractionId,sha256:document.sha256,bootstrapId:"fixture-history",expiresAt:new Date(Date.now()+120000).toISOString(),credentialIds:["fixture"],maxMicroCny:5_000_000,reservedMicroCny:0,textCalls:0,embeddingCalls:0,entries:[],cumulativeBudget}}});
+      expect((await prisma.job.findUniqueOrThrow({where:{id:newGrant.id}})).payload).toMatchObject({cumulativeBudget:{limitMicroCny:10_000_000,carryForward:[carried]}});
       await bindBookPaidGrant(newGrant.id,rearmed.id,f);await activateBookPaidGrant(newGrant.id,f);
       let paused!:()=>void,resume!:()=>void;const reached=new Promise<void>(r=>{paused=r;}),release=new Promise<void>(r=>{resume=r;});
       const obsolete=processBookAnalysisRun(requested.run.id,{...dependencies,faultInjector:async(point,meta)=>{if(point==="afterChunkPersist"&&meta.ordinal===27){paused();await release;}}},rearmed.dispatchGeneration);
@@ -174,6 +179,100 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
       expect(final.status).toBe("SUCCEEDED"); expect(groundedRequests).toBeGreaterThan(0);
       expect(await prisma.bookMemoryEvidence.count({ where: { analysisRunId: requested.run.id } })).toBeGreaterThan(0);
     } finally { await r.close(); }
+  });
+
+  it("v3 restores immutable source tuples from spanIndex and consumes a real gateway receipt", async () => {
+    const f = await fixture(), document = await bookLineage(f);
+    await routes(f);
+    let chunkCalls = 0;
+    const r = createBookProductionGatewayRuntime(source, { ...controls, adapterResolver: input => ({
+      execute: async ({ request: value }) => {
+        if (input.family === "EMBEDDING") return { response: { vectors: value.embedding!.texts.map(() => [1, 0, 0]), dimensions: 3 } };
+        if (value.routeSlot !== "BOOK_CHUNK_ANALYSIS") return { response: { type: "STRUCTURED", structured: { summary: "derived summary" } } };
+        const payload = JSON.parse(value.text!.messages[0]!.content);
+        const slices = payload.sourceSlices as Array<{ spanIndex: number; text: string }>;
+        expect(slices.length).toBeGreaterThan(0);
+        expect(slices.map(slice => slice.spanIndex)).toEqual(slices.map((_slice, i) => i));
+        expect(slices.every(slice => typeof slice.text === "string" && !("sourceBlockId" in slice) && !("startOffset" in slice) && !("endOffset" in slice))).toBe(true);
+        expect(payload).not.toHaveProperty("content");
+        expect(value.text!.system).toContain("Evidence contract v3");
+        expect(value.schemaVersion).toContain("book-evidence-span-v3");
+        expect(value.idempotencyKey).toContain(":span-v3");
+        chunkCalls++;
+        return { response: { type: "STRUCTURED", structured: { summary: "grounded", memory: [{ type: "CLAIM", content: "Grounded evidence.", evidence: [{ spanIndex: 0 }] }] } } };
+      },
+    }) });
+    try {
+      const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "book-span-v3-integration", promptVersion: "book-evidence-span-v3", provider: "fixture", model: "fixture-model" });
+      const result = await processBookAnalysisRun(requested.run.id, { analysisProviderForRun: r.createAnalysisProvider, embeddingGatewayForRun: input => ({ gateway: r.gateway, repository: r.repository, userId: input.userId }) });
+      expect(result.status).toBe("SUCCEEDED");
+      expect(chunkCalls).toBeGreaterThan(0);
+      const items = await prisma.bookMemoryEvidence.findMany({ where: { analysisRunId: requested.run.id } });
+      expect(items.length).toBeGreaterThan(0);
+      for (const item of items) {
+        const sourceBlock = await prisma.sourceBlock.findUniqueOrThrow({ where: { id: item.sourceBlockId } });
+        expect(item.startOffset).toBeGreaterThanOrEqual(0);
+        expect(item.endOffset).toBeLessThanOrEqual(sourceBlock.text.length);
+        expect(item.endOffset).toBeGreaterThan(item.startOffset);
+      }
+    } finally { await r.close(); }
+  });
+
+  it("reuses every validated frozen CHUNK without invoking the old chunk model again", async () => {
+    const f=await fixture(),document=await bookLineage(f);await routes(f);
+    const calls={text:0,embedding:0},r=runtime(calls);
+    try {
+      const old=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-origin",promptVersion:"original",provider:"fixture",model:"fixture-model"});
+      expect((await processBookAnalysisRun(old.run.id,{analysisProviderForRun:r.createAnalysisProvider,embeddingGatewayForRun:i=>({gateway:r.gateway,repository:r.repository,userId:i.userId})})).status).toBe("SUCCEEDED");
+      const leaves=await prisma.analysisArtifact.findMany({where:{analysisRunId:old.run.id,scope:"CHUNK"},orderBy:{ordinal:"asc"}});
+      expect(leaves.length).toBeGreaterThan(0);
+      const selection={version:1 as const,entries:leaves.map(a=>({artifactId:a.id,digest:frozenChunkRowDigest(a)}))};
+      expect(frozenChunkSelectionHash(selection)).toMatch(/^[a-f0-9]{64}$/);
+      const broken={version:1 as const,entries:selection.entries.map((e,i)=>i===0?{...e,digest:"0".repeat(64)}:e)};
+      await expect(requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-invalid",promptVersion:"invalid",provider:"fixture",model:"fixture-model",frozenChunks:broken})).rejects.toThrow("FROZEN_CHUNKS_LINEAGE_INVALID");
+      const before=await prisma.providerInvocation.count({where:{workspaceId:f.workspaceId,routeSlot:"BOOK_CHUNK_ANALYSIS"}});
+      const target=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-target",promptVersion:"target",provider:"fixture",model:"fixture-model",frozenChunks:selection});
+      expect(await prisma.analysisArtifact.count({where:{analysisRunId:target.run.id,scope:"CHUNK"}})).toBe(leaves.length);
+      const pendingAudit=await inspectBookMergeStructure(target.run.id,f);
+      expect(pendingAudit.structuralPass).toBe(false);
+      expect(pendingAudit.issues).toEqual(expect.arrayContaining([{code:"RUN_NOT_COMPLETE"}]));
+      expect((await processBookAnalysisRun(target.run.id,{analysisProviderForRun:r.createAnalysisProvider,embeddingGatewayForRun:i=>({gateway:r.gateway,repository:r.repository,userId:i.userId})})).status).toBe("SUCCEEDED");
+      expect(await prisma.providerInvocation.count({where:{workspaceId:f.workspaceId,routeSlot:"BOOK_CHUNK_ANALYSIS"}})).toBe(before);
+      const audit=await inspectBookMergeStructure(target.run.id,f);
+      expect(audit.structuralPass).toBe(true);
+      expect(audit.issues).toHaveLength(0);
+      const sameTransactionAudit=await prisma.$transaction(
+        tx=>inspectBookMergeStructureInTransaction(tx,target.run.id,f),
+        {isolationLevel:Prisma.TransactionIsolationLevel.Serializable},
+      );
+      expect(sameTransactionAudit).toEqual(audit);
+      expect(audit).toMatchObject({semanticReviewRequired:true,fullBookVerified:false});
+      expect(audit.counts.chunks).toBe(leaves.length);
+      // Structural acceptance must fail when a copied CHUNK's source digest
+      // changes, even if the row count and reduction tree remain complete.
+      const originalChunk=await prisma.documentChunk.findFirstOrThrow({where:{chunkSetId:target.run.chunkSetId},orderBy:{ordinal:"asc"}});
+      await prisma.documentChunk.update({where:{id:originalChunk.id},data:{contentHash:"0".repeat(64)}});
+      try {
+        const changed=await inspectBookMergeStructure(target.run.id,f);
+        expect(changed.structuralPass).toBe(false);
+        expect(changed.issues).toEqual(expect.arrayContaining([{code:"CHUNK_SOURCE_INVALID",id:originalChunk.id}]));
+      } finally {
+        await prisma.documentChunk.update({where:{id:originalChunk.id},data:{contentHash:originalChunk.contentHash}});
+      }
+      // Memory text is immutable evidence for downstream revisions: a tampered
+      // body must fail even when vector counts and artifact edges still agree.
+      const originalMemory=await prisma.bookMemoryItem.findFirstOrThrow({where:{analysisRunId:target.run.id}});
+      await prisma.bookMemoryItem.update({where:{id:originalMemory.id},data:{content:originalMemory.content+" tampered"}});
+      try {
+        const changed=await inspectBookMergeStructure(target.run.id,f);
+        expect(changed.structuralPass).toBe(false);
+        expect(changed.issues).toEqual(expect.arrayContaining([{code:"MEMORY_CONTENT_HASH_INVALID",id:originalMemory.id}]));
+      } finally {
+        await prisma.bookMemoryItem.update({where:{id:originalMemory.id},data:{content:originalMemory.content}});
+      }
+      await expect(inspectBookMergeStructure(target.run.id,{workspaceId:f.workspaceId,userId:randomUUID()})).rejects.toThrow("BOOK_MERGE_AUDIT_ACCESS_DENIED");
+      expect((await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"frozen-target",promptVersion:"target",provider:"fixture",model:"fixture-model",frozenChunks:selection})).run.id).toBe(target.run.id);
+    }finally{await r.close();}
   });
   it("allows the explicitly selected two-attempt deadline policy within the original business lease", async () => {
     const f = await fixture(); await routes(f); let calls = 0;

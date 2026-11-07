@@ -18,10 +18,12 @@ class E2EProvider implements AnalysisProvider {
     this.requests.push(structuredClone(request));
     const markers = ["BEGIN_MARKER", "MIDDLE_MARKER", "END_MARKER"].filter((marker) => request.content.includes(marker));
     if (request.stage !== "CHUNK") return { summary: `${markers.join(" ")} reduced ${request.stage}`.trim(), memory: request.stage === "BOOK" ? [{ type: "SUMMARY", content: `book ${markers.join(" ")}` }, { type: "CONCEPT", content: "bounded synthesis" }] : undefined, relations: request.stage === "BOOK" ? [{ fromOrdinal: 0, toOrdinal: 1, type: "DEVELOPS" }] : undefined };
-    const blocks = await prisma.sourceBlock.findMany({ where: { id: { in: request.sourceBlockIds } } });
-    const exact = blocks.map((block) => ({ block, offset: block.text.indexOf(request.content) })).find((candidate) => candidate.offset >= 0);
+    // The CHUNK payload may join several bounded sourceSlices from distinct
+    // source blocks. This deterministic fixture cites only a slice that was
+    // actually sent to the provider; whole-chunk offsets would be fabricated.
+    const sourceSlice = request.sourceSlices?.find(slice => slice.text.length > 0);
     const memory: AnalysisResponse["memory"] = [{ type: "CLAIM", content: `claim:${request.content}` }, { type: "EXAMPLE", content: `example:${request.content}` }];
-    if (exact) memory.push({ type: "QUOTE", content: request.content, evidence: [{ sourceBlockId: exact.block.id, startOffset: exact.offset, endOffset: exact.offset + request.content.length, quoteText: request.content }] });
+    if (sourceSlice) memory.push({ type: "QUOTE", content: sourceSlice.text, evidence: [{ sourceBlockId: sourceSlice.sourceBlockId, startOffset: sourceSlice.startOffset, endOffset: sourceSlice.endOffset, quoteText: sourceSlice.text }] });
     return { summary: `${markers.join(" ")} ${request.content} ${"derived ".repeat(120)}`, memory, relations: [{ fromOrdinal: 0, toOrdinal: 1, type: "SUPPORTS" }] };
   }
 }

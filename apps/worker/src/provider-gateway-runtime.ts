@@ -1,11 +1,11 @@
 import type { BookExecutionContext } from "@ai-cognitive/book-intelligence";
-import { bookAnalysisMessage } from "./book-analysis-request.js";
+import { bookAnalysisMessage, bookAnalysisSpanReferenceInstruction, bookAnalysisSpanReferenceVersion, resolveBookAnalysisSpanReferences } from "./book-analysis-request.js";
 import { ProviderGatewayError } from "@ai-cognitive/provider-gateway";
 import { PostgresResourceBudget, boundedResourceUnits } from "@ai-cognitive/provider-gateway";
 import { prisma, assertExecutionRunActive } from "@ai-cognitive/db";
 import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, GatewayPodcastSpeechSynthesisProvider, type DurablePodcastGenerationProvider, type DurableSpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
 import { GatewayShortVideoProvider, GatewayShortVideoRetrievalEmbeddingProvider, GatewayShortVideoTtsProvider, type ShortVideoProvider, type ShortVideoTtsProvider } from "@ai-cognitive/short-video-generation";
-import { bookRoutePlanHash, fullBookRoutePlanHash, loadConsumedBookAnalysisEmbeddingIdentity, normalizeBookRoutePlan, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type BookAnalysisRoutePlan, type EmbeddingProvider, validateAnalysisResponse } from "@ai-cognitive/book-intelligence";
+import { bookRoutePlanHash, fullBookRoutePlanHash, loadConsumedBookAnalysisEmbeddingIdentity, normalizeBookRoutePlan, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type BookAnalysisRoutePlan, type EmbeddingProvider, validateAnalysisResponse, assertAnalysisRelationsWithinMemory, bookAnalysisRelationsContractVersion, bookAnalysisRelationsInstruction } from "@ai-cognitive/book-intelligence";
 import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, resolveCredentialKeyring, resolveProviderCatalog, stableHash, validateProviderEndpoint, type ExecutionSnapshot, type GatewayExecutionDependencies, type ProviderAdapterResolver, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
@@ -46,32 +46,40 @@ function bookExecutionAttemptPlan(jobPayload: unknown, fallbackPlan: unknown, fa
 function slot(stage: AnalysisRequest["stage"]): "BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS" { return stage === "CHUNK" ? "BOOK_CHUNK_ANALYSIS" : stage === "BOOK" ? "BOOK_SYNTHESIS" : "BOOK_REDUCTION_ANALYSIS"; }
 
 class GatewayAnalysisProvider implements AnalysisProvider {
-  private readonly receipts = new WeakMap<object, { invocationId: string; snapshotId: string }>();
+  private readonly receipts = new WeakMap<object, { invocationId: string; snapshotId: string; spans?: NonNullable<AnalysisRequest["sourceSlices"]> }>();
   constructor(private readonly runtime: BookGatewayRuntime, private readonly input: { workspaceId: string; userId: string; analysisRunId: string; executionKey: string; execution?: BookExecutionContext; routes: Record<"BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS", ExecutionSnapshot> }) {}
   async generateStructured(request: AnalysisRequest) {
     const routeSlot = slot(request.stage), pinned = this.input.routes[routeSlot], structuredOutput = pinned.capability.structuredOutput === "STRICT_JSON_SCHEMA" ? "STRICT_JSON_SCHEMA" : pinned.capability.structuredOutput === "JSON_MODE" ? "JSON_MODE" : undefined;
     if (!structuredOutput) throw new Error("BOOK_ANALYSIS_STRUCTURED_OUTPUT_UNSUPPORTED");
     const operation = (request as AnalysisRequest & { operationKey?: string }).operationKey ?? sha256(JSON.stringify([request.stage, request.content, request.sourceBlockIds]));
-    const evidenceInstruction = request.sourceSlices ? "\nEvidence contract: sourceSlices contain the actual sourceBlockId, original UTF-16 startOffset/endOffset and exact bounded text. For factual memory cite the supplied ID and complete supplied span without changing the offsets. Never invent IDs, ordinal IDs or ranges. Direct quotes require exact text and exact original offsets; omit a quote if uncertain. Return at most six grounded memory entries per chunk." : "";
+    const useSpanReferences = request.stage === "CHUNK" && request.promptVersion === bookAnalysisSpanReferenceVersion;
+    const spans = useSpanReferences ? structuredClone(request.sourceSlices ?? []) : undefined;
+    if (useSpanReferences && (!spans?.length || spans.some(span => !span.text.length))) throw new Error("ANALYSIS_SOURCE_SLICE_INVALID");
+    const evidenceInstruction = spans ? bookAnalysisSpanReferenceInstruction(spans.length)
+      : request.sourceSlices ? "\nEvidence contract: sourceSlices contain the actual sourceBlockId, original UTF-16 startOffset/endOffset and exact bounded text. For factual memory cite the supplied ID and complete supplied span without changing the offsets. Never invent IDs, ordinal IDs or ranges. Direct quotes require exact text and exact original offsets; omit a quote if uncertain. Return at most six grounded memory entries per chunk." : "";
+    const outputContract = spans ? bookAnalysisJsonOutputContract.replace('"sourceBlockId": string, "startOffset": integer, "endOffset": integer,', '"spanIndex": integer,') : bookAnalysisJsonOutputContract;
     const objective = request.stage === "CHUNK" ? "\nExtract the author's core claims, facts, supporting evidence, concepts, people and relevant historical examples objectively and concisely. Preserve qualifications and source meaning. Do not invent scenes, extrapolate instructions or add unrelated detail. sourceSlices contain the bounded source text in reading order." : "";
-    const system = (structuredOutput === "JSON_MODE" ? `${request.systemInstructions}\n\n${bookAnalysisJsonOutputContract}` : request.systemInstructions) + evidenceInstruction + objective;
-    const content = bookAnalysisMessage(request);
+    const system = (structuredOutput === "JSON_MODE" ? `${request.systemInstructions}\n\n${outputContract}` : request.systemInstructions) + evidenceInstruction + objective + "\n" + bookAnalysisRelationsInstruction;
+    const content = bookAnalysisMessage(request, Boolean(spans));
     const text = { system, messages: [{ role: "user" as const, content }], structuredOutput: structuredOutput === "STRICT_JSON_SCHEMA" ? { mode: "STRICT_JSON_SCHEMA" as const, schemaName: "book_analysis_response", schema } : { mode: "JSON_MODE" as const } };
-    const inputHash = sha256(JSON.stringify([this.input.workspaceId, routeSlot, this.input.analysisRunId, request.stage, operation, sha256(content), request.pipelineVersion, request.promptVersion, schema]));
-    const outcome = await this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion: request.promptVersion, schemaVersion: "book-analysis-v2-evidence" }, { userId: this.input.userId });
+    const inputHash = sha256(JSON.stringify([this.input.workspaceId, routeSlot, this.input.analysisRunId, request.stage, operation, sha256(content), request.pipelineVersion, request.promptVersion, schema, bookAnalysisRelationsContractVersion, ...(spans ? [bookAnalysisSpanReferenceVersion, sha256(JSON.stringify(spans))] : [])]));
+    const outcome = await this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}${spans ? ":span-v3" : ""}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion: request.promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` }, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);
     if (outcome.status === "ALREADY_PROCESSED" && outcome.textConsumed) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const response = outcome.response as { type?: string; structured?: unknown } | undefined;
     if (!response || response.type !== "STRUCTURED" || !outcome.invocationId || !(outcome.status === "SUCCEEDED" ? outcome.snapshot : outcome.snapshot)) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
-    const analysis = validateAnalysisResponse(response.structured), snapshotId = outcome.snapshot!.id;
-    this.receipts.set(analysis, { invocationId: outcome.invocationId, snapshotId });
+    const analysis = validateAnalysisResponse(spans ? resolveBookAnalysisSpanReferences(response.structured, spans) : response.structured), snapshotId = outcome.snapshot!.id;
+    assertAnalysisRelationsWithinMemory(analysis);
+    this.receipts.set(analysis, { invocationId: outcome.invocationId, snapshotId, ...(spans ? { spans } : {}) });
     return analysis;
   }
   async consumeGenerated(response: Awaited<ReturnType<AnalysisProvider["generateStructured"]>>, consumer: AnalysisReceiptConsumer): Promise<"CONSUMED" | "ALREADY_CONSUMED"> {
     const receipt = this.receipts.get(response as object); if (!receipt) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const result = await this.runtime.repository.consumeTextResult({ workspaceId: this.input.workspaceId, invocationId: receipt.invocationId, snapshotId: receipt.snapshotId, consumerKind: consumer.consumerKind, consumerKey: consumer.consumerKey, consumerFingerprint: consumer.consumerFingerprint }, async ({ tx, response: raw }) => {
       if (raw.type !== "STRUCTURED") throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
-      await consumer.materialize(tx as unknown as AnalysisTransaction, validateAnalysisResponse(raw.structured));
+      const analysis = validateAnalysisResponse(receipt.spans ? resolveBookAnalysisSpanReferences(raw.structured, receipt.spans) : raw.structured);
+      assertAnalysisRelationsWithinMemory(analysis);
+      await consumer.materialize(tx as unknown as AnalysisTransaction, analysis);
     });
     return result.status;
   }
