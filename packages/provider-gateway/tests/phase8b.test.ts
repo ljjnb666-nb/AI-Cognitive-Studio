@@ -75,7 +75,7 @@ describe("Phase 8B real text provider adapters", () => {
     ["{\"wrong\":true}","stop",true,false],
     [null,"stop",false,false],
   ])("MiniMax 拒绝非法或截断内容并保留用量，不泄露正文：%s %s",async(content,reason,jsonValid,inline)=>{
-    const base=input("minimax","OPENAI_COMPATIBLE"),value={...base,snapshot:{...base.snapshot,modelId:"MiniMax-M3"}};
+    const base=input("minimax","OPENAI_COMPATIBLE","https://api.minimax.io/v1/chat/completions"),value={...base,snapshot:{...base.snapshot,modelId:"MiniMax-M3"},request:{...base.request,capability:{family:"TEXT_GENERATION" as const,structuredOutput:"JSON_MODE" as const},text:{...text,structuredOutput:{mode:"JSON_MODE" as const,schema:text.structuredOutput!.schema}}}};
     const wire=transport({choices:[{finish_reason:reason,message:{content,reasoning_content:"PRIVATE_REASONING"}}],usage:{prompt_tokens:12,completion_tokens:34}});
     let failure:unknown;try{await new OpenAICompatibleAdapter(wire).execute(value);}catch(error){failure=error;}
     expect(failure).toMatchObject({code:reason === "length" ? "OUTPUT_TRUNCATED" : "INVALID_PROVIDER_RESPONSE",retryable:false,usage:{inputTokens:12,outputTokens:34,extra:{textStructuredResponse:{contentJsonValid:jsonValid,inlineReasoningPresent:inline,reportedUsagePresent:true}}}});
@@ -103,7 +103,7 @@ describe("Phase 8B real text provider adapters", () => {
     const wire = transport({ model: "MiniMax-M3", choices: [{ finish_reason: "stop", message: { content: '{"answer":"ok"}', reasoning_content: "private" } }] });
     await new OpenAICompatibleAdapter(wire).execute({ ...base, snapshot, request });
     expect(wire.calls[0]!.url).toBe(base.snapshot.endpoint);
-    expect(JSON.parse(wire.calls[0]!.body)).toMatchObject({ thinking: { type: "disabled" }, reasoning_split: true, max_tokens: 100 });
+    expect(JSON.parse(wire.calls[0]!.body)).toMatchObject({ thinking: { type: "disabled" }, reasoning_split: true, max_completion_tokens: 100 });
     expect(JSON.parse(wire.calls[0]!.body).response_format).toBeUndefined();
     expect(JSON.parse(wire.calls[0]!.body).temperature).toBeUndefined();
     const legacy = transport({ choices: [{ message: { content: '{"answer":"ok"}' } }] });

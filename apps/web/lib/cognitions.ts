@@ -1,3 +1,4 @@
+import { readPublishedBookRevisionForRun } from "@ai-cognitive/book-intelligence";
 import { bibliographicMemoryPattern, isBibliographicMemory } from "./bibliographic-memory";
 import { Prisma, prisma } from "@ai-cognitive/db";
 import type { WebIdentityContext } from "./identity";

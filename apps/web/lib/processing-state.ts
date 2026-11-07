@@ -3,7 +3,7 @@ export type ProcessingWorkerAvailability = { ingestion: WorkerAvailability; book
 export type ProcessingState = "NOT_STARTED" | "QUEUED_FOR_INGESTION" | "INGESTING" | "WAITING_FOR_ANALYSIS" | "ANALYSIS_QUEUED" | "ANALYZING" | "WAITING_FOR_PROVIDER" | "BOOTSTRAP_FAILED" | "BOOTSTRAP_SUCCEEDED" | "SUCCEEDED" | "INGESTION_FAILED" | "ANALYSIS_FAILED" | "PROCESSING_DEGRADED";
 export type ProcessingStage = "INGESTION" | "BOOK_ANALYSIS" | "COMPLETE";
 export type RecoveryAction = "NONE" | "RECHECK" | "RETRY_INGESTION" | "RETRY_ANALYSIS" | "REPAIR_CURRENT_INTELLIGENCE";
-export type ProcessingStatus = { state: ProcessingState; stage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability };
+export type ProcessingStatus = { failureReason?: string; state: ProcessingState; stage: ProcessingStage; recoveryAction: RecoveryAction; stageAvailability: WorkerAvailability };
 
 type Run = { routingPlan?: unknown; routingOutcome?: unknown; errorCode?: string | null; status?: string | null; createdAt?: Date | null; startedAt?: Date | null; updatedAt?: Date | null; completedAt?: Date | null; executionLeaseUntil?: Date | null; executionClaimedAt?: Date | null; job?: { startedAt?: Date | null; createdAt?: Date | null } | null } | null | undefined;
 
