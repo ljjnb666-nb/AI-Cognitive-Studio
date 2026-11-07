@@ -60,10 +60,22 @@ async function signedUp(browser: Browser, name: string, email: string) {
 
 async function uploadBook(page: Page, filename: string) {
   await page.goto("/studio/library");
+  // The hidden input is rendered by React: wait for the client upload handler
+  // to hydrate before dispatching a synthetic file change in Playwright.
+  await page.waitForLoadState("networkidle");
   const contents = `# ${filename}\n\n${"Tenant-scoped evidence must never be exposed to another authenticated workspace. ".repeat(300)}`;
+  const completion = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/studio/upload" &&
+    response.request().method() === "POST" &&
+    Boolean(response.request().postData()?.includes('"sessionId"')), { timeout: 30_000 });
   await page.locator('input[type="file"]').setInputFiles({ name: filename, mimeType: "text/markdown", buffer: Buffer.from(contents) });
-  await expect(page).toHaveURL(/\/studio\/library\/[^/]+$/, { timeout: 30_000 });
-  const sourceDocumentId = page.url().split("/").pop()!;
+  const completed = await completion;
+  const payload = (await completed.json()) as { sourceDocumentId?: string; error?: string };
+  expect(completed.status(), `upload complete failed: ${payload.error ?? "unknown"}`).toBe(200);
+  expect(payload.sourceDocumentId, "upload response must contain durable source ID").toBeTruthy();
+  const sourceDocumentId = payload.sourceDocumentId!;
+  // Still require the actual client transition; do not navigate manually.
+  await expect(page).toHaveURL(url => url.pathname === "/studio/library/" + sourceDocumentId, { timeout: 30_000 });
   await expect.poll(async () => (await prisma.currentBookIntelligence.findFirst({ where: { sourceDocumentId } }))?.id, { timeout: 90_000 }).toBeTruthy();
   return sourceDocumentId;
 }
@@ -164,12 +176,14 @@ test("two real users cannot cross tenant boundaries, while members can switch an
   const b = await signedUp(browser, "Tenant B", `phase7-b-${suffix}@ai-cognitive-studio.test`);
   const bSourceId = await uploadBook(b.page, "b-tenant-evidence.md");
   const bGateway = await assertDurableGatewayPrincipal({ sourceDocumentId: bSourceId, userId: b.user.id, workspaceId: b.workspaceId });
-  const firstRun = await prisma.bookAnalysisRun.findFirstOrThrow({ where: { job: { user: { email: { startsWith: "phase7-flow-" } } }, status: "SUCCEEDED" }, include: { job: true }, orderBy: { createdAt: "desc" } });
-  const firstInvocation = await prisma.providerInvocation.findFirstOrThrow({ where: { workspaceId: firstRun.workspaceId, idempotencyKey: `book-analysis-embeddings:${firstRun.id}` } });
-  expect(firstRun.workspaceId).not.toBe(b.workspaceId);
-  expect(firstInvocation.workspaceId).not.toBe(bGateway.invocation.workspaceId);
   const fixture = await createBProductFixtures({ userId: b.user.id, workspaceId: b.workspaceId });
   const a = await signedUp(browser, "Tenant A", `phase7-a-${suffix}@ai-cognitive-studio.test`);
+  // Independently prove both tenants have distinct durable gateway principals.
+  // Do not rely on a separate spec executing first or passing.
+  const aSourceId = await uploadBook(a.page, "a-tenant-evidence.md");
+  const aGateway = await assertDurableGatewayPrincipal({ sourceDocumentId: aSourceId, userId: a.user.id, workspaceId: a.workspaceId });
+  expect(a.workspaceId).not.toBe(b.workspaceId);
+  expect(aGateway.invocation.workspaceId).not.toBe(bGateway.invocation.workspaceId);
 
   const forbiddenSource = await a.page.request.get(`/studio/library/${bSourceId}`);
   expect(forbiddenSource.status()).toBe(404);

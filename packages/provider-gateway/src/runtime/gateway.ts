@@ -14,6 +14,7 @@ import { type ResourceBudgetControl } from "./resource-budget.js";
 import type { ExecutionPrincipal, ExecutionSnapshot, GatewayRequest, PlatformDefaultResolver, ProviderAdapterResolver } from "../types.js";
 
 export type GatewayExecutionDependencies = {
+  requestExecutionPolicy?: (snapshot: ExecutionSnapshot, request: GatewayRequest) => { timeoutMs: number; maxAttempts: number } | undefined;
   assertActive?: (request: GatewayRequest) => Promise<void>;
   resourceBudget?: ResourceBudgetControl;
   authorize?: (principal: ExecutionPrincipal, request: GatewayRequest) => Promise<void>;
@@ -114,7 +115,11 @@ class ProviderGatewayCore {
       catch (error) { try { await this.execution.repository.releasePreRemoteClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!); } catch (releaseError) { throw safeError(releaseError, request.correlationId); } throw error; }
     }
     if (request.speech && this.execution.repository) { try { this.execution.repository.assertSpeechResultStorageAvailable(); } catch (error) { try { await this.execution.repository.releasePreRemoteClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!); } catch (releaseError) { throw safeError(releaseError, request.correlationId); } throw error; } }
-    const key = `${snapshot.workspaceId}:${snapshot.connectionId ?? snapshot.providerKey}:${snapshot.modelId}`; const maxAttempts = Math.min(request.budget?.maxAttempts ?? this.execution.maxAttempts ?? 3, this.execution.maxAttempts ?? 3); let last: ProviderGatewayError | undefined;
+    const policy = this.execution.requestExecutionPolicy?.(snapshot, request);
+    const timeoutMs = this.execution.timeoutMs ?? policy?.timeoutMs ?? 30_000;
+    const attemptLimit = this.execution.maxAttempts ?? policy?.maxAttempts ?? 3;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || !Number.isSafeInteger(attemptLimit) || attemptLimit < 1) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Invalid execution policy");
+    const key = `${snapshot.workspaceId}:${snapshot.connectionId ?? snapshot.providerKey}:${snapshot.modelId}`; const maxAttempts = Math.min(request.budget?.maxAttempts ?? attemptLimit, attemptLimit); let last: ProviderGatewayError | undefined;
     for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
       if (request.signal?.aborted) { await this.finish(claim, snapshot, "BLOCKED"); throw new ProviderGatewayError("CANCELLED"); }
       let remoteStarted = false;
@@ -129,13 +134,13 @@ class ProviderGatewayCore {
         const state = snapshot.connectionId ? this.execution.repository ? await this.execution.repository.loadPinnedRuntimeState(snapshot.workspaceId, snapshot.id) : await this.execution.beforeAttempt?.(snapshot) : snapshot.source === "PLATFORM" ? snapshot.protocol === "TEST" ? {} : this.execution.repository ? { credential: await resolvePlatformCredential(this.execution.platformCredentials, snapshot) } : await this.execution.beforeAttempt?.(snapshot) : await this.execution.beforeAttempt?.(snapshot);
         await this.execution.circuit?.admit(key, this.execution.circuitCooldownMs ?? 1_000);
         await this.execution.rate?.admit(key, this.execution.rateLimit ?? 60, this.execution.rateWindowSeconds ?? 60);
-        lease = await this.execution.concurrency?.acquire(key, this.execution.concurrencyLimit ?? 4, this.execution.concurrencyLeaseMs ?? 30_000);
+        lease = await this.execution.concurrency?.acquire(key, this.execution.concurrencyLimit ?? 4, policy ? Math.max(this.execution.concurrencyLeaseMs ?? 30_000, timeoutMs + 1_000) : this.execution.concurrencyLeaseMs ?? 30_000);
         reservation = await this.execution.resourceBudget?.reserve(request);
         const startedAt = Date.now(); const durableAttempt = claim.invocationId && claim.claimToken ? await this.execution.repository!.startAttempt(snapshot.workspaceId, claim.invocationId, claim.claimToken) : undefined; remoteStarted = Boolean(durableAttempt);
         let remoteSucceeded = false; let heartbeatLost = false;
         try {
           let heartbeat: ClaimHeartbeat | undefined; let result;
-          try { result = await deadline(signal => { remoteStarted = true; return adapter.execute({ snapshot, request: { ...request, requestFingerprint: fingerprint }, signal, credential: state?.credential }); }, request.signal, this.execution.timeoutMs ?? 30_000, controller => { if (!claim.invocationId || !claim.claimToken || !this.execution.repository) return; heartbeat = new ClaimHeartbeat(Math.max(1, Math.floor(this.execution.repository.leaseDurationMs / 3)), async () => { await this.execution.assertActive?.(request); await this.execution.repository!.renewClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!); }, () => controller.abort()); heartbeat.start(); }); } finally { await heartbeat?.stopAndDrain(); heartbeatLost = heartbeat?.lost ?? false; }
+          try { result = await deadline(signal => { remoteStarted = true; return adapter.execute({ snapshot, request: { ...request, requestFingerprint: fingerprint }, signal, credential: state?.credential }); }, request.signal, timeoutMs, controller => { if (!claim.invocationId || !claim.claimToken || !this.execution.repository) return; heartbeat = new ClaimHeartbeat(Math.max(1, Math.floor(this.execution.repository.leaseDurationMs / 3)), async () => { await this.execution.assertActive?.(request); await this.execution.repository!.renewClaim(snapshot.workspaceId, claim.invocationId!, claim.claimToken!); }, () => controller.abort()); heartbeat.start(); }); } finally { await heartbeat?.stopAndDrain(); heartbeatLost = heartbeat?.lost ?? false; }
           if (heartbeatLost) throw new ProviderGatewayError("INTERNAL_PROVIDER_ERROR", "Execution ownership heartbeat was lost");
           remoteSucceeded = true;
           const latencyMs = Date.now() - startedAt;

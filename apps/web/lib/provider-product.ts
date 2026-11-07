@@ -7,7 +7,7 @@ import { resolveBookProductExecution as resolveSharedBookProductExecution, type 
 const requiredSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"] as const;
 type JsonRecord = Record<string, unknown>;
 type RouteWithConnection = { routeSlot: string; modelId: string; configuration: unknown; connection: { id: string; providerKey: string; protocol: string; endpoint: string | null; status: string; credentialVersions: { id: string; status: string }[] } };
-export type ProviderReadinessDependency = { slot: RouteSlot; label: string; state: "READY" | "MISSING"; providerKey?: string; providerName?: string; modelId?: string; error?: string };
+export type ProviderReadinessDependency = { slot: RouteSlot; label: string; state: "READY" | "MISSING"; providerKey?: string; providerName?: string; modelId?: string; error?: string; detail?: string };
 
 export type ProductRouteIdentity = { provider: string; model: string; modelVersion?: string; configuration: JsonRecord };
 export type ProductBookExecution = ProductRouteIdentity & { routePlan: BookAnalysisRoutePlan };
@@ -55,11 +55,17 @@ const readinessDependencyLabels: Partial<Record<RouteSlot, string>> = {
   BOOK_SYNTHESIS: "全书综合",
   EMBEDDING: "向量检索",
   THINKING_SESSION: "思考",
+  PODCAST_SCRIPT: "播客脚本",
+  PODCAST_TTS: "播客语音",
+  SHORT_VIDEO_SCRIPT: "短视频脚本",
+  SHORT_VIDEO_TTS: "短视频语音",
+  TEACH_BACK_ASSESSMENT: "理解验证",
+  PDF_VISUAL_STRUCTURE: "页面结构审核",
 };
 function readinessDependency(manifest: ReturnType<typeof productManifest>, routes: RouteWithConnection[], slot: RouteSlot, missingError?: string): ProviderReadinessDependency {
   try {
     const identity = routeIdentity(manifest, routes, slot), provider = manifest.providers.find(item => item.providerKey === identity.provider);
-    return { slot, label: readinessDependencyLabels[slot] ?? slot, state: "READY", providerKey: identity.provider, providerName: provider?.displayName ?? identity.provider, modelId: identity.model };
+    return { slot, label: readinessDependencyLabels[slot] ?? slot, state: "READY", providerKey: identity.provider, providerName: provider?.displayName ?? identity.provider, modelId: identity.model, ...(provider?.models.find(model => model.modelId === identity.model)?.deprecated ? { detail: `${provider?.displayName ?? identity.provider} · ${identity.model}（旧型号，建议更新）` } : {}) };
   } catch (error) {
     return { slot, label: readinessDependencyLabels[slot] ?? slot, state: "MISSING", error: missingError ?? (error instanceof Error ? error.message : "AI_PROVIDER_CONFIGURATION_REQUIRED") };
   }
@@ -116,6 +122,7 @@ export async function providerReadiness(workspaceId: string) {
   // route is absent or unusable.
   const bookDependencies = (["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"] as const).map(slot => readinessDependency(manifest, routes, slot, slot === "EMBEDDING" ? "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED" : undefined));
   const bookMissing = bookDependencies.flatMap(item => item.state === "MISSING" ? [item.error ?? "AI_PROVIDER_CONFIGURATION_REQUIRED"] : []);
+  const podcastDependencies = (["PODCAST_SCRIPT", "EMBEDDING"] as const).map(slot => readinessDependency(manifest, routes, slot));
   const podcastMissing = missing(["PODCAST_SCRIPT", "EMBEDDING"]);
   const audioMissing = missing(["PODCAST_TTS"]);
   try { await resolvePodcastAudioRoute(workspaceId); } catch (error) { audioMissing.push(error instanceof Error ? error.message : "PODCAST_TTS_CONFIGURATION_REQUIRED"); }
@@ -124,8 +131,17 @@ export async function providerReadiness(workspaceId: string) {
   const thinkingMissing = thinkingDependency.state === "MISSING" ? [thinkingDependency.error ?? "AI_PROVIDER_CONFIGURATION_REQUIRED"] : [];
   const masteryMissing = missing(["TEACH_BACK_ASSESSMENT"]);
   try { await resolveShortVideoTtsRoute(workspaceId); } catch (error) { videoMissing.push(error instanceof Error ? error.message : "SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED"); }
+  const audioModel = { ...readinessDependency(manifest, routes, "PODCAST_TTS"), label: "语音模型" };
+  let voiceDependency: ProviderReadinessDependency = { slot: "PODCAST_TTS", label: "主持人音色", state: "MISSING", error: "PODCAST_TTS_CONFIGURATION_REQUIRED" };
+  try { const audio = await resolvePodcastAudioRoute(workspaceId); voiceDependency = { ...voiceDependency, state: "READY", error: undefined, detail: audio.voices.map(voice => `${voice.providerVoiceId}（${voice.speakingRate} 倍速）`).join(" / ") }; } catch { /* Keep the existing voice configuration gate. */ }
+  const audioDependencies = [audioModel, voiceDependency];
+  const videoDependencies = (["SHORT_VIDEO_SCRIPT", "EMBEDDING", "SHORT_VIDEO_TTS"] as const).map(slot => readinessDependency(manifest, routes, slot));
+  let narrator: ProviderReadinessDependency = { slot: "SHORT_VIDEO_TTS", label: "旁白设置", state: "MISSING", error: "SHORT_VIDEO_TTS_VOICE_CONFIGURATION_REQUIRED" };
+  try { const tts = await resolveShortVideoTtsRoute(workspaceId); narrator = { ...narrator, state: "READY", error: undefined, detail: `${tts.configuration.providerVoiceId}（${tts.configuration.speakingRate} 倍速） · ${String(tts.configuration.outputFormat).toUpperCase()}` }; } catch { /* Preserve the execution gate and expose the missing configuration. */ }
+  videoDependencies.push(narrator);
+  const masteryDependency = readinessDependency(manifest, routes, "TEACH_BACK_ASSESSMENT");
   const bookConfigured = bookDependencies.filter(item => item.state === "READY").length;
-  return { book: { state: bookMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(bookMissing)], configured: bookConfigured, required: bookDependencies.length, dependencies: bookDependencies }, podcast: { state: podcastMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(podcastMissing)] }, podcastAudio: { state: audioMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(audioMissing)] }, shortVideo: { state: videoMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(videoMissing)] }, thinking: { state: thinkingMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(thinkingMissing)], dependencies: [thinkingDependency] }, mastery: { state: masteryMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(masteryMissing)] } } as const;
+  return { book: { state: bookMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(bookMissing)], configured: bookConfigured, required: bookDependencies.length, dependencies: bookDependencies }, podcast: { state: podcastMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(podcastMissing)], configured:podcastDependencies.filter(item=>item.state==="READY").length,required:podcastDependencies.length,dependencies:podcastDependencies }, podcastAudio: { state: audioMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(audioMissing)], configured:audioDependencies.filter(item=>item.state==="READY").length,required:audioDependencies.length,dependencies:audioDependencies }, shortVideo: { state: videoMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(videoMissing)],configured:videoDependencies.filter(item=>item.state==="READY").length,required:videoDependencies.length,dependencies:videoDependencies }, thinking: { state: thinkingMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(thinkingMissing)], dependencies: [thinkingDependency] }, mastery: { state: masteryMissing.length ? "INCOMPLETE" : "READY", missing: [...new Set(masteryMissing)],dependencies:[masteryDependency] } } as const;
 }
 
 export function routeCapability(routeSlot: RouteSlot) { return routeSlotCapabilities[routeSlot]; }

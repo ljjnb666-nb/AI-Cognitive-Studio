@@ -33,19 +33,42 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await expect.poll(() => prisma.currentDocumentExtraction.count({ where: { sourceDocumentId } }), { timeout: 90_000 }).toBe(1);
   const extraction = await prisma.currentDocumentExtraction.findFirstOrThrow({ where: { sourceDocumentId } });
   await expect.poll(() => prisma.sourceBlock.count({ where: { extractionId: extraction.extractionId } }), { timeout: 90_000 }).toBeGreaterThan(0);
+  // New UI opens the original-text reader by default; generation actions
+  // and generated insights are intentionally inside the overview tab.
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 90_000 });
   await expect(page.getByText(excerpt).first()).toBeVisible();
   await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
   await expect(page.locator(".evidence-item.active").filter({ hasText: excerpt })).toBeVisible();
-  await expect(page.getByText(/IGNORE PREVIOUS INSTRUCTIONS/)).toHaveCount(0);
+  // This adversarial text is part of the uploaded book and must remain readable
+  // as *source evidence*. It must not become a generated intelligence claim.
+  await expect(page.locator(".evidence-pane").getByText(/IGNORE PREVIOUS INSTRUCTIONS/).first()).toBeVisible();
+  await expect(page.locator(".interpretation-pane").getByText(/IGNORE PREVIOUS INSTRUCTIONS/)).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("book-intelligence.png"), fullPage: true });
   console.log("FLOW_A_PASS");
 
+  // Clicking an evidence citation switches back to the source reader.
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await page.getByRole("link", { name: "生成播客" }).click();
   await page.locator('input[name="title"]').fill("证据播客");
   await page.locator('input[name="duration"]').fill("1");
   await page.getByRole("button", { name: "开始生成播客" }).click();
-  await expect(page).toHaveURL(/\/studio\/podcasts\//, { timeout: 30_000 });
+  // `/studio/podcasts/new` is the form, not a generated episode. Wait for
+  // the actual detail route before deriving a durable episode identifier.
+  await expect(page).toHaveURL(url => /^\/studio\/podcasts\/[^/]+$/.test(url.pathname) && url.pathname !== "/studio/podcasts/new", { timeout: 30_000 });
+  // The latest product deliberately separates script generation from paid TTS.
+  // In this isolated Phase 6 harness, the configured speech provider is a
+  // deterministic local WAV fixture, so exercise the actual user-initiated
+  // audio request instead of assuming the script job auto-starts TTS.
+  const episodeId = new URL(page.url()).pathname.split("/").pop();
+  if (!episodeId) throw new Error("PHASE6_EPISODE_ID_MISSING");
+  await expect.poll(() => prisma.podcastGenerationRun.count({ where: { episodeId, status: "SUCCEEDED" } }), { timeout: 90_000 }).toBe(1);
+  await page.reload();
+  const generateAudio = page.getByRole("button", { name: "生成音频" });
+  await expect(generateAudio).toBeVisible({ timeout: 30_000 });
+  const requestAudio = page.waitForResponse(response => new URL(response.url()).pathname === "/api/studio/podcast-audio" && response.request().method() === "POST");
+  await generateAudio.click();
+  expect((await requestAudio).ok()).toBeTruthy();
   const audio = page.locator("audio");
   await expect(audio).toBeVisible({ timeout: 90_000 });
   await expect.poll(async () => audio.evaluate((node: HTMLAudioElement) => new Promise<number>((resolve, reject) => { if (Number.isFinite(node.duration) && node.duration > 0) return resolve(node.duration); node.addEventListener("loadedmetadata", () => resolve(node.duration), { once: true }); node.addEventListener("error", () => reject(new Error("audio metadata failed")), { once: true }); node.load(); })), { timeout: 30_000 }).toBeGreaterThan(0);
@@ -68,7 +91,9 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.locator('input[name="title"]').fill("证据短视频");
   await page.locator('input[name="duration"]').fill("15");
   await page.getByRole("button", { name: "开始生成短视频" }).click();
-  await expect(page).toHaveURL(/\/studio\/videos\//, { timeout: 30_000 });
+  // `/studio/videos/new` also satisfies a loose prefix match. Require a
+  // real project detail route so video rendering checks the created record.
+  await expect(page).toHaveURL(url => /^\/studio\/videos\/[^/]+$/.test(url.pathname) && url.pathname !== "/studio/videos/new", { timeout: 30_000 });
   const video = page.locator("video");
   await expect(video).toBeVisible({ timeout: 120_000 });
   const metadata = await video.evaluate((node: HTMLVideoElement) => new Promise<{ duration: number; width: number; height: number }>((resolve, reject) => { if (Number.isFinite(node.duration) && node.duration > 0) return resolve({ duration: node.duration, width: node.videoWidth, height: node.videoHeight }); node.addEventListener("loadedmetadata", () => resolve({ duration: node.duration, width: node.videoWidth, height: node.videoHeight }), { once: true }); node.addEventListener("error", () => reject(new Error("video metadata failed")), { once: true }); node.load(); }));

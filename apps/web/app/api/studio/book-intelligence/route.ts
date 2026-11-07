@@ -17,10 +17,11 @@ export async function POST(request: Request) {
   try {
     const { sourceDocumentId } = schema.parse(await request.json());
     const identity = await resolveWebMutationIdentity();
-    const document = await prisma.sourceDocument.findFirstOrThrow({
-      where: { id: sourceDocumentId, workspaceId: identity.workspaceId },
+    const document = await prisma.sourceDocument.findFirst({
+      where: { id: sourceDocumentId, workspaceId: identity.workspaceId, source: { archivedAt: null } },
       include: { ingestionRuns: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true } } },
     });
+    if (!document) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
     if (document.ingestionRuns[0]?.status !== "SUCCEEDED") throw new Error("INGESTION_NOT_SUCCEEDED");
     const provider = await resolveBookProductExecution(identity.workspaceId);
     const chunkSet = await materializeChunkSet({ workspaceId: identity.workspaceId, sourceDocumentId: document.id });

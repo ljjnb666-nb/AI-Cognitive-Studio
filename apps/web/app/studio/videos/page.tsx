@@ -2,7 +2,7 @@ import { ListPagination, listPage } from "@/components/list-pagination";
 import Link from "next/link";
 import { PageHeader } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
-import { statusLabel, videoList } from "@/lib/product";
+import { videoList } from "@/lib/product";
 
 export default async function VideosPage({ searchParams }: { searchParams: Promise<{ page?: string | string[] }> }) {
   const page = listPage((await searchParams).page);
@@ -27,9 +27,9 @@ export default async function VideosPage({ searchParams }: { searchParams: Promi
             <div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
                 <span className="font-mono" style={{ fontSize: 11, color: "var(--outline)", textTransform: "uppercase" }}>
-                  SHORT VIDEO
+                  短视频
                 </span>
-                <StatusBadge value={statusLabel(v.status, v.errorCode)} />
+                <StatusBadge value={v.statusText} />
               </div>
               <h3 className="font-serif" style={{ fontSize: 18, fontWeight: 600, color: "var(--on-surface)", margin: 0 }}>
                 {v.title}

@@ -1,3 +1,5 @@
+import { processingWorkerAvailability } from "@/lib/worker-heartbeat";
+import { processingErrorType } from "@/lib/product-errors";
 import { CancelJobButton } from "@/components/cancel-job-button";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -8,7 +10,7 @@ import { GenerationProcessing } from "@/components/generation-processing";
 import { PodcastPlayer } from "@/components/podcast-player";
 import { PodcastQualityFeedback } from "@/components/podcast-quality-feedback";
 import { resolveWebIdentity } from "@/lib/identity";
-import { podcastStageLabel, statusLabel } from "@/lib/product";
+import { generationStatusLabel } from "@/lib/product-labels";
 import { betaTelemetryEnabledForUser } from "@ai-cognitive/product-analytics";
 
 export default async function PodcastDetail({ params }: { params: Promise<{ episodeId: string }> }) {
@@ -48,25 +50,23 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
 
   const run = episode.generationRuns[0];
   const audioRun = episode.audioGenerationRuns[0];
-  const statusText = run
-    ? run.status === "FAILED"
-      ? "生成失败，可重新尝试"
-      : podcastStageLabel(run.stage) ?? statusLabel(run.status, run.errorCode)
-    : "等待处理";
+  const scriptActive = run?.status === "QUEUED" || run?.status === "RUNNING";
+  const worker = run?.status === "QUEUED" ? (await processingWorkerAvailability()).podcastGeneration : undefined;
+  const statusText = generationStatusLabel({ kind:"podcast", status:run?.status ?? episode.status, stage:run?.stage ?? "QUEUED", hasScript:Boolean(episode.currentScript), hasArtifact:Boolean(episode.currentAudio), audioStatus:audioRun?.status, audioStage:audioRun?.stage });
 
   return (
     <div>
       {run && ["QUEUED", "RUNNING"].includes(run.status) && <CancelJobButton jobId={run.jobId} />}
       {audioRun && ["QUEUED", "RUNNING"].includes(audioRun.status) && <CancelJobButton jobId={audioRun.jobId} />}
       <PageHeader
-        eyebrow="EDITORIAL AUDIO DOCUMENT"
+        eyebrow="双人播客"
         title={episode.title}
         description="有证据支撑的多主持人对话"
-        action={
+        action={!scriptActive && (
           <Link className="btn btn-secondary" href="/studio/podcasts/new">
             重新生成
           </Link>
-        }
+        )}
       />
 
       {/* Generation Status Panel */}
@@ -76,15 +76,24 @@ export default async function PodcastDetail({ params }: { params: Promise<{ epis
             <h2 className="section-title" style={{ fontSize: 16 }}>
               生成进度
             </h2>
-            <StatusBadge value={statusText} />
+            <StatusBadge value={worker === "DEGRADED" ? "等待文稿服务" : statusText} />
           </div>
-          <p style={{ fontSize: 13, color: "var(--outline)", margin: 0 }}>页面刷新会读取持久化状态。</p>
+          <p style={{ fontSize: 13, color: "var(--outline)", margin: 0 }}>{run.status === "FAILED"
+              ? `文稿生成失败。原因：${processingErrorType(run.errorCode)}。`
+              : worker === "DEGRADED"
+                ? "任务已排队，播客文稿后台服务暂不可用。服务恢复后会自动接单。"
+                : worker === "UNKNOWN"
+                  ? "任务已排队，暂时无法确认后台服务状态。页面会自动更新。"
+                  : scriptActive
+                    ? "页面会自动更新文稿生成进度。"
+                    : "下方显示已保存的生成结果。"}</p>
         </section>
       )}
 
       <GenerationProcessing
         status={run?.status ?? "QUEUED"}
         episodeId={episode.id}
+        hasScript={Boolean(episode.currentScript)}
         hasAudio={Boolean(episode.currentAudio)}
         audioStatus={audioRun?.status}
         audioErrorCode={audioRun?.errorCode}

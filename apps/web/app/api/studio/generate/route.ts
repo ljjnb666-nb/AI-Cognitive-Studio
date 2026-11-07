@@ -12,7 +12,7 @@ const video = z.object({ kind: z.literal("video"), title: z.string().trim().min(
 const bodySchema = z.discriminatedUnion("kind", [podcast, video]);
 
 async function assertGenerationSources(workspaceId: string, ids: string[]) {
-  const sources = await prisma.sourceDocument.findMany({ where: { workspaceId, id: { in: ids } }, select: { id: true, currentIntelligence: { select: { id: true } } } });
+  const sources = await prisma.sourceDocument.findMany({ where: { workspaceId, id: { in: ids }, source: { archivedAt: null } }, select: { id: true, currentIntelligence: { select: { id: true } } } });
   if (sources.length !== ids.length) throw new Error("SOURCE_DOCUMENT_ACCESS_DENIED");
   if (sources.some(source => !source.currentIntelligence)) throw new Error("SOURCE_DOCUMENT_INTELLIGENCE_REQUIRED");
 }

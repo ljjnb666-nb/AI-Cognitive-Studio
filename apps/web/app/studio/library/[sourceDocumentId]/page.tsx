@@ -3,34 +3,42 @@ import { notFound } from "next/navigation";
 import { sourceDetail } from "@/lib/product";
 import { projectBookDisplay } from "@/lib/book-display";
 import { BookDetailView } from "@/components/book-detail-view";
-import { deriveProcessingStatus } from "@/lib/processing-state";
+import { sourceProcessingSnapshot } from "@/lib/processing-state";
 import { processingWorkerAvailability } from "@/lib/worker-heartbeat";
 
-export default async function SourcePage({ params, searchParams }: { params: Promise<{ sourceDocumentId: string }>; searchParams: Promise<{ textPage?: string | string[] }> }) {
-  const [{ sourceDocumentId }, query] = await Promise.all([params, searchParams]);
-  const requestedPage = typeof query.textPage === "string" && /^\d{1,9}$/.test(query.textPage) ? Number(query.textPage) : 1;
+export default async function SourcePage({ params, searchParams }: { params: Promise<{ sourceDocumentId: string }>; searchParams:Promise<{textPage?:string}> }) {
+  const { sourceDocumentId } = await params;
   let item: Awaited<ReturnType<typeof sourceDetail>>;
 
   try {
-    item = await sourceDetail(sourceDocumentId, undefined, requestedPage);
+    const query = await searchParams;
+    const page = query.textPage && /^\d{1,9}$/.test(query.textPage) ? Number(query.textPage) : 1;
+    item = await sourceDetail(sourceDocumentId, undefined, page);
   } catch (error) {
     if (error instanceof Error && error.message === "SOURCE_DOCUMENT_ACCESS_DENIED") notFound();
     throw error;
   }
 
+  // sourceDetail has already applied the published revision and its audited
+  // evidence overlay. Never fall back to raw analysis-run memory rows here.
+  const memories = item.bookMemories;
   const structureNodes = item.currentExtraction?.extraction.structureNodes ?? [];
   const ingestionStatus = item.ingestionRuns[0]?.status;
   const analysisStatus = item.analysisRuns[0]?.status;
   const bootstrap = item.bookAnalysisBootstraps[0];
-  const errorCode = item.ingestionRuns[0]?.errorCode ?? item.analysisRuns[0]?.errorCode ?? bootstrap?.errorCode;
   const workerAvailability = await processingWorkerAvailability();
-  const processing = deriveProcessingStatus({ ingestion: item.ingestionRuns[0], analysis: item.analysisRuns[0], bootstrap, hasIntelligence: Boolean(item.currentIntelligence), workerAvailability, staleAfterMs: Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000) });
+  const snapshot = sourceProcessingSnapshot({ ingestion: item.ingestionRuns[0], analysis: item.analysisRuns[0], bootstrap, hasIntelligence: Boolean(item.currentIntelligence), workerAvailability, staleAfterMs: Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000) });
+  const { processing, errorCode, processingSince } = snapshot;
 
   return (
-    <>
+    <div className="book-detail-page">
+    <div className="actions">
     <a className="btn btn-secondary" href={`/api/studio/sources/${encodeURIComponent(item.id)}/download`} download>下载原始文件</a>
     {item.analysisRuns[0] && ["QUEUED", "RUNNING"].includes(item.analysisRuns[0].status) && <CancelJobButton jobId={item.analysisRuns[0].jobId} />}
+    </div>
     <BookDetailView
+      bookSummary={item.bookSummary}
+      textPreview={item.textPreview}
       item={{
         id: item.id,
         displayName: item.source.displayName,
@@ -43,23 +51,24 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
         mediaType: item.mediaType,
         version: item.version,
         hasIntelligence: Boolean(item.currentIntelligence),
-        extractionSummary: item.currentExtraction?.extraction.status === "SUCCEEDED" ? { pages: item.currentExtraction.extraction._count.pages, characters: item.currentExtraction.extraction.characterCount, blocks: item.currentExtraction.extraction._count.blocks } : null,
+        currentExtractionId: item.currentExtraction?.extractionId ?? null,
+        extractionSummary: item.currentExtraction?.extraction.status === "SUCCEEDED" ? {pages:item.currentExtraction.extraction._count.pages,blocks:item.currentExtraction.extraction._count.blocks,characters:item.currentExtraction.extraction.characterCount}:null,
         ingestionStatus,
         analysisStatus,
+        analysisProgress: item.analysisProgress,
         bootstrapStatus: bootstrap?.status,
         errorCode,
+        failureReason: processing.failureReason,
         processingState: processing.state,
         processingStage: processing.stage,
         recoveryAction: processing.recoveryAction,
         stageAvailability: processing.stageAvailability,
         workerAvailability,
-        processingSince: (item.analysisRuns[0]?.startedAt ?? item.analysisRuns[0]?.createdAt ?? bootstrap?.startedAt ?? bootstrap?.createdAt ?? item.ingestionRuns[0]?.startedAt ?? item.ingestionRuns[0]?.createdAt)?.toISOString() ?? null,
+        processingSince,
       }}
-      textPreview={item.textPreview}
-      memories={item.bookMemories}
-      bookSummary={item.bookSummary}
-      structureNodes={structureNodes as any}
+      memories={memories}
+      structureNodes={structureNodes}
     />
-    </>
+    </div>
   );
 }

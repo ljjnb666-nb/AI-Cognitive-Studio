@@ -37,6 +37,13 @@ function display(value: string | null | undefined): string {
   return value?.trim() || "未提供";
 }
 
+const languageNames = new Intl.DisplayNames(["zh-CN"], { type: "language", fallback: "none" });
+function displayLanguage(value: string | null | undefined): string {
+  if (!value?.trim()) return "未提供";
+  try { return languageNames.of(value.trim().replaceAll("_", "-")) ?? "未识别的语言"; }
+  catch { return "未识别的语言"; }
+}
+
 async function readJson(response: Response): Promise<Record<string, unknown>> {
   try {
     const result: unknown = await response.json();
@@ -113,14 +120,18 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
     setReloadIndex((n) => n + 1);
   }
 
-  function recheckAfterCorrection(message: string) {
+  function recheckAfterCorrection(message: string, refreshParent = true) {
     setNotice(message);
     setLastOutcome(null);
     setLoadError(null);
+    // Clear the stale draft immediately; the next GET fetches authoritative
+    // extraction and product state even when a route refresh is unnecessary.
     setPreview(null);
     setLoading(true);
     setReloadIndex((n) => n + 1);
-    router.refresh();
+    // A STALE correction has a newer extraction ID. Refreshing the parent
+    // would remount this keyed panel and erase the explicit rejection notice.
+    if (refreshParent) router.refresh();
   }
 
   function openConfirmation() {
@@ -177,7 +188,7 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
     <section className="identity-panel card-panel" aria-labelledby="identity-heading">
       <div className="identity-heading">
         <div>
-          <p className="page-eyebrow">EPUB · 身份识别</p>
+          <p className="page-eyebrow">电子书 · 身份识别</p>
           <h2 className="identity-title" id="identity-heading">书籍身份核对</h2>
         </div>
         <span className="status-badge">人工确认</span>
@@ -195,14 +206,14 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
       {preview && (
         <>
           <div className="identity-data-block">
-            <h3>解析候选信息 <span className="identity-muted">（EPUB 原始证据）</span></h3>
+            <h3>解析候选信息 <span className="identity-muted">（电子书原始信息）</span></h3>
             <dl className="identity-fields">
-              <div><dt>书名 · dc:title</dt><dd>{display(preview.candidate?.title?.value)}</dd></div>
-              <div><dt>语言 · dc:language</dt><dd>{display(preview.candidate?.language?.value)}</dd></div>
-              <div><dt>原始标识 · dc:identifier</dt><dd>{display(preview.candidate?.identifier?.value)}</dd></div>
+              <div><dt>书名</dt><dd>{display(preview.candidate?.title?.value)}</dd></div>
+              <div><dt>语言</dt><dd>{displayLanguage(preview.candidate?.language?.value)}</dd></div>
+              <div><dt>原始标识</dt><dd>{display(preview.candidate?.identifier?.value)}</dd></div>
               <div><dt>标识分类</dt><dd>{preview.candidate?.identifier?.classification === "UNCLASSIFIED" ? "未分类（仅为原始证据）" : "无可用分类"}</dd></div>
             </dl>
-            <p className="identity-muted">原始标识并不必然是 ISBN，只有服务端通过类型及校验位核验后才可能写入。</p>
+            <p className="identity-muted">原始标识不一定是国际标准书号，只有通过服务端的类型及校验位核验后才会写入。</p>
           </div>
 
           <div className="identity-data-block">
@@ -210,11 +221,11 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
             {preview.product ? (
               <dl className="identity-fields">
                 <div><dt>正式书名</dt><dd>{preview.product.title}</dd></div>
-                <div><dt>语言</dt><dd>{display(preview.product.language)}</dd></div>
-                <div><dt>ISBN-10</dt><dd>{display(preview.product.isbn10)}</dd></div>
-                <div><dt>ISBN-13</dt><dd>{display(preview.product.isbn13)}</dd></div>
+                <div><dt>语言</dt><dd>{displayLanguage(preview.product.language)}</dd></div>
+                <div><dt>国际标准书号（10 位）</dt><dd>{display(preview.product.isbn10)}</dd></div>
+                <div><dt>国际标准书号（13 位）</dt><dd>{display(preview.product.isbn13)}</dd></div>
               </dl>
-            ) : <p className="identity-muted">当前文件尚未关联正式 Work / Edition 记录。</p>}
+            ) : <p className="identity-muted">当前文件尚未关联正式书籍与版本记录。</p>}
           </div>
 
           <p className="identity-muted">
@@ -266,7 +277,7 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
       >
         <div className="identity-dialog-body">
           <p className="page-eyebrow">写入正式书籍身份</p>
-          <h2 id="identity-confirm-title">确认使用当前 EPUB 解析结果？</h2>
+          <h2 id="identity-confirm-title">确认使用当前电子书解析结果？</h2>
           <p id="identity-confirm-desc">
             这不是自动修改。服务端会再次核查当前版本、解析结果和权限，若已有字段冲突将整体拒绝写入。
           </p>

@@ -1,18 +1,57 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { PageHeader } from "./page-header";
 import { UploadPanel } from "./upload-panel";
+import { LibraryDeleteDialog } from "./library-delete-dialog";
 import { SourceCard } from "./source-card";
-import { statusLabel } from "@/lib/product-labels";
+import { processingDisplay } from "@/lib/processing-display";
 import type { SourceSummary } from "@/lib/product";
 
-export function LibraryView({ items, query = {}, page = 1 }: { items: SourceSummary[]; query?: Record<string, string | undefined>; page?: number }) {
+export function LibraryView({ items, canDelete = false, query = {}, page = 1 }: { items: SourceSummary[]; canDelete?: boolean; query?:Record<string,string|undefined>; page?:number }) {
+  const router = useRouter();
   const [search, setSearch] = useState(query.q ?? "");
+  const [deleting, setDeleting] = useState<SourceSummary | null>(null);
+  const [removedIds, setRemovedIds] = useState<Set<string>>(() => new Set());
+  const [deleteMessage, setDeleteMessage] = useState("");
+  const visibleItems = useMemo(() => items.filter(item => !removedIds.has(item.id)), [items, removedIds]);
   const [formatFilter, setFormatFilter] = useState(query.format ?? "ALL");
-  const [statusFilter, setStatusFilter] = useState(query.status ?? "ALL");
+  const [serverStatus,setServerStatus] = useState(query.status ?? "ALL");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const needsRefresh = visibleItems.some(item => item.processing.recoveryAction === "RECHECK");
+  useEffect(() => {
+    if (!needsRefresh) return;
+    const timer = window.setInterval(() => { if (!document.hidden) router.refresh(); }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [needsRefresh, router]);
+  const counts = visibleItems.reduce((result, item) => {
+    result[processingDisplay(item.processing, item.errorCode).group]++;
+    return result;
+  }, { READY: 0, ACTIVE: 0, WAITING: 0, ATTENTION: 0 });
 
-  const filteredItems = items;
+  const filteredItems = useMemo(() => {
+    return visibleItems.filter((item) => {
+      // Match either authoritative Work title or original file name.
+      const term = search.trim().toLowerCase();
+      if (term && !item.title.toLowerCase().includes(term) && !item.fileName.toLowerCase().includes(term)) {
+        return false;
+      }
+      // Format filter
+      if (formatFilter !== "ALL") {
+        const media = item.mediaType.toLowerCase();
+        if (formatFilter === "PDF" && !media.includes("pdf")) return false;
+        if (formatFilter === "EPUB" && !media.includes("epub")) return false;
+        if (formatFilter === "MD" && !media.includes("markdown") && !item.fileName.endsWith(".md")) return false;
+        if (formatFilter === "TXT" && !media.includes("text/plain") && !item.fileName.endsWith(".txt")) return false;
+      }
+      // Status filter
+      if (statusFilter !== "ALL") {
+        if (processingDisplay(item.processing, item.errorCode).group !== statusFilter) return false;
+      }
+      return true;
+    });
+  }, [visibleItems, search, formatFilter, statusFilter]);
 
   return (
     <div>
@@ -23,6 +62,14 @@ export function LibraryView({ items, query = {}, page = 1 }: { items: SourceSumm
         <UploadPanel />
       </section>
 
+      <div className="library-state-summary" aria-label="书籍处理概况">
+        {([['READY', '理解完成'], ['ACTIVE', '处理中'], ['WAITING', '等待处理'], ['ATTENTION', '需要处理']] as const).map(([group, label]) => (
+          <button key={group} type="button" aria-pressed={statusFilter === group} onClick={() => setStatusFilter(statusFilter === group ? "ALL" : group)}>
+            <span>{label}</span><strong>{counts[group]}</strong>
+          </button>
+        ))}
+      </div>
+
       {/* Filter & Search Bar */}
       <form className="filter-bar" action="/studio/library" method="get">
         <div className="search-input-wrapper">
@@ -32,7 +79,8 @@ export function LibraryView({ items, query = {}, page = 1 }: { items: SourceSumm
           </svg>
           <input
             className="input-control input-control-search font-serif"
-            name="q" aria-label="搜索书名或文件名" placeholder="搜索标题..."
+            name="q" aria-label="搜索书名或文件名"
+            placeholder="搜索书名或文件名…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -46,27 +94,30 @@ export function LibraryView({ items, query = {}, page = 1 }: { items: SourceSumm
           <option value="TXT">纯文本 (.txt)</option>
         </select>
 
-        <select name="status" aria-label="处理状态" className="select-control" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+        <select name="status" aria-label="处理状态" className="select-control" value={serverStatus} onChange={(e) => setServerStatus(e.target.value)}>
           <option value="ALL">所有状态</option>
           <option value="SUCCEEDED">理解完成</option>
           <option value="PROCESSING">处理中</option>
           <option value="FAILED">失败</option>
         </select>
-        <button className="btn" type="submit">筛选</button>
+        <button type="submit" className="btn btn-secondary">搜索与筛选</button>
+        <button type="button" className="btn btn-secondary" onClick={() => router.refresh()}>刷新状态</button>
       </form>
+      <p className="muted library-results" aria-live="polite">本页显示 {filteredItems.length} / {visibleItems.length} 本书 · 正文提取与 AI 理解分别记录</p>
 
+      {deleteMessage && <p role="status" className="muted">{deleteMessage}</p>}
+      {deleting && <LibraryDeleteDialog key={deleting.id} item={deleting} onClose={() => setDeleting(null)} onDeleted={ids => { setRemovedIds(previous => new Set([...previous, ...ids])); setDeleteMessage(`已从知识库删除《${deleting.title}》。`); router.refresh(); }} />}
       {/* Book Cards Grid (3 Columns) */}
       <div className="cards-grid-3">
         {filteredItems.map((x) => {
-          const statusText = x.hasIntelligence ? "理解完成" : statusLabel(x.status, x.errorCode);
-          return <SourceCard key={x.id} {...x} statusText={statusText} />;
+          return <SourceCard key={x.id} {...x} onDelete={canDelete ? () => { setDeleteMessage(""); setDeleting(x); } : undefined} />;
         })}
       </div>
 
       {!filteredItems.length && (
         <div className="card-panel" style={{ textAlign: "center", padding: "48px 24px" }}>
           <p style={{ color: "var(--outline)", margin: 0, fontSize: 15 }}>
-            {page > 1 ? "这一页没有书籍，请返回上一页。" : query.q?.trim() || (query.format && query.format !== "ALL") || (query.status && query.status !== "ALL") ? "没有匹配当前搜索和筛选条件的书籍。" : "上传第一本书，开始构建你的知识库。"}
+            {visibleItems.length || query.q || query.format || query.status ? "没有匹配当前搜索和筛选条件的书籍。" : page > 1 ? "这一页没有书籍，请返回上一页。" : "上传第一本书，开始构建你的知识库。"}
           </p>
         </div>
       )}

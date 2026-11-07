@@ -13,7 +13,21 @@ const envPath = resolve(directory, "runtime.env");
 const password = randomBytes(32).toString("hex");
 const names = [];
 let networkCreated = false;
-const docker = args => execFileSync("docker", args, { encoding: "utf8", timeout: 180_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+const docker = args => {
+  try {
+    return execFileSync("docker", args, { encoding: "utf8", timeout: 180_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } catch (error) {
+    // The default execFileSync error only names the command. Preserve a small,
+    // bounded diagnostic from Docker's stderr so registry/daemon/image issues
+    // are distinguishable, without printing env-file contents or auth values.
+    const stderr = error && typeof error === "object" && "stderr" in error
+      ? String(error.stderr ?? "").trim().slice(0, 1600) : "";
+    const exitCode = error && typeof error === "object" && "status" in error
+      ? String(error.status ?? "unknown") : "unknown";
+    const operation = args[0] === "run" ? "run" : args[0] ?? "unknown";
+    throw new Error(`CONTAINER_DOCKER_${operation.toUpperCase()}_FAILED:exit=${exitCode}${stderr ? ": " + stderr : ""}`);
+  }
+};
 const logs = name => { const result = spawnSync("docker", ["logs", name], { encoding: "utf8", timeout: 10_000 }); if (result.status !== 0) throw new Error("CONTAINER_LOG_READ_FAILED"); return result.stdout + result.stderr; };
 const delay = () => new Promise(resolve => setTimeout(resolve, 500));
 async function until(probe, label) {
@@ -38,6 +52,21 @@ try {
   };
   await writeFile(envPath, Object.entries(environment).map(([key, value]) => `${key}=${value}`).join("\n"), { mode: 0o600 });
   docker(["network", "create", prefix]); networkCreated = true;
+  // Fresh hosted runners may not have the service images cached. Pull absent
+  // images explicitly so registry failures produce a meaningful diagnostic,
+  // with one bounded retry for transient transport errors only.
+  for (const serviceImage of ["postgres:17-alpine", "redis:7-alpine", "ghcr.io/ljjnb666-nb/acs-ci-minio:RELEASE.2025-04-22T22-12-26Z@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb"]) {
+    try { docker(["image", "inspect", serviceImage]); continue; } catch {}
+    let pullError;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { docker(["pull", serviceImage]); pullError = null; break; }
+      catch (error) {
+        pullError = error;
+        if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 1_500));
+      }
+    }
+    if (pullError) throw pullError;
+  }
   const postgres = start("postgres", ["--env-file", envPath, "postgres:17-alpine"]);
   start("redis", ["redis:7-alpine", "redis-server", "--save", "", "--appendonly", "no"]);
   const minio = start("minio", ["--env-file", envPath, "ghcr.io/ljjnb666-nb/acs-ci-minio:RELEASE.2025-04-22T22-12-26Z@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb", "server", "/data"]);

@@ -2,7 +2,7 @@ import { ListPagination, listPage } from "@/components/list-pagination";
 import Link from "next/link";
 import { PageHeader } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
-import { podcastList, statusLabel } from "@/lib/product";
+import { podcastList } from "@/lib/product";
 
 export default async function PodcastsPage({ searchParams }: { searchParams: Promise<{ page?: string | string[] }> }) {
   const page = listPage((await searchParams).page);
@@ -27,9 +27,9 @@ export default async function PodcastsPage({ searchParams }: { searchParams: Pro
             <div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
                 <span className="font-mono" style={{ fontSize: 11, color: "var(--outline)", textTransform: "uppercase" }}>
-                  AUDIO EPISODE
+                  播客节目
                 </span>
-                <StatusBadge value={statusLabel(p.status, p.errorCode)} />
+                <StatusBadge value={p.statusText} />
               </div>
               <h3 className="font-serif" style={{ fontSize: 18, fontWeight: 600, color: "var(--on-surface)", margin: 0 }}>
                 {p.title}

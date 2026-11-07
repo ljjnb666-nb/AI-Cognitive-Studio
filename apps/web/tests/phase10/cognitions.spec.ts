@@ -59,7 +59,13 @@ test("real Better Auth user browses versioned cognition, exact evidence, state, 
   await expect(page.getByRole("link", { name: fixture.evidence.content, exact: true }).first()).toBeVisible();
 
   await page.goto(`/studio/library/${fixture.document.id}`);
-  await page.getByRole("link", { name: "查看认知详情" }).first().click();
+  // The reader starts on original text when an extraction exists. Links to
+  // cognition records are in the overview tab, which must be opened explicitly.
+  await page.getByRole("button", { name: "书籍概览" }).click();
+  await expect(page.getByRole("button", { name: "书籍概览" })).toHaveAttribute("aria-pressed", "true");
+  const cognitionLink = page.getByRole("link", { name: "查看认知详情" }).first();
+  await expect(cognitionLink).toHaveAttribute("href", `/studio/cognitions/${fixture.evidence.id}`);
+  await cognitionLink.click();
   await expect(page).toHaveURL(new RegExp(`/studio/cognitions/${fixture.evidence.id}$`));
   await page.goto(`/studio/cognitions/${fixture.noEvidence.id}`);
   await expect(page.getByText("暂无可验证来源证据", { exact: true })).toBeVisible();

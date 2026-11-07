@@ -1,4 +1,5 @@
 import { readPublishedBookRevisionForRun } from "@ai-cognitive/book-intelligence";
+import { isBibliographicMemory } from "./bibliographic-memory";
 import { createHash } from "node:crypto";
 import { Prisma, prisma } from "@ai-cognitive/db";
 import {
@@ -69,7 +70,7 @@ async function current(
     Prisma.sql`SELECT memory."id", memory."type", memory."content", memory."sourceDocumentId", memory."analysisRunId", memory."extractionId", source."displayName" AS "sourceTitle" FROM "BookMemoryItem" memory JOIN "CurrentBookIntelligence" current ON current."analysisRunId"=memory."analysisRunId" AND current."workspaceId"=memory."workspaceId" AND current."sourceDocumentId"=memory."sourceDocumentId" AND current."extractionId"=memory."extractionId" JOIN "CurrentDocumentExtraction" extraction ON extraction."workspaceId"=current."workspaceId" AND extraction."sourceDocumentId"=current."sourceDocumentId" AND extraction."extractionId"=current."extractionId" JOIN "SourceDocument" document ON document."id"=memory."sourceDocumentId" AND document."workspaceId"=memory."workspaceId" JOIN "Source" source ON source."id"=document."sourceId" AND source."workspaceId"=document."workspaceId" WHERE memory."workspaceId"=${identity.workspaceId} AND memory."id"=${memoryItemId} LIMIT 1`,
   );
   const item = rows[0];
-  if (!item || !types.has(item.type)) return null;
+  if (!item || !types.has(item.type) || isBibliographicMemory(item.content)) return null;
   const published = await readPublishedBookRevisionForRun(tx, { workspaceId: identity.workspaceId, analysisRunId: item.analysisRunId });
   const change = published.revision?.memories.find(memory => memory.id === item.id);
   return { ...item, content: change?.after ?? item.content,

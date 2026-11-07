@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/app-shell";
 import { StatusBadge } from "@/components/status-badge";
 import { GenerationProcessing } from "@/components/generation-processing";
 import { resolveWebIdentity } from "@/lib/identity";
-import { videoStageLabel, statusLabel } from "@/lib/product";
+import { generationStatusLabel } from "@/lib/product-labels";
 
 export default async function VideoDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -35,11 +35,7 @@ export default async function VideoDetail({ params }: { params: Promise<{ id: st
   if (!project) notFound();
 
   const run = project.runs[0];
-  const statusText = run
-    ? run.status === "FAILED"
-      ? "生成失败，可重新尝试"
-      : videoStageLabel(run.stage) ?? statusLabel(run.status, run.errorCode)
-    : "等待处理";
+  const statusText = generationStatusLabel({ kind: "video", status: run?.status ?? "DRAFT", stage: run?.stage ?? "QUEUED", hasArtifact: Boolean(project.currentVideo) });
 
   return (
     <div>
@@ -67,7 +63,7 @@ export default async function VideoDetail({ params }: { params: Promise<{ id: st
         </section>
       )}
 
-      <GenerationProcessing status={run?.status ?? "QUEUED"} />
+      <GenerationProcessing status={project.currentVideo ? "SUCCEEDED" : run?.status ?? "DRAFT"} />
 
       {/* Video Player & Download */}
       {project.currentVideo && (

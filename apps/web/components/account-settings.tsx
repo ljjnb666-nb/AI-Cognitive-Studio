@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
+import styles from "./account-settings.module.css";
 
 export function AccountSettings({ name, email, workspace }: { name: string; email: string; workspace: string }) {
   const router = useRouter();
@@ -60,8 +61,8 @@ export function AccountSettings({ name, email, workspace }: { name: string; emai
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 32, maxWidth: 640 }}>
-      <section className="card-panel">
+    <div className={styles.grid}>
+      <section className={`card-panel ${styles.profile}`}>
         <h2 className="section-title" style={{ marginBottom: 16 }}>
           账户信息
         </h2>
@@ -85,14 +86,14 @@ export function AccountSettings({ name, email, workspace }: { name: string; emai
         </form>
       </section>
 
-      <section className="card-panel">
+      <section className={`card-panel ${styles.workspace}`}>
         <h2 className="section-title" style={{ marginBottom: 12 }}>
           当前工作区
         </h2>
         <p style={{ margin: 0, fontSize: 15, fontWeight: 500, color: "var(--on-surface)" }}>{workspace}</p>
       </section>
 
-      <section className="card-panel">
+      <section className={`card-panel ${styles.password}`}>
         <h2 className="section-title" style={{ marginBottom: 20 }}>
           修改密码
         </h2>

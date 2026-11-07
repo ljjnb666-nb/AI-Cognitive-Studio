@@ -43,7 +43,7 @@ test("worker-down upload becomes a recoverable degraded processing state without
     await expect(degradedStatus).toBeVisible();
     await page.reload();
     await expect(degradedStatus).toBeVisible();
-    await expect(page.getByRole("button", { name: "重新解析" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "重新提取" })).toBeVisible();
     await expect(page.getByRole("button", { name: "重新检查状态" })).toBeVisible();
   } finally { await redis.quit(); }
 });
@@ -56,6 +56,9 @@ test("worker recovery processes the same degraded upload and renders grounded in
   page.on("console", (message) => { if (message.type() === "error" && message.location().url !== "http://localhost:3001/favicon.ico") errors.push(message.text()); });
   await page.context().addCookies([{ name: "acs_phase6_harness", value: harnessToken, url: "http://localhost:3001", httpOnly: true, sameSite: "Lax" }]);
   await page.goto(`/studio/library/${sourceDocumentId}`);
+  // The latest reader defaults to original text when a preview exists.
+  // Switch to the overview before asserting its controls and intelligence.
+  await page.getByRole("button", { name: "书籍概览" }).click();
   const recheck = page.getByRole("button", { name: "重新检查状态" });
   if (await recheck.count()) await recheck.click();
   await expect(page.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 90_000 });
@@ -64,7 +67,7 @@ test("worker recovery processes the same degraded upload and renders grounded in
   await expect(page.locator(".evidence-item.active").filter({ hasText: recoveryEvidence })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("worker-recovery-desktop.png"), fullPage: true });
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 } });
-  try { await mobile.addCookies([{ name: "acs_phase6_harness", value: harnessToken, url: "http://localhost:3001", httpOnly: true, sameSite: "Lax" }]); const mobilePage = await mobile.newPage(); await mobilePage.goto(`/studio/library/${sourceDocumentId}`); await expect(mobilePage.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 30_000 }); await mobilePage.screenshot({ path: testInfo.outputPath("worker-recovery-mobile.png"), fullPage: true }); }
+  try { await mobile.addCookies([{ name: "acs_phase6_harness", value: harnessToken, url: "http://localhost:3001", httpOnly: true, sameSite: "Lax" }]); const mobilePage = await mobile.newPage(); await mobilePage.goto(`/studio/library/${sourceDocumentId}`); await mobilePage.getByRole("button", { name: "书籍概览" }).click(); await expect(mobilePage.getByRole("link", { name: "生成播客" })).toBeVisible({ timeout: 30_000 }); await mobilePage.screenshot({ path: testInfo.outputPath("worker-recovery-mobile.png"), fullPage: true }); }
   finally { await mobile.close(); }
   expect(errors).toEqual([]);
 });
@@ -76,9 +79,10 @@ test("R07 re-finalizes valid durable analysis through the real processing recove
   await prisma.currentBookIntelligence.delete({ where: { sourceDocumentId_workspaceId: { sourceDocumentId, workspaceId: run.workspaceId } } });
   await page.context().addCookies([{ name: "acs_phase6_harness", value: harnessToken, url: "http://localhost:3001", httpOnly: true, sameSite: "Lax" }]);
   await page.goto(`/studio/library/${sourceDocumentId}`);
+  await page.getByRole("button", { name: "书籍概览" }).click();
   await expect(page.getByText("后台处理服务暂时没有响应。你的文件已经保存，可以稍后重试。")).toBeVisible();
   await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "重新解析" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "重新提取" })).toHaveCount(0);
   const recovery = page.waitForResponse(response => new URL(response.url()).pathname === `/api/studio/processing/${sourceDocumentId}/recover` && response.request().method() === "POST");
   await page.getByRole("button", { name: "恢复深度理解" }).click();
   expect((await recovery).ok()).toBeTruthy();

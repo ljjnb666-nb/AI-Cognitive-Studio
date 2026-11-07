@@ -1,3 +1,4 @@
+import { workspaceBookChunkConcurrency } from "../../../packages/book-intelligence/src/chunk-concurrency.js";
 import { recoverSettledDeferredBookEmbeddings, reconcileStaleBookAnalysisJobs, type EmbeddingProvider, type ProcessBookAnalysisDependencies } from "@ai-cognitive/book-intelligence";
 import type { PodcastGenerationProvider, DurablePodcastGenerationProvider } from "@ai-cognitive/podcast-generation";
 import { logger } from "@ai-cognitive/shared";
@@ -104,7 +105,7 @@ export async function startWorkerRuntime(environment: Environment, options: Work
     podcastAdapter = { providerForRun: input => runtime.createProviderForRun(input), embeddingProviderForRun: input => runtime.createEmbeddingProviderForRun(input) };
   }
   const audioAdapter = audioConfigured ? options.audioAdapter ?? { providerForRun: input => (productionPodcastAudioGatewayRuntime ??= createPodcastAudioProductionGatewayRuntime(source, options.bookProductionGatewayOverrides)).createSpeechProviderForRun(input) } : undefined;
-  const productionBookDependencies = bookEnabled && !options.bookDependencies ? (() => { const runtime = productionBookGatewayRuntime = createBookProductionGatewayRuntime(source, options.bookProductionGatewayOverrides); return { analysisProviderForRun: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => runtime.createAnalysisProvider(input), embeddingGatewayForRun: (input: { workspaceId: string; userId: string; analysisRunId: string }) => runtime.createEmbeddingGatewayForRun(input) }; })() : undefined;
+  const productionBookDependencies = bookEnabled && !options.bookDependencies ? (() => { const runtime = productionBookGatewayRuntime = createBookProductionGatewayRuntime(source, options.bookProductionGatewayOverrides); return { chunkConcurrencyForRun: workspaceBookChunkConcurrency, analysisProviderForRun: (input: { workspaceId: string; userId: string; analysisRunId: string; provider: string; model: string }) => runtime.createAnalysisProvider(input), embeddingGatewayForRun: (input: { workspaceId: string; userId: string; analysisRunId: string }) => runtime.createEmbeddingGatewayForRun(input) }; })() : undefined;
   const bookWorker = bookEnabled ? createBookAnalysisWorker(environment, options.bookDependencies ?? productionBookDependencies, bookWorkerOptions) : undefined;
   const bookBootstrapWorker = createBookAnalysisBootstrapWorker(environment, { ...bookWorkerOptions, source });
   const healthWorker = createHealthCheckWorker(environment.REDIS_URL);

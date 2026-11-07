@@ -26,6 +26,8 @@ export function bookIntelligenceErrorMessage(code?: string | null) {
 
 export function uploadErrorMessage(code?: string | null) {
   const normalized = code?.toUpperCase() ?? "";
+  if (normalized === "UNSUPPORTED_MOBI") return "暂不支持 MOBI 格式，请先转换为 EPUB 或 PDF 后上传。";
+  if (normalized === "UPLOAD_REQUEST_INVALID") return "上传信息不完整或格式无效，请重新选择文件。";
   if (
     normalized.includes("TOO_LARGE") ||
     normalized.includes("FILE_SIZE") ||
@@ -54,4 +56,20 @@ export function mediaGenerationErrorMessage(code?: string | null) {
     return "需要先配置 Provider，才能继续生成音频。";
   }
   return "暂时无法完成音频生成，请稍后重试。";
+}
+
+/** 仅呈现经过固定中文映射的错误类型，原始编号留在服务端。 */
+export function processingErrorType(code?: string | null): string {
+  const labels: Record<string, string> = {
+    INVALID_PROVIDER_RESPONSE: "模型返回格式异常", OUTPUT_TRUNCATED: "模型输出被截断",
+    ANALYSIS_PROVIDER_RESPONSE_INVALID: "理解结果字段未通过校验", ANALYSIS_MEMORY_TYPE_UNSUPPORTED: "模型返回了不支持的记忆分类", ANALYSIS_EVIDENCE_REQUIRED: "理解结果缺少有效原文引用",
+    TIMEOUT: "模型响应超时", BUDGET_EXCEEDED: "处理额度不足", CONTENT_REJECTED: "服务商内容审核拒绝",
+    BOOK_ANALYSIS_EXECUTION_LEASE_EXPIRED: "任务执行凭证已过期", BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST: "任务执行权限已失效",
+    RATE_LIMITED: "服务商请求过于频繁", QUOTA_EXCEEDED: "服务商余额或计费额度不足", INVALID_PROVIDER_REQUEST: "服务商拒绝了请求参数", AUTHENTICATION_FAILED: "服务商密钥验证失败",
+    AUTHORIZATION_FAILED: "服务商权限不足", MODEL_NOT_FOUND: "所选模型不可用", TRANSIENT_UPSTREAM: "服务商暂时异常",
+    SOURCE_PARSE_ERROR: "正文提取程序异常", SOURCE_PARSE_TIMEOUT: "正文提取超时", SOURCE_QUALITY_REJECTED: "正文提取质量未通过",
+    SOURCE_CORRUPTED: "文件结构校验失败", SOURCE_OCR_REQUIRED: "文件需要文字识别", SOURCE_PASSWORD_REQUIRED: "文件需要密码",
+    CANCELLED: "任务已取消", IDEMPOTENCY_CONFLICT: "任务请求与历史记录不一致",
+  };
+  return code && labels[code] ? labels[code] : "处理异常，具体原因待核查";
 }
