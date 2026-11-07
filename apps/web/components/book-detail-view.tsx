@@ -1,13 +1,18 @@
 "use client";
+import { processingDisplay } from "@/lib/processing-display";
+import type { ProcessingState } from "@/lib/processing-state";
+
 
 import Link from "next/link";
 import { useState } from "react";
 import { StatusBadge } from "./status-badge";
 import { ProductIdentityPanel } from "./product-identity-panel";
-import { SourceProcessing } from "./source-processing";
 import { SourceTextReader, type SourceTextPreview } from "./source-text-reader";
+import { SourceProcessing } from "./source-processing";
+import type { BookAnalysisProgress } from "@/lib/book-analysis-progress";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
-import { cognitionTypeLabels } from "@/lib/cognition-types";
+import { isBibliographicMemory } from "@/lib/bibliographic-memory";
+import { cognitionTypeLabels } from "@/lib/cognitions";
 
 const categoryNames: Record<string, string> = cognitionTypeLabels;
 
@@ -41,6 +46,7 @@ type StructureNodeData = {
 };
 
 type Props = {
+  textPreview?: SourceTextPreview | null;
   item: {
     id: string;
     displayName: string;
@@ -50,9 +56,12 @@ type Props = {
     mediaType: string;
     version: number;
     hasIntelligence: boolean;
-    extractionSummary?: { pages: number; blocks: number; characters?: number | null } | null;
+    extractionSummary?: {pages:number; blocks:number; characters?:number|null;notes?:string[]}|null;
+    currentExtractionId?: string | null;
+    failureReason?: string;
     ingestionStatus?: string | null;
     analysisStatus?: string | null;
+    analysisProgress?: BookAnalysisProgress | null;
     bootstrapStatus?: string | null;
     errorCode?: string | null;
     processingState: string;
@@ -63,13 +72,16 @@ type Props = {
     processingSince?: string | null;
   };
   memories: MemoryItemData[];
-  bookSummary?: string | null;
   structureNodes: StructureNodeData[];
-  textPreview?: SourceTextPreview | null;
 };
 
-export function BookDetailView({ item, memories, structureNodes, bookSummary, textPreview }: Props) {
+export function BookDetailView({ item, memories, structureNodes, textPreview }: Props) {
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
+  const [view, setView] = useState<"overview" | "source">(textPreview ? "source" : "overview");
+  const display = processingDisplay({state: item.processingState as ProcessingState, stage:item.processingStage,recoveryAction:item.recoveryAction,stageAvailability:item.stageAvailability,failureReason:item.failureReason},item.errorCode);
+
+  const bookFacts = memories.filter((memory) => isBibliographicMemory(memory.content));
+  const insights = memories.filter((memory) => !isBibliographicMemory(memory.content));
 
   // Flatten evidence items from memories for right pane display
   const allEvidence = memories.flatMap((m) =>
@@ -86,16 +98,19 @@ export function BookDetailView({ item, memories, structureNodes, bookSummary, te
 
   function highlightEvidence(evidenceId: string) {
     setActiveEvidenceId(evidenceId);
-    const element = document.getElementById(`evidence-${evidenceId}`);
-    if (element) {
-      element.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
+    setView("source");
+    requestAnimationFrame(() => document.getElementById(`evidence-${evidenceId}`)?.scrollIntoView({ behavior: "instant", block: "nearest", inline: "start" }));
   }
 
   return (
     <div className="book-detail-layout">
+      <div className="book-view-tabs" role="group" aria-label="书籍视图">
+        <span title={item.title}>{item.title}</span>
+        <button type="button" className="btn btn-secondary" aria-pressed={view === "overview"} onClick={() => setView("overview")}>书籍概览</button>
+        <button type="button" className="btn btn-secondary" aria-pressed={view === "source"} onClick={() => setView("source")}>原文阅读</button>
+      </div>
       {/* Left Pane: System Interpretation (系统解读) */}
-      <div className="interpretation-pane">
+      <div className="interpretation-pane" hidden={view !== "overview"}>
         <div className="page-eyebrow">系统解读</div>
         <h1 className="font-serif" style={{ fontSize: 32, fontWeight: 600, color: "var(--on-surface)", margin: "0 0 20px 0" }}>
           {item.title}
@@ -104,6 +119,7 @@ export function BookDetailView({ item, memories, structureNodes, bookSummary, te
           原文件：{item.displayName} · 文件版本 v{item.version}
           {!item.isLatestVersion && " · 历史版本（显示所属书籍当前正式书名）"}
         </p>
+        <div className="book-state-heading"><StatusBadge value={display.label} tone={display.tone} /><span>以当前保存的处理结果为准</span></div>
 
         {item.hasIntelligence && (
           <div style={{ display: "flex", gap: 12, marginBottom: 32 }}>
@@ -124,29 +140,21 @@ export function BookDetailView({ item, memories, structureNodes, bookSummary, te
           </div>
         )}
 
-        {item.extractionSummary && (
-          <section className="card-panel" style={{ marginBottom: 20 }} aria-label="文本提取结果">
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-              <span className="section-title">文本提取</span><StatusBadge value="提取完成" />
-            </div>
-            <p>正文已识别，可在右侧查看原文。</p>
-            <p className="muted">{item.extractionSummary.pages ? `${item.extractionSummary.pages} 页 · ` : ""}{item.extractionSummary.characters != null ? `${item.extractionSummary.characters.toLocaleString("zh-CN")} 个字符` : `${item.extractionSummary.blocks} 个文本区块`}</p>
-          </section>
-        )}
-
         {/* Processing State */}
         {!item.hasIntelligence && (
           <div className="card-panel" style={{ marginBottom: 32 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-              <span className="section-title">{item.extractionSummary ? "AI 深度理解" : "处理状态"}</span>
-              <StatusBadge value={item.extractionSummary && item.processingStage === "BOOK_ANALYSIS" && item.stageAvailability === "DEGRADED" && ["ANALYSIS_QUEUED", "WAITING_FOR_ANALYSIS"].includes(item.processingState) ? "等待服务" : item.processingState === "WAITING_FOR_PROVIDER" ? "待配置 AI" : item.processingState === "SUCCEEDED" ? "完成" : item.processingState.includes("FAILED") ? "失败" : item.processingState === "PROCESSING_DEGRADED" ? "需处理" : "处理中"} />
+              <span className="section-title">处理状态</span>
+              <StatusBadge value={display.label} tone={display.tone} />
             </div>
             <SourceProcessing
               sourceDocumentId={item.id}
               ingestionStatus={item.ingestionStatus}
               analysisStatus={item.analysisStatus}
+              analysisProgress={item.analysisProgress}
               bootstrapStatus={item.bootstrapStatus}
               errorCode={item.errorCode}
+              failureReason={item.failureReason}
               processingState={item.processingState}
               processingStage={item.processingStage}
               recoveryAction={item.recoveryAction}
@@ -158,13 +166,30 @@ export function BookDetailView({ item, memories, structureNodes, bookSummary, te
         )}
 
         {item.mediaType === "application/epub+zip" && (
-          <ProductIdentityPanel key={item.id} sourceDocumentId={item.id} sourceFileName={item.displayName} />
+          // A newly published extraction invalidates the old advisory preview
+          // and any confirmation dialog based on that previous extraction.
+          <ProductIdentityPanel key={`${item.id}:${item.currentExtractionId ?? "pending"}`} sourceDocumentId={item.id} sourceFileName={item.displayName} />
         )}
 
-        {bookSummary && <section aria-label="全书摘要"><h2 className="font-serif">全书摘要</h2><p>{bookSummary}</p></section>}
-
         {/* Memory Items Cards - Fully Keyboard Accessible Buttons */}
-        {memories.map((memory) => {
+        {bookFacts.length > 0 && (
+          <section className="card-panel" aria-label="书籍资料">
+            <h2>书籍资料</h2>
+            <ul>
+              {bookFacts.map((memory) => (
+                <li key={memory.id}>
+                  <p>{memory.content}</p>
+                  {memory.evidence[0] && (
+                    <button type="button" className="btn btn-secondary" onClick={() => highlightEvidence(memory.evidence[0]!.id)}>
+                      查看资料原文
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {insights.map((memory) => {
           const firstEvidence = memory.evidence[0];
           const linkedNode = firstEvidence ? structureNodes.find((n) => n.id === firstEvidence.sourceBlock.structureNodeId) : null;
 
@@ -182,7 +207,7 @@ export function BookDetailView({ item, memories, structureNodes, bookSummary, te
                 aria-label={`查看 ${categoryNames[memory.type] ?? "解读点"} 对应的原文证据`}
               >
                 <div style={{ fontSize: 11, color: "var(--outline)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>
-                  {categoryNames[memory.type] ?? "BOOK MEMORY"}
+                  {categoryNames[memory.type] ?? "解读点"}
                 </div>
                 <h3 className="memory-card-title">{categoryNames[memory.type] ?? "解读点"}</h3>
                 <p className="memory-card-body">{memory.content}</p>
@@ -217,7 +242,7 @@ export function BookDetailView({ item, memories, structureNodes, bookSummary, te
           );
         })}
 
-        {!memories.length && item.hasIntelligence && (
+        {!insights.length && item.hasIntelligence && (
           <div className="card-panel">
             <p style={{ color: "var(--outline)", margin: 0 }}>分析已完成，等待呈现解读点。</p>
           </div>
@@ -225,11 +250,12 @@ export function BookDetailView({ item, memories, structureNodes, bookSummary, te
       </div>
 
       {/* Right Pane: Source Evidence (原文证据 - Parchment Surface) */}
-      <div className="evidence-pane">
+      <div className="evidence-pane" hidden={view !== "source"}>
         <div className="evidence-header">
-          <h2 className="evidence-title">{!allEvidence.length && textPreview ? "原文预览" : "原文证据"}</h2>
+          <h2 className="evidence-title">{textPreview ? "原文预览" : "原文证据"}</h2>
         </div>
 
+        {textPreview && <SourceTextReader sourceDocumentId={item.id} preview={textPreview} />}
         <div className="evidence-timeline">
           {allEvidence.map((ev) => {
             const excerpt = ev.sourceBlock.text.slice(ev.startOffset, ev.endOffset) || ev.sourceBlock.text;
@@ -253,15 +279,12 @@ export function BookDetailView({ item, memories, structureNodes, bookSummary, te
                 <blockquote className="evidence-text">“{excerpt}”</blockquote>
                 <div className="evidence-meta">
                   {ev.nodeTitle ? `${ev.nodeTitle} · ` : ""}
-                  区块 #{ev.sourceBlock.ordinal + 1} · 字符 offset {ev.startOffset}-{ev.endOffset}
+                  区块 #{ev.sourceBlock.ordinal + 1} · 字符位置 {ev.startOffset}-{ev.endOffset}
                 </div>
               </div>
             );
           })}
 
-          {!allEvidence.length && textPreview && (
-            <SourceTextReader key={item.id + ":" + textPreview.pageNumber} sourceDocumentId={item.id} preview={textPreview} />
-          )}
           {!allEvidence.length && !textPreview && (
             <div style={{ color: "#787774", fontSize: 14 }}>
               暂无可展示的原文证据。
