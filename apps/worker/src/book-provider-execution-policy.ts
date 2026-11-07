@@ -4,13 +4,16 @@ import type { ExecutionSnapshot, GatewayRequest } from "@ai-cognitive/provider-g
 const minimaxBookLimits = Object.freeze({ maxOutputTokens: 32_000, timeoutMs: 600_000, leaseMs: 630_000 });
 const minimaxSynthesisLimits = Object.freeze({ maxOutputTokens: 128_000, timeoutMs: 900_000, leaseMs: 930_000 });
 const limitsForStage = (stage?: string) => stage === "BOOK" ? minimaxSynthesisLimits : minimaxBookLimits;
+const longReasoningBookModel = (snapshot: Pick<ExecutionSnapshot, "providerKey" | "modelId">) =>
+  (snapshot.providerKey === "minimax" && snapshot.modelId === "MiniMax-M3") ||
+  (snapshot.providerKey === "zhipu" && snapshot.modelId === "glm-5.3-flash");
 export function bookProviderGeneration(snapshot: Pick<ExecutionSnapshot, "providerKey" | "modelId">, stage?: string) {
-  return snapshot.providerKey === "minimax" && snapshot.modelId === "MiniMax-M3" ? { maxOutputTokens: limitsForStage(stage).maxOutputTokens } : undefined;
+  return longReasoningBookModel(snapshot) ? { maxOutputTokens: limitsForStage(stage).maxOutputTokens } : undefined;
 }
 
 /** 仅控制新请求的调度，不改写冻结路由、历史身份或回执。 */
 export function bookProviderExecutionPolicy(snapshot: ExecutionSnapshot, request: GatewayRequest) {
-  if (snapshot.providerKey === "minimax" && snapshot.modelId === "MiniMax-M3" && request.capability.family === "TEXT_GENERATION" && ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"].includes(request.routeSlot)) return { timeoutMs: limitsForStage(request.routeSlot === "BOOK_SYNTHESIS" ? "BOOK" : undefined).timeoutMs, maxAttempts: 1 };
+  if (longReasoningBookModel(snapshot) && request.capability.family === "TEXT_GENERATION" && ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"].includes(request.routeSlot)) return { timeoutMs: limitsForStage(request.routeSlot === "BOOK_SYNTHESIS" ? "BOOK" : undefined).timeoutMs, maxAttempts: 1 };
   return undefined;
 }
 
