@@ -661,11 +661,13 @@ test("desktop navigation keeps one clear active destination", async ({
         await route.fulfill({ status: mode === "transport" ? 500 : 200 });
       });
     }
-    // Exercise the real upload control after hydration. Directly dispatching
-    // change on a hidden input before React attaches its handler is racy.
-    await page.waitForLoadState("networkidle");
+    // The page may continuously poll processing state, so networkidle is not
+    // a valid hydration signal. A real browser filechooser event proves that
+    // the visible upload button's client-side handler is ready and clickable.
+    const uploadButton = page.getByRole("button", { name: "上传内容", exact: true });
+    await expect(uploadButton).toBeEnabled();
     const fileChooser = page.waitForEvent("filechooser");
-    await page.getByRole("button", { name: "上传内容" }).click();
+    await uploadButton.click();
     await (await fileChooser).setFiles(file);
   }
   await uploadWith("start", sentinels[0]!);
