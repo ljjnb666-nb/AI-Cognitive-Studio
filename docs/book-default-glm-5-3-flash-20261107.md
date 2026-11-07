@@ -1,0 +1,34 @@
+# 新书理解默认模型切换：GLM-5.3-Flash（2026-11-07）
+
+## 决策与范围
+
+按用户决定，**新创建**的书籍理解任务在没有显式绑定模型的文本路由时，以智谱 `glm-5.3-flash` 为默认主模型，适用于：
+
+- `BOOK_CHUNK_ANALYSIS` 分块理解
+- `BOOK_REDUCTION_ANALYSIS` 章节/小节归并
+- `BOOK_SYNTHESIS` 全书综合
+
+只有工作区存在已启用、具备 ACTIVE 凭据的智谱 `OPENAI_COMPATIBLE` 连接时才补缺省路由。若缺失则提示配置，不自动选择其他付费模型。
+
+**显式绑定覆盖缺省**。不改写工作区绑定、已冻结的 Route Plan / 运行回执、当前处理中的书或历史成功分块。Embedding、TTS、音频、视频与独立语义审校路由不变。显式供应商目录 `PROVIDER_GATEWAY_MODEL_MANIFEST` 如有配置，仍以该目录为准；需要自行加入该模型。
+
+## 官方协议
+
+官方 API Model Code 为 `glm-5.3-flash`。内置目录将其声明为 TEXT_GENERATION / JSON_MODE，沿用智谱兼容适配器及现有结果验证、证据坐标、执行授权和费用保护。
+
+智谱官方文档说明该系列只允许 `thinking.type=enabled`，**不支持 disabled**。本次不新增关闭思考参数、不将 MiniMax 专属的 `thinking.disabled` 或 `reasoning_split` 用于智谱模型，不声称已经进行付费真实质量验收。
+
+官方型号文档：https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash
+
+## 运行边界
+
+这是**默认主模型变更**，不是运行中的自动供应商 Failover：
+
+- GLM 余额不足、HTTP 1301 审核拒绝、超时、输出截断等错误不会自动切换至 MiniMax M3 或 DeepSeek；
+- 历史任务继续使用各自冻结路由，不可暗中改用新模型；
+- 后续实现备用模型顺序时，需要独立设计授权、可计费未知状态协调、跨模型结果身份与审计回执；
+- 没有在此改动中进行任何付费 API 调用、部署或生产数据迁移。
+
+## 验收
+
+添加无费用回归，涵盖官方型号可选、三个默认槽、显式绑定优先、缺少智谱凭据时不盲目选择其他模型、已配置全部路由时不查询默认提供者。CI 与真实模型调用结果分别记录，不以模拟测试替代真实质量判断。
