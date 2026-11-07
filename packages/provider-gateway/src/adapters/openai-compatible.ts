@@ -60,8 +60,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       : { max_tokens: text.generation?.maxOutputTokens };
     const m3Options = m3Review
       ? { thinking: { type: selectedThinking }, reasoning_split: true }
-      : m3BookGeneration ? { reasoning_split: true }
       : m3Json ? { thinking: { type: "disabled" }, reasoning_split: true }
+      : m3BookGeneration ? { reasoning_split: true }
       : { temperature: text.generation?.temperature, top_p: text.generation?.topP };
     const body = { model: input.snapshot.modelId, messages, ...tokenCap, ...m3Options, ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
     const remote = await this.transport.execute({ url: profile.endpoint, method: "POST", headers: { "content-type": "application/json", ...authHeaders(profile.authScheme, input.credential) }, body: JSON.stringify(body), signal: input.signal });

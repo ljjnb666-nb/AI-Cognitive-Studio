@@ -12,7 +12,7 @@ import { SourceProcessing } from "./source-processing";
 import type { BookAnalysisProgress } from "@/lib/book-analysis-progress";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
 import { isBibliographicMemory } from "@/lib/bibliographic-memory";
-import { cognitionTypeLabels } from "@/lib/cognitions";
+import { cognitionTypeLabels } from "@/lib/cognition-types";
 
 const categoryNames: Record<string, string> = cognitionTypeLabels;
 

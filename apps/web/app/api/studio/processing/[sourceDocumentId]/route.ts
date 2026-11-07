@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { sourceDetail } from "@/lib/product";
-import { deriveProcessingStatus } from "@/lib/processing-state";
+import { sourceProcessingSnapshot } from "@/lib/processing-state";
 import { processingWorkerAvailability } from "@/lib/worker-heartbeat";
 
 export async function GET(_: Request, { params }: { params: Promise<{ sourceDocumentId: string }> }) {
   try {
     const item = await sourceDetail((await params).sourceDocumentId), workerAvailability = await processingWorkerAvailability();
     const ingestion = item.ingestionRuns[0], analysis = item.analysisRuns[0];
-    const errorCode = ingestion?.errorCode ?? analysis?.errorCode ?? null;
+    const projection = sourceProcessingSnapshot({ ingestion, analysis, bootstrap:item.bookAnalysisBootstraps[0], hasIntelligence:Boolean(item.currentIntelligence), workerAvailability, staleAfterMs:Number(process.env.SOURCE_PARSE_TIMEOUT_MS ?? 120_000) });
+    const errorCode = projection.errorCode;
     const safeFailureCode = errorCode && /^[A-Z0-9_]{1,80}$/.test(errorCode) ? errorCode : null;
     const status = projection.processing;
     return NextResponse.json({ analysisProgress: item.analysisProgress, processingState: status.state, processingStage: status.stage, recoveryAction: status.recoveryAction, stageAvailability: status.stageAvailability, ingestionStatus: ingestion?.status ?? null, analysisStatus: analysis?.status ?? null, queuedAt: ingestion?.createdAt?.toISOString() ?? null, startedAt: ingestion?.startedAt?.toISOString() ?? null, updatedAt: ingestion?.startedAt?.toISOString() ?? ingestion?.createdAt?.toISOString() ?? null, workerAvailability, failureReason:status.failureReason, processingSince:projection.processingSince, recoverable: status.recoveryAction !== "NONE" && status.recoveryAction !== "RECHECK", safeFailureCode });
