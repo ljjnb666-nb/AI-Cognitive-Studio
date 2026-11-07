@@ -38,6 +38,14 @@ async function waitForRun(id: string) { for (let i = 0; i < 50; i++) { const run
 afterEach(async () => { for (const f of owned.splice(0)) { await prisma.currentBookIntelligence.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerTextResult.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerEmbeddingResult.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerUsageEvent.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerInvocationAttempt.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerInvocation.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerExecutionSnapshot.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerRouteBinding.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerCredentialVersion.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.providerConnection.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.bookAnalysisRun.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.chunkSet.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.currentDocumentExtraction.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.documentExtraction.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.ingestionRun.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.job.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.sourceDocument.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.source.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.sourceBlob.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.workspaceMember.deleteMany({ where: { workspaceId: f.workspaceId } }); await prisma.workspace.delete({ where: { id: f.workspaceId } }); await prisma.user.delete({ where: { id: f.userId } }); } });
 
 describe("Phase 8C Checkpoint 3B production gateway composition", () => {
+  it("M3 长输出请求在远端执行前延长当前拥有者业务租约并保留 Token 预算",async()=>{
+    const f=await fixture(),document=await bookLineage(f);
+    await routes(f,undefined,{providerKey:"minimax",protocol:"TEST",displayName:"M3 fixture",modelId:"MiniMax-M3",embeddingModelId:"MiniMax-M3",embeddingDimensions:3});
+    const definition=JSON.parse(manifest);definition.providers[0].providerKey="minimax";definition.providers[0].adapterVersion="builtin-v1";definition.providers[0].models[0].modelId="MiniMax-M3";definition.providers[0].models[0].structuredOutput="JSON_MODE";
+    const requested=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"m3-lease-test",promptVersion:"v1",provider:"minimax",model:"MiniMax-M3",routePlan:await durableRoutePlan(f.workspaceId)});
+    let calls=0;const r=createBookProductionGatewayRuntime({...source,PROVIDER_GATEWAY_MODEL_MANIFEST:JSON.stringify(definition)},{...controls,adapterResolver:()=>({execute:async({request:value})=>{calls++;const run=await prisma.bookAnalysisRun.findUniqueOrThrow({where:{id:requested.run.id}});expect(run.executionLeaseUntil!.getTime()-Date.now()).toBeGreaterThan(600_000);expect(value.text!.generation!.maxOutputTokens).toBe(32_000);expect(value.text!.generation).not.toHaveProperty("thinking");expect(value.bookExecution).toMatchObject({analysisRunId:requested.run.id,jobId:requested.job.id});throw new ProviderGatewayError("QUOTA_EXCEEDED");}})});
+    try{await expect(processBookAnalysisRun(requested.run.id,{analysisProviderForRun:input=>r.createAnalysisProvider(input),embeddingGateway:{gateway:r.gateway,repository:r.repository,userId:f.userId}})).rejects.toMatchObject({code:"QUOTA_EXCEEDED"});expect(calls).toBe(1);}finally{await r.close();}
+  });
   it.each(["cancelled","expired","lost-owner"])("retains the encrypted remote receipt but rejects materialization when %s", async mode => {
     const f=await fixture(),document=await bookLineage(f);await routes(f);
     const requested=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"cancel-receipt",promptVersion:"v1",provider:"fixture",model:"fixture-model"});
@@ -304,6 +312,8 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
   it("P20 completes the real production-composed BookAnalysis chain", async () => { const f = await fixture(), document = await bookLineage(f), calls = { text: 0, embedding: 0 }, r = runtime(calls); await routes(f); const requested = await requestBookAnalysisForUser(f, { sourceDocumentId: document.id, pipelineVersion: "p20", promptVersion: "p", provider: "fixture", model: "fixture-model" }); const final = await processBookAnalysisRun(requested.run.id, { analysisProviderForRun: input => r.createAnalysisProvider(input), embeddingGatewayForRun: input => ({ gateway: r.gateway, repository: r.repository, userId: input.userId }) }); expect(final).toMatchObject({ status: "SUCCEEDED", analysisStage: "COMPLETED" }); expect(await prisma.job.findUniqueOrThrow({ where: { id: requested.job.id } })).toMatchObject({ status: "SUCCEEDED" }); expect(await prisma.currentBookIntelligence.findFirst({ where: { workspaceId: f.workspaceId, analysisRunId: requested.run.id } })).toBeTruthy(); expect(calls.text).toBeGreaterThan(0); expect(calls.embedding).toBe(1); });
   it("P21 completes durable MiniMax JSON-mode text plus Gemini 768-dimensional embeddings", async () => {
     const f = await fixture(), document = await bookLineage(f), calls = { text: 0, embedding: 0 };
+    // 本样本不报告用量，必须显式准备足够预算并保留全部未知预留。
+    await prisma.workspaceResourcePolicy.create({data:{workspaceId:f.workspaceId,runUnitLimit:1000000}});
     const manifest = JSON.stringify({ providers: [
       { providerKey: "minimax", displayName: "MiniMax", protocol: "OPENAI_COMPATIBLE", adapterVersion: "test", models: [{ modelId: "MiniMax-M3", families: ["TEXT_GENERATION"], confidence: "DECLARED", structuredOutput: "JSON_MODE" }] },
       { providerKey: "gemini", displayName: "Google Gemini", protocol: "GEMINI_NATIVE", capabilityProtocols: { EMBEDDING: "GEMINI_EMBEDDINGS" }, adapterVersion: "test", models: [{ modelId: "gemini-embedding-2", families: ["EMBEDDING"], confidence: "DECLARED", embeddingDimensions: 768, configurableEmbeddingDimensions: true }] },
@@ -436,4 +446,39 @@ describe("Phase 8C Checkpoint 3B production gateway composition", () => {
     expect(calls.embedding).toBe(1);
   });
 
+});
+
+it("事实分类提示明确使用现有CLAIM且不丢弃原文事实", async () => {
+  const {bookAnalysisJsonOutputContract} = await import("../src/provider-gateway-runtime.js");
+  expect(bookAnalysisJsonOutputContract).toContain("factual statements and supporting facts use CLAIM");
+  expect(bookAnalysisJsonOutputContract).toContain("do not omit facts");
+});
+
+it.each([true,false])("M3综合使用有界提示、独立版本并尊重调用前预算保护：%s", async enoughBudget => {
+  const {claimBookAnalysisRun}=await import("@ai-cognitive/book-intelligence");
+  const f=await fixture(),document=await bookLineage(f);
+  await routes(f,undefined,{providerKey:"minimax",protocol:"TEST",displayName:"M3 synthesis",modelId:"MiniMax-M3",embeddingModelId:"MiniMax-M3",embeddingDimensions:3});
+  const definition=JSON.parse(manifest);definition.providers[0].providerKey="minimax";definition.providers[0].adapterVersion="builtin-v1";definition.providers[0].models[0].modelId="MiniMax-M3";definition.providers[0].models[0].structuredOutput="JSON_MODE";
+  const requested=await requestBookAnalysisForUser(f,{sourceDocumentId:document.id,pipelineVersion:"synthesis-test",promptVersion:"v1",provider:"minimax",model:"MiniMax-M3",routePlan:await durableRoutePlan(f.workspaceId)});
+  await prisma.workspaceResourcePolicy.create({data:{workspaceId:f.workspaceId,runUnitLimit:enoughBudget?300000:64000}});
+  const token=randomUUID();expect(await claimBookAnalysisRun(requested.run.id,token,0)).toBe(true);
+  let calls=0;
+  const r=createBookProductionGatewayRuntime({...source,PROVIDER_GATEWAY_MODEL_MANIFEST:JSON.stringify(definition)},{...controls,adapterResolver:()=>({execute:async({request})=>{
+    calls++;expect(request.routeSlot).toBe("BOOK_SYNTHESIS");
+    expect(request.text!.generation).toEqual({maxOutputTokens:128000});
+    expect(request.text!.system).toContain("not tasks for you to solve");
+    expect(request.text!.system).toContain("preserve qualifications");
+    expect(request.promptVersion).toBe("v1:bounded-synthesis-v1");
+    const run=await prisma.bookAnalysisRun.findUniqueOrThrow({where:{id:requested.run.id}});
+    expect(run.executionLeaseUntil!.getTime()-Date.now()).toBeGreaterThan(900000);
+    return {response:{type:"STRUCTURED",structured:{summary:"完整综合结果"}},usage:{inputTokens:1,outputTokens:1}};
+  }})});
+  try {
+    const provider=await r.createAnalysisProvider({...f,analysisRunId:requested.run.id,provider:"minimax",model:"MiniMax-M3",execution:{...f,analysisRunId:requested.run.id,jobId:requested.job.id,dispatchGeneration:0,claimToken:token}});
+    const generated=provider.generateStructured({stage:"BOOK",content:'{"summary":"已有摘要"}',sourceBlockIds:[],tokenBudget:100,correlationId:requested.run.id,systemInstructions:"Aggregate supplied evidence",promptVersion:"v1"});
+    if(enoughBudget) await expect(generated).resolves.toEqual({summary:"完整综合结果"});
+    else await expect(generated).rejects.toMatchObject({code:"BUDGET_EXCEEDED"});
+    expect(calls).toBe(enoughBudget?1:0);
+    expect((await prisma.bookAnalysisRun.findUniqueOrThrow({where:{id:requested.run.id}})).promptVersion).toBe("v1");
+  } finally {await r.close();}
 });

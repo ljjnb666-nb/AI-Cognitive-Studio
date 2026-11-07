@@ -1,3 +1,4 @@
+import { ProviderGatewayError } from "@ai-cognitive/provider-gateway";
 /* Prisma rows are deliberately structurally typed at this orchestration boundary. */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { randomUUID } from "node:crypto";
@@ -476,7 +477,7 @@ export async function processPodcastGenerationRun(runId: string, dependencies: P
     return loadRun(run.id);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "PODCAST_GENERATION_FAILED";
-    const errorCode = errorMessage.split(":")[0]!;
+    const errorCode = error instanceof ProviderGatewayError ? error.code : errorMessage.split(":")[0]!;
     if (errorCode !== PODCAST_GENERATION_OWNERSHIP_LOST) await failOwnedPodcastGeneration(run.id, run.jobId, run.episodeId, token, errorCode);
     logger.error("podcast.generation.failed", { podcastGenerationRunId: run.id, episodeId: run.episodeId, workspaceId: run.workspaceId, errorCode, errorMessage: errorMessage.slice(0, 500) });
     throw error;
