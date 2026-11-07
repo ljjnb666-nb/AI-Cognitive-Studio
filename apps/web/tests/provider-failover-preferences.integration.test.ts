@@ -145,6 +145,30 @@ describe("owner-configured cross-workflow fallback intent (no provider execution
     }
   });
 
+  it("rejects default GLM primary as a backup when the route has no manual binding",async()=>{
+    const {zhipu}=await fixture();
+    await prisma.providerRouteBinding.delete({where:{
+      workspaceId_routeSlot:{workspaceId:actor.workspaceId,routeSlot:"BOOK_CHUNK_ANALYSIS"},
+    }});
+    const get=await GET();
+    expect(get.status).toBe(200);
+    const state=await get.json();
+    expect(state.routes).toEqual(expect.arrayContaining([
+      expect.objectContaining({routeSlot:"BOOK_CHUNK_ANALYSIS",modelId:"glm-5.3-flash"}),
+    ]));
+    expect(state.failoverChoices.some((candidate:{routeSlot:string;providerKey:string;modelId:string})=>
+      candidate.routeSlot==="BOOK_CHUNK_ANALYSIS" &&
+      candidate.providerKey==="zhipu" && candidate.modelId==="glm-5.3-flash")).toBe(false);
+    const forbidden=await post({
+      action:"SET_FAILOVER_PREFERENCE",routeSlot:"BOOK_CHUNK_ANALYSIS",
+      requestedEnabled:true,maxSwitches:1,expectedRevision:null,
+      candidates:[{connectionId:zhipu.connection.id,modelId:"glm-5.3-flash",configuration:{}}],
+    });
+    expect(forbidden.status).toBe(400);
+    expect((await forbidden.json()).error).toBe("CAPABILITY_MISMATCH");
+    expect(await prisma.providerFailoverPreference.count({where:{workspaceId:actor.workspaceId}})).toBe(0);
+  });
+
   it("validates strict JSON schema for Teach Back and keeps feature-specific routes distinct",async()=>{
     const {backups,zhipu}=await fixture();
     const bad=await post({action:"SET_FAILOVER_PREFERENCE",routeSlot:"TEACH_BACK_ASSESSMENT",
