@@ -43,7 +43,7 @@ test("worker-down upload becomes a recoverable degraded processing state without
     await expect(degradedStatus).toBeVisible();
     await page.reload();
     await expect(degradedStatus).toBeVisible();
-    await expect(page.getByRole("button", { name: "重新解析" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "重新提取" })).toBeVisible();
     await expect(page.getByRole("button", { name: "重新检查状态" })).toBeVisible();
   } finally { await redis.quit(); }
 });
@@ -78,7 +78,7 @@ test("R07 re-finalizes valid durable analysis through the real processing recove
   await page.goto(`/studio/library/${sourceDocumentId}`);
   await expect(page.getByText("后台处理服务暂时没有响应。你的文件已经保存，可以稍后重试。")).toBeVisible();
   await expect(page.getByRole("button", { name: "恢复深度理解" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "重新解析" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "重新提取" })).toHaveCount(0);
   const recovery = page.waitForResponse(response => new URL(response.url()).pathname === `/api/studio/processing/${sourceDocumentId}/recover` && response.request().method() === "POST");
   await page.getByRole("button", { name: "恢复深度理解" }).click();
   expect((await recovery).ok()).toBeTruthy();
