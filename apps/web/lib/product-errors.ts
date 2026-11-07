@@ -26,6 +26,8 @@ export function bookIntelligenceErrorMessage(code?: string | null) {
 
 export function uploadErrorMessage(code?: string | null) {
   const normalized = code?.toUpperCase() ?? "";
+  if (normalized === "UNSUPPORTED_MOBI") return "暂不支持 MOBI 格式，请先转换为 EPUB 或 PDF 后上传。";
+  if (normalized === "UPLOAD_REQUEST_INVALID") return "上传信息不完整或格式无效，请重新选择文件。";
   if (
     normalized.includes("TOO_LARGE") ||
     normalized.includes("FILE_SIZE") ||
