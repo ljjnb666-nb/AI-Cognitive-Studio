@@ -990,10 +990,10 @@ test("captures the final Studio experience evidence", async ({
       await expectSearchIconInsideField(page);
     }
     if (name === "07-podcasts-desktop.png") {
-      await expect(page.getByRole("heading", { name: "证据与判断" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "播客", exact: true })).toBeVisible();
     }
     if (name === "08-videos-desktop.png") {
-      await expect(page.getByRole("heading", { name: "证据短视频" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "短视频", exact: true })).toBeVisible();
     }
     if (name === "18-provider-settings-desktop.png") {
       // New settings page shows its title directly, without the retired
