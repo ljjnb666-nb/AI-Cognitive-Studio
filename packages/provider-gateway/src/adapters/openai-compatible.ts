@@ -50,15 +50,17 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       ? input.snapshot.configuration.minimaxM3ReviewThinking ?? "adaptive" : "disabled";
     if (m3Review && selectedThinking !== "adaptive" && selectedThinking !== "disabled")
       throw new ProviderGatewayError("CAPABILITY_MISMATCH");
+    const m3BookGeneration = m3 && ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"].includes(input.request.routeSlot);
     const m3Json = m3 && mode === "JSON_MODE" &&
       (m3Review || input.snapshot.configuration.minimaxM3JsonMode === true);
     // Preserve old MiniMax text endpoint's max_tokens; the OpenAI-compatible
     // chat endpoint uses max_completion_tokens. Neither reserves final tokens.
-    const tokenCap = m3Review && profile.endpoint.endsWith("/chat/completions")
+    const tokenCap = m3 && profile.endpoint.endsWith("/chat/completions")
       ? { max_completion_tokens: text.generation?.maxOutputTokens }
       : { max_tokens: text.generation?.maxOutputTokens };
     const m3Options = m3Review
       ? { thinking: { type: selectedThinking }, reasoning_split: true }
+      : m3BookGeneration ? { reasoning_split: true }
       : m3Json ? { thinking: { type: "disabled" }, reasoning_split: true }
       : { temperature: text.generation?.temperature, top_p: text.generation?.topP };
     const body = { model: input.snapshot.modelId, messages, ...tokenCap, ...m3Options, ...(responseFormat ? { response_format: responseFormat } : {}), ...(boundedVision ? { thinking: { type: "disabled" } } : {}) };
@@ -69,7 +71,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       if (String(businessCode) === "1301") throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: header(remote.headers, "x-request-id"), usage: { extra: { moderationDiagnostic: zhipuModerationDiagnostic(JSON.parse(remote.body), remote.status) } } });
     }
     failureForStatus(remote);
-    const json = parseJson(remote);
+    let json: Record<string, unknown>;
+    try { json = parseJson(remote); } catch (error) {
+      if (!m3) throw error;
+      throw new ProviderAdapterFailure("INVALID_PROVIDER_RESPONSE", { retryable: false, remoteRequestId: header(remote.headers, "x-request-id"), usage: { extra: { textStructuredResponse: { httpStatus: remote.status, responseJsonValid: false, responseBytes: Buffer.byteLength(remote.body, "utf8"), reportedUsagePresent: false } } } });
+    }
     const choice = Array.isArray(json.choices) ? json.choices[0] as Record<string, unknown> | undefined : undefined;
     const message = choice?.message as Record<string, unknown> | undefined;
     const rawUsage = json.usage as Record<string, unknown> | undefined;
@@ -84,14 +90,16 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       // the provider stopped because of the generation limit. Keep the billed
       // usage, mark this non-retryable and never materialize a false PASS.
       if (m3 && mode === "JSON_MODE" && finish(choice?.finish_reason) === "LENGTH")
-        throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
+        throw new ProviderGatewayError(m3BookGeneration ? "OUTPUT_TRUNCATED" : "INVALID_PROVIDER_RESPONSE");
       return response(message.content, typeof json.model === "string" ? json.model : undefined, finish(choice?.finish_reason), text, usage, requestId);
     } catch (error) {
-      if (!boundedVision && !(["zhipu", "minimax"].includes(input.snapshot.providerKey) && mode === "JSON_MODE")) throw error;
+      if (!m3 && !boundedVision && !(input.snapshot.providerKey === "zhipu" && mode === "JSON_MODE")) throw error;
+      let contentJsonValid = false;
+      if (m3 && typeof message?.content === "string") { try { JSON.parse(message.content); contentJsonValid = true; } catch { /* Diagnostic only, never accept invalid content. */ } }
       // A billed 200 response can still be unusable JSON. Preserve reported
       // usage and non-content diagnostics; never copy page/model prose or
       // reasoning into logs or turn a malformed response into a judgement.
-      throw new ProviderAdapterFailure("INVALID_PROVIDER_RESPONSE", { remoteRequestId: requestId, retryable: false, usage: { ...usage, extra: { [boundedVision ? "pdfReviewResponse" : "textStructuredResponse"]: { httpStatus: remote.status, finishReason: finish(choice?.finish_reason), contentType: typeof message?.content, contentCharacters: typeof message?.content === "string" ? message.content.length : null, reasoningCharacters: typeof message?.reasoning_content === "string" ? message.reasoning_content.length : null, reportedUsagePresent: Boolean(rawUsage) } } } });
+      throw new ProviderAdapterFailure(m3BookGeneration && finish(choice?.finish_reason) === "LENGTH" ? "OUTPUT_TRUNCATED" : "INVALID_PROVIDER_RESPONSE", { remoteRequestId: requestId, retryable: false, usage: { ...usage, extra: { [boundedVision ? "pdfReviewResponse" : "textStructuredResponse"]: { httpStatus: remote.status, finishReason: finish(choice?.finish_reason), contentType: typeof message?.content, contentCharacters: typeof message?.content === "string" ? message.content.length : null, reasoningCharacters: typeof message?.reasoning_content === "string" ? message.reasoning_content.length : null, reportedUsagePresent: Boolean(rawUsage), ...(m3 ? { responseJsonValid: true, contentJsonValid, inlineReasoningPresent: typeof message?.content === "string" && /<\/?think\b/i.test(message.content) } : {}) } } } });
     }
   }
 }
