@@ -60,7 +60,8 @@ async function signedUp(browser: Browser, name: string, email: string) {
 
 async function uploadBook(page: Page, filename: string) {
   await page.goto("/studio/library");
-  // Wait for the React upload input to hydrate before dispatching its change event.
+  // The hidden input is rendered by React: wait for the client upload handler
+  // to hydrate before dispatching a synthetic file change in Playwright.
   await page.waitForLoadState("networkidle");
   const contents = `# ${filename}\n\n${"Tenant-scoped evidence must never be exposed to another authenticated workspace. ".repeat(300)}`;
   const completion = page.waitForResponse(response =>
@@ -73,68 +74,8 @@ async function uploadBook(page: Page, filename: string) {
   expect(completed.status(), `upload complete failed: ${payload.error ?? "unknown"}`).toBe(200);
   expect(payload.sourceDocumentId, "upload response must contain durable source ID").toBeTruthy();
   const sourceDocumentId = payload.sourceDocumentId!;
-  // Still require the real client navigation; do not navigate manually in the test.
-  await expect(page).toHaveURL(new RegExp(`/studio/library/${sourceDocumentId}import { createHash } from "node:crypto";
-import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { prisma } from "@ai-cognitive/db";
-import { createS3CompatibleStorageProvider } from "@ai-cognitive/storage";
-import { ProviderGatewayRepository, testCipher } from "@ai-cognitive/provider-gateway";
-
-const password = "Phase7Password!1";
-let nextTestIp = 10;
-
-async function configurePhase7Routes(identity: { workspaceId: string; userId: string }) {
-  const repository = new ProviderGatewayRepository(prisma, testCipher());
-  const connection = new Map<string, string>();
-  for (const providerKey of ["phase6-analysis", "phase6-podcast", "phase6-wav", "phase6-video", "phase6-video-wav"]) {
-    const created = await repository.createConnection(identity, { providerKey, protocol: "TEST", displayName: providerKey, endpoint: `https://${providerKey}.fixture.test/v1` });
-    await repository.rotateCredential(identity, created.id, `phase7-${providerKey}-credential`);
-    connection.set(providerKey, created.id);
-  }
-  const route = (routeSlot: string, providerKey: string, modelId: string, configuration: Record<string, unknown> = {}) => repository.setRoute(identity, { routeSlot, connectionId: connection.get(providerKey)!, modelId, configuration });
-  await Promise.all([
-    route("BOOK_CHUNK_ANALYSIS", "phase6-analysis", "fixture"), route("BOOK_REDUCTION_ANALYSIS", "phase6-analysis", "fixture"), route("BOOK_SYNTHESIS", "phase6-analysis", "fixture"), route("EMBEDDING", "phase6-analysis", "embedding"),
-    route("PODCAST_SCRIPT", "phase6-podcast", "fixture"), route("PODCAST_TTS", "phase6-wav", "fixture", { outputFormat: "wav", hostVoices: [{ ordinal: 1, providerVoiceId: "phase6-host-a", voiceVersion: "1", speakingRate: 1, pitch: 0, outputFormat: "wav" }, { ordinal: 2, providerVoiceId: "phase6-host-b", voiceVersion: "1", speakingRate: 1, pitch: 0, outputFormat: "wav" }] }),
-    route("SHORT_VIDEO_SCRIPT", "phase6-video", "fixture"), route("SHORT_VIDEO_TTS", "phase6-video-wav", "fixture", { providerVoiceId: "phase6-video", voiceVersion: "1", speakingRate: 1, pitch: 0, outputFormat: "wav" }),
-  ]);
-}
-
-function captureErrors(page: Page) {
-  const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error" && !message.text().includes("favicon")) errors.push(message.text()); });
-  return errors;
-}
-
-async function signUp(page: Page, name: string, email: string) {
-  await page.goto("/sign-up");
-  await page.locator('input[name="name"]').fill(name);
-  await page.locator('input[name="email"]').fill(email);
-  await page.locator('input[name="password"]').fill(password);
-  await page.locator('input[name="confirmPassword"]').fill(password);
-  await page.locator('button[type="submit"]').click();
-  await expect(page).toHaveURL(/\/studio$/);
-}
-
-async function signIn(page: Page, email: string) {
-  await page.goto("/sign-in");
-  await page.locator('input[name="email"]').fill(email);
-  await page.locator('input[name="password"]').fill(password);
-  await page.locator('button[type="submit"]').click();
-  await expect(page).toHaveURL(/\/studio$/);
-}
-
-async function signedUp(browser: Browser, name: string, email: string) {
-  const context = await browser.newContext({ extraHTTPHeaders: { "x-forwarded-for": `203.0.113.${nextTestIp++}` } });
-  const page = await context.newPage();
-  await signUp(page, name, email);
-  const user = await prisma.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } });
-  expect(user.memberships).toHaveLength(1);
-  await configurePhase7Routes({ workspaceId: user.memberships[0]!.workspaceId, userId: user.id });
-  return { context, page, user, workspaceId: user.memberships[0]!.workspaceId };
-}
-
-), { timeout: 30_000 });
+  // Still require the actual client transition; do not navigate manually.
+  await expect(page).toHaveURL(url => url.pathname === "/studio/library/" + sourceDocumentId, { timeout: 30_000 });
   await expect.poll(async () => (await prisma.currentBookIntelligence.findFirst({ where: { sourceDocumentId } }))?.id, { timeout: 90_000 }).toBeTruthy();
   return sourceDocumentId;
 }
@@ -237,8 +178,8 @@ test("two real users cannot cross tenant boundaries, while members can switch an
   const bGateway = await assertDurableGatewayPrincipal({ sourceDocumentId: bSourceId, userId: b.user.id, workspaceId: b.workspaceId });
   const fixture = await createBProductFixtures({ userId: b.user.id, workspaceId: b.workspaceId });
   const a = await signedUp(browser, "Tenant A", `phase7-a-${suffix}@ai-cognitive-studio.test`);
-  // Do not depend on another Playwright test executing first or succeeding.
-  // Independently prove both real tenants have different durable gateway principals.
+  // Independently prove both tenants have distinct durable gateway principals.
+  // Do not rely on a separate spec executing first or passing.
   const aSourceId = await uploadBook(a.page, "a-tenant-evidence.md");
   const aGateway = await assertDurableGatewayPrincipal({ sourceDocumentId: aSourceId, userId: a.user.id, workspaceId: a.workspaceId });
   expect(a.workspaceId).not.toBe(b.workspaceId);
