@@ -19,7 +19,9 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
     throw error;
   }
 
-  const memories = item.currentIntelligence?.analysisRun.memoryItems ?? [];
+  // sourceDetail has already applied the published revision and its audited
+  // evidence overlay. Never fall back to raw analysis-run memory rows here.
+  const memories = item.bookMemories;
   const structureNodes = item.currentExtraction?.extraction.structureNodes ?? [];
   const ingestionStatus = item.ingestionRuns[0]?.status;
   const analysisStatus = item.analysisRuns[0]?.status;
@@ -35,6 +37,7 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
     {item.analysisRuns[0] && ["QUEUED", "RUNNING"].includes(item.analysisRuns[0].status) && <CancelJobButton jobId={item.analysisRuns[0].jobId} />}
     </div>
     <BookDetailView
+      bookSummary={item.bookSummary}
       textPreview={item.textPreview}
       item={{
         id: item.id,
@@ -63,8 +66,8 @@ export default async function SourcePage({ params, searchParams }: { params: Pro
         workerAvailability,
         processingSince,
       }}
-      memories={memories as any}
-      structureNodes={structureNodes as any}
+      memories={memories}
+      structureNodes={structureNodes}
     />
     </div>
   );

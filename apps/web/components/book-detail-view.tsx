@@ -46,6 +46,7 @@ type StructureNodeData = {
 };
 
 type Props = {
+  bookSummary?: string | null;
   textPreview?: SourceTextPreview | null;
   item: {
     id: string;
@@ -75,7 +76,7 @@ type Props = {
   structureNodes: StructureNodeData[];
 };
 
-export function BookDetailView({ item, memories, structureNodes, textPreview }: Props) {
+export function BookDetailView({ item, memories, structureNodes, bookSummary, textPreview }: Props) {
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
   const [view, setView] = useState<"overview" | "source">(textPreview ? "source" : "overview");
   const display = processingDisplay({state: item.processingState as ProcessingState, stage:item.processingStage,recoveryAction:item.recoveryAction,stageAvailability:item.stageAvailability,failureReason:item.failureReason},item.errorCode);
@@ -169,6 +170,15 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
           // A newly published extraction invalidates the old advisory preview
           // and any confirmation dialog based on that previous extraction.
           <ProductIdentityPanel key={`${item.id}:${item.currentExtractionId ?? "pending"}`} sourceDocumentId={item.id} sourceFileName={item.displayName} />
+        )}
+
+        {/* The full-book synthesis is projected by sourceDetail from the
+            published revision, not from an unpublished candidate or raw run. */}
+        {bookSummary && (
+          <section className="card-panel" aria-label="全书摘要">
+            <h2 className="font-serif">全书摘要</h2>
+            <p>{bookSummary}</p>
+          </section>
         )}
 
         {/* Memory Items Cards - Fully Keyboard Accessible Buttons */}
