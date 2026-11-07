@@ -53,7 +53,7 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.locator('input[name="title"]').fill("证据播客");
   await page.locator('input[name="duration"]').fill("1");
   await page.getByRole("button", { name: "开始生成播客" }).click();
-  await expect(page).toHaveURL(/\\/studio\\/podcasts\\//, { timeout: 30_000 });
+  await expect(page).toHaveURL(/\/studio\/podcasts\//, { timeout: 30_000 });
   // The latest product deliberately separates script generation from paid TTS.
   // In this isolated Phase 6 harness, the configured speech provider is a
   // deterministic local WAV fixture, so exercise the actual user-initiated
