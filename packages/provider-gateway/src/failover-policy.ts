@@ -120,6 +120,10 @@ export function assessProviderFailover(input: FailoverAssessmentInput): Failover
       input.switchesUsed >= input.maxSwitches) return hold("ATTEMPT_LIMIT_REACHED");
   if (!Number.isSafeInteger(currentCandidateIndex) || currentCandidateIndex < 0 ||
       currentCandidateIndex >= candidates.length - 1) return hold("NO_BACKUP");
+  // The candidate chain advances exactly one step per recorded cross-model
+  // switch. A divergent index/counter is an invalid recovery state, not a
+  // license to reset the switch budget after a crash or queue redelivery.
+  if (currentCandidateIndex !== input.switchesUsed) return hold("ATTEMPT_LIMIT_REACHED");
 
   const current = candidates[currentCandidateIndex];
   const candidate = candidates[currentCandidateIndex + 1];
