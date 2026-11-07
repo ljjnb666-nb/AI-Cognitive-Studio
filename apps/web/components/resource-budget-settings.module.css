@@ -1,0 +1,8 @@
+.panel { display: grid; gap: 16px; min-width: 0; }
+.panel h2, .panel p { margin: 0; }
+.panel p { color: var(--text-secondary); line-height: 1.7; }
+.fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; min-width: 0; border: 0; padding: 0; margin: 0; }
+.field { display: grid; gap: 8px; min-width: 0; font-weight: 600; }
+.field input, .field select { box-sizing: border-box; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text-primary); font: inherit; font-weight: 400; }
+.full { grid-column: 1 / -1; }
+@media (max-width: 640px) { .fields { grid-template-columns: minmax(0, 1fr); } }

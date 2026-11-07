@@ -27,3 +27,18 @@ describe("audit evidence and synthesis regressions", () => {
     await expect(guardedGenerateStructured({ generateStructured: async () => ({ summary: "summary", memory: [{ type: "CLAIM", content: "claim", evidence: [{ sourceBlockId: "block", startOffset: 0, endOffset: text.length, quoteText: text }] }] }) }, request, blocks, 100)).resolves.toMatchObject({ memory: [{ type: "CLAIM" }] });
   });
 });
+
+it("全书综合某批次截断后复用成功批次，不重发已保存综合请求", async () => {
+  const cache = new Map<string, AnalysisResponse>();
+  const key = (id: unknown) => JSON.stringify(id);
+  const input = {stage:"BOOK" as const,children:Array.from({length:4},(_,ordinal)=>({ordinal,summary:`批次${ordinal}:`+"内容".repeat(100)})),blocks:[{id:"source",ordinal:0,kind:"PARAGRAPH" as const,text:"仅用于原文身份校验的独立样本"}],limit:600,correlationId:"test",systemInstructions:"仅综合已有摘要",cache:{find:async(id:unknown)=>cache.get(key(id))??null,persist:async(id:unknown,value:AnalysisResponse)=>{cache.set(key(id),value);return value;}}};
+  let firstCalls=0;
+  await expect(reduceBoundedAnalysisChildren({...input,provider:{generateStructured:async()=>{if(++firstCalls===2)throw new Error("OUTPUT_TRUNCATED");return {summary:"已成功的首个综合批次"};}}})).rejects.toThrow("OUTPUT_TRUNCATED");
+  expect(cache.size).toBe(1);
+  const [firstKey, firstValue] = [...cache.entries()][0]!;
+  let resumedCalls=0;
+  const result=await reduceBoundedAnalysisChildren({...input,provider:{generateStructured:async()=>{resumedCalls++;return {summary:"完整综合摘要"};}}});
+  expect(result.summary).toBe("完整综合摘要");
+  expect(resumedCalls).toBe(2);
+  expect(cache.get(firstKey)).toBe(firstValue);
+});

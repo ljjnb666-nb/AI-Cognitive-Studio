@@ -61,6 +61,10 @@ async function makeSource(workspaceId: string, fileName: string, versionCount: n
 afterEach(async () => {
   if (workspaceIds.length) {
     const where = { workspaceId: { in: workspaceIds } };
+    await prisma.analysisArtifact.deleteMany({ where });
+    await prisma.bookAnalysisRun.deleteMany({ where });
+    await prisma.documentChunk.deleteMany({ where });
+    await prisma.chunkSet.deleteMany({ where });
     await prisma.currentDocumentExtraction.deleteMany({ where });
     await prisma.sourceBlock.deleteMany({ where: { extraction: where } });
     await prisma.sourcePage.deleteMany({ where: { extraction: where } });
@@ -81,6 +85,27 @@ afterEach(async () => {
 });
 
 describe("04C-4C3 authoritative Source/Work read model (real PostgreSQL)", () => {
+  it("按当前提取的最新任务展示真实分块计数，失败保留进度且不混入其他阶段或旧任务",async()=>{
+    const identity=await createWorkspace(),foreign=await createWorkspace(),sample=await makeSource(identity.workspaceId,"progress.epub",1),sourceDocumentId=sample.documents[0]!.id,workspaceId=identity.workspaceId;
+    const ingestJob=await prisma.job.create({data:{workspaceId,type:"source.ingest",payload:{}}});
+    const ingestion=await prisma.ingestionRun.create({data:{sourceDocumentId,workspaceId,jobId:ingestJob.id,parserVersion:"test",normalizationVersion:"test",status:"SUCCEEDED"}});
+    const extraction=await prisma.documentExtraction.create({data:{workspaceId,sourceDocumentId,ingestionRunId:ingestion.id,status:"SUCCEEDED",qualityStatus:"ACCEPTED",parserName:"test",parserVersion:"test",normalizationVersion:"test"}});
+    await prisma.currentDocumentExtraction.create({data:{workspaceId,sourceDocumentId,extractionId:extraction.id}});
+    const chunks=await prisma.chunkSet.create({data:{workspaceId,sourceDocumentId,extractionId:extraction.id,chunkingVersion:"test",configuration:{},configurationHash:"test",status:"SUCCEEDED"}});
+    for(let ordinal=0;ordinal<3;ordinal++)await prisma.documentChunk.create({data:{workspaceId,extractionId:extraction.id,chunkSetId:chunks.id,structureVersion:"test",ordinal,content:"原文",contentHash:`hash-${ordinal}`,characterCount:2,tokenEstimate:2}});
+    const job=await prisma.job.create({data:{workspaceId,type:"book.analysis",payload:{}}});
+    const run=await prisma.bookAnalysisRun.create({data:{workspaceId,sourceDocumentId,extractionId:extraction.id,chunkSetId:chunks.id,jobId:job.id,pipelineVersion:"test",promptVersion:"test",provider:"fixture",model:"fixture",modelVersionKey:"test",idempotencyKey:crypto.randomUUID(),analysisIdentityHash:crypto.randomUUID(),status:"RUNNING",analysisStage:"CHUNK_ANALYSIS"}});
+    expect((await sourceDetail(sourceDocumentId,identity)).analysisProgress).toEqual({runId:run.id,stage:"CHUNK_ANALYSIS",completedChunks:0,totalChunks:3});
+    const firstChunk=await prisma.documentChunk.findFirstOrThrow({where:{chunkSetId:chunks.id},orderBy:{ordinal:"asc"}});
+    for(const scope of ["CHUNK","BOOK"] as const)await prisma.analysisArtifact.create({data:{analysisRunId:run.id,workspaceId,extractionId:extraction.id,chunkSetId:chunks.id,chunkId:scope==="CHUNK"?firstChunk.id:null,scope,ordinal:0,structuredOutput:{summary:"fixture"}}});
+    await prisma.bookAnalysisRun.update({where:{id:run.id},data:{status:"FAILED",errorCode:"TIMEOUT"}});
+    expect((await sourceDetail(sourceDocumentId,identity)).analysisProgress).toMatchObject({completedChunks:1,totalChunks:3});
+    await expect(sourceDetail(sourceDocumentId,foreign)).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");
+    const nextJob=await prisma.job.create({data:{workspaceId,type:"book.analysis",payload:{}}});
+    const next=await prisma.bookAnalysisRun.create({data:{workspaceId,sourceDocumentId,extractionId:extraction.id,chunkSetId:chunks.id,jobId:nextJob.id,pipelineVersion:"next",promptVersion:"test",provider:"fixture",model:"fixture",modelVersionKey:"test",idempotencyKey:crypto.randomUUID(),analysisIdentityHash:crypto.randomUUID(),status:"RUNNING",analysisStage:"CHUNK_ANALYSIS",createdAt:new Date(Date.now()+1000)}});
+    expect((await sourceDetail(sourceDocumentId,identity)).analysisProgress).toMatchObject({runId:next.id,completedChunks:0,totalChunks:3});
+    await prisma.currentDocumentExtraction.delete({where:{sourceDocumentId_workspaceId:{sourceDocumentId,workspaceId}}});expect((await sourceDetail(sourceDocumentId,identity)).analysisProgress).toBeNull();
+  });
   it("previews owner-scoped published PDF text without AI and bounds each requested page", async () => {
     const identity = await createWorkspace(), foreign = await createWorkspace();
     const sample = await makeSource(identity.workspaceId, "native.pdf", 1, "application/pdf");
@@ -97,7 +122,7 @@ describe("04C-4C3 authoritative Source/Work read model (real PostgreSQL)", () =>
     const detail = await sourceDetail(documentId, identity, 2);
     expect(detail.currentIntelligence).toBeNull();
     const summary = (await sources(identity)).find(item => item.id === documentId)!;
-    expect(sourceStatusLabel(summary.status, summary.hasIntelligence, summary.errorCode)).toBe("已解析，待理解");
+    expect(sourceStatusLabel(summary.status, summary.hasIntelligence, summary.errorCode)).toBe("正文已提取，待理解");
     expect(detail.textPreview).toMatchObject({ pageNumber: 2, pageCount: 3, physicalPageNumber: 2, truncated: false, blocks: [{ text: "原文第2页" }] });
     expect(JSON.stringify(detail.textPreview)).not.toContain("原文第1页");
     expect((await sourceDetail(documentId, identity, -1)).textPreview?.pageNumber).toBe(1);
@@ -106,6 +131,23 @@ describe("04C-4C3 authoritative Source/Work read model (real PostgreSQL)", () =>
     expect(last).toMatchObject({ pageNumber: 3, truncated: true });
     expect(last!.blocks[0]!.text).toHaveLength(4000);
     await expect(sourceDetail(documentId, foreign, 1)).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");
+  });
+
+  it.each(["application/epub+zip", "text/plain", "text/markdown", "application/pdf"])("读取无页面记录的已发布正文区块，按内容分段且保留访问隔离：%s",async mediaType=>{
+    const identity=await createWorkspace(),foreign=await createWorkspace();
+    const sample=await makeSource(identity.workspaceId,"block-source",1,mediaType),documentId=sample.documents[0]!.id;
+    const job=await prisma.job.create({data:{workspaceId:identity.workspaceId,type:"source.ingest",payload:{}}});
+    const run=await prisma.ingestionRun.create({data:{sourceDocumentId:documentId,workspaceId:identity.workspaceId,jobId:job.id,parserVersion:"test",normalizationVersion:"test",status:"SUCCEEDED"}});
+    const extraction=await prisma.documentExtraction.create({data:{sourceDocumentId:documentId,workspaceId:identity.workspaceId,ingestionRunId:run.id,status:"SUCCEEDED",qualityStatus:"ACCEPTED",parserName:"test",parserVersion:"test",normalizationVersion:"test"}});
+    await prisma.sourceBlock.createMany({data:Array.from({length:83},(_,ordinal)=>({extractionId:extraction.id,ordinal,kind:"PARAGRAPH" as const,text:`正文区块${ordinal}`,contentHash:`block-${ordinal}`}))});
+    expect((await sourceDetail(documentId,identity)).textPreview).toBeNull();
+    await prisma.currentDocumentExtraction.create({data:{workspaceId:identity.workspaceId,sourceDocumentId:documentId,extractionId:extraction.id}});
+    const first=await sourceDetail(documentId,identity);expect(first.currentIntelligence).toBeNull();expect(first.textPreview).toMatchObject({paginationKind:"blocks",pageNumber:1,pageCount:3,physicalPageNumber:null,truncated:false});expect(first.textPreview!.blocks).toHaveLength(40);
+    const second=(await sourceDetail(documentId,identity,2)).textPreview!;expect(second.blocks[0]!.text).toBe("正文区块40");expect(second.blocks.at(-1)!.text).toBe("正文区块79");expect(second.truncated).toBe(false);
+    const last=(await sourceDetail(documentId,identity,999)).textPreview!;expect(last.pageNumber).toBe(3);expect(last.blocks).toHaveLength(3);expect(last.blocks[0]!.text).toBe("正文区块80");
+    expect((await sourceDetail(documentId,identity,Number.NaN)).textPreview?.pageNumber).toBe(1);
+    await expect(sourceDetail(documentId,foreign,1)).rejects.toThrow("SOURCE_DOCUMENT_ACCESS_DENIED");
+    await prisma.documentExtraction.update({where:{id:extraction.id},data:{status:"FAILED"}});expect((await sourceDetail(documentId,identity)).textPreview).toBeNull();
   });
 
   it("never displays unconfirmed EPUB metadata as a book title", async () => {

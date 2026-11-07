@@ -23,13 +23,13 @@ export class PostgresResourceBudget implements ResourceBudgetControl {
     const scopeKey = request.executionRunId ?? request.correlationId;
     await prisma.$transaction(async tx => {
       await tx.$executeRaw`INSERT INTO "WorkspaceResourcePolicy" ("workspaceId") VALUES (${request.workspaceId}) ON CONFLICT DO NOTHING`;
-      const [policy] = await tx.$queryRaw<Array<{ dailyUnitLimit: number; runUnitLimit: number }>>`SELECT * FROM "WorkspaceResourcePolicy" WHERE "workspaceId"=${request.workspaceId} FOR UPDATE`;
+      const [policy] = await tx.$queryRaw<Array<{ dailyUnitLimit: number; runUnitLimit: number; runLimitEnabled: boolean }>>`SELECT * FROM "WorkspaceResourcePolicy" WHERE "workspaceId"=${request.workspaceId} FOR UPDATE`;
       const [used] = await tx.$queryRaw<Array<{ daily: bigint; run: bigint }>>`SELECT
         COALESCE(sum(COALESCE("chargedUnits", "units")) FILTER (WHERE "createdAt">=date_trunc('day', NOW() AT TIME ZONE 'UTC')),0)::bigint AS daily,
         COALESCE(sum(COALESCE("chargedUnits", "units")) FILTER (WHERE "scopeKey"=${scopeKey}),0)::bigint AS run
         FROM "ProviderResourceReservation" WHERE "workspaceId"=${request.workspaceId}
         AND ("createdAt">=date_trunc('day', NOW() AT TIME ZONE 'UTC') OR "scopeKey"=${scopeKey})`;
-      if (!policy || Number(used?.daily ?? 0) + units > policy.dailyUnitLimit || Number(used?.run ?? 0) + units > policy.runUnitLimit) throw new ProviderGatewayError("BUDGET_EXCEEDED");
+      if (!policy || Number(used?.daily ?? 0) + units > policy.dailyUnitLimit || (policy.runLimitEnabled !== false && Number(used?.run ?? 0) + units > policy.runUnitLimit)) throw new ProviderGatewayError("BUDGET_EXCEEDED");
       await tx.$executeRaw`INSERT INTO "ProviderResourceReservation" ("id","workspaceId","scopeKey","units") VALUES (${id},${request.workspaceId},${scopeKey},${units})`;
     });
     return id;
