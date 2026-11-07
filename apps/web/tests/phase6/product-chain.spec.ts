@@ -53,7 +53,20 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await page.locator('input[name="title"]').fill("证据播客");
   await page.locator('input[name="duration"]').fill("1");
   await page.getByRole("button", { name: "开始生成播客" }).click();
-  await expect(page).toHaveURL(/\/studio\/podcasts\//, { timeout: 30_000 });
+  await expect(page).toHaveURL(/\\/studio\\/podcasts\\//, { timeout: 30_000 });
+  // The latest product deliberately separates script generation from paid TTS.
+  // In this isolated Phase 6 harness, the configured speech provider is a
+  // deterministic local WAV fixture, so exercise the actual user-initiated
+  // audio request instead of assuming the script job auto-starts TTS.
+  const episodeId = new URL(page.url()).pathname.split("/").pop();
+  if (!episodeId) throw new Error("PHASE6_EPISODE_ID_MISSING");
+  await expect.poll(() => prisma.podcastGenerationRun.count({ where: { episodeId, status: "SUCCEEDED" } }), { timeout: 90_000 }).toBe(1);
+  await page.reload();
+  const generateAudio = page.getByRole("button", { name: "生成音频" });
+  await expect(generateAudio).toBeVisible({ timeout: 30_000 });
+  const requestAudio = page.waitForResponse(response => new URL(response.url()).pathname === "/api/studio/podcast-audio" && response.request().method() === "POST");
+  await generateAudio.click();
+  expect((await requestAudio).ok()).toBeTruthy();
   const audio = page.locator("audio");
   await expect(audio).toBeVisible({ timeout: 90_000 });
   await expect.poll(async () => audio.evaluate((node: HTMLAudioElement) => new Promise<number>((resolve, reject) => { if (Number.isFinite(node.duration) && node.duration > 0) return resolve(node.duration); node.addEventListener("loadedmetadata", () => resolve(node.duration), { once: true }); node.addEventListener("error", () => reject(new Error("audio metadata failed")), { once: true }); node.load(); })), { timeout: 30_000 }).toBeGreaterThan(0);
