@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { podcastConfigurationFromForm, shortVideoConfigurationFromForm, routeFormConfiguration } from "@/lib/provider-route-form";
 import { ModelPicker } from "./model-picker";
+import { FailoverPreferencesEditor, type FailoverPreference, type FailoverChoice } from "./provider-failover-preferences";
 import { miniMaxSites } from "@/lib/minimax-endpoints";
 import { StatusBadge } from "./status-badge";
 import styles from "./provider-settings.module.css";
@@ -14,7 +15,7 @@ type Provider = { providerKey: string; displayName: string; protocol: string; ca
 type Connection = { managedCapabilities?: string[]; id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credential: { id?: string; exists: boolean; displayHint?: string | null; status?: string } };
 type Route = { id: string; routeSlot: string; connectionId: string; modelId: string; configuration: Record<string, unknown>; connection: { displayName: string; providerKey: string } };
 type RouteFeedback = { tone: "pending" | "success" | "error"; message: string };
-type State = { speechVoices: Record<string, string[]>; manifest: { providers: Provider[] }; connections: Connection[]; routes: Route[]; routeModels: Record<string, Record<string, Model[]>>; readiness: Record<string, ProviderReadinessView> };
+type State = { speechVoices: Record<string, string[]>; manifest: { providers: Provider[] }; connections: Connection[]; routes: Route[]; routeModels: Record<string, Record<string, Model[]>>; readiness: Record<string, ProviderReadinessView>; failoverPreferences?: FailoverPreference[]; failoverChoices?: FailoverChoice[] };
 
 const routeSlots = [
   { slot: "PDF_OCR", label: "扫描 PDF 文字识别（GLM-OCR，按需授权）" },
@@ -41,7 +42,7 @@ function normalizeProviderState(body: State): State {
     return [connection.id, Object.fromEntries(routeSlots.map(({slot}) => [slot, provider?.models.filter(model =>
       !model.deprecated && !model.retired && model.families.includes(slot === "PDF_OCR" ? "OCR" : slot === "EMBEDDING" ? "EMBEDDING" : slot.endsWith("TTS") ? "SPEECH" : "TEXT_GENERATION") && (slot !== "TEACH_BACK_ASSESSMENT" || model.structuredOutput === "STRICT_JSON_SCHEMA") && (slot !== "PDF_VISUAL_STRUCTURE" || (connection.providerKey === "zhipu" && model.visionInput === true))) ?? []]))];
   }));
-  return {...body,routeModels,speechVoices:body.speechVoices??{zhipu:["tongtong","xiaochen"],openai:["alloy","echo","fable","onyx","nova","shimmer"]}};
+  return {...body,routeModels,failoverPreferences:body.failoverPreferences??[],failoverChoices:body.failoverChoices??[],speechVoices:body.speechVoices??{zhipu:["tongtong","xiaochen"],openai:["alloy","echo","fable","onyx","nova","shimmer"]}};
 }
 
 export function ProviderSettings() {
@@ -86,7 +87,7 @@ export function ProviderSettings() {
       }
       setState(normalizeProviderState(body));
       setMessageTone("success");
-      const success = payload.action === "DELETE_CONNECTION" ? "服务商已删除，相关用途已解除绑定。" : slot ? "用途配置已保存。" : "配置已保存。";
+      const success = payload.action === "DELETE_CONNECTION" ? "服务商已删除，相关用途已解除绑定。" : payload.action === "SET_FAILOVER_PREFERENCE" ? "备用模型顺序已保存；自动切换尚未启用。" : slot ? "用途配置已保存。" : "配置已保存。";
       setMessage(success);
       feedback({ tone: "success", message: payload.applyToBookStages ? "三个理解阶段已统一保存；向量检索配置未改变。" : slot === "PODCAST_TTS" ? "语音模型、主持人音色和语速已保存；保存设置不会生成音频。" : "用途配置已保存。" });
     } catch (error) {
@@ -249,6 +250,13 @@ export function ProviderSettings() {
           ))}
         </div>
       </details>
+      <FailoverPreferencesEditor
+        preferences={state.failoverPreferences ?? []}
+        choices={state.failoverChoices ?? []}
+        busy={busy}
+        submit={submit}
+        routeSlots={routeSlots.filter(item => item.slot !== "PDF_OCR")}
+      />
       </section>
 
       {message && (
