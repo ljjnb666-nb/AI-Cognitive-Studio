@@ -115,14 +115,17 @@ export function assessProviderFailover(input: FailoverAssessmentInput): Failover
   if (input.settledOutcome === "UNKNOWN") return hold("UNKNOWN_BILLING");
   if (!verified.newPaidCallAuthorized) return hold("NO_PAID_CALL_AUTHORIZATION");
   if (!verified.budgetAvailable) return hold("BUDGET_EXHAUSTED");
-  if (input.switchesUsed >= input.maxSwitches) return hold("ATTEMPT_LIMIT_REACHED");
+  if (!Number.isSafeInteger(input.switchesUsed) || input.switchesUsed < 0 ||
+      !Number.isSafeInteger(input.maxSwitches) || input.maxSwitches > 2 || input.maxSwitches < 0 ||
+      input.switchesUsed >= input.maxSwitches) return hold("ATTEMPT_LIMIT_REACHED");
   if (!Number.isSafeInteger(currentCandidateIndex) || currentCandidateIndex < 0 ||
       currentCandidateIndex >= candidates.length - 1) return hold("NO_BACKUP");
 
   const current = candidates[currentCandidateIndex];
   const candidate = candidates[currentCandidateIndex + 1];
   if (!candidate || !current) return hold("NO_BACKUP");
-  if (current.providerKey === candidate.providerKey && current.modelId === candidate.modelId)
+  if (candidates.slice(0, currentCandidateIndex + 1).some(prior =>
+    prior.providerKey === candidate.providerKey && prior.modelId === candidate.modelId))
     return hold("REPEATED_MODEL");
   if (!candidate.connectionId || !candidate.credentialVersionId || candidate.source !== "WORKSPACE")
     return hold("UNPINNED_ROUTE");
@@ -131,7 +134,8 @@ export function assessProviderFailover(input: FailoverAssessmentInput): Failover
   // be reconciled before issuing a separately authorized fallback invocation.
   const outcomeAllowed = input.settledOutcome === "PAID_AND_RECONCILED"
     ? settledPaidCandidateErrors.has(errorCode)
-    : noChargeCandidateErrors.has(errorCode);
+    : (input.settledOutcome === "NOT_SENT" || input.settledOutcome === "PROVIDER_CONFIRMED_UNBILLED")
+      && noChargeCandidateErrors.has(errorCode);
   if (!outcomeAllowed) return hold("UNSAFE_FAILURE_CLASS");
 
   if (routeSlot === "EMBEDDING") return hold("EMBEDDING_REINDEX_REQUIRED");

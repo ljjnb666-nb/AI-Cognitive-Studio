@@ -72,6 +72,11 @@ describe("cross-workflow failover admission: fail closed by default", () => {
     },
   );
 
+  it("never trusts an unrecognized billing state as evidence that no charge occurred", () => {
+    expect(assessProviderFailover(input({ settledOutcome: "UNKNOWN_BUT_OK" as "NOT_SENT" })))
+      .toEqual({ action: "HOLD", reason: "UNSAFE_FAILURE_CLASS" });
+  });
+
   it("never treats a timeout with unknown remote charging as free", () => {
     expect(assessProviderFailover(input({ errorCode: "TIMEOUT", settledOutcome: "UNKNOWN" })))
       .toEqual({ action: "HOLD", reason: "UNKNOWN_BILLING" });
@@ -86,6 +91,10 @@ describe("cross-workflow failover admission: fail closed by default", () => {
   );
 
   it("cannot silently cycle models, extend the candidate chain, or exceed attempt ceiling", () => {
+    expect(assessProviderFailover(input({ switchesUsed: -1 }))).toEqual({ action: "HOLD", reason: "ATTEMPT_LIMIT_REACHED" });
+    expect(assessProviderFailover(input({ switchesUsed: 0, maxSwitches: 3 as 2 }))).toEqual({ action: "HOLD", reason: "ATTEMPT_LIMIT_REACHED" });
+    expect(assessProviderFailover(input({ currentCandidateIndex: 1, candidates: [chain[0]!, chain[1]!, chain[0]!] })))
+      .toEqual({ action: "HOLD", reason: "REPEATED_MODEL" });
     expect(assessProviderFailover(input({ currentCandidateIndex: 2 }))).toEqual({ action: "HOLD", reason: "NO_BACKUP" });
     expect(assessProviderFailover(input({ switchesUsed: 2 }))).toEqual({ action: "HOLD", reason: "ATTEMPT_LIMIT_REACHED" });
     expect(assessProviderFailover(input({ candidates: [chain[0]!, chain[0]!] })))
