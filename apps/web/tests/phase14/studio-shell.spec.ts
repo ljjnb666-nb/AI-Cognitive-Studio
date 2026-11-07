@@ -660,7 +660,12 @@ test("desktop navigation keeps one clear active destination", async ({
         await route.fulfill({ status: mode === "transport" ? 500 : 200 });
       });
     }
-    await page.locator('input[type="file"]').setInputFiles(file);
+    // Exercise the real upload control after hydration. Directly dispatching
+    // change on a hidden input before React attaches its handler is racy.
+    await page.waitForLoadState("networkidle");
+    const fileChooser = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "上传内容" }).click();
+    await (await fileChooser).setFiles(file);
   }
   await uploadWith("start", sentinels[0]!);
   await expect(page.getByText("上传没有完成，请稍后重试。")).toBeVisible();
@@ -722,10 +727,10 @@ test("desktop navigation keeps one clear active destination", async ({
     "AI_PROVIDER_CONFIGURATION_REQUIRED",
   );
   await page.goto(`/studio/library/${providerFailure}`);
-  await expect(
-    page.getByText("书籍解析完成。配置 AI Provider 后开始深度理解。"),
-  ).toBeVisible();
-  await expect(page.getByRole("link", { name: "配置 AI Provider" })).toBeVisible();
+  // The current UI retains the failed source and offers provider setup,
+  // without exposing internal configuration-error identifiers.
+  await expect(page.getByRole("paragraph").filter({ hasText: /^AI 深度理解失败$/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: "配置 AI 服务商" })).toBeVisible();
   await expect(
     page.locator("body"),
   ).not.toContainText("AI_PROVIDER_CONFIGURATION_REQUIRED");
@@ -991,7 +996,9 @@ test("captures the final Studio experience evidence", async ({
       await expect(page.getByRole("heading", { name: "证据短视频" })).toBeVisible();
     }
     if (name === "18-provider-settings-desktop.png") {
-      await expect(page.getByRole("navigation", { name: "设置导航" }).locator('a[aria-current="page"]')).toHaveAccessibleName("Provider");
+      // New settings page shows its title directly, without the retired
+      // secondary "Provider" navigation; primary Settings remains selected.
+      await expect(page.getByRole("heading", { name: "AI 服务商设置" })).toBeVisible();
       await expect(page.locator('nav[aria-label="主导航"] a[aria-current="page"]')).toHaveAccessibleName("设置");
       await expect(page.getByText("未完成", { exact: false }).first()).toBeVisible();
       await expect(page.locator("body")).not.toContainText("sk-");
