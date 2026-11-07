@@ -61,8 +61,9 @@ export function GenerationForm({
       });
       const body = (await response.json()) as { href?: string; error?: string };
       if (!response.ok || !body.href) throw new Error(body.error ?? "GENERATION_FAILED");
+      // The destination renders its own fresh data; avoid racing navigation
+      // against an immediate refresh of this creation page.
       router.push(body.href);
-      router.refresh();
     } catch (error) {
       setMessage(mediaGenerationErrorMessage(error instanceof Error ? error.message : undefined));
     } finally {

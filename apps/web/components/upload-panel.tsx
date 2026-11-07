@@ -46,8 +46,9 @@ export function UploadPanel() {
       const result = await complete.json();
       if (!complete.ok) throw new Error(result.error);
 
+      // Navigating to the detail route already loads fresh server data.
+      // Refreshing the old route can race with the pending navigation.
       router.push(`/studio/library/${result.sourceDocumentId}`);
-      router.refresh();
     } catch (error) {
       setMessage(uploadErrorMessage(error instanceof Error ? error.message : undefined));
     } finally {
