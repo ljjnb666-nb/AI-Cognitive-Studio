@@ -11,6 +11,7 @@ import { SourceTextReader, type SourceTextPreview } from "./source-text-reader";
 import { SourceProcessing } from "./source-processing";
 import type { BookAnalysisProgress } from "@/lib/book-analysis-progress";
 import type { ProcessingStage, ProcessingWorkerAvailability, RecoveryAction, WorkerAvailability } from "@/lib/processing-state";
+import { isBibliographicMemory } from "@/lib/bibliographic-memory";
 import { cognitionTypeLabels } from "@/lib/cognitions";
 
 const categoryNames: Record<string, string> = cognitionTypeLabels;
@@ -78,6 +79,9 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
   const [view, setView] = useState<"overview" | "source">(textPreview ? "source" : "overview");
   const display = processingDisplay({state: item.processingState as ProcessingState, stage:item.processingStage,recoveryAction:item.recoveryAction,stageAvailability:item.stageAvailability,failureReason:item.failureReason},item.errorCode);
+
+  const bookFacts = memories.filter((memory) => isBibliographicMemory(memory.content));
+  const insights = memories.filter((memory) => !isBibliographicMemory(memory.content));
 
   // Flatten evidence items from memories for right pane display
   const allEvidence = memories.flatMap((m) =>
@@ -168,7 +172,24 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
         )}
 
         {/* Memory Items Cards - Fully Keyboard Accessible Buttons */}
-        {memories.map((memory) => {
+        {bookFacts.length > 0 && (
+          <section className="card-panel" aria-label="书籍资料">
+            <h2>书籍资料</h2>
+            <ul>
+              {bookFacts.map((memory) => (
+                <li key={memory.id}>
+                  <p>{memory.content}</p>
+                  {memory.evidence[0] && (
+                    <button type="button" className="btn btn-secondary" onClick={() => highlightEvidence(memory.evidence[0]!.id)}>
+                      查看资料原文
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {insights.map((memory) => {
           const firstEvidence = memory.evidence[0];
           const linkedNode = firstEvidence ? structureNodes.find((n) => n.id === firstEvidence.sourceBlock.structureNodeId) : null;
 
@@ -186,7 +207,7 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
                 aria-label={`查看 ${categoryNames[memory.type] ?? "解读点"} 对应的原文证据`}
               >
                 <div style={{ fontSize: 11, color: "var(--outline)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>
-                  {categoryNames[memory.type] ?? "BOOK MEMORY"}
+                  {categoryNames[memory.type] ?? "解读点"}
                 </div>
                 <h3 className="memory-card-title">{categoryNames[memory.type] ?? "解读点"}</h3>
                 <p className="memory-card-body">{memory.content}</p>
@@ -221,7 +242,7 @@ export function BookDetailView({ item, memories, structureNodes, textPreview }: 
           );
         })}
 
-        {!memories.length && item.hasIntelligence && (
+        {!insights.length && item.hasIntelligence && (
           <div className="card-panel">
             <p style={{ color: "var(--outline)", margin: 0 }}>分析已完成，等待呈现解读点。</p>
           </div>

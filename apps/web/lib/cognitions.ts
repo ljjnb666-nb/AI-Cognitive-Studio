@@ -1,3 +1,4 @@
+import { bibliographicMemoryPattern, isBibliographicMemory } from "./bibliographic-memory";
 import { Prisma, prisma } from "@ai-cognitive/db";
 import type { WebIdentityContext } from "./identity";
 
@@ -84,6 +85,7 @@ export function currentLineageJoin() {
       ON document."id" = memory."sourceDocumentId" AND document."workspaceId" = memory."workspaceId"
     INNER JOIN "Source" source
       ON source."id" = document."sourceId" AND source."workspaceId" = document."workspaceId"
+      AND memory."content" !~* ${bibliographicMemoryPattern}
   `;
 }
 
@@ -221,7 +223,7 @@ export async function cognitionDetail(
       relation.fromMemoryItemId === row.id
         ? relation.toMemoryItem
         : relation.fromMemoryItem;
-    return isCognitionType(item.type)
+    return isCognitionType(item.type) && !isBibliographicMemory(item.content)
       ? [{ id: item.id, type: item.type, content: item.content }]
       : [];
   });
