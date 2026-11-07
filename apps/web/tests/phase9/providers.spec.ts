@@ -40,12 +40,17 @@ test("library filters and pagination survive repeated query parameters and empty
   await page.getByRole("textbox", { name: "搜索书名或文件名" }).fill("不存在的书籍");
   await page.getByRole("button", { name: "搜索与筛选", exact: true }).click();
   await expect(page.getByText("没有匹配当前搜索和筛选条件的书籍。", { exact: true })).toBeVisible();
-  await expect(page.getByText("第 1 页", { exact: true })).toBeVisible();
+  // At page 1 without a next page, pagination is intentionally not rendered.
+  // Confirm the filter submits a fresh first-page query instead of assuming
+  // the retired always-visible page counter exists.
+  expect(new URL(page.url()).searchParams.has("page")).toBe(false);
+  await expect(page.getByRole("navigation", { name: "列表分页" })).toHaveCount(0);
   await page.getByRole("textbox", { name: "搜索书名或文件名" }).fill("");
   await page.getByRole("combobox", { name: "文件格式" }).selectOption("TXT");
   await page.getByRole("button", { name: "搜索与筛选", exact: true }).click();
   await expect(page.getByRole("heading", { name: "纯文本资料.txt", exact: true })).toBeVisible();
   await expect(titles).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "列表分页" })).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("button", { name: "搜索与筛选", exact: true })).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
@@ -53,7 +58,11 @@ test("library filters and pagination survive repeated query parameters and empty
   await expect(page.getByText("这一页没有书籍，请返回上一页。", { exact: true })).toBeVisible();
   for (const path of ["library", "podcasts", "videos"]) {
     await page.goto(`/studio/${path}?page=invalid&page=2`);
-    await expect(page.getByText("第 1 页", { exact: true })).toBeVisible();
+    // Invalid/repeated page parameters normalize to page one. An empty
+    // one-page collection has no pagination controls by design.
+    await expect(page.getByRole("link", { name: "上一页", exact: true })).toHaveCount(0);
+    const pagination = page.getByRole("navigation", { name: "列表分页" });
+    if (await pagination.count()) await expect(pagination.getByText("第 1 页", { exact: true })).toBeVisible();
   }
 });
 
@@ -517,7 +526,9 @@ test("real authenticated BYOK workspace completes book, podcast audio, and local
   await expect.poll(async () => (await prisma.audioGenerationRun.findFirst({ where: { episodeId: failedPodcastBody.id }, orderBy: { createdAt: "desc" }, select: { status: true } }))?.status, { timeout: 120_000 }).toBe("FAILED");
   expect((await prisma.podcastGenerationRun.findUniqueOrThrow({ where: { id: scriptRun.id } })).status).toBe("SUCCEEDED");
   await page.goto(`/studio/podcasts/${failedPodcastBody.id}`);
-  await expect(page.getByText("音频生成失败")).toBeVisible();
+  // Both the status badge and the detailed error say "音频生成失败".
+  // Assert the exact status and keep the separate actionable retry check.
+  await expect(page.getByText("音频生成失败", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "重试音频生成" })).toBeVisible();
   await setRoute(page, "PODCAST_TTS", connection.id, "phase9-speech", voiceConfiguration);
   const audioRetry = page.waitForResponse(response => response.url().includes("/api/studio/podcast-audio") && response.request().method() === "POST");
