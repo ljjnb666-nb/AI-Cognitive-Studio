@@ -7,7 +7,7 @@ import { resolveBookProductExecution as resolveSharedBookProductExecution, type 
 const requiredSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING", "PODCAST_SCRIPT", "PODCAST_TTS", "SHORT_VIDEO_SCRIPT", "SHORT_VIDEO_TTS", "THINKING_SESSION", "TEACH_BACK_ASSESSMENT"] as const;
 type JsonRecord = Record<string, unknown>;
 type RouteWithConnection = { routeSlot: string; modelId: string; configuration: unknown; connection: { id: string; providerKey: string; protocol: string; endpoint: string | null; status: string; credentialVersions: { id: string; status: string }[] } };
-export type ProviderReadinessDependency = { slot: RouteSlot; label: string; state: "READY" | "MISSING"; providerKey?: string; providerName?: string; modelId?: string; error?: string };
+export type ProviderReadinessDependency = { slot: RouteSlot; label: string; state: "READY" | "MISSING"; providerKey?: string; providerName?: string; modelId?: string; error?: string; detail?: string };
 
 export type ProductRouteIdentity = { provider: string; model: string; modelVersion?: string; configuration: JsonRecord };
 export type ProductBookExecution = ProductRouteIdentity & { routePlan: BookAnalysisRoutePlan };

@@ -14,6 +14,10 @@ export type ModelCapability = {
   maxInputTokens?: number;
   maxOutputTokens?: number;
   structuredOutput?: StructuredOutputMode;
+  /** Not selectable for new routes, but historical snapshots remain intact. */
+  deprecated?: boolean;
+  /** Retired models must not receive new executions. */
+  retired?: boolean;
   streaming?: boolean;
   /** Explicit support for bounded PNG input in the PDF visual route. */
   visionInput?: boolean;
