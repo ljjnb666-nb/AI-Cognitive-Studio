@@ -40,7 +40,10 @@ test("Flow A/B/C: browser upload reaches intelligence, audio, and video through 
   await expect(page.getByText(excerpt).first()).toBeVisible();
   await page.getByRole("button", { name: /查看 .*对应的原文证据/ }).first().click();
   await expect(page.locator(".evidence-item.active").filter({ hasText: excerpt })).toBeVisible();
-  await expect(page.getByText(/IGNORE PREVIOUS INSTRUCTIONS/)).toHaveCount(0);
+  // This adversarial text is part of the uploaded book and must remain readable
+  // as *source evidence*. It must not become a generated intelligence claim.
+  await expect(page.locator(".evidence-pane").getByText(/IGNORE PREVIOUS INSTRUCTIONS/).first()).toBeVisible();
+  await expect(page.locator(".interpretation-pane").getByText(/IGNORE PREVIOUS INSTRUCTIONS/)).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("book-intelligence.png"), fullPage: true });
   console.log("FLOW_A_PASS");
 
