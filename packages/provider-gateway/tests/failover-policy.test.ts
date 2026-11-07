@@ -125,9 +125,15 @@ describe("cross-workflow failover admission: fail closed by default", () => {
     for (const routeSlot of ["PODCAST_TTS", "SHORT_VIDEO_TTS"] as const) {
       expect(assessProviderFailover(input({ routeSlot })))
         .toEqual({ action: "HOLD", reason: "SPEECH_VOICE_MAPPING_REQUIRED" });
-      const b = input({ routeSlot, candidates: [chain[0]!, candidate("zhipu", "glm-tts", "CUSTOM_SPEECH")] });
+      const b = input({ routeSlot, candidates: [
+        candidate("zhipu", "glm-tts", "CUSTOM_SPEECH"),
+        candidate("openai", "gpt-4o-mini-tts", "CUSTOM_SPEECH"),
+      ] });
       expect(assessProviderFailover({ ...b, verified: { ...b.verified, speechVoiceMapping: true } }).action)
-        .toBe("HOLD");
+        .toBe("SWITCH");
+      const unsupported = input({ routeSlot, candidates: [chain[0]!, candidate("deepseek", "deepseek-v4-flash")] });
+      expect(assessProviderFailover({ ...unsupported, verified: { ...unsupported.verified, speechVoiceMapping: true } }))
+        .toEqual({ action: "HOLD", reason: "INCOMPATIBLE_CAPABILITY" });
     }
   });
 

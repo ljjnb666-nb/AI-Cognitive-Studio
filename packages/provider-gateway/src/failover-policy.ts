@@ -87,7 +87,6 @@ const noAutomaticFallbackAfter = new Set<ProviderErrorCode>([
   "IDEMPOTENCY_CONFLICT",
   "PROVIDER_CONNECTION_CHANGED",
   "PROVIDER_CONNECTION_NAME_CONFLICT",
-  "PROVIDER_OUTCOME_UNKNOWN" as ProviderErrorCode,
 ]);
 
 const noChargeCandidateErrors = new Set<ProviderErrorCode>([
