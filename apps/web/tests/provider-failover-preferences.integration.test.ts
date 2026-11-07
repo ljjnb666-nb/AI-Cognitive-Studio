@@ -113,7 +113,7 @@ describe("owner-configured cross-workflow fallback intent (no provider execution
     for(const override of invalid){
       const response=await post({
         action:"SET_FAILOVER_PREFERENCE",routeSlot:"BOOK_CHUNK_ANALYSIS",
-        requestedEnabled:true,maxSwitches:1,expectedRevision:null,candidates:backups.slice(0,1),
+        requestedEnabled:true,maxSwitches:1,expectedRevision:null,
         ...override,
       });
       expect(response.ok).toBe(false);
