@@ -17,7 +17,7 @@ import {
 
 type Props = {
   preview: ProductIdentityPreview;
-  onRecheck: (message: string) => void;
+  onRecheck: (message: string, refreshParent?: boolean) => void;
 };
 
 function readableTime(value: string): string {
@@ -85,6 +85,7 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
       reason: reason.trim(),
     };
     let message = "网络异常，无法确认是否已提交。正在读取正式信息，请检查历史记录后再操作。";
+    let refreshParent = true;
     try {
       const response = await fetch(
         "/api/studio/identity/" + encodeURIComponent(preview.sourceDocumentId) + "/corrections",
@@ -99,13 +100,17 @@ export function ProductIdentityCorrection({ preview, onRecheck }: Props) {
       const status = payload && typeof payload === "object" && "status" in payload
         ? (payload as { status: unknown }).status : undefined;
       message = manualIdentityOutcomeMessage(status, response.status);
+      // For STALE, the parent book route already holds an obsolete extraction
+      // key; refreshing it would remount the panel and hide this rejection.
+      // Re-fetch the latest preview in place, while keeping the notice.
+      if (status === "STALE") refreshParent = false;
     } catch {
       // A transport failure is an unknown outcome, never a claimed successful write.
     } finally {
       submittingRef.current = false;
       setBusy(false);
       setEditing(false);
-      onRecheck(message);
+      onRecheck(message, refreshParent);
     }
   }
 

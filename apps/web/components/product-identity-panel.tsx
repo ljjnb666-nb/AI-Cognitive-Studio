@@ -120,14 +120,18 @@ export function ProductIdentityPanel({ sourceDocumentId, sourceFileName }: {
     setReloadIndex((n) => n + 1);
   }
 
-  function recheckAfterCorrection(message: string) {
+  function recheckAfterCorrection(message: string, refreshParent = true) {
     setNotice(message);
     setLastOutcome(null);
     setLoadError(null);
+    // Clear the stale draft immediately; the next GET fetches authoritative
+    // extraction and product state even when a route refresh is unnecessary.
     setPreview(null);
     setLoading(true);
     setReloadIndex((n) => n + 1);
-    router.refresh();
+    // A STALE correction has a newer extraction ID. Refreshing the parent
+    // would remount this keyed panel and erase the explicit rejection notice.
+    if (refreshParent) router.refresh();
   }
 
   function openConfirmation() {
