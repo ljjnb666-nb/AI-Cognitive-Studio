@@ -230,13 +230,13 @@ async function verifiedModelReview(
 afterAll(() => prisma.$disconnect());
 
 describe("Phase 10 cognition product read model", () => {
-  it("仅用有效 MiniMax 凭据补齐新任务缺省文本槽，保留显式选择", async () => {
+  it("仅用有效智谱凭据补齐新任务缺省 GLM 文本槽，保留显式选择", async () => {
     const data = await fixture();
     const actor = { workspaceId: data.workspace.id, userId: data.userA.id };
     const store = new ProviderGatewayRepository(prisma, testCipher());
     const connection = await store.createConnection(actor, {
-      providerKey: "minimax", protocol: "OPENAI_COMPATIBLE", displayName: "MiniMax fixture",
-      endpoint: "https://api.minimax.io/v1/chat/completions",
+      providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE", displayName: "GLM fixture",
+      endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     });
     expect(await workspaceRoutesWithBookDefaults(actor.workspaceId)).toEqual([]);
     const request = { workspaceId: actor.workspaceId, routeSlot: "BOOK_SYNTHESIS" as const,
@@ -247,8 +247,8 @@ describe("Phase 10 cognition product read model", () => {
     await expect(store.resolveWorkspaceRoute(request)).rejects.toMatchObject({ code: "ROUTE_UNAVAILABLE" });
     const routes = await workspaceRoutesWithBookDefaults(actor.workspaceId);
     expect(routes.map(route => [route.routeSlot, route.modelId])).toEqual([
-      ["BOOK_CHUNK_ANALYSIS", "MiniMax-M3"], ["BOOK_REDUCTION_ANALYSIS", "MiniMax-M3"],
-      ["BOOK_SYNTHESIS", "MiniMax-M3"],
+      ["BOOK_CHUNK_ANALYSIS", "glm-5.3-flash"], ["BOOK_REDUCTION_ANALYSIS", "glm-5.3-flash"],
+      ["BOOK_SYNTHESIS", "glm-5.3-flash"],
     ]);
     expect(await prisma.providerRouteBinding.count({ where: { workspaceId: actor.workspaceId } })).toBe(0);
     await store.setRoute(actor, { routeSlot: "BOOK_CHUNK_ANALYSIS", connectionId: connection.id, modelId: "explicit-model" });
@@ -259,11 +259,11 @@ describe("Phase 10 cognition product read model", () => {
     await expect(store.resolveWorkspaceRoute({ ...request, routeSlot: "BOOK_CHUNK_ANALYSIS" })).rejects.toMatchObject({ code: "CONNECTION_DISABLED" });
     await expect(store.resolveWorkspaceRoute(request)).rejects.toMatchObject({ code: "ROUTE_UNAVAILABLE" });
   });
-  it("新任务冻结 M3 路由，后续用户切换模型不改写原计划", async () => {
+  it("新任务冻结 GLM-5.3-Flash 路由，后续用户切换模型不改写原计划", async () => {
     const data = await fixture();
     const actor = { workspaceId: data.workspace.id, userId: data.userA.id };
     const store = new ProviderGatewayRepository(prisma, testCipher());
-    await expect(resolveBookProductExecution(actor.workspaceId)).rejects.toThrow("MINIMAX_BOOK_CONFIGURATION_REQUIRED");
+    await expect(resolveBookProductExecution(actor.workspaceId)).rejects.toThrow("AI_PROVIDER_CONFIGURATION_REQUIRED");
     const m3 = await store.createConnection(actor, { providerKey: "minimax", protocol: "OPENAI_COMPATIBLE",
       displayName: "默认文本", endpoint: "https://api.minimax.cn/v1/chat/completions" });
     const glm = await store.createConnection(actor, { providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE",
@@ -275,12 +275,12 @@ describe("Phase 10 cognition product read model", () => {
     await store.rotateCredential(actor,vector.id,"synthetic-vector-only");
     await store.setRoute(actor,{routeSlot:"EMBEDDING",connectionId:vector.id,modelId:"embedding-3"});
     const plan = await resolveBookProductExecution(actor.workspaceId);
-    expect(plan.routePlan.routes.BOOK_CHUNK_ANALYSIS).toMatchObject({providerKey:"minimax",modelId:"MiniMax-M3",structuredOutput:"JSON_MODE"});
+    expect(plan.routePlan.routes.BOOK_CHUNK_ANALYSIS).toMatchObject({providerKey:"zhipu",modelId:"glm-5.3-flash",structuredOutput:"JSON_MODE"});
     const frozen = JSON.stringify(plan);
-    await store.setRoute(actor,{routeSlot:"BOOK_CHUNK_ANALYSIS",connectionId:glm.id,modelId:"glm-4.7-flash"});
+    await store.setRoute(actor,{routeSlot:"BOOK_CHUNK_ANALYSIS",connectionId:m3.id,modelId:"MiniMax-M3"});
     const next = await resolveBookProductExecution(actor.workspaceId);
-    expect(next.routePlan.routes.BOOK_CHUNK_ANALYSIS).toMatchObject({providerKey:"zhipu",modelId:"glm-4.7-flash"});
-    expect(next.routePlan.routes.BOOK_SYNTHESIS.modelId).toBe("MiniMax-M3");
+    expect(next.routePlan.routes.BOOK_CHUNK_ANALYSIS).toMatchObject({providerKey:"minimax",modelId:"MiniMax-M3"});
+    expect(next.routePlan.routes.BOOK_SYNTHESIS.modelId).toBe("glm-5.3-flash");
     expect(JSON.stringify(plan)).toBe(frozen);
     expect(await prisma.bookAnalysisRun.count({where:{workspaceId:actor.workspaceId}})).toBe(0);
   });

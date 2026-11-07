@@ -14,7 +14,7 @@ export async function resolveBookProductExecution(workspaceId: string): Promise<
   try {
     for (const routeSlot of slots) {
       const route = routes.find(item => item.routeSlot === routeSlot);
-      if (!route && routeSlot !== "EMBEDDING") throw new Error("MINIMAX_BOOK_CONFIGURATION_REQUIRED");
+      if (!route && routeSlot !== "EMBEDDING") throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
       if (!route || route.connection.status !== "ACTIVE" || !endpoint(route.connection.endpoint)) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");
       const credential = route.connection.credentialVersions[0], configuration = record(route.configuration);
       if (!credential) throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED");

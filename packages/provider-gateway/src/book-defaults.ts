@@ -11,7 +11,7 @@ export async function workspaceRoutesWithBookDefaults(workspaceId: string, db: t
   const missing = defaultBookTextSlots.filter(slot => !routes.some(route => route.routeSlot === slot));
   if (!missing.length) return routes;
   const connection = await db.providerConnection.findFirst({
-    where: { workspaceId, providerKey: "minimax", protocol: "OPENAI_COMPATIBLE", status: "ACTIVE",
+    where: { workspaceId, providerKey: "zhipu", protocol: "OPENAI_COMPATIBLE", status: "ACTIVE",
       credentialVersions: { some: { status: "ACTIVE" } } },
     include: include.connection.include,
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -19,7 +19,7 @@ export async function workspaceRoutesWithBookDefaults(workspaceId: string, db: t
   if (!connection) return routes;
   return [...routes, ...missing.map(routeSlot => ({
     id: `default:${workspaceId}:${routeSlot}`, workspaceId, routeSlot,
-    connectionId: connection.id, modelId: "MiniMax-M3", configuration: { minimaxM3JsonMode: true },
+    connectionId: connection.id, modelId: "glm-5.3-flash", configuration: {},
     createdAt: connection.createdAt, updatedAt: connection.updatedAt, connection,
   }))];
 }

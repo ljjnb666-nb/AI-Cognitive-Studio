@@ -9,14 +9,14 @@ it("M3 书籍生成具有分块及归并保持 32000 总输出额度，进入请
   expect(canonicalTextInputHash({...text,generation})).not.toBe(canonicalTextInputHash(text));expect(text.messages[0]!.content).toBe("原文与引用范围保持不变");
   expect(bookProviderGeneration({providerKey:"zhipu",modelId:"glm-4.7-flashx"})).toBeUndefined();expect(bookProviderGeneration({providerKey:"minimax",modelId:"MiniMax-M2.5"})).toBeUndefined();
 });
-function fixture(delay: number, overrides: GatewayExecutionDependencies = {}, modelId = "MiniMax-M3", slot: GatewayRequest["routeSlot"] = "BOOK_CHUNK_ANALYSIS") {
+function fixture(delay: number, overrides: GatewayExecutionDependencies = {}, modelId = "MiniMax-M3", slot: GatewayRequest["routeSlot"] = "BOOK_CHUNK_ANALYSIS", providerKey = "minimax") {
   const capability={modelId,families:["TEXT_GENERATION"] as const,confidence:"VERIFIED" as const,structuredOutput:"JSON_MODE" as const};
-  const registry=new ProviderRegistry();registry.register({providerKey:"minimax",displayName:"MiniMax",protocol:"TEST",adapterVersion:"test",models:[capability]});
+  const registry=new ProviderRegistry();registry.register({providerKey,displayName:providerKey,protocol:"TEST",adapterVersion:"test",models:[capability]});
   const text={system:"Return JSON",messages:[{role:"user" as const,content:"Test source"}],structuredOutput:{mode:"JSON_MODE" as const}};
   const request:GatewayRequest={workspaceId:"fixture",routeSlot:slot,correlationId:"fixture",idempotencyKey:"fixture",inputHash:canonicalTextInputHash(text),capability:{family:"TEXT_GENERATION",structuredOutput:"JSON_MODE"},text};
   const execute=vi.fn(({signal}:{signal:AbortSignal})=>new Promise<{response:{ok:boolean}}>((resolve,reject)=>{const timer=setTimeout(()=>resolve({response:{ok:true}}),delay);signal.addEventListener("abort",()=>{clearTimeout(timer);reject(new DOMException("aborted","AbortError"));},{once:true});}));
   const acquire=vi.fn(async()=>({key:"fixture",token:"fixture"}));
-  const gateway=createTestProviderGateway(registry,{resolveWorkspaceRoute:async()=>({source:"PLATFORM",providerKey:"minimax",protocol:"TEST",modelId,adapterVersion:"test",capability,configuration:{}})},{resolve:async()=>undefined},()=>({execute}),{requestExecutionPolicy:bookProviderExecutionPolicy,concurrency:{acquire,release:async()=>true},...overrides});
+  const gateway=createTestProviderGateway(registry,{resolveWorkspaceRoute:async()=>({source:"PLATFORM",providerKey,protocol:"TEST",modelId,adapterVersion:"test",capability,configuration:{}})},{resolve:async()=>undefined},()=>({execute}),{requestExecutionPolicy:bookProviderExecutionPolicy,concurrency:{acquire,release:async()=>true},...overrides});
   return {gateway,request,execute,acquire};
 }
 it("M3 书籍请求可等待超过 30 秒并保持足够并发租约，不改变请求",async()=>{
@@ -67,4 +67,34 @@ it("综合达到900秒仍只尝试一次", async () => {
   vi.useFakeTimers();const f=fixture(901000,{},"MiniMax-M3","BOOK_SYNTHESIS");
   const done=expect(f.gateway.execute(f.request,{userId:"fixture"})).rejects.toMatchObject({code:"TIMEOUT"});
   await vi.advanceTimersByTimeAsync(900000);await done;expect(f.execute).toHaveBeenCalledTimes(1);
+});
+
+it("GLM-5.3-Flash 书籍分析使用长思考预算，保留思考与输入指纹", () => {
+  const model = { providerKey: "zhipu", modelId: "glm-5.3-flash" };
+  expect(bookProviderGeneration(model, "CHUNK")).toEqual({ maxOutputTokens: 32000 });
+  expect(bookProviderGeneration(model, "BOOK")).toEqual({ maxOutputTokens: 128000 });
+  expect(bookProviderGeneration(model)).not.toHaveProperty("thinking");
+  expect(bookProviderGeneration({ providerKey: "zhipu", modelId: "glm-4.7-flashx" })).toBeUndefined();
+  expect(canonicalTextInputHash({ messages: [{ role: "user", content: "原文" }], generation: bookProviderGeneration(model) }))
+    .not.toBe(canonicalTextInputHash({ messages: [{ role: "user", content: "原文" }] }));
+});
+
+it.each(["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const)(
+  "GLM-5.3-Flash 防止过早超时与自动重复计费：%s", async routeSlot => {
+    const f = fixture(1, {}, "glm-5.3-flash", routeSlot, "zhipu");
+    const snapshot = await f.gateway.resolveSnapshot(f.request);
+    expect(bookProviderExecutionPolicy(snapshot, f.request)).toEqual({
+      timeoutMs: routeSlot === "BOOK_SYNTHESIS" ? 900_000 : 600_000, maxAttempts: 1,
+    });
+  },
+);
+
+it("GLM-5.3-Flash 分块请求可等待超过30秒，保持一次尝试及长租约", async () => {
+  vi.useFakeTimers();
+  const f = fixture(45_000, {}, "glm-5.3-flash", "BOOK_CHUNK_ANALYSIS", "zhipu");
+  const done = expect(f.gateway.execute(f.request, { userId: "fixture" })).resolves.toMatchObject({ status: "SUCCEEDED", attempt: 1 });
+  await vi.advanceTimersByTimeAsync(45_000);
+  await done;
+  expect(f.execute).toHaveBeenCalledTimes(1);
+  expect(f.acquire).toHaveBeenCalledWith(expect.any(String), 4, 601_000);
 });
