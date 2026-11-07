@@ -75,7 +75,9 @@ test("fresh zero-env owner saves an encrypted built-in Provider, configures rout
   expect(response.ok()).toBeTruthy();
   const product = await response.text();
   expect(product).not.toContain(secret);
-  expect(JSON.parse(product).readiness.book.state).toBe("READY");
+  // Only the user-selected chunk route is configured; other book routes
+  // must remain incomplete rather than silently auto-bound by saving a key.
+  expect(JSON.parse(product).readiness.book.state).toBe("INCOMPLETE");
   expect(await page.content()).not.toContain(secret);
 
   const workerEnvironment: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: "development", BETA_PROVIDER_UX_WORKSPACE_ID: workspaceId, BETA_PROVIDER_UX_USER_ID: userId };
