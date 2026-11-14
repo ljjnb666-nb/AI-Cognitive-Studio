@@ -35,6 +35,9 @@ type ConnectionRow = {
   region: string | null; credentialVersions: { id: string; status: string }[];
 };
 const fail = (): never => { throw new Error("BOOK_FAILOVER_PLAN_INTEGRITY_FAILED"); };
+function assertValid(value: unknown): asserts value {
+  if (!value) fail();
+}
 const record = (value: unknown): value is Record<string, unknown> =>
   Boolean(value && typeof value === "object" && !Array.isArray(value));
 const safeEndpoint = (value: string | null): value is string => {
@@ -63,31 +66,31 @@ const hasTextSlot = (slot: string): slot is BookFailoverTextSlot =>
 /** Verify both primary binding and every backup locator before a Worker reads the intent. */
 export function verifyFrozenBookFailoverPlan(value: unknown, primary: BookAnalysisRoutePlan): FrozenBookFailoverPlan {
   try {
-    if (!record(value) || value.version !== 1 || value.executionEnabled !== false ||
-        !record(value.slots) || !primary.integrityHash || value.primaryPlanHash !== primary.integrityHash ||
-        typeof value.integrityHash !== "string" || !/^[a-f0-9]{64}$/.test(value.integrityHash)) fail();
-    if (stableHash({
+    assertValid(record(value) && value.version === 1 && value.executionEnabled === false &&
+        record(value.slots) && primary.integrityHash && value.primaryPlanHash === primary.integrityHash &&
+        typeof value.integrityHash === "string" && /^[a-f0-9]{64}$/.test(value.integrityHash));
+    assertValid(stableHash({
       version: value.version, executionEnabled: value.executionEnabled,
       primaryPlanHash: value.primaryPlanHash, slots: value.slots,
-    }) !== value.integrityHash) fail();
+    }) === value.integrityHash);
     for (const [name, rawSlot] of Object.entries(value.slots)) {
-      if (!hasTextSlot(name) || !record(rawSlot) ||
-          rawSlot.requestedEnabled !== true ||
-          !Number.isSafeInteger(rawSlot.preferenceRevision) || Number(rawSlot.preferenceRevision) < 1 ||
-          typeof rawSlot.preferenceHash !== "string" || !/^[a-f0-9]{64}$/.test(rawSlot.preferenceHash) ||
-          (rawSlot.maxSwitches !== 1 && rawSlot.maxSwitches !== 2) ||
-          !Array.isArray(rawSlot.candidates) ||
-          rawSlot.candidates.length !== Number(rawSlot.maxSwitches) + 1) fail();
+      assertValid(hasTextSlot(name) && record(rawSlot) &&
+          rawSlot.requestedEnabled === true &&
+          Number.isSafeInteger(rawSlot.preferenceRevision) && Number(rawSlot.preferenceRevision) >= 1 &&
+          typeof rawSlot.preferenceHash === "string" && /^[a-f0-9]{64}$/.test(rawSlot.preferenceHash) &&
+          (rawSlot.maxSwitches === 1 || rawSlot.maxSwitches === 2) &&
+          Array.isArray(rawSlot.candidates) &&
+          rawSlot.candidates.length === Number(rawSlot.maxSwitches) + 1);
       const seen = new Set<string>();
       for (const [index, candidate] of rawSlot.candidates.entries()) {
-        if (!record(candidate) || !record(candidate.configuration) ||
-            typeof candidate.providerKey !== "string" || !candidate.providerKey ||
-            typeof candidate.modelId !== "string" || !candidate.modelId ||
-            typeof candidate.connectionId !== "string" || !candidate.connectionId ||
-            typeof candidate.credentialVersionId !== "string" || !candidate.credentialVersionId ||
-            typeof candidate.endpoint !== "string" || !safeEndpoint(candidate.endpoint) ||
-            typeof candidate.configurationHash !== "string" ||
-            candidate.configurationHash !== stableHash(candidate.configuration)) fail();
+        assertValid(record(candidate) && record(candidate.configuration) &&
+            typeof candidate.providerKey === "string" && Boolean(candidate.providerKey) &&
+            typeof candidate.modelId === "string" && Boolean(candidate.modelId) &&
+            typeof candidate.connectionId === "string" && Boolean(candidate.connectionId) &&
+            typeof candidate.credentialVersionId === "string" && Boolean(candidate.credentialVersionId) &&
+            typeof candidate.endpoint === "string" && safeEndpoint(candidate.endpoint) &&
+            typeof candidate.configurationHash === "string" &&
+            candidate.configurationHash === stableHash(candidate.configuration));
         assertPublicConfiguration(candidate.configuration);
         const modelIdentity = candidate.providerKey + "\u0000" + candidate.modelId;
         if (seen.has(modelIdentity)) fail();
@@ -115,33 +118,33 @@ export function sealFrozenBookFailoverPlan(
   const slots: FrozenBookFailoverPlan["slots"] = {};
   for (const preference of active) {
     const name = preference.routeSlot as BookFailoverTextSlot;
-    if (slots[name] || !Number.isSafeInteger(preference.revision) || preference.revision < 1 ||
-        (preference.maxSwitches !== 1 && preference.maxSwitches !== 2) ||
-        !Array.isArray(preference.candidates) ||
-        preference.candidates.length < preference.maxSwitches ||
-        preference.candidates.length > 2 ||
+    assertValid(!slots[name] && Number.isSafeInteger(preference.revision) && preference.revision >= 1 &&
+        (preference.maxSwitches === 1 || preference.maxSwitches === 2) &&
+        Array.isArray(preference.candidates) &&
+        preference.candidates.length >= preference.maxSwitches &&
+        preference.candidates.length <= 2 &&
         stableHash({
           version: 1, routeSlot: name, requestedEnabled: preference.requestedEnabled,
           maxSwitches: preference.maxSwitches, candidates: preference.candidates,
-        }) !== preference.preferenceHash) fail();
+        }) === preference.preferenceHash);
     const candidates: BookRoutePlanEntry[] = [primary.routes[name]];
     const seen = new Set([primary.routes[name].providerKey + "\u0000" + primary.routes[name].modelId]);
     for (const item of (preference.candidates as BackupCandidate[]).slice(0, preference.maxSwitches)) {
-      if (!record(item) || typeof item.connectionId !== "string" ||
-          typeof item.modelId !== "string" || !item.modelId.trim()) fail();
+      assertValid(record(item) && typeof item.connectionId === "string" &&
+          typeof item.modelId === "string" && Boolean(item.modelId.trim()));
       assertPublicConfiguration(item.configuration);
       const connection = byId.get(item.connectionId);
-      if (!connection || connection.status !== "ACTIVE" ||
-          !safeEndpoint(connection.endpoint) || connection.credentialVersions.length !== 1 ||
-          connection.credentialVersions[0]?.status !== "ACTIVE") fail();
+      assertValid(connection && connection.status === "ACTIVE" &&
+          safeEndpoint(connection.endpoint) && connection.credentialVersions.length === 1 &&
+          connection.credentialVersions[0]?.status === "ACTIVE");
       const provider = manifest.providers.find(entry => entry.providerKey === connection.providerKey);
-      if (!provider) fail();
+      assertValid(provider);
       const model = validateRouteManifestSelection(manifest, {
         routeSlot: name, providerKey: connection.providerKey, protocol: connection.protocol,
         modelId: item.modelId, configuration: item.configuration,
       });
-      if (model.deprecated || model.retired ||
-          (model.structuredOutput !== "STRICT_JSON_SCHEMA" && model.structuredOutput !== "JSON_MODE")) fail();
+      assertValid(!model.deprecated && !model.retired &&
+          (model.structuredOutput === "STRICT_JSON_SCHEMA" || model.structuredOutput === "JSON_MODE"));
       const identity = connection.providerKey + "\u0000" + item.modelId;
       if (seen.has(identity)) fail();
       seen.add(identity);
