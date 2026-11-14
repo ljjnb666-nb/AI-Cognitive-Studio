@@ -93,7 +93,7 @@ describe("cross-workflow failover admission: fail closed by default", () => {
   it("cannot silently cycle models, extend the candidate chain, or exceed attempt ceiling", () => {
     expect(assessProviderFailover(input({ switchesUsed: -1 }))).toEqual({ action: "HOLD", reason: "ATTEMPT_LIMIT_REACHED" });
     expect(assessProviderFailover(input({ switchesUsed: 0, maxSwitches: 3 as 2 }))).toEqual({ action: "HOLD", reason: "ATTEMPT_LIMIT_REACHED" });
-    expect(assessProviderFailover(input({ currentCandidateIndex: 1, candidates: [chain[0]!, chain[1]!, chain[0]!] })))
+    expect(assessProviderFailover(input({ currentCandidateIndex: 1, switchesUsed: 1, candidates: [chain[0]!, chain[1]!, chain[0]!] })))
       .toEqual({ action: "HOLD", reason: "REPEATED_MODEL" });
     expect(assessProviderFailover(input({ currentCandidateIndex: 2 }))).toEqual({ action: "HOLD", reason: "NO_BACKUP" });
     expect(assessProviderFailover(input({ switchesUsed: 2 }))).toEqual({ action: "HOLD", reason: "ATTEMPT_LIMIT_REACHED" });
@@ -111,6 +111,27 @@ describe("cross-workflow failover admission: fail closed by default", () => {
       expect(original.candidates[0]).toBe(chain[0]);
     },
   );
+
+  it("rejects forged or stale switch counters during recovery without consuming extra models", () => {
+    // Two candidates have already been attempted, but a stale counter claims zero.
+    expect(assessProviderFailover(input({
+      currentCandidateIndex: 1, switchesUsed: 0, maxSwitches: 2,
+    }))).toEqual({ action: "HOLD", reason: "ATTEMPT_LIMIT_REACHED" });
+    // A counter ahead of its actual pinned position is also not a valid plan.
+    expect(assessProviderFailover(input({
+      currentCandidateIndex: 0, switchesUsed: 1, maxSwitches: 2,
+    }))).toEqual({ action: "HOLD", reason: "ATTEMPT_LIMIT_REACHED" });
+    // A legitimately settled first switch may still advance to the third model.
+    expect(assessProviderFailover(input({
+      currentCandidateIndex: 1, switchesUsed: 1, maxSwitches: 2,
+    }))).toEqual({ action: "SWITCH", nextCandidateIndex: 2, candidate: chain[2] });
+    // No user authorization means no switch, even with correct counters.
+    const verified = input().verified;
+    expect(assessProviderFailover(input({
+      currentCandidateIndex: 1, switchesUsed: 1,
+      verified: { ...verified, newPaidCallAuthorized: false },
+    }))).toEqual({ action: "HOLD", reason: "NO_PAID_CALL_AUTHORIZATION" });
+  });
 
   it("Teach Back excludes JSON-mode providers without strict schema support", () => {
     expect(assessProviderFailover(input({ routeSlot: "TEACH_BACK_ASSESSMENT" })))
