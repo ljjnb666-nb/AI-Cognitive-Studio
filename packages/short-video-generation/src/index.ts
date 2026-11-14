@@ -473,14 +473,63 @@ function canonicalSceneEvidence(evidence: Array<{ sourceDocumentId: string; extr
     return 0;
   });
 }
-function sceneDestination(scenes: z.infer<typeof shortVideoScenesSchema>["scenes"], evidenceSources: Map<string, any>) {
-  let offset = 0;
-  return scenes.map((scene) => { const destination = { ordinal: scene.ordinal, sceneType: scene.sceneType, targetStartMs: offset, targetEndMs: offset + scene.targetDurationMs, targetDurationMs: scene.targetDurationMs, narrationText: scene.narrationText, narrationTextHash: sha256(scene.narrationText), visualIntent: scene.visualIntent, primaryText: scene.primaryText, secondaryText: scene.secondaryText ?? null, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent, evidence: canonicalSceneEvidence(scene.evidence.map((item) => {
-    const source = evidenceSources.get(item.sourceBlockId);
-    if (!source) throw new Error("SHORT_VIDEO_EVIDENCE_LINEAGE_INVALID");
-    return { ...source, ...item };
-  })) }; offset += scene.targetDurationMs; return destination; });
+type VideoScene = z.infer<typeof shortVideoScenesSchema>["scenes"][number];
+type VideoSceneEvidence = VideoScene["evidence"][number];
+
+/** Both the paid-result fingerprint and its durable materialization use this normalization. */
+function normalizeVideoScenePlan(scenes: VideoScene[], targetMs: number): VideoScene[] {
+  const normalized = scenes.map((scene) => ({ ...scene }));
+  const plannedTotal = normalized.reduce((total, scene) => total + scene.targetDurationMs, 0);
+  if (plannedTotal > targetMs * 1.15) {
+    const scale = targetMs * 1.15 / plannedTotal;
+    for (const scene of normalized) scene.targetDurationMs = Math.max(1000, Math.floor(scene.targetDurationMs * scale / 100) * 100);
+    let total = normalized.reduce((sum, scene) => sum + scene.targetDurationMs, 0);
+    while (total > targetMs * 1.15) {
+      const longest = normalized.filter((scene) => scene.targetDurationMs > 1000).sort((a, b) => b.targetDurationMs - a.targetDurationMs)[0];
+      if (!longest) break;
+      const cut = Math.min(100, longest.targetDurationMs - 1000);
+      longest.targetDurationMs -= cut;
+      total -= cut;
+    }
+  }
+  for (const scene of normalized) scene.narrationText = scene.narrationText.replace(/^\s*(首先|其次|最后|总结|总之|综上|让我们)[，,：:、\s]*/, "");
+  assertScenes(normalized, targetMs);
+  return normalized;
 }
+
+/** Re-anchor quoted excerpts to trusted source blocks; reject invalid residual ranges. */
+function normalizeSceneEvidence(item: VideoSceneEvidence, blockTextById: Map<string, string>) {
+  const text = blockTextById.get(item.sourceBlockId);
+  if (text === undefined) throw new Error("SHORT_VIDEO_EVIDENCE_LINEAGE_INVALID");
+  let { startOffset, endOffset } = item;
+  let quoteText = item.quoteText ?? null, quoteHash = item.quoteHash ?? null;
+  if (quoteText !== null) {
+    const found = text.indexOf(quoteText);
+    if (found >= 0 && quoteText.length > 0) {
+      startOffset = found;
+      endOffset = found + quoteText.length;
+      quoteHash = sha256(quoteText);
+    } else {
+      quoteText = null;
+      quoteHash = null;
+    }
+  }
+  if (!Number.isInteger(startOffset) || !Number.isInteger(endOffset) || startOffset < 0 || endOffset <= startOffset || endOffset > text.length)
+    throw new Error("SHORT_VIDEO_EVIDENCE_LINEAGE_INVALID");
+  return { ...item, startOffset, endOffset, quoteText, quoteHash };
+}
+function sceneDestination(scenes: VideoScene[], evidenceSources: Map<string, any>, blockTextById: Map<string, string>) {
+  let offset = 0;
+  return scenes.map((scene) => {
+    const verifiable = scene.evidence.filter((item) => evidenceSources.has(item.sourceBlockId));
+    if (!verifiable.length && ["EVIDENCE", "CLAIM", "QUOTE"].includes(scene.sceneType)) throw new Error("SHORT_VIDEO_EVIDENCE_LINEAGE_INVALID");
+    const destination = { ordinal: scene.ordinal, sceneType: scene.sceneType, targetStartMs: offset, targetEndMs: offset + scene.targetDurationMs, targetDurationMs: scene.targetDurationMs, narrationText: scene.narrationText, narrationTextHash: sha256(scene.narrationText), visualIntent: scene.visualIntent, primaryText: scene.primaryText, secondaryText: scene.secondaryText ?? null, keywords: scene.keywords, layoutTemplate: scene.layoutTemplate, motionPreset: scene.motionPreset, transitionIntent: scene.transitionIntent, evidence: canonicalSceneEvidence(verifiable.map((item) => ({
+      ...evidenceSources.get(item.sourceBlockId)!,
+      ...normalizeSceneEvidence(item, blockTextById),
+    }))) }; offset += scene.targetDurationMs; return destination;
+  });
+}
+
 async function persistedSceneDestination(run: any) {
   const evidence = await prisma.shortVideoNarrationEvidence.findMany({ where: { shortVideoGenerationRunId: run.id } });
   const narrationByScene = new Map<string, any>(run.narration.map((item: any) => [item.sceneId, item]));
@@ -774,17 +823,16 @@ export async function processShortVideoGenerationRun(
             context: bounded,
           };
           assertBudget(input);
-          const scenes = shortVideoScenesSchema.parse(
+          const targetMs = run.styleProfile.targetDurationSeconds * 1000;
+          const scenes = normalizeVideoScenePlan(shortVideoScenesSchema.parse(
             await withLeaseHeartbeat(run.id, token, () => provider.scenes(input), dependencies.heartbeatIntervalMs, dependencies.onLeaseRenewed),
-          ).scenes;
-          assertScenes(scenes, run.styleProfile.targetDurationSeconds * 1000);
+          ).scenes, targetMs);
           const evidenceSources = new Map<string, any>();
           for (const item of bounded) for (const evidence of item.evidence) evidenceSources.set(evidence.sourceBlockId, item.source);
+          const blockTextById = new Map<string, string>((await prisma.sourceBlock.findMany({ where: { id: { in: [...evidenceSources.keys()] } }, select: { id: true, text: true } })).map((block: { id: string; text: string }) => [block.id, block.text]));
           const materialize = async (tx: any, exactScenes: z.infer<typeof shortVideoScenesSchema>["scenes"]) => {
             let offset = 0;
             for (const scene of exactScenes) {
-              if (scene.evidence.some((e) => !evidenceSources.has(e.sourceBlockId)))
-                throw new Error("SHORT_VIDEO_EVIDENCE_LINEAGE_INVALID");
               const created = await tx.shortVideoScene.create({
                 data: {
                   shortVideoGenerationRunId: run.id,
@@ -816,8 +864,16 @@ export async function processShortVideoGenerationRun(
                   estimatedDurationMs: scene.targetDurationMs,
                 },
               });
-              for (const evidence of scene.evidence) {
+              // Model output is nondeterministic: an invented or mistyped
+              // sourceBlockId drops that citation (keep the verifiable ones)
+              // instead of failing the whole run; scenes that structurally
+              // require evidence still fail when nothing verifiable remains.
+              const verifiableEvidence = scene.evidence.filter(evidence => evidenceSources.has(evidence.sourceBlockId));
+              if (!verifiableEvidence.length && ["EVIDENCE", "CLAIM", "QUOTE"].includes(scene.sceneType))
+                throw new Error("SHORT_VIDEO_EVIDENCE_LINEAGE_INVALID");
+              for (const evidence of verifiableEvidence) {
                 const source = evidenceSources.get(evidence.sourceBlockId);
+                const { startOffset, endOffset, quoteText, quoteHash } = normalizeSceneEvidence(evidence, blockTextById);
                 await tx.shortVideoNarrationEvidence.create({
                   data: {
                     shortVideoGenerationRunId: run.id,
@@ -829,20 +885,19 @@ export async function processShortVideoGenerationRun(
                     chunkSetId: source.chunkSetId,
                     analysisRunId: source.analysisRunId,
                     sourceBlockId: evidence.sourceBlockId,
-                    startOffset: evidence.startOffset,
-                    endOffset: evidence.endOffset,
-                    quoteText: evidence.quoteText ?? null,
-                    quoteHash: evidence.quoteHash ?? null,
+                    startOffset,
+                    endOffset,
+                    quoteText,
+                    quoteHash,
                   },
                 });
               }
               offset += scene.targetDurationMs;
             }
           };
-          const consumer = { consumerKind: "SHORT_VIDEO_SCENE_GRAPH", consumerKey: run.id, consumerFingerprint: textDestinationFingerprint(run, "SCENES", sceneDestination(scenes, evidenceSources)) };
+          const consumer = { consumerKind: "SHORT_VIDEO_SCENE_GRAPH", consumerKey: run.id, consumerFingerprint: textDestinationFingerprint(run, "SCENES", sceneDestination(scenes, evidenceSources, blockTextById)) };
           if (isDurableTextProvider(provider)) await provider.consumeTextResult<z.infer<typeof shortVideoScenesSchema>>(operation, consumer, async ({ tx, output }) => {
-            const exact = shortVideoScenesSchema.parse(output).scenes;
-            assertScenes(exact, run.styleProfile.targetDurationSeconds * 1000);
+            const exact = normalizeVideoScenePlan(shortVideoScenesSchema.parse(output).scenes, targetMs);
             await assertOwnedInTransaction(tx, run.id, token);
             await materialize(tx, exact);
           });
@@ -860,6 +915,22 @@ export async function processShortVideoGenerationRun(
           } : {}),
         };
         await synthesizeNarration(run, token, { ...dependencies, tts: heartbeatTts });
+        // Planned scene windows are model estimates and never match spoken
+        // audio exactly; captions, rendering and quality validation all key
+        // on the actual narration timeline, so rebase scene windows onto the
+        // synthesized audio durations once every scene has audio.
+        const synthesized = await prisma.shortVideoAudioArtifact.findMany({ where: { shortVideoGenerationRunId: run.id }, select: { sceneId: true, durationMs: true } });
+        const durationByScene = new Map(synthesized.map((artifact: { sceneId: string | null; durationMs: number }) => [artifact.sceneId, artifact.durationMs]));
+        if (run.scenes.every((scene: { id: string }) => durationByScene.has(scene.id))) {
+          let actualOffset = 0;
+          for (const scene of [...run.scenes].sort((a: { ordinal: number }, b: { ordinal: number }) => a.ordinal - b.ordinal)) {
+            const duration = durationByScene.get((scene as { id: string }).id)!;
+            const targetEndMs = actualOffset + duration;
+            if (scene.targetStartMs !== actualOffset || scene.targetEndMs !== targetEndMs)
+              await prisma.shortVideoScene.update({ where: { id: (scene as { id: string }).id }, data: { targetStartMs: actualOffset, targetEndMs: targetEndMs } });
+            actualOffset = targetEndMs;
+          }
+        }
         await stage(run.id, token, "NARRATION_SYNTHESIS", "VISUAL_PREPARATION");
       } else if (run.stage === "VISUAL_PREPARATION") {
         const existing = await prisma.shortVideoVisualAsset.count({ where: { shortVideoGenerationRunId: run.id } });

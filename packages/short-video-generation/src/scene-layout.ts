@@ -1,3 +1,25 @@
+import { existsSync } from "node:fs";
+
+/**
+ * drawtext without an explicit fontfile falls back to FFmpeg's built-in
+ * default, which carries no CJK glyphs — Chinese card text renders as tofu
+ * boxes even though the libass subtitle layer (fontconfig-backed) is fine.
+ * Resolve a CJK-capable system font once; SHORT_VIDEO_FONT_FILE overrides.
+ */
+const cjkFontCandidates: ReadonlyArray<string> = process.platform === "win32"
+  ? ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msyhbd.ttc", "C:/Windows/Fonts/simhei.ttf", "C:/Windows/Fonts/simsun.ttc"]
+  : process.platform === "darwin"
+    ? ["/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Light.ttc", "/Library/Fonts/Arial Unicode.ttf"]
+    : ["/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"];
+// null = not yet resolved; undefined = resolved but no usable font found.
+let resolvedFontFile: string | undefined | null = null;
+export function resolveCjkFontFile(): string | undefined {
+  if (resolvedFontFile !== null) return resolvedFontFile;
+  const override = process.env.SHORT_VIDEO_FONT_FILE?.trim();
+  resolvedFontFile = override && existsSync(override) ? override : cjkFontCandidates.find(candidate => existsSync(candidate)) ?? undefined;
+  return resolvedFontFile;
+}
+
 /** Conservative Unicode wrapping keeps text inside the 9:16 safe area. */
 export function wrapCardText(text: string, columns: number, maxLines: number): string {
   const lines: string[] = []; let line = "", width = 0;
@@ -34,8 +56,13 @@ export function sceneVisualFilter(input: { width: number; height: number; fps: n
   const filters = [`color=c=${layout.background}:s=${w}x${h}:r=${input.fps}:d=${d}`];
   if (layout.panel) filters.push(`drawbox=x=${margin / 2}:y=${h * .16}:w=${w - margin}:h=${h * .60}:color=white@0.06:t=fill`);
   filters.push(`drawbox=x=${margin}:y=${h * .15}:w=${w - margin * 2}:h=${Math.max(3, w * .008)}:color=${layout.accent}:t=fill`);
-  filters.push(`drawtext=textfile='${path(input.primaryPath)}':expansion=none:fontcolor=white:fontsize=${titleSize}:x=${titleX}:y=h*${layout.titleY}:line_spacing=12${alpha}`);
-  filters.push(`drawtext=textfile='${path(input.secondaryPath)}':expansion=none:fontcolor=${layout.accent}:fontsize=${Math.max(12, Math.floor(w / 24))}:x=${x}:y=h*${layout.detailY}:line_spacing=8`);
+  // FFmpeg's drawtext default font carries no CJK glyphs; pin a resolved
+  // system font so Chinese card text renders. The escaped absolute path is
+  // verified working through the "-f lavfi -i" argument form.
+  const font = resolveCjkFontFile();
+  const fontOption = font ? `:fontfile='${path(font)}'` : "";
+  filters.push(`drawtext=textfile='${path(input.primaryPath)}':expansion=none:fontcolor=white:fontsize=${titleSize}:x=${titleX}:y=h*${layout.titleY}:line_spacing=12${alpha}${fontOption}`);
+  filters.push(`drawtext=textfile='${path(input.secondaryPath)}':expansion=none:fontcolor=${layout.accent}:fontsize=${Math.max(12, Math.floor(w / 24))}:x=${x}:y=h*${layout.detailY}:line_spacing=8${fontOption}`);
   if (input.transitionIntent === "FADE") filters.push(`fade=t=in:st=0:d=0.2`, `fade=t=out:st=${Math.max(0, d - .2)}:d=0.2`);
   if (input.transitionIntent === "WIPE") filters.push(`format=gbrp,geq=r='if(lt(X,W*(1-min(1,T/0.25))),0,r(X,Y))':g='if(lt(X,W*(1-min(1,T/0.25))),0,g(X,Y))':b='if(lt(X,W*(1-min(1,T/0.25))),0,b(X,Y))',format=yuv420p`);
   if (input.motionPreset === "ZOOM") {
