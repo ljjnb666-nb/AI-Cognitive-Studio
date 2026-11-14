@@ -23,6 +23,7 @@ import { buildContext } from "./context.js";
 import { cosineSimilarity, embeddingIdentityWithHash, type EmbeddingProvider } from "./embeddings.js";
 import { sha256, validateEvidence, type SourceBlockInput } from "./chunking.js";
 import { bookRoutePlanHash, normalizeBookRoutePlan, type BookAnalysisRoutePlan } from "./route-plan.js";
+import { verifyFrozenBookFailoverPlan, type FrozenBookFailoverPlan } from "./failover-plan.js";
 import { canonicalEmbeddingInputHash, ProviderGatewayError, type ProviderExecutionRepository, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
 import { bookAnalysisEmbeddingIdempotencyKey, bookAnalysisEmbeddingRetryIdempotencyKey, loadConsumedBookAnalysisEmbeddingIdentity, materializeBookAnalysisEmbeddings, type BookAnalysisEmbeddingTarget, verifyConsumedBookAnalysisEmbeddings } from "./gateway-materialization.js";
 import { dispatchPendingOutbox, MAX_PERSISTED_DISPATCH_GENERATION, normalizeDispatchGeneration } from "../../ingestion/src/outbox-dispatcher.js";
@@ -43,8 +44,8 @@ export const BOOK_ANALYSIS_TOPIC = "book.analysis.requested";
 const contextLimit = 8_000;
 const workspaceOperationLimit = () => Number(process.env.WORKSPACE_EXPENSIVE_OPERATION_LIMIT ?? "2");
 
-function bookExecutionAttemptPayload(sourceDocumentId: string, chunkSetId: string, routePlan?: BookAnalysisRoutePlan, routePlanHash?: string) {
-  return { sourceDocumentId, chunkSetId, ...(routePlan ? { routePlan, routePlanHash } : {}) };
+function bookExecutionAttemptPayload(sourceDocumentId: string, chunkSetId: string, routePlan?: BookAnalysisRoutePlan, routePlanHash?: string, failoverPlan?: FrozenBookFailoverPlan) {
+  return { sourceDocumentId, chunkSetId, ...(routePlan ? { routePlan, routePlanHash } : {}), ...(failoverPlan ? { failoverPlan } : {}) };
 }
 
 async function nextBookRecoveryJobIdempotencyKey(tx: Prisma.TransactionClient, workspaceId: string, analysisIdentityHash: string): Promise<string> {
@@ -71,7 +72,7 @@ export type ProcessBookAnalysisDependencies = {
   faultInjector?: AnalysisFaultInjector;
 };
 type ActiveBookAnalysisDependencies = ProcessBookAnalysisDependencies & { analysisProvider: AnalysisProvider };
-export type BookAnalysisRequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; routePlan?: BookAnalysisRoutePlan; correlationId?: string; outboxTopic?: string; frozenChunks?: FrozenChunkSelection };
+export type BookAnalysisRequestInput = { workspaceId: string; sourceDocumentId: string; chunkSetId?: string; pipelineVersion: string; promptVersion: string; provider: string; model: string; modelVersion?: string; routePlan?: BookAnalysisRoutePlan; failoverPlan?: FrozenBookFailoverPlan; correlationId?: string; outboxTopic?: string; frozenChunks?: FrozenChunkSelection };
 export type TrustedBookAnalysisRequestContext = { workspaceId: string; userId: string };
 type StageContext = { blocks: SourceBlockInput[]; blockMap: Map<string, SourceBlockInput>; chunks: any[]; nodes: any[] };
 
@@ -107,6 +108,8 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
   if (chunkSet.status !== "SUCCEEDED") throw new Error("CHUNK_SET_NOT_SUCCEEDED");
   const routePlan = input.routePlan ? normalizeBookRoutePlan(input.routePlan) : undefined;
   const routePlanHash = routePlan ? bookRoutePlanHash(routePlan) : undefined;
+  if (input.failoverPlan && !routePlan) throw new Error("BOOK_FAILOVER_PLAN_INTEGRITY_FAILED");
+  const failoverPlan = input.failoverPlan ? verifyFrozenBookFailoverPlan(input.failoverPlan, routePlan!) : undefined;
   const display = routePlan?.routes.BOOK_CHUNK_ANALYSIS;
   const provider = display?.providerKey ?? input.provider, model = display?.modelId ?? input.model, modelVersion = display?.modelVersion ?? input.modelVersion;
   const modelVersionKey = modelVersion ?? "";
@@ -132,7 +135,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
         workspaceId: input.workspaceId,
         ...(requestedByUserId ? { userId: requestedByUserId } : {}),
         type: BOOK_ANALYSIS_JOB,
-        payload: { ...bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash), ...((fresh.job.payload as {frozenChunks?:unknown}|null)?.frozenChunks ? {frozenChunks:(fresh.job.payload as {frozenChunks:unknown}).frozenChunks} : {}) } as never,
+        payload: { ...bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash, failoverPlan), ...((fresh.job.payload as {frozenChunks?:unknown}|null)?.frozenChunks ? {frozenChunks:(fresh.job.payload as {frozenChunks:unknown}).frozenChunks} : {}) } as never,
         idempotencyKey: await nextBookRecoveryJobIdempotencyKey(tx, input.workspaceId, analysisIdentityHash),
         correlationId: input.correlationId,
       } });
