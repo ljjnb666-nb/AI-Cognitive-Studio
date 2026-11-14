@@ -1,7 +1,7 @@
 import { readEnvironment } from "@ai-cognitive/shared/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { ProviderGatewayRepository, workspaceRoutesWithBookDefaults, managedConnectionParent, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, routeSlotCapabilities, type RouteSlot } from "@ai-cognitive/provider-gateway";
+import { ProviderGatewayRepository, workspaceRoutesWithBookDefaults, listWorkspaceFailoverPreferences, saveWorkspaceFailoverPreference, routeSlots, managedConnectionParent, builtInProviderProfiles, builtInProviderTestEndpoint, resolveCredentialKeyring, sanitizedProviderManifest, validateRouteManifestSelection, validateProviderEndpoint, routeSlotCapabilities, type RouteSlot } from "@ai-cognitive/provider-gateway";
 import { prisma } from "@ai-cognitive/db";
 import { resolveWebIdentity } from "@/lib/identity";
 import { assertSafeConfiguration, productManifest, providerReadiness, safeConfiguration } from "@/lib/provider-product";
@@ -21,17 +21,30 @@ const setRoute = z.object({ applyToBookStages: z.boolean().optional(), action: z
 const testConnection = z.object({ action: z.literal("TEST_CONNECTION"), providerKey: z.string().trim().min(1).max(80), protocol: z.string().trim().min(1).max(80), endpoint: executableEndpoint, secret: z.string().trim().min(1).max(10_000), configuration: jsonRecord });
 const autoConfigureRoutes = z.object({ action: z.literal("AUTO_CONFIGURE_ROUTES"), connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200).optional() });
 const stableBookRoutesInput = z.object({ action: z.literal("APPLY_STABLE_BOOK_ROUTES"), textConnectionId: z.string().cuid(), textModelId: z.string().trim().min(1).max(200), textConfiguration: jsonRecord, embeddingConnectionId: z.string().cuid(), embeddingModelId: z.string().trim().min(1).max(200), embeddingConfiguration: jsonRecord });
-const bodySchema = z.discriminatedUnion("action", [deleteConnection, createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection, autoConfigureRoutes, stableBookRoutesInput]);
+const failoverCandidate = z.object({
+  connectionId: z.string().cuid(), modelId: z.string().trim().min(1).max(200),
+  configuration: jsonRecord,
+});
+const setFailoverPreference = z.object({
+  action: z.literal("SET_FAILOVER_PREFERENCE"),
+  routeSlot: z.enum(routeSlots),
+  requestedEnabled: z.boolean(),
+  maxSwitches: z.number().int().min(0).max(2),
+  candidates: z.array(failoverCandidate).max(2),
+  expectedRevision: z.number().int().min(1).nullable(),
+});
+const bodySchema = z.discriminatedUnion("action", [deleteConnection, createConnection, createConnectionWithCredential, setCredential, revokeCredential, setEnabled, setRoute, testConnection, autoConfigureRoutes, stableBookRoutesInput, setFailoverPreference]);
 
 function safeConnection(connection: { id: string; providerKey: string; protocol: string; displayName: string; endpoint: string | null; region: string | null; status: string; health: string; credentialVersions: { id: string; displayHint: string | null; status: string }[] }) {
   const credential = connection.credentialVersions[0];
   return { id: connection.id, providerKey: connection.providerKey, protocol: connection.protocol, displayName: connection.displayName, endpoint: connection.endpoint, region: connection.region, status: connection.status, health: connection.health, credential: credential ? { id: credential.id, exists: true, displayHint: credential.displayHint, status: credential.status } : { exists: false } };
 }
 async function response(workspaceId: string) {
-  const [connections, routes, readiness] = await Promise.all([
+  const [connections, routes, readiness, failoverPreferences] = await Promise.all([
     prisma.providerConnection.findMany({ where: { workspaceId, status: { not: "REVOKED" } }, include: { credentialVersions: { where: { status: { in: ["ACTIVE", "RETIRED"] } }, orderBy: { credentialVersion: "desc" }, take: 1, select: { id: true, displayHint: true, status: true } } }, orderBy: { createdAt: "asc" } }),
     workspaceRoutesWithBookDefaults(workspaceId),
     providerReadiness(workspaceId),
+    listWorkspaceFailoverPreferences(workspaceId),
   ]);
   const parentById = new Map(connections.map(connection => [connection.id, managedConnectionParent(connection, connections)]));
   const visible = connections.filter(connection => !parentById.get(connection.id));
@@ -45,7 +58,34 @@ async function response(workspaceId: string) {
       catch { return false; }
     })]))];
   }));
-  return NextResponse.json({ manifest: sanitizedProviderManifest(manifest), routeModels, connections: visible.map(connection => ({ ...safeConnection(connection), managedCapabilities: connections.filter(child => parentById.get(child.id)?.id === connection.id).map(child => child.protocol === "CUSTOM_SPEECH" ? "语音合成" : "向量检索") })), routes: routes.map(route => {
+  const failoverChoices = connections.flatMap(connection => {
+    if (connection.status !== "ACTIVE" || connection.credentialVersions[0]?.status !== "ACTIVE") return [];
+    const provider = manifest.providers.find(item => item.providerKey === connection.providerKey);
+    if (!provider) return [];
+    const base = safeConfiguration(connection.configuration);
+    return (Object.keys(routeSlotCapabilities) as RouteSlot[]).flatMap(routeSlot =>
+      provider.models.flatMap(model => {
+        if (model.deprecated || model.retired) return [];
+        // Filter the effective primary (including implicit GLM defaults), not
+        // only the manually persisted ProviderRouteBinding.
+        if (routes.some(route => route.routeSlot === routeSlot &&
+          route.connection.providerKey === connection.providerKey && route.modelId === model.modelId)) return [];
+        const family = routeSlotCapabilities[routeSlot];
+        try {
+          validateRouteManifestSelection(manifest, {
+            routeSlot, providerKey: provider.providerKey, protocol: connection.protocol, modelId: model.modelId,
+          });
+        } catch { return []; }
+        const configuration: Record<string, unknown> = connection.providerKey === "qwen"
+          ? { qwenRegion: base.qwenRegion, qwenWorkspaceId: base.qwenWorkspaceId, ...(family === "EMBEDDING" ? { embeddingDimensions: model.embeddingDimensions } : {}) }
+          : family === "EMBEDDING" && model.embeddingDimensions ? { embeddingDimensions: model.embeddingDimensions } : {};
+        return [{
+          routeSlot, connectionId: connection.id, modelId: model.modelId,
+          providerKey: provider.providerKey, displayName: connection.displayName, configuration,
+        }];
+      }));
+  });
+  return NextResponse.json({ manifest: sanitizedProviderManifest(manifest), routeModels, failoverPreferences, failoverChoices, connections: visible.map(connection => ({ ...safeConnection(connection), managedCapabilities: connections.filter(child => parentById.get(child.id)?.id === connection.id).map(child => child.protocol === "CUSTOM_SPEECH" ? "语音合成" : "向量检索") })), routes: routes.map(route => {
     const parent = parentById.get(route.connectionId);
     return { id: route.id, routeSlot: route.routeSlot, connectionId: parent?.id ?? route.connectionId, modelId: route.modelId, configuration: safeConfiguration(route.configuration), connection: parent ? { id:parent.id,displayName:parent.displayName,providerKey:parent.providerKey,protocol:parent.protocol,status:parent.status } : route.connection };
   }), readiness });
@@ -175,6 +215,11 @@ export async function POST(request: Request) {
     if (membership?.role !== "OWNER") throw new Error("AUTHORIZATION_FAILED");
     const manifest = productManifest();
     if (input.action === "TEST_CONNECTION") return NextResponse.json({ test: await testSubmittedConnection(input, manifest) });
+    if (input.action === "SET_FAILOVER_PREFERENCE") {
+      for (const candidate of input.candidates) assertSafeConfiguration(candidate.configuration);
+      await saveWorkspaceFailoverPreference(context, input, manifest);
+      return response(context.workspaceId);
+    }
     const cipher = resolveCredentialKeyring(process.env, { initializeLocal: input.action === "CREATE_CONNECTION_WITH_CREDENTIAL" || input.action === "SET_CREDENTIAL" });
     if (!cipher && ["CREATE_CONNECTION_WITH_CREDENTIAL", "SET_CREDENTIAL", "AUTO_CONFIGURE_ROUTES"].includes(input.action)) throw new Error("PROVIDER_GATEWAY_KEYRING_MISSING");
     const repository = new ProviderGatewayRepository(prisma, cipher);

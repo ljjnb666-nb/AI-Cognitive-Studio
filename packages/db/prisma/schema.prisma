@@ -500,6 +500,7 @@ model Workspace {
   shortVideoRevisions                ShortVideoRevision[]
   providerConnections                ProviderConnection[]
   providerRoutes                     ProviderRouteBinding[]
+  providerFailoverPreferences        ProviderFailoverPreference[]
   providerSnapshots                  ProviderExecutionSnapshot[]
   providerInvocations                ProviderInvocation[]
   providerInvocationAttempts         ProviderInvocationAttempt[]
@@ -652,6 +653,25 @@ model ProviderRouteBinding {
 
   @@unique([workspaceId, routeSlot])
   @@index([connectionId])
+}
+
+/// Workspace owner-configured candidate order, inert until a durable runtime
+/// seals an execution plan and explicitly enables the per-route executor.
+/// Never store API keys or runtime execution state inside these preferences.
+model ProviderFailoverPreference {
+  workspaceId      String
+  routeSlot        String
+  requestedEnabled Boolean  @default(false)
+  maxSwitches      Int      @default(0)
+  candidates       Json     @default("[]")
+  preferenceHash   String
+  revision         Int      @default(1)
+  updatedByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  workspace        Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, routeSlot])
 }
 
 model ProviderExecutionSnapshot {

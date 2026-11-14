@@ -1,6 +1,7 @@
 import { prisma } from "@ai-cognitive/db";
 
 export const defaultBookTextSlots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS"] as const;
+export const defaultBookTextModelId = "glm-5.3-flash";
 
 /** 仅补齐新任务缺省路由，不写入用户绑定或历史快照。 */
 export async function workspaceRoutesWithBookDefaults(workspaceId: string, db: typeof prisma = prisma) {
@@ -19,7 +20,7 @@ export async function workspaceRoutesWithBookDefaults(workspaceId: string, db: t
   if (!connection) return routes;
   return [...routes, ...missing.map(routeSlot => ({
     id: `default:${workspaceId}:${routeSlot}`, workspaceId, routeSlot,
-    connectionId: connection.id, modelId: "glm-5.3-flash", configuration: {},
+    connectionId: connection.id, modelId: defaultBookTextModelId, configuration: {},
     createdAt: connection.createdAt, updatedAt: connection.updatedAt, connection,
   }))];
 }

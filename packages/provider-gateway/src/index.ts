@@ -10,6 +10,7 @@ export * from "./credentials/redaction.js";
 export * from "./safety/endpoint-policy.js";
 export * from "./runtime/retry.js";
 export * from "./failover-policy.js";
+export * from "./failover-preferences.js";
 export * from "./runtime/gateway.js";
 export * from "./runtime/platform-credentials.js";
 export * from "./authorization.js";

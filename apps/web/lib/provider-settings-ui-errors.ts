@@ -1,4 +1,5 @@
 export const providerErrorMessages: Record<string, string> = {
+  INVALID_PROVIDER_REQUEST: "备用模型配置无效：请检查候选数量、顺序、配置和模型兼容性。",
   PROVIDER_CONNECTION_CHANGED: "服务商配置已变化，请刷新设置后重新确认删除。",
   CONNECTION_DISABLED: "该服务商已停用或删除，请刷新设置并检查启用状态。",
   PROVIDER_SETTINGS_INPUT_INVALID: "配置内容无效，请检查服务商或用途设置。模型请在用途配置中选择。",
