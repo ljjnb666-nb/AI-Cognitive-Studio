@@ -295,15 +295,25 @@ async function draftSegment(run: any, segment: any, token: string, dependencies:
     if (mode === "QUALITY_REDRAFT") await tx.podcastUtterance.deleteMany({ where: { segmentId: segment.id } });
     await tx.episodeSegment.update({ where: { id: segment.id }, data: { generationAttemptCount: { increment: 1 } } });
     for (const item of output.utterances) {
-      const utterance = await tx.podcastUtterance.create({ data: { segmentId: segment.id, podcastGenerationRunId: run.id, workspaceId: run.workspaceId, podcastProjectId: run.podcastProjectId, episodeId: run.episodeId, speakerHostId: item.speakerHostId, ordinal: item.ordinal, draftText: item.text, text: item.text, utteranceType: item.utteranceType, substantive: item.substantive, isDirectQuote: item.isDirectQuote, estimatedDurationMs: estimateSpokenDurationMs(item.text) } });
-      for (const reference of item.evidence) {
-        const source = context.find((candidate) => candidate.memoryItemId === reference.memoryItemId)!;
+      // A model-labelled direct quote is only kept when at least one cited
+      // span's stored quoteText appears verbatim in the utterance text; citing
+      // quote-less evidence can never satisfy the quote check, so the label is
+      // dropped (evidence linkage stays intact) instead of failing the run on
+      // an unpassable lineage gate.
+      const referenceLineage = item.evidence.map((reference) => {
         const memoryItem = memoryMap.get(reference.memoryItemId);
+        const lineageEvidence = reference.sourceBlockId === undefined ? memoryItem?.evidence ?? [] : (memoryItem?.evidence ?? []).filter((evidence: any) => evidence.sourceBlockId === reference.sourceBlockId && evidence.startOffset === reference.startOffset && evidence.endOffset === reference.endOffset);
+        const verbatim = lineageEvidence.filter((evidence: any) => Boolean(evidence.quoteText) && item.text.includes(evidence.quoteText!));
+        return { reference, memoryItem, lineageEvidence, verbatim };
+      });
+      const isDirectQuote = item.isDirectQuote && referenceLineage.some((entry) => entry.verbatim.length > 0);
+      const utterance = await tx.podcastUtterance.create({ data: { segmentId: segment.id, podcastGenerationRunId: run.id, workspaceId: run.workspaceId, podcastProjectId: run.podcastProjectId, episodeId: run.episodeId, speakerHostId: item.speakerHostId, ordinal: item.ordinal, draftText: item.text, text: item.text, utteranceType: item.utteranceType, substantive: item.substantive, isDirectQuote, estimatedDurationMs: estimateSpokenDurationMs(item.text) } });
+      for (const entry of referenceLineage) {
+        const { reference, memoryItem, lineageEvidence, verbatim } = entry;
+        const source = context.find((candidate) => candidate.memoryItemId === reference.memoryItemId)!;
         if (!memoryItem?.evidence.length) throw new Error("PODCAST_EVIDENCE_REQUIRED");
-        const lineageEvidence = reference.sourceBlockId === undefined ? memoryItem.evidence : memoryItem.evidence.filter((evidence: any) => evidence.sourceBlockId === reference.sourceBlockId && evidence.startOffset === reference.startOffset && evidence.endOffset === reference.endOffset);
         if (!lineageEvidence.length) throw new Error("PODCAST_EVIDENCE_SPAN_LINEAGE_INVALID");
-        const selectedEvidence = item.isDirectQuote ? lineageEvidence.filter((evidence: any) => Boolean(evidence.quoteText) && item.text.includes(evidence.quoteText!)) : lineageEvidence;
-        if (!selectedEvidence.length) throw new Error(`PODCAST_DIRECT_QUOTE_LINEAGE_INVALID:textLength=${item.text.length}:quoteLengths=${lineageEvidence.map((evidence: any) => evidence.quoteText?.length ?? 0).join(",")}`);
+        const selectedEvidence = isDirectQuote && verbatim.length ? verbatim : lineageEvidence;
         await tx.podcastUtteranceEvidence.createMany({ data: selectedEvidence.map((evidence: any) => ({ utteranceId: utterance.id, segmentId: segment.id, podcastGenerationRunId: run.id, workspaceId: run.workspaceId, sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, memoryItemId: memoryItem.id, sourceBlockId: evidence.sourceBlockId, startOffset: evidence.startOffset, endOffset: evidence.endOffset, quoteText: evidence.quoteText, quoteHash: evidence.quoteHash })), skipDuplicates: true });
       }
     }
@@ -338,12 +348,21 @@ async function humanizeSegment(run: any, segment: any, token: string, dependenci
   const input = { metadata: metadata(run, "HUMANIZATION", PODCAST_PROVIDER_INPUT_BUDGETS.HUMANIZATION, segment.id, current.generationAttemptCount), style: styleRecord(run.styleProfile), hosts: (await loadHosts(run)).map(persona), segment: segmentOutput(segment), dialogue, qualityHints: preQuality.warnings };
   const persist = async (tx: any, output: HumanizationOutput) => {
     const currentUtterances = await tx.podcastUtterance.findMany({ where: { segmentId: segment.id }, include: { evidence: true }, orderBy: { ordinal: "asc" } });
-    if (output.utterances.length !== currentUtterances.length || output.utterances.some((item, index) => item.ordinal !== currentUtterances[index]!.ordinal)) throw new Error("PODCAST_HUMANIZATION_STRUCTURE_CHANGED");
-    for (let index = 0; index < currentUtterances.length; index++) { if (currentUtterances[index]!.isDirectQuote && output.utterances[index]!.text !== currentUtterances[index]!.text) throw new Error("PODCAST_HUMANIZATION_CHANGED_QUOTE"); if ((currentUtterances[index]!.substantive || currentUtterances[index]!.evidence.length > 0) && output.utterances[index]!.text !== currentUtterances[index]!.text) throw new Error("PODCAST_HUMANIZATION_CHANGED_SUBSTANTIVE_CLAIM"); }
-    for (let index = 0; index < currentUtterances.length; index++) await tx.podcastUtterance.update({ where: { id: currentUtterances[index]!.id }, data: { text: output.utterances[index]!.text, estimatedDurationMs: estimateSpokenDurationMs(output.utterances[index]!.text), humanizedAt: new Date() } });
+    // Align humanizer output to the drafted structure by ordinal instead of
+    // rejecting structural drift: renamed, dropped or extra utterances degrade
+    // to the drafted text rather than failing the run.
+    const humanizedByOrdinal = new Map(output.utterances.map((item) => [item.ordinal, item.text]));
+    // Direct quotes, substantive claims and evidence-backed lines keep their
+    // stored text by construction: the humanizer rewrite is accepted only for
+    // editable connective tissue. Enforcing preservation here instead of
+    // rejecting character-level model drift keeps the evidence-integrity
+    // guarantee absolute while any model can complete the run.
+    const protectedTexts: string[] = [];
+    for (let index = 0; index < currentUtterances.length; index++) { const current = currentUtterances[index]!; protectedTexts.push(current.isDirectQuote || current.substantive || current.evidence.length > 0 ? current.text : humanizedByOrdinal.get(current.ordinal) ?? current.text); }
+    for (let index = 0; index < currentUtterances.length; index++) await tx.podcastUtterance.update({ where: { id: currentUtterances[index]!.id }, data: { text: protectedTexts[index], estimatedDurationMs: estimateSpokenDurationMs(protectedTexts[index]!), humanizedAt: new Date() } });
     await tx.episodeSegment.update({ where: { id: segment.id }, data: { status: "HUMANIZED" } });
   };
-  const generated = await invokeText(run, token, dependencies, "HUMANIZATION", segment.id, input, () => dependencies.provider!.humanizeSegment(input), humanizationSchema.parse, "SEGMENT_HUMANIZATION", persist, output => buildHumanizationDestinationProjection(run, { ...current, status: "HUMANIZED" }, utterances.map((item, index) => ({ ...item, text: output.utterances[index]!.text, estimatedDurationMs: estimateSpokenDurationMs(output.utterances[index]!.text), humanizedAt: true }))), run.stage as DurableStage);
+  const generated = await invokeText(run, token, dependencies, "HUMANIZATION", segment.id, input, () => dependencies.provider!.humanizeSegment(input), humanizationSchema.parse, "SEGMENT_HUMANIZATION", persist, output => { const humanizedByOrdinal = new Map(output.utterances.map((item) => [item.ordinal, item.text])); return buildHumanizationDestinationProjection(run, { ...current, status: "HUMANIZED" }, utterances.map((item) => { const text = item.isDirectQuote || item.substantive || item.evidence.length > 0 ? item.text : humanizedByOrdinal.get(item.ordinal) ?? item.text; return { ...item, text, estimatedDurationMs: estimateSpokenDurationMs(text), humanizedAt: true }; })); }, run.stage as DurableStage);
   if (!generated.consumed) await withOwnedPodcastTransaction(run.id, token, tx => persist(tx, generated.output));
   await dependencies.faultInjector?.("afterSegmentHumanization", { podcastGenerationRunId: run.id, segmentId: segment.id });
 }

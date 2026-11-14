@@ -84,6 +84,13 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     if (input.snapshot.providerKey === "zhipu" && (choice?.finish_reason === "sensitive" || choice?.finish_reason === "content_filter")) throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage: { ...usage, extra: { moderationDiagnostic: zhipuModerationDiagnostic(json, remote.status) } } });
     if (input.snapshot.providerKey === "minimax" && (choice?.finish_reason === "content_filter" || choice?.finish_reason === "sensitive"))
       throw new ProviderAdapterFailure("CONTENT_REJECTED", { retryable: false, remoteRequestId: requestId, usage });
+    // Reasoning models (DeepSeek V4, GLM thinking) draw down the shared
+    // completion budget with reasoning tokens before any content; a LENGTH
+    // finish with missing or empty content is truncation, not a malformed
+    // response. Classify before the JSON repair path can relabel it, and keep
+    // the billed usage on the failure.
+    if (finish(choice?.finish_reason) === "LENGTH" && (!message || typeof message.content !== "string" || message.content === ""))
+      throw new ProviderAdapterFailure("OUTPUT_TRUNCATED", { retryable: false, remoteRequestId: requestId, usage });
     try {
       if (!message || typeof message.content !== "string") throw new ProviderGatewayError("INVALID_PROVIDER_RESPONSE");
       // Even a syntactically complete JSON prefix is not a final judgement if
