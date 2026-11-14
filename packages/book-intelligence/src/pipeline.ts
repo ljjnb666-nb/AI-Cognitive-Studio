@@ -131,11 +131,24 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
       const fresh = await tx.bookAnalysisRun.findUnique({ where: { id: existing.id }, include: { job: true } });
       if (!fresh || fresh.status !== "FAILED" || fresh.dispatchGeneration >= MAX_PERSISTED_DISPATCH_GENERATION) return null;
       await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
+      // Retries must not silently inherit a newly edited workspace preference.
+      // Preserve the original frozen candidate chain and its matching primary.
+      const priorPayload = fresh.job.payload as { routePlan?: unknown; routePlanHash?: unknown; failoverPlan?: unknown; frozenChunks?: unknown } | null;
+      const priorIntent = priorPayload?.failoverPlan;
+      const retryPrimary = priorIntent
+        ? normalizeBookRoutePlan(priorPayload?.routePlan as BookAnalysisRoutePlan)
+        : routePlan;
+      const retryHash = priorIntent ? priorPayload?.routePlanHash : routePlanHash;
+      if (priorIntent) {
+        if (typeof retryHash !== "string" || !retryPrimary ||
+            bookRoutePlanHash(retryPrimary) !== retryHash) throw new Error("BOOK_FAILOVER_PLAN_INTEGRITY_FAILED");
+        verifyFrozenBookFailoverPlan(priorIntent, retryPrimary);
+      }
       const retryJob = await tx.job.create({ data: {
         workspaceId: input.workspaceId,
         ...(requestedByUserId ? { userId: requestedByUserId } : {}),
         type: BOOK_ANALYSIS_JOB,
-        payload: { ...bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash, failoverPlan), ...((fresh.job.payload as {frozenChunks?:unknown}|null)?.frozenChunks ? {frozenChunks:(fresh.job.payload as {frozenChunks:unknown}).frozenChunks} : {}) } as never,
+        payload: { ...bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, retryPrimary, retryHash as string | undefined, priorIntent as FrozenBookFailoverPlan | undefined), ...(priorPayload?.frozenChunks ? { frozenChunks: priorPayload.frozenChunks } : {}) } as never,
         idempotencyKey: await nextBookRecoveryJobIdempotencyKey(tx, input.workspaceId, analysisIdentityHash),
         correlationId: input.correlationId,
       } });
@@ -159,7 +172,7 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
         ? await loadFrozenChunks(tx, { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id }, input.frozenChunks, requestedByUserId!)
         : undefined;
       await admitWorkspaceExpensiveOperation(tx, input.workspaceId, workspaceOperationLimit());
-      const payload = { ...bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash),
+      const payload = { ...bookExecutionAttemptPayload(input.sourceDocumentId, chunkSet.id, routePlan, routePlanHash, failoverPlan),
         ...(frozen ? { frozenChunks: { hash: frozen.hash, selection: input.frozenChunks, origins: frozen.origins } } : {}) };
       const job = await tx.job.create({ data: { workspaceId: input.workspaceId, ...(requestedByUserId ? { userId: requestedByUserId } : {}), type: BOOK_ANALYSIS_JOB, payload: payload as never, idempotencyKey, correlationId: input.correlationId } });
       const run = await tx.bookAnalysisRun.create({ data: { workspaceId: input.workspaceId, sourceDocumentId: input.sourceDocumentId, extractionId: current.extractionId, chunkSetId: chunkSet.id, jobId: job.id, pipelineVersion: input.pipelineVersion, promptVersion: input.promptVersion, provider, model, modelVersion, modelVersionKey, idempotencyKey, analysisIdentityHash, ...(routePlan ? { routePlan: routePlan as never, routePlanHash } : {}) } });
