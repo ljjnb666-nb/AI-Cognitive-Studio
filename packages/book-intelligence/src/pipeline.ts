@@ -134,12 +134,18 @@ async function requestBookAnalysisCore(input: BookAnalysisRequestInput, requeste
       // Retries must not silently inherit a newly edited workspace preference.
       // Preserve the original frozen candidate chain and its matching primary.
       const priorPayload = fresh.job.payload as { routePlan?: unknown; routePlanHash?: unknown; failoverPlan?: unknown; frozenChunks?: unknown } | null;
+      const hadFrozenIntent = Boolean(priorPayload &&
+        Object.prototype.hasOwnProperty.call(priorPayload, "failoverPlan"));
       const priorIntent = priorPayload?.failoverPlan;
-      const retryPrimary = priorIntent
+      // Even null/empty tampering must not remove a previously sealed plan.
+      if (hadFrozenIntent && (!priorIntent || !priorPayload?.routePlan)) {
+        throw new Error("BOOK_FAILOVER_PLAN_INTEGRITY_FAILED");
+      }
+      const retryPrimary = hadFrozenIntent
         ? normalizeBookRoutePlan(priorPayload?.routePlan as BookAnalysisRoutePlan)
         : routePlan;
-      const retryHash = priorIntent ? priorPayload?.routePlanHash : routePlanHash;
-      if (priorIntent) {
+      const retryHash = hadFrozenIntent ? priorPayload?.routePlanHash : routePlanHash;
+      if (hadFrozenIntent) {
         if (typeof retryHash !== "string" || !retryPrimary ||
             bookRoutePlanHash(retryPrimary) !== retryHash) throw new Error("BOOK_FAILOVER_PLAN_INTEGRITY_FAILED");
         verifyFrozenBookFailoverPlan(priorIntent, retryPrimary);
