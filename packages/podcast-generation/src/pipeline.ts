@@ -226,20 +226,34 @@ async function ensureSegmentContext(run: any, segment: any, token: string, depen
   return context;
 }
 
+/** A single deterministic rule drives both the consumed receipt fingerprint and database writes. */
+function resolveDraftCitation(item: DialogueOutput["utterances"][number], memoryMap: Map<string, any>) {
+  const referenceLineage = item.evidence.map((reference) => {
+    const memoryItem = memoryMap.get(reference.memoryItemId);
+    const lineageEvidence = reference.sourceBlockId === undefined ? memoryItem?.evidence ?? [] : (memoryItem?.evidence ?? []).filter((evidence: any) => evidence.sourceBlockId === reference.sourceBlockId && evidence.startOffset === reference.startOffset && evidence.endOffset === reference.endOffset);
+    const verbatim = lineageEvidence.filter((evidence: any) => Boolean(evidence.quoteText) && item.text.includes(evidence.quoteText!));
+    return { reference, memoryItem, lineageEvidence, verbatim };
+  });
+  const isDirectQuote = item.isDirectQuote && referenceLineage.some((entry) => entry.verbatim.length > 0);
+  return { referenceLineage, isDirectQuote };
+}
+
 function expectedDraftProjection(run: any, segment: any, output: DialogueOutput, context: PodcastContextItem[], memory: any[]) {
   const memoryMap = new Map(memory.map((item: any): [string, any] => [item.id, item]));
-  const utterances = output.utterances.map((item) => ({
-    ...item,
-    draftText: item.text,
-    estimatedDurationMs: estimateSpokenDurationMs(item.text),
-    evidence: item.evidence.flatMap((reference) => {
-      const source = context.find((candidate) => candidate.memoryItemId === reference.memoryItemId)!;
-      const memoryItem = memoryMap.get(reference.memoryItemId);
-      const lineage = reference.sourceBlockId === undefined ? memoryItem?.evidence ?? [] : (memoryItem?.evidence ?? []).filter((value: any) => value.sourceBlockId === reference.sourceBlockId && value.startOffset === reference.startOffset && value.endOffset === reference.endOffset);
-      const selected = item.isDirectQuote ? lineage.filter((value: any) => Boolean(value.quoteText) && item.text.includes(value.quoteText)) : lineage;
-      return selected.map((value: any) => ({ sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, memoryItemId: memoryItem.id, sourceBlockId: value.sourceBlockId, startOffset: value.startOffset, endOffset: value.endOffset, quoteText: value.quoteText, quoteHash: value.quoteHash }));
-    }),
-  }));
+  const utterances = output.utterances.map((item) => {
+    const { referenceLineage, isDirectQuote } = resolveDraftCitation(item, memoryMap);
+    return {
+      ...item,
+      isDirectQuote,
+      draftText: item.text,
+      estimatedDurationMs: estimateSpokenDurationMs(item.text),
+      evidence: referenceLineage.flatMap(({ reference, memoryItem, lineageEvidence, verbatim }) => {
+        const source = context.find((candidate) => candidate.memoryItemId === reference.memoryItemId)!;
+        const selected = isDirectQuote && verbatim.length ? verbatim : lineageEvidence;
+        return selected.map((value: any) => ({ sourceDocumentId: source.sourceDocumentId, extractionId: source.extractionId, chunkSetId: source.chunkSetId, analysisRunId: source.analysisRunId, memoryItemId: memoryItem.id, sourceBlockId: value.sourceBlockId, startOffset: value.startOffset, endOffset: value.endOffset, quoteText: value.quoteText, quoteHash: value.quoteHash }));
+      }),
+    };
+  });
   return buildDraftDestinationProjection(run, { ...segment, status: "DRAFTED" }, utterances);
 }
 
@@ -300,13 +314,7 @@ async function draftSegment(run: any, segment: any, token: string, dependencies:
       // quote-less evidence can never satisfy the quote check, so the label is
       // dropped (evidence linkage stays intact) instead of failing the run on
       // an unpassable lineage gate.
-      const referenceLineage = item.evidence.map((reference) => {
-        const memoryItem = memoryMap.get(reference.memoryItemId);
-        const lineageEvidence = reference.sourceBlockId === undefined ? memoryItem?.evidence ?? [] : (memoryItem?.evidence ?? []).filter((evidence: any) => evidence.sourceBlockId === reference.sourceBlockId && evidence.startOffset === reference.startOffset && evidence.endOffset === reference.endOffset);
-        const verbatim = lineageEvidence.filter((evidence: any) => Boolean(evidence.quoteText) && item.text.includes(evidence.quoteText!));
-        return { reference, memoryItem, lineageEvidence, verbatim };
-      });
-      const isDirectQuote = item.isDirectQuote && referenceLineage.some((entry) => entry.verbatim.length > 0);
+      const { referenceLineage, isDirectQuote } = resolveDraftCitation(item, memoryMap);
       const utterance = await tx.podcastUtterance.create({ data: { segmentId: segment.id, podcastGenerationRunId: run.id, workspaceId: run.workspaceId, podcastProjectId: run.podcastProjectId, episodeId: run.episodeId, speakerHostId: item.speakerHostId, ordinal: item.ordinal, draftText: item.text, text: item.text, utteranceType: item.utteranceType, substantive: item.substantive, isDirectQuote, estimatedDurationMs: estimateSpokenDurationMs(item.text) } });
       for (const entry of referenceLineage) {
         const { reference, memoryItem, lineageEvidence, verbatim } = entry;
