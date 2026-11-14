@@ -95,7 +95,7 @@ export function verifyFrozenBookFailoverPlan(value: unknown, primary: BookAnalys
         if (index === 0 && stableHash(candidate) !== stableHash(primary.routes[name])) fail();
       }
     }
-    return value as FrozenBookFailoverPlan;
+    return value as unknown as FrozenBookFailoverPlan;
   } catch { return fail(); }
 }
 
@@ -118,14 +118,15 @@ export function sealFrozenBookFailoverPlan(
     if (slots[name] || !Number.isSafeInteger(preference.revision) || preference.revision < 1 ||
         (preference.maxSwitches !== 1 && preference.maxSwitches !== 2) ||
         !Array.isArray(preference.candidates) ||
-        preference.candidates.length !== preference.maxSwitches ||
+        preference.candidates.length < preference.maxSwitches ||
+        preference.candidates.length > 2 ||
         stableHash({
           version: 1, routeSlot: name, requestedEnabled: preference.requestedEnabled,
           maxSwitches: preference.maxSwitches, candidates: preference.candidates,
         }) !== preference.preferenceHash) fail();
     const candidates: BookRoutePlanEntry[] = [primary.routes[name]];
     const seen = new Set([primary.routes[name].providerKey + "\u0000" + primary.routes[name].modelId]);
-    for (const item of preference.candidates as BackupCandidate[]) {
+    for (const item of (preference.candidates as BackupCandidate[]).slice(0, preference.maxSwitches)) {
       if (!record(item) || typeof item.connectionId !== "string" ||
           typeof item.modelId !== "string" || !item.modelId.trim()) fail();
       assertPublicConfiguration(item.configuration);
