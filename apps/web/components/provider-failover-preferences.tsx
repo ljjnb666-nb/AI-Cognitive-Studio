@@ -37,7 +37,7 @@ export function candidateFromFailoverChoice(
   if (!choice) return null;
   const isCustom = choice.providerKey === "openai-compatible" && choice.modelId === "custom-model";
   const modelId = isCustom ? customModelId.trim() : choice.modelId;
-  if (!modelId || modelId === "custom-model" || modelId.length > 200 || /\\s/u.test(modelId)) return null;
+  if (!modelId || modelId === "custom-model" || modelId.length > 200 || /\s/u.test(modelId)) return null;
   const saved = previous.find(candidate => candidate.connectionId === choice.connectionId && candidate.modelId === modelId);
   return {
     connectionId: choice.connectionId,
@@ -89,7 +89,7 @@ function FailoverSlotEditor(props: {
     first ? candidateFromFailoverChoice(first, firstCustomModel, props.choices, savedCandidates) : null,
     second ? candidateFromFailoverChoice(second, secondCustomModel, props.choices, savedCandidates) : null,
   ];
-  const candidates = resolved.filter((item): item is NonNullable<typeof item> => item !== null);
+  const candidates = resolved.filter((item): item is SavedCandidate => item !== null);
   const sameProviderModel = candidates.length === 2 && (() => {
     const provider = (connectionId: string) => props.choices.find(choice => choice.connectionId === connectionId)?.providerKey;
     return provider(candidates[0]!.connectionId) === provider(candidates[1]!.connectionId)
