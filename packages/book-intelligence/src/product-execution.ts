@@ -1,5 +1,6 @@
 import { resolveProviderCatalog, stableHash, validateRouteManifestSelection, workspaceRoutesWithBookDefaults } from "@ai-cognitive/provider-gateway";
 import { normalizeBookRoutePlan, type BookAnalysisRoutePlan } from "./route-plan.js";
+import { loadFrozenBookFailoverPlan, type FrozenBookFailoverPlan } from "./failover-plan.js";
 
 const slots = ["BOOK_CHUNK_ANALYSIS", "BOOK_REDUCTION_ANALYSIS", "BOOK_SYNTHESIS", "EMBEDDING"] as const;
 type Route = { routeSlot: string; modelId: string; configuration: unknown; connection: { id: string; providerKey: string; protocol: string; endpoint: string | null; status: string; credentialVersions: { id: string; status: string }[] } };
@@ -7,7 +8,7 @@ const record = (value: unknown) => value && typeof value === "object" && !Array.
 const endpoint = (value: string | null): value is string => { try { const url = new URL(value ?? ""); return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash; } catch { return false; } };
 
 /** Shared, pinned Book route-plan builder for Web requests and durable Workers. */
-export async function resolveBookProductExecution(workspaceId: string): Promise<{ provider: string; model: string; modelVersion?: string; configuration: Record<string, unknown>; routePlan: BookAnalysisRoutePlan }> {
+export async function resolveBookProductExecution(workspaceId: string): Promise<{ provider: string; model: string; modelVersion?: string; configuration: Record<string, unknown>; routePlan: BookAnalysisRoutePlan; failoverPlan?: FrozenBookFailoverPlan }> {
   const manifest = resolveProviderCatalog(process.env.PROVIDER_GATEWAY_MODEL_MANIFEST);
   const routes = await workspaceRoutesWithBookDefaults(workspaceId) as Route[];
   const entries = {} as BookAnalysisRoutePlan["routes"];
@@ -28,6 +29,7 @@ export async function resolveBookProductExecution(workspaceId: string): Promise<
     }
     const routePlan = normalizeBookRoutePlan({ version: 1, routes: entries });
     const chunk = routePlan.routes.BOOK_CHUNK_ANALYSIS;
-    return { provider: chunk.providerKey, model: chunk.modelId, modelVersion: chunk.modelVersion, configuration: chunk.configuration, routePlan };
-  } catch (error) { if (error instanceof Error && ["AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED", "MINIMAX_BOOK_CONFIGURATION_REQUIRED"].includes(error.message)) throw error; throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED"); }
+    const failoverPlan = await loadFrozenBookFailoverPlan(workspaceId, routePlan, manifest);
+    return { provider: chunk.providerKey, model: chunk.modelId, modelVersion: chunk.modelVersion, configuration: chunk.configuration, routePlan, ...(failoverPlan ? { failoverPlan } : {}) };
+  } catch (error) { if (error instanceof Error && ["AI_PROVIDER_CONFIGURATION_REQUIRED", "BOOK_EMBEDDING_PROVIDER_NOT_CONFIGURED", "MINIMAX_BOOK_CONFIGURATION_REQUIRED", "BOOK_FAILOVER_PLAN_INTEGRITY_FAILED"].includes(error.message)) throw error; throw new Error("AI_PROVIDER_CONFIGURATION_REQUIRED"); }
 }

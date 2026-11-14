@@ -10,7 +10,7 @@ type RouteWithConnection = { routeSlot: string; modelId: string; configuration: 
 export type ProviderReadinessDependency = { slot: RouteSlot; label: string; state: "READY" | "MISSING"; providerKey?: string; providerName?: string; modelId?: string; error?: string; detail?: string };
 
 export type ProductRouteIdentity = { provider: string; model: string; modelVersion?: string; configuration: JsonRecord };
-export type ProductBookExecution = ProductRouteIdentity & { routePlan: BookAnalysisRoutePlan };
+export type ProductBookExecution = Awaited<ReturnType<typeof resolveSharedBookProductExecution>>;
 export type PodcastVoice = { ordinal: number; providerVoiceId: string; voiceVersion: string; speakingRate: number; pitch: number; style?: string; language?: string; outputFormat: string };
 
 export function productManifest() { return resolveProviderCatalog(process.env.PROVIDER_GATEWAY_MODEL_MANIFEST); }

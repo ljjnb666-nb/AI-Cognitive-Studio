@@ -6,7 +6,7 @@ import { PostgresResourceBudget, boundedResourceUnits } from "@ai-cognitive/prov
 import { prisma, assertExecutionRunActive } from "@ai-cognitive/db";
 import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, GatewayPodcastSpeechSynthesisProvider, type DurablePodcastGenerationProvider, type DurableSpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
 import { GatewayShortVideoProvider, GatewayShortVideoRetrievalEmbeddingProvider, GatewayShortVideoTtsProvider, type ShortVideoProvider, type ShortVideoTtsProvider } from "@ai-cognitive/short-video-generation";
-import { bookRoutePlanHash, fullBookRoutePlanHash, loadConsumedBookAnalysisEmbeddingIdentity, normalizeBookRoutePlan, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type BookAnalysisRoutePlan, type EmbeddingProvider, validateAnalysisResponse, assertAnalysisRelationsWithinMemory, bookAnalysisRelationsContractVersion, bookAnalysisRelationsInstruction } from "@ai-cognitive/book-intelligence";
+import { bookRoutePlanHash, fullBookRoutePlanHash, loadConsumedBookAnalysisEmbeddingIdentity, normalizeBookRoutePlan, verifyFrozenBookFailoverPlan, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type BookAnalysisRoutePlan, type EmbeddingProvider, validateAnalysisResponse, assertAnalysisRelationsWithinMemory, bookAnalysisRelationsContractVersion, bookAnalysisRelationsInstruction } from "@ai-cognitive/book-intelligence";
 import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, resolveCredentialKeyring, resolveProviderCatalog, stableHash, validateProviderEndpoint, type ExecutionSnapshot, type GatewayExecutionDependencies, type ProviderAdapterResolver, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
@@ -45,6 +45,14 @@ function bookExecutionAttemptPlan(jobPayload: unknown, fallbackPlan: unknown, fa
     }
   }
   return { routePlan: fallbackPlan, routePlanHash: fallbackHash };
+}
+/** Verify the frozen intent before any Book Gateway attempt; it never enables paid switching. */
+function assertFrozenBookFailoverIntent(jobPayload: unknown, primary: BookAnalysisRoutePlan | undefined): void {
+  if (!jobPayload || typeof jobPayload !== "object" || Array.isArray(jobPayload)) return;
+  const payload = jobPayload as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(payload, "failoverPlan")) return;
+  if (!primary) throw new Error("BOOK_FAILOVER_PLAN_INTEGRITY_FAILED");
+  verifyFrozenBookFailoverPlan(payload.failoverPlan, primary);
 }
 function slot(stage: AnalysisRequest["stage"]): "BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS" { return stage === "CHUNK" ? "BOOK_CHUNK_ANALYSIS" : stage === "BOOK" ? "BOOK_SYNTHESIS" : "BOOK_REDUCTION_ANALYSIS"; }
 
@@ -109,6 +117,7 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
     const attemptPlan = bookExecutionAttemptPlan(run.job.payload, run.routePlan, run.routePlanHash);
     if ((attemptPlan.routePlan === null) !== (attemptPlan.routePlanHash === null)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
     const plan = attemptPlan.routePlan ? verifiedPlan(attemptPlan.routePlan, attemptPlan.routePlanHash) : undefined;
+    assertFrozenBookFailoverIntent(run.job.payload, plan);
     if (plan && Object.values(plan.routes).some(entry => manifest.providers.find(provider => provider.providerKey === entry.providerKey)?.adapterVersion !== entry.adapterVersion)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
     const legacyRoute = async (routeSlot: typeof slots[number]): Promise<ResolvedRoute> => {
       const snapshot = await gateway.resolveSnapshot({ workspaceId: input.workspaceId, routeSlot, correlationId: input.analysisRunId, idempotencyKey: `book-analysis-legacy-preflight:${input.analysisRunId}:${routeSlot}`, inputHash: sha256(`${input.analysisRunId}:${routeSlot}`), capability: { family: "TEXT_GENERATION" } });
@@ -132,6 +141,7 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
     if ((attemptPlan.routePlan === null) !== (attemptPlan.routePlanHash === null)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
     if (!attemptPlan.routePlan) throw new Error("BOOK_ANALYSIS_LEGACY_ROUTE_PLAN_UNAVAILABLE");
     const plan = verifiedPlan(attemptPlan.routePlan, attemptPlan.routePlanHash), entry = plan.routes.EMBEDDING;
+    assertFrozenBookFailoverIntent(run.job.payload, plan);
     if (manifest.providers.find(provider => provider.providerKey === entry.providerKey)?.adapterVersion !== entry.adapterVersion) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
     const declaredCapability = manifest.providers.find(provider => provider.providerKey === entry.providerKey)?.models.find(model => model.modelId === entry.modelId);
     if (!declaredCapability?.families.includes("EMBEDDING")) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
