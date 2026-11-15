@@ -1146,6 +1146,19 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     expect(nextOperation.candidateIndex).toBe(0);
     expect(nextOperation.revision).toBe(1);
 
+    // A resumed Book Job must not reissue the primary paid request with a
+    // fresh idempotency key when the prior remote outcome was unresolved.
+    await prisma.bookFailoverCheckpoint.update({
+      where: { analysisRunId_routeSlot_operationHash: {
+        analysisRunId: input.execution.analysisRunId,
+        routeSlot: input.routeSlot, operationHash: input.operationHash,
+      } },
+      data: { settledOutcome: "UNKNOWN", lastFailureCode: "TIMEOUT",
+        holdReason: "UNKNOWN_BILLING", latestAttemptId: "remote-attempt" },
+    });
+    await expect(seedBookFailoverCheckpoint(input))
+      .rejects.toThrow("BOOK_FAILOVER_PRIOR_OUTCOME_REVIEW_REQUIRED");
+
     await prisma.bookAnalysisRun.update({
       where: { id: data.run.id }, data: { executionLeaseUntil: new Date(0) },
     });
