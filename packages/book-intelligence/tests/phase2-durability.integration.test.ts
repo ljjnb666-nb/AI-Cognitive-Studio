@@ -1194,6 +1194,73 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     await expect(reserveBookFailoverSendIntent(presend))
       .rejects.toThrow("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
 
+    // Recovery uses an immutable original invocation and encrypted text
+    // receipt. No model adapter, network or second paid call is involved.
+    await prisma.providerConnection.create({ data: {
+      id: primaryConnectionId, workspaceId: data.workspace.id,
+      providerKey: "test", protocol: "TEST",
+      displayName: "presend-" + crypto.randomUUID(),
+      endpoint: "https://provider.example.test/v1",
+    } });
+    await prisma.providerCredentialVersion.create({ data: {
+      id: primaryCredentialId, workspaceId: data.workspace.id,
+      connectionId: primaryConnectionId, credentialVersion: 1,
+      ciphertext: "fixture", iv: "fixture", authTag: "fixture",
+      keyVersion: "fixture", status: "ACTIVE",
+    } });
+    const snapshot = await prisma.providerExecutionSnapshot.create({ data: {
+      workspaceId: data.workspace.id, routeSlot: "BOOK_CHUNK_ANALYSIS",
+      providerKey: "test", protocol: "TEST", modelId: "primary",
+      connectionId: primaryConnectionId, credentialVersionId: primaryCredentialId,
+      endpoint: "https://provider.example.test/v1",
+      capability: { modelId: "primary", families: ["TEXT_GENERATION"],
+        confidence: "VERIFIED", structuredOutput: "JSON_MODE" },
+      configuration: {}, configurationHash: stableHash({}),
+      adapterVersion: "fixture", correlationId: data.run.id,
+    } });
+    const invocation = await prisma.providerInvocation.create({ data: {
+      workspaceId: data.workspace.id, snapshotId: snapshot.id,
+      connectionId: primaryConnectionId, credentialVersionId: primaryCredentialId,
+      providerKey: "test", protocol: "TEST", modelId: "primary",
+      routeSlot: "BOOK_CHUNK_ANALYSIS", idempotencyKey: presend.idempotencyKey,
+      requestFingerprint: stableHash(["pre-send-test-request"]),
+      correlationId: data.run.id, status: "SUCCEEDED",
+    } });
+    const attempt = await prisma.providerInvocationAttempt.create({ data: {
+      workspaceId: data.workspace.id, invocationId: invocation.id,
+      attemptNumber: 1, status: "SUCCEEDED",
+      completedAt: new Date(),
+    } });
+    const cipher = new VersionedAesGcmCipher(
+      "unit", new Map([["unit", Buffer.alloc(32, 7)]]),
+    );
+    const encrypted = cipher.encryptTextResult(
+      JSON.stringify({ type: "STRUCTURED", structured: { summary: "restored without network" } }),
+      { workspaceId: data.workspace.id, invocationId: invocation.id,
+        attemptId: attempt.id, snapshotId: snapshot.id,
+        providerKey: "test", modelId: "primary" },
+    );
+    await prisma.providerTextResult.create({ data: {
+      workspaceId: data.workspace.id, invocationId: invocation.id,
+      attemptId: attempt.id, snapshotId: snapshot.id, ...encrypted,
+    } });
+    expect(await reserveBookFailoverSendIntent(presend)).toEqual({
+      action: "RECOVER_PERSISTED_TEXT",
+      idempotencyKey: presend.idempotencyKey,
+      invocationId: invocation.id, snapshotId: snapshot.id,
+    });
+    expect(await reserveBookFailoverSendIntent({
+      ...presend, idempotencyKey: presend.idempotencyKey + "-new-job",
+    })).toMatchObject({
+      action: "RECOVER_PERSISTED_TEXT", idempotencyKey: presend.idempotencyKey,
+    });
+    const handoff = await new ProviderExecutionRepository(prisma, cipher)
+      .recoverTextHandoff(data.workspace.id, invocation.id);
+    expect(handoff).toEqual({
+      kind: "RECOVERABLE",
+      response: { type: "STRUCTURED", structured: { summary: "restored without network" } },
+    });
+
     // Legacy seeded checkpoints have no pre-send identity; don't guess one.
     await expect(reserveBookFailoverSendIntent({
       ...input, idempotencyKey: "legacy-replay", inputHash: presend.inputHash,
