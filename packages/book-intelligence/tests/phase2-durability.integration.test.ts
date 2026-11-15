@@ -1585,7 +1585,12 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       where: { id: backupSnapshot.id }, data: { configurationHash: stableHash({}) },
     });
     await prisma.providerTextResult.update({
-      where: { invocationId: backupInvocation.id }, data: { consumedAt: new Date() },
+      where: { invocationId: backupInvocation.id },
+      data: {
+        consumedAt: new Date(), consumerKind: "BOOK_ANALYSIS",
+        consumerKey: "test-backup-consumer-" + data.run.id,
+        consumerFingerprint: stableHash(["consumed", backupInvocation.id]),
+      },
     });
     await expect(reserveBookFailoverSendIntent(recoveryInput))
       .rejects.toThrow("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
