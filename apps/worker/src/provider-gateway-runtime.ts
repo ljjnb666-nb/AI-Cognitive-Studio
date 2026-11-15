@@ -1,4 +1,4 @@
-import { renewBookAnalysisLease, type BookExecutionContext } from "@ai-cognitive/book-intelligence";
+import { renewBookAnalysisLease, seedBookFailoverCheckpoint, observeBookFailoverFailure, type BookExecutionContext, type FrozenBookFailoverPlan } from "@ai-cognitive/book-intelligence";
 import { bookSynthesisContractVersion, bookSynthesisInstructions } from "./book-synthesis-instructions.js";
 import { bookAnalysisMessage, bookAnalysisSpanReferenceInstruction, bookAnalysisSpanReferenceVersion, resolveBookAnalysisSpanReferences } from "./book-analysis-request.js";
 import { ProviderGatewayError } from "@ai-cognitive/provider-gateway";
@@ -47,18 +47,18 @@ function bookExecutionAttemptPlan(jobPayload: unknown, fallbackPlan: unknown, fa
   return { routePlan: fallbackPlan, routePlanHash: fallbackHash };
 }
 /** Verify the frozen intent before any Book Gateway attempt; it never enables paid switching. */
-function assertFrozenBookFailoverIntent(jobPayload: unknown, primary: BookAnalysisRoutePlan | undefined): void {
+function assertFrozenBookFailoverIntent(jobPayload: unknown, primary: BookAnalysisRoutePlan | undefined): FrozenBookFailoverPlan | undefined {
   if (!jobPayload || typeof jobPayload !== "object" || Array.isArray(jobPayload)) return;
   const payload = jobPayload as Record<string, unknown>;
   if (!Object.prototype.hasOwnProperty.call(payload, "failoverPlan")) return;
   if (!primary) throw new Error("BOOK_FAILOVER_PLAN_INTEGRITY_FAILED");
-  verifyFrozenBookFailoverPlan(payload.failoverPlan, primary);
+  return verifyFrozenBookFailoverPlan(payload.failoverPlan, primary);
 }
 function slot(stage: AnalysisRequest["stage"]): "BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS" { return stage === "CHUNK" ? "BOOK_CHUNK_ANALYSIS" : stage === "BOOK" ? "BOOK_SYNTHESIS" : "BOOK_REDUCTION_ANALYSIS"; }
 
 class GatewayAnalysisProvider implements AnalysisProvider {
   private readonly receipts = new WeakMap<object, { invocationId: string; snapshotId: string; spans?: NonNullable<AnalysisRequest["sourceSlices"]> }>();
-  constructor(private readonly runtime: BookGatewayRuntime, private readonly input: { workspaceId: string; userId: string; analysisRunId: string; executionKey: string; execution?: BookExecutionContext; routes: Record<"BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS", ExecutionSnapshot> }) {}
+  constructor(private readonly runtime: BookGatewayRuntime, private readonly input: { workspaceId: string; userId: string; analysisRunId: string; executionKey: string; execution?: BookExecutionContext; failoverPlan?: FrozenBookFailoverPlan; routes: Record<"BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS", ExecutionSnapshot> }) {}
   async generateStructured(request: AnalysisRequest) {
     const routeSlot = slot(request.stage), pinned = this.input.routes[routeSlot], structuredOutput = pinned.capability.structuredOutput === "STRICT_JSON_SCHEMA" ? "STRICT_JSON_SCHEMA" : pinned.capability.structuredOutput === "JSON_MODE" ? "JSON_MODE" : undefined;
     if (!structuredOutput) throw new Error("BOOK_ANALYSIS_STRUCTURED_OUTPUT_UNSUPPORTED");
@@ -77,7 +77,14 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     const text = { system, messages: [{ role: "user" as const, content }], ...(generation ? { generation } : {}), structuredOutput: structuredOutput === "STRICT_JSON_SCHEMA" ? { mode: "STRICT_JSON_SCHEMA" as const, schemaName: "book_analysis_response", schema } : { mode: "JSON_MODE" as const } };
     const promptVersion = request.stage === "BOOK" ? `${request.promptVersion ?? "legacy"}:${bookSynthesisContractVersion}` : request.promptVersion;
     const inputHash = sha256(JSON.stringify([this.input.workspaceId, routeSlot, this.input.analysisRunId, request.stage, operation, sha256(content), request.pipelineVersion, promptVersion, schema, bookAnalysisRelationsContractVersion, ...(spans ? [bookAnalysisSpanReferenceVersion, sha256(JSON.stringify(spans))] : []), ...(request.stage === "BOOK" ? [sha256(system), generation] : [])]));
-    const outcome = await this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}${spans ? ":span-v3" : ""}`, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` }, { userId: this.input.userId });
+    const idempotencyKey = `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}${spans ? ":span-v3" : ""}`;
+    const operationHash = sha256(JSON.stringify([request.stage, operation, request.pipelineVersion, promptVersion, inputHash]));
+    const checkpoint = this.input.execution && this.input.failoverPlan?.slots[routeSlot]
+      ? { execution: this.input.execution, routeSlot, operationHash, planHash: this.input.failoverPlan.integrityHash }
+      : undefined;
+    if (checkpoint) await seedBookFailoverCheckpoint(checkpoint);
+    try {
+      const outcome = await this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` }, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);
     if (outcome.status === "ALREADY_PROCESSED" && outcome.textConsumed) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const response = outcome.response as { type?: string; structured?: unknown } | undefined;
@@ -86,6 +93,16 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     assertAnalysisRelationsWithinMemory(analysis);
     this.receipts.set(analysis, { invocationId: outcome.invocationId, snapshotId, ...(spans ? { spans } : {}) });
     return analysis;
+    } catch (error) {
+      if (checkpoint) {
+        await observeBookFailoverFailure({
+          ...checkpoint,
+          idempotencyKey,
+          failureCode: error instanceof ProviderGatewayError ? error.code : "INTERNAL_PROVIDER_ERROR",
+        });
+      }
+      throw error;
+    }
   }
   async consumeGenerated(response: Awaited<ReturnType<AnalysisProvider["generateStructured"]>>, consumer: AnalysisReceiptConsumer): Promise<"CONSUMED" | "ALREADY_CONSUMED"> {
     const receipt = this.receipts.get(response as object); if (!receipt) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
@@ -117,7 +134,7 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
     const attemptPlan = bookExecutionAttemptPlan(run.job.payload, run.routePlan, run.routePlanHash);
     if ((attemptPlan.routePlan === null) !== (attemptPlan.routePlanHash === null)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
     const plan = attemptPlan.routePlan ? verifiedPlan(attemptPlan.routePlan, attemptPlan.routePlanHash) : undefined;
-    assertFrozenBookFailoverIntent(run.job.payload, plan);
+    const frozenFailoverPlan = assertFrozenBookFailoverIntent(run.job.payload, plan);
     if (plan && Object.values(plan.routes).some(entry => manifest.providers.find(provider => provider.providerKey === entry.providerKey)?.adapterVersion !== entry.adapterVersion)) throw new Error("BOOK_ANALYSIS_ROUTE_PLAN_INTEGRITY_FAILED");
     const legacyRoute = async (routeSlot: typeof slots[number]): Promise<ResolvedRoute> => {
       const snapshot = await gateway.resolveSnapshot({ workspaceId: input.workspaceId, routeSlot, correlationId: input.analysisRunId, idempotencyKey: `book-analysis-legacy-preflight:${input.analysisRunId}:${routeSlot}`, inputHash: sha256(`${input.analysisRunId}:${routeSlot}`), capability: { family: "TEXT_GENERATION" } });
@@ -132,7 +149,7 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
     }));
     const routes = Object.fromEntries(snapshots.map((snapshot, index) => [slots[index]!, snapshot])) as Record<"BOOK_CHUNK_ANALYSIS" | "BOOK_REDUCTION_ANALYSIS" | "BOOK_SYNTHESIS", ExecutionSnapshot>;
     if (Object.values(routes).some(snapshot => snapshot.capability.structuredOutput !== "STRICT_JSON_SCHEMA" && snapshot.capability.structuredOutput !== "JSON_MODE")) throw new Error("BOOK_ANALYSIS_STRUCTURED_OUTPUT_UNSUPPORTED");
-    return new GatewayAnalysisProvider(runtime, { workspaceId: input.workspaceId, userId: input.userId, analysisRunId: input.analysisRunId, executionKey: run.jobId, execution: input.execution, routes });
+    return new GatewayAnalysisProvider(runtime, { workspaceId: input.workspaceId, userId: input.userId, analysisRunId: input.analysisRunId, executionKey: run.jobId, execution: input.execution, failoverPlan: frozenFailoverPlan, routes });
   }, createEmbeddingGatewayForRun: async input => {
     const run = await prisma.bookAnalysisRun.findUniqueOrThrow({ where: { id: input.analysisRunId }, select: { routePlan: true, routePlanHash: true, job: { select: { payload: true } } } });
     // Legacy rows never recorded an embedding identity.  Assigning today's
