@@ -93,14 +93,25 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     try {
       // Receipt recovery MUST stay read-only. A second Gateway.execute call
       // could otherwise reclaim a stale pre-remote claim and charge twice.
-      const outcome = send?.action === "RECOVER_PERSISTED_TEXT"
+      const outcome = send?.action === "RECOVER_PERSISTED_TEXT" ||
+        send?.action === "RECOVER_RESERVED_BACKUP_TEXT"
         ? await (async () => {
           const handoff = await this.runtime.repository.recoverTextHandoff(this.input.workspaceId, send.invocationId);
-          if (handoff.kind !== "RECOVERABLE") throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+          if (handoff.kind !== "RECOVERABLE")
+            throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
           const snapshot = await this.runtime.repository.loadExecutionSnapshot(this.input.workspaceId, send.snapshotId);
-          if (snapshot.routeSlot !== routeSlot || snapshot.providerKey !== pinned.providerKey ||
-              snapshot.modelId !== pinned.modelId || snapshot.connectionId !== pinned.connectionId ||
-              snapshot.credentialVersionId !== pinned.credentialVersionId)
+          const expected = send.action === "RECOVER_RESERVED_BACKUP_TEXT"
+            ? this.input.failoverPlan?.slots[routeSlot]?.candidates[1]
+            : pinned;
+          if (!expected || snapshot.routeSlot !== routeSlot ||
+              snapshot.providerKey !== expected.providerKey ||
+              snapshot.modelId !== expected.modelId ||
+              snapshot.connectionId !== expected.connectionId ||
+              snapshot.credentialVersionId !== expected.credentialVersionId ||
+              (send.action === "RECOVER_RESERVED_BACKUP_TEXT" && (
+                snapshot.endpoint !== expected.endpoint ||
+                snapshot.adapterVersion !== expected.adapterVersion ||
+                stableHash(snapshot.configuration) !== expected.configurationHash)))
             throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
           return { status: "ALREADY_PROCESSED" as const, invocationId: send.invocationId,
             snapshot, response: handoff.response, textConsumed: false as const };
@@ -115,7 +126,10 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     this.receipts.set(analysis, { invocationId: outcome.invocationId, snapshotId, ...(spans ? { spans } : {}) });
     return analysis;
     } catch (error) {
-      if (checkpoint) {
+      // A corrupt or unreadable persisted receipt is an audit HOLD, not a
+      // fresh remote failure. Never rewrite its cursor or trigger a retry.
+      if (checkpoint && send?.action !== "RECOVER_PERSISTED_TEXT" &&
+          send?.action !== "RECOVER_RESERVED_BACKUP_TEXT") {
         await observeBookFailoverFailure({
           ...checkpoint,
           idempotencyKey: selectedIdempotencyKey,
