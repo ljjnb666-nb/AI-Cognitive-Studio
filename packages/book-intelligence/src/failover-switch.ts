@@ -228,7 +228,9 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
     if (fencedPrimary.count !== 1) fail();
     const updated = await tx.bookFailoverCheckpoint.updateMany({
       where: {
-        ...where, revision: cursor.revision, state: "HOLD",
+        analysisRunId: execution.analysisRunId, routeSlot, operationHash,
+        workspaceId: execution.workspaceId,
+        revision: cursor.revision, state: "HOLD",
         candidateIndex: 0, switchesUsed: 0,
         backupSendKey: null, paidGrantId: null,
       },
