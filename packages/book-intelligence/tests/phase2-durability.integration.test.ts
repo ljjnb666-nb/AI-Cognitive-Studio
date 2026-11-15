@@ -1366,6 +1366,11 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     expect(switched.backupSendKey).toBe(backupRequest.idempotencyKey);
     expect(switched.backupSendHash).toBe(switchFingerprint);
     expect(switched.paidGrantId).toBe(grant.id);
+    // The old primary key is now terminal and cannot be reclaimed by a
+    // second Gateway owner after the backup reservation commits.
+    expect((await prisma.providerInvocation.findUniqueOrThrow({
+      where: { id: unfinished.id },
+    })).status).toBe("BLOCKED");
     expect((await prisma.bookFailoverPaidGrant.findUniqueOrThrow({ where: { id: grant.id } })).usedAt)
       .toBeInstanceOf(Date);
     expect(await reserveFirstBookFailoverSwitch(switchRequest))
