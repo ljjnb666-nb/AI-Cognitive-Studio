@@ -95,6 +95,11 @@ export async function seedBookFailoverCheckpoint(input: BookFailoverOperation) {
          checkpoint.holdReason === "CONTENT_POLICY_REVIEW_REQUIRED")) {
       throw new Error("BOOK_FAILOVER_PRIOR_OUTCOME_REVIEW_REQUIRED");
     }
+    // Older callers cannot bypass the atomic pre-send reservation contract
+    // once an outbound intent exists, even if no failure was observed.
+    if (checkpoint.sendIntentKey) {
+      throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+    }
     return checkpoint;
   });
 }
