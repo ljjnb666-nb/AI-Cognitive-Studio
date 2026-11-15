@@ -3,6 +3,7 @@ import { ProviderSettings } from "@/components/provider-settings";
 import { SettingsNavigation } from "@/components/settings-navigation";
 import styles from "@/components/provider-settings.module.css";
 import { ResourceBudgetSettings } from "@/components/resource-budget-settings";
+import { BookFailoverGrantPanel } from "@/components/book-failover-grants";
 
 export default function ProviderSettingsPage() {
   return (
@@ -15,6 +16,7 @@ export default function ProviderSettingsPage() {
       <SettingsNavigation active="providers" />
       <ProviderSettings />
       <ResourceBudgetSettings />
+      <BookFailoverGrantPanel />
     </div>
   );
 }

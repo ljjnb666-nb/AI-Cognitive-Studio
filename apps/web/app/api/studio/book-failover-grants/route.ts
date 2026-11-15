@@ -40,7 +40,8 @@ function safeFailure(error: unknown) {
   return NextResponse.json({
     error: denied ? "BOOK_FAILOVER_GRANT_ACCESS_DENIED"
       : conflict ? reason : "BOOK_FAILOVER_GRANT_REQUEST_REJECTED",
-  }, { status: denied ? 403 : conflict ? 409 : 400 });
+  }, { status: denied ? 403 : conflict ? 409 : 400,
+    headers: { "Cache-Control": "no-store" } });
 }
 
 export async function GET() {
@@ -48,7 +49,7 @@ export async function GET() {
     const actor = await authenticatedOwner();
     const checkpoints = await prisma.bookFailoverCheckpoint.findMany({
       where: { workspaceId: actor.workspaceId, state: "HOLD",
-        candidateIndex: 0, lastFailureCode: { not: null } },
+        candidateIndex: 0, paidGrantId: null, lastFailureCode: { not: null } },
       take: 50, orderBy: { updatedAt: "desc" },
       select: {
         analysisRunId: true, routeSlot: true, operationHash: true,
@@ -57,20 +58,36 @@ export async function GET() {
         analysisRun: { select: { status: true } },
       },
     });
+    // A grant is written before it is consumed into paidGrantId. Exclude both
+    // pending and consumed grants so reloading cannot suggest a second approval.
+    const grants = checkpoints.length === 0 ? [] : await prisma.bookFailoverPaidGrant.findMany({
+      where: {
+        workspaceId: actor.workspaceId, nextCandidateIndex: 1,
+        OR: checkpoints.map(item => ({
+          analysisRunId: item.analysisRunId, routeSlot: item.routeSlot,
+          operationHash: item.operationHash,
+        })),
+      },
+      select: { analysisRunId: true, routeSlot: true, operationHash: true },
+    });
+    const grantedKeys = new Set(grants.map(item =>
+      JSON.stringify([item.analysisRunId, item.routeSlot, item.operationHash])));
     // Preview only. A GET never authorizes payment, sends a call or
     // asserts that billing is settled; POST independently rechecks all facts.
     return NextResponse.json({
       executable: false,
       unit: "TOKENS_OR_CHARACTERS",
       currencyEstimate: null,
-      operations: checkpoints.filter(item => item.analysisRun.status === "RUNNING").map(item => ({
+      operations: checkpoints.filter(item => item.analysisRun.status === "RUNNING" &&
+        !grantedKeys.has(JSON.stringify([item.analysisRunId, item.routeSlot, item.operationHash])))
+        .map(item => ({
         analysisRunId: item.analysisRunId, routeSlot: item.routeSlot,
         operationHash: item.operationHash, planHash: item.planHash,
         expectedRevision: item.revision, lastFailureCode: item.lastFailureCode,
         holdReason: item.holdReason, settledOutcome: item.settledOutcome,
         updatedAt: item.updatedAt,
       })),
-    });
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return safeFailure(error); }
 }
 
