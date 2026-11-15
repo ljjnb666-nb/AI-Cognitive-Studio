@@ -10,7 +10,7 @@ import { bookFailoverOutboundFingerprint, type BookFailoverSwitchInput } from ".
 export type BookBackupDryRunDecision =
   | { status: "HOLD"; reason: "PLAN_INVALID" | "NOT_RESERVED" | "REQUEST_CHANGED" |
       "GRANT_INVALID" | "PRIMARY_NOT_FENCED" | "BACKUP_ALREADY_EXISTS" |
-      "CREDENTIAL_UNAVAILABLE" | "CAPABILITY_CHANGED"; canDispatch: false }
+      "CREDENTIAL_UNAVAILABLE" | "CAPABILITY_CHANGED" | "SOURCE_CHANGED"; canDispatch: false }
   | { status: "DRY_RUN_READY"; nextCandidateIndex: 1; canDispatch: false };
 
 /**
@@ -43,7 +43,18 @@ export async function inspectReservedBookBackupDryRun(
   } catch { return hold("REQUEST_CHANGED"); }
 
   return prisma.$transaction(async tx => {
-    const { job } = await assertBookExecutionAuthority(tx, execution);
+    const { run, job } = await assertBookExecutionAuthority(tx, execution);
+    const currentExtraction = await tx.currentDocumentExtraction.findUnique({
+      where: { sourceDocumentId_workspaceId: {
+        sourceDocumentId: run.sourceDocumentId, workspaceId: execution.workspaceId,
+      } }, select: { extractionId: true },
+    });
+    const activeDocument = await tx.sourceDocument.findFirst({
+      where: { id: run.sourceDocumentId, workspaceId: execution.workspaceId,
+        source: { archivedAt: null } }, select: { id: true },
+    });
+    if (!activeDocument || currentExtraction?.extractionId !== run.extractionId)
+      return hold("SOURCE_CHANGED");
     if (!job.payload || typeof job.payload !== "object" || Array.isArray(job.payload))
       return hold("PLAN_INVALID");
     const payload = job.payload as Record<string, unknown>;
@@ -72,6 +83,8 @@ export async function inspectReservedBookBackupDryRun(
       } },
     });
     if (!cursor || cursor.workspaceId !== execution.workspaceId ||
+        cursor.sendIntentInputHash !== fingerprint ||
+        cursor.backupSendKey === cursor.sendIntentKey || !cursor.lastFailureCode ||
         cursor.planHash !== planHash || cursor.state !== "SWITCH_RESERVED" ||
         cursor.candidateIndex !== 1 || cursor.switchesUsed !== 1 ||
         cursor.backupSendKey !== request.idempotencyKey || !cursor.sendIntentKey ||
