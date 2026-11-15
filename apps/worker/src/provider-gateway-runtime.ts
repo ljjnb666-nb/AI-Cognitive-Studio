@@ -105,7 +105,7 @@ class GatewayAnalysisProvider implements AnalysisProvider {
           return { status: "ALREADY_PROCESSED" as const, invocationId: send.invocationId,
             snapshot, response: handoff.response };
         })()
-        : this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: selectedIdempotencyKey, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` }, { userId: this.input.userId });
+        : await this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: selectedIdempotencyKey, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` }, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);
     if (outcome.status === "ALREADY_PROCESSED" && outcome.textConsumed) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const response = outcome.response as { type?: string; structured?: unknown } | undefined;
