@@ -1498,6 +1498,107 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       where: { id: data.document.sourceId }, data: { archivedAt: null },
     });
 
+    // Future backup executors may already have persisted a paid result
+    // before a Worker crashes. Resumption must consume that immutable receipt,
+    // not resend the primary or execute another backup.
+    const recoveryInput = {
+      ...switchOp, idempotencyKey: firstPrimaryKey, inputHash: switchFingerprint,
+    };
+    await expect(reserveBookFailoverSendIntent(recoveryInput))
+      .rejects.toThrow("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
+
+    const backupSnapshot = await prisma.providerExecutionSnapshot.create({ data: {
+      workspaceId: data.workspace.id, routeSlot: "BOOK_CHUNK_ANALYSIS",
+      providerKey: "test", protocol: "TEST", modelId: "backup",
+      connectionId: backupConnectionId, credentialVersionId: backupCredentialId,
+      endpoint: "https://provider.example.test/v1",
+      capability: { modelId: "backup", families: ["TEXT_GENERATION"],
+        confidence: "VERIFIED", structuredOutput: "JSON_MODE" },
+      configuration: {}, configurationHash: stableHash({}),
+      adapterVersion: "fixture", correlationId: data.run.id,
+    } });
+    const backupInvocation = await prisma.providerInvocation.create({ data: {
+      workspaceId: data.workspace.id, snapshotId: backupSnapshot.id,
+      connectionId: backupConnectionId, credentialVersionId: backupCredentialId,
+      providerKey: "test", protocol: "TEST", modelId: "backup",
+      routeSlot: "BOOK_CHUNK_ANALYSIS", idempotencyKey: backupRequest.idempotencyKey,
+      requestFingerprint: stableHash(["fake-backup-completed", backupRequest.idempotencyKey]),
+      correlationId: data.run.id, status: "SUCCEEDED",
+    } });
+    const backupAttempt = await prisma.providerInvocationAttempt.create({ data: {
+      workspaceId: data.workspace.id, invocationId: backupInvocation.id,
+      attemptNumber: 1, status: "SUCCEEDED", completedAt: new Date(),
+    } });
+    await prisma.providerTextResult.create({ data: {
+      workspaceId: data.workspace.id, invocationId: backupInvocation.id,
+      attemptId: backupAttempt.id, snapshotId: backupSnapshot.id,
+      ...cipher.encryptTextResult(
+        JSON.stringify({ type: "STRUCTURED", structured: { summary: "backup recovered without network" } }),
+        { workspaceId: data.workspace.id, invocationId: backupInvocation.id,
+          attemptId: backupAttempt.id, snapshotId: backupSnapshot.id,
+          providerKey: "test", modelId: "backup" }),
+    } });
+    const countsBeforeRecovery = {
+      invocations: await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } }),
+      reservations: await prisma.providerResourceReservation.count({ where: { workspaceId: data.workspace.id } }),
+    };
+    expect((await seedBookFailoverCheckpoint(switchOp)).state).toBe("SWITCH_RESERVED");
+    const expectedBackupRecovery = {
+      action: "RECOVER_RESERVED_BACKUP_TEXT",
+      idempotencyKey: backupRequest.idempotencyKey,
+      invocationId: backupInvocation.id, snapshotId: backupSnapshot.id,
+    };
+    expect(await reserveBookFailoverSendIntent(recoveryInput)).toEqual(expectedBackupRecovery);
+    expect(await reserveBookFailoverSendIntent({
+      ...recoveryInput, idempotencyKey: firstPrimaryKey + "-after-crash",
+    })).toEqual(expectedBackupRecovery);
+    expect(await new ProviderExecutionRepository(prisma, cipher)
+      .recoverTextHandoff(data.workspace.id, backupInvocation.id)).toEqual({
+      kind: "RECOVERABLE",
+      response: { type: "STRUCTURED", structured: {
+        summary: "backup recovered without network",
+      } },
+    });
+    expect(await prisma.providerInvocation.count({
+      where: { workspaceId: data.workspace.id },
+    })).toBe(countsBeforeRecovery.invocations);
+    expect(await prisma.providerResourceReservation.count({
+      where: { workspaceId: data.workspace.id },
+    })).toBe(countsBeforeRecovery.reservations);
+
+    // Corrupted receipts or changed snapshot identity never receive another
+    // dispatch opportunity, even when the backup was previously successful.
+    await prisma.providerInvocation.update({
+      where: { id: backupInvocation.id }, data: { status: "RECONCILIATION_REQUIRED" },
+    });
+    await expect(reserveBookFailoverSendIntent(recoveryInput))
+      .rejects.toThrow("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
+    await prisma.providerInvocation.update({
+      where: { id: backupInvocation.id }, data: { status: "SUCCEEDED" },
+    });
+    await prisma.providerExecutionSnapshot.update({
+      where: { id: backupSnapshot.id }, data: { configurationHash: "c".repeat(64) },
+    });
+    await expect(reserveBookFailoverSendIntent(recoveryInput))
+      .rejects.toThrow("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
+    await prisma.providerExecutionSnapshot.update({
+      where: { id: backupSnapshot.id }, data: { configurationHash: stableHash({}) },
+    });
+    await prisma.providerTextResult.update({
+      where: { invocationId: backupInvocation.id },
+      data: {
+        consumedAt: new Date(), consumerKind: "BOOK_ANALYSIS",
+        consumerKey: "test-backup-consumer-" + data.run.id,
+        consumerFingerprint: stableHash(["consumed", backupInvocation.id]),
+        // Match the real consumeTextResult transition: a consumed receipt is
+        // tombstoned and its ciphertext is purged in the same transaction.
+        purgedAt: new Date(), ciphertext: null, iv: null,
+        authTag: null, keyVersion: null,
+      },
+    });
+    await expect(reserveBookFailoverSendIntent(recoveryInput))
+      .rejects.toThrow("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
+
     const switched = await prisma.bookFailoverCheckpoint.findUniqueOrThrow({
       where: { analysisRunId_routeSlot_operationHash: {
         analysisRunId: data.run.id, routeSlot: switchOp.routeSlot,
@@ -1519,9 +1620,11 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       .toBeInstanceOf(Date);
     expect(await reserveFirstBookFailoverSwitch(switchRequest))
       .toEqual({ action: "HOLD", reason: "INTEGRITY_FAILED" });
+    // Reserved operations now enter the read-only backup-receipt recovery gate,
+    // which must reject already-consumed receipts without authorizing a send.
     await expect(reserveBookFailoverSendIntent({
       ...switchOp, idempotencyKey: firstPrimaryKey, inputHash: switchFingerprint,
-    })).rejects.toThrow("BOOK_FAILOVER_CHECKPOINT_INTEGRITY_FAILED");
+    })).rejects.toThrow("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
 
     // Legacy seeded checkpoints have no pre-send identity; don't guess one.
     await expect(reserveBookFailoverSendIntent({
