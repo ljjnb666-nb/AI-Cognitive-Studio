@@ -156,7 +156,7 @@ export async function reserveBookFailoverSendIntent(input: BookFailoverSendInten
         checkpoint.candidateIndex !== 0 || checkpoint.switchesUsed !== 0) fail();
     if (created.count === 1) {
       // The transaction COMMIT must complete before Gateway.execute can begin.
-      return { action: "SEND_PRIMARY_ONCE", idempotencyKey: input.idempotencyKey };
+      return { action: "SEND_PRIMARY_ONCE" as const, idempotencyKey: input.idempotencyKey };
     }
     // Rows created before pre-send intents existed are UNKNOWN, not "free."
     if (!checkpoint.sendIntentKey || !checkpoint.sendIntentInputHash ||
@@ -183,7 +183,7 @@ export async function reserveBookFailoverSendIntent(input: BookFailoverSendInten
         previous.connectionId !== primary.connectionId ||
         previous.credentialVersionId !== primary.credentialVersionId)
       throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
-    return { action: "RECOVER_PERSISTED_TEXT", idempotencyKey: checkpoint.sendIntentKey, invocationId: previous.id, snapshotId: previous.snapshotId };
+    return { action: "RECOVER_PERSISTED_TEXT" as const, idempotencyKey: checkpoint.sendIntentKey, invocationId: previous.id, snapshotId: previous.snapshotId };
   });
 }
 
