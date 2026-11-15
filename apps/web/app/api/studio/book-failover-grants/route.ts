@@ -40,7 +40,8 @@ function safeFailure(error: unknown) {
   return NextResponse.json({
     error: denied ? "BOOK_FAILOVER_GRANT_ACCESS_DENIED"
       : conflict ? reason : "BOOK_FAILOVER_GRANT_REQUEST_REJECTED",
-  }, { status: denied ? 403 : conflict ? 409 : 400 });
+  }, { status: denied ? 403 : conflict ? 409 : 400,
+    headers: { "Cache-Control": "no-store" } });
 }
 
 export async function GET() {
@@ -48,7 +49,7 @@ export async function GET() {
     const actor = await authenticatedOwner();
     const checkpoints = await prisma.bookFailoverCheckpoint.findMany({
       where: { workspaceId: actor.workspaceId, state: "HOLD",
-        candidateIndex: 0, lastFailureCode: { not: null } },
+        candidateIndex: 0, paidGrantId: null, lastFailureCode: { not: null } },
       take: 50, orderBy: { updatedAt: "desc" },
       select: {
         analysisRunId: true, routeSlot: true, operationHash: true,
@@ -70,7 +71,7 @@ export async function GET() {
         holdReason: item.holdReason, settledOutcome: item.settledOutcome,
         updatedAt: item.updatedAt,
       })),
-    });
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return safeFailure(error); }
 }
 
