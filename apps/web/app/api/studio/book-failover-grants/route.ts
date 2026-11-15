@@ -58,13 +58,29 @@ export async function GET() {
         analysisRun: { select: { status: true } },
       },
     });
+    // A grant is written before it is consumed into paidGrantId. Exclude both
+    // pending and consumed grants so reloading cannot suggest a second approval.
+    const grants = checkpoints.length === 0 ? [] : await prisma.bookFailoverPaidGrant.findMany({
+      where: {
+        workspaceId: actor.workspaceId, nextCandidateIndex: 1,
+        OR: checkpoints.map(item => ({
+          analysisRunId: item.analysisRunId, routeSlot: item.routeSlot,
+          operationHash: item.operationHash,
+        })),
+      },
+      select: { analysisRunId: true, routeSlot: true, operationHash: true },
+    });
+    const grantedKeys = new Set(grants.map(item =>
+      JSON.stringify([item.analysisRunId, item.routeSlot, item.operationHash])));
     // Preview only. A GET never authorizes payment, sends a call or
     // asserts that billing is settled; POST independently rechecks all facts.
     return NextResponse.json({
       executable: false,
       unit: "TOKENS_OR_CHARACTERS",
       currencyEstimate: null,
-      operations: checkpoints.filter(item => item.analysisRun.status === "RUNNING").map(item => ({
+      operations: checkpoints.filter(item => item.analysisRun.status === "RUNNING" &&
+        !grantedKeys.has(JSON.stringify([item.analysisRunId, item.routeSlot, item.operationHash])))
+        .map(item => ({
         analysisRunId: item.analysisRunId, routeSlot: item.routeSlot,
         operationHash: item.operationHash, planHash: item.planHash,
         expectedRevision: item.revision, lastFailureCode: item.lastFailureCode,
