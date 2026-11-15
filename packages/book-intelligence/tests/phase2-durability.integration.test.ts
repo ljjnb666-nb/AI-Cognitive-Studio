@@ -1,7 +1,7 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma, PrismaClient, lockWorkspaceExpensiveOperationCapacity } from "../../db/src/index.js";
 import { type Environment } from "@ai-cognitive/shared/server";
-import { stableHash } from "@ai-cognitive/provider-gateway";
+import { stableHash, VersionedAesGcmCipher, ProviderExecutionRepository } from "@ai-cognitive/provider-gateway";
 import { createBookAnalysisQueue, createBookAnalysisWorker } from "../../../apps/worker/src/book-analysis.js";
 import {
   BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST,
@@ -197,6 +197,7 @@ async function waitForSignal(signal: () => boolean, message: string) {
 afterEach(async () => {
   for (const workspaceId of workspaces.splice(0)) {
     await prisma.providerEmbeddingResult.deleteMany({ where: { workspaceId } });
+    await prisma.providerTextResult.deleteMany({ where: { workspaceId } });
     await prisma.providerUsageEvent.deleteMany({ where: { workspaceId } });
     await prisma.providerInvocationAttempt.deleteMany({ where: { workspaceId } });
     await prisma.providerInvocation.deleteMany({ where: { workspaceId } });
@@ -1057,6 +1058,8 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
   it("pins per-operation cursor and receipt evidence across duplicate Worker delivery", async () => {
     const data = await fixture();
     const configuration = {};
+    const primaryConnectionId = `primary-${crypto.randomUUID()}`;
+    const primaryCredentialId = `credential-${primaryConnectionId}`;
     const entry = (modelId: string, connectionId: string) => ({
       providerKey: "test", protocol: "TEST", modelId, configuration,
       configurationHash: stableHash(configuration),
@@ -1066,9 +1069,9 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     const primary: BookAnalysisRoutePlan = normalizeBookRoutePlan({
       version: 1,
       routes: {
-        BOOK_CHUNK_ANALYSIS: { ...entry("primary", "primary"), structuredOutput: "JSON_MODE" },
-        BOOK_REDUCTION_ANALYSIS: { ...entry("primary", "primary"), structuredOutput: "JSON_MODE" },
-        BOOK_SYNTHESIS: { ...entry("primary", "primary"), structuredOutput: "JSON_MODE" },
+        BOOK_CHUNK_ANALYSIS: { ...entry("primary", primaryConnectionId), structuredOutput: "JSON_MODE" },
+        BOOK_REDUCTION_ANALYSIS: { ...entry("primary", primaryConnectionId), structuredOutput: "JSON_MODE" },
+        BOOK_SYNTHESIS: { ...entry("primary", primaryConnectionId), structuredOutput: "JSON_MODE" },
         EMBEDDING: { ...entry("vector", "vector"), dimensions: 4 },
       },
     });
