@@ -1620,9 +1620,11 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       .toBeInstanceOf(Date);
     expect(await reserveFirstBookFailoverSwitch(switchRequest))
       .toEqual({ action: "HOLD", reason: "INTEGRITY_FAILED" });
+    // Reserved operations now enter the read-only backup-receipt recovery gate,
+    // which must reject already-consumed receipts without authorizing a send.
     await expect(reserveBookFailoverSendIntent({
       ...switchOp, idempotencyKey: firstPrimaryKey, inputHash: switchFingerprint,
-    })).rejects.toThrow("BOOK_FAILOVER_CHECKPOINT_INTEGRITY_FAILED");
+    })).rejects.toThrow("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
 
     // Legacy seeded checkpoints have no pre-send identity; don't guess one.
     await expect(reserveBookFailoverSendIntent({
