@@ -487,6 +487,7 @@ model Workspace {
   chunkSets                          ChunkSet[]
   analysisRuns                       BookAnalysisRun[]
   bookFailoverCheckpoints            BookFailoverCheckpoint[]
+  bookFailoverPaidGrants             BookFailoverPaidGrant[]
   bookAnalysisBootstraps             BookAnalysisBootstrap[]
   memoryItems                        BookMemoryItem[]
   podcastProjects                    PodcastProject[]
@@ -1670,6 +1671,7 @@ model BookAnalysisRun {
   podcastGenerationSources PodcastGenerationSource[]
   bootstraps               BookAnalysisBootstrap[]
   failoverCheckpoints      BookFailoverCheckpoint[]
+  failoverPaidGrants       BookFailoverPaidGrant[]
 
   @@unique([id, workspaceId])
   @@unique([id, workspaceId, chunkSetId])
@@ -1699,6 +1701,12 @@ model BookFailoverCheckpoint {
   sendIntentKey      String?
   sendIntentInputHash String?
   sendIntentAt       DateTime?
+  /// Future backup send can use ONLY this separately reserved identity.
+  backupSendKey      String?
+  backupSendHash     String?
+  backupReservedAt   DateTime?
+  paidGrantId        String?
+  paidGrant          BookFailoverPaidGrant? @relation(fields: [paidGrantId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   revision           Int      @default(1)
   observedAt         DateTime?
   createdAt          DateTime @default(now())
@@ -1707,7 +1715,33 @@ model BookFailoverCheckpoint {
   analysisRun        BookAnalysisRun @relation(fields: [analysisRunId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 
   @@id([analysisRunId, routeSlot, operationHash])
+  @@unique([workspaceId, backupSendKey])
   @@index([workspaceId, analysisRunId, updatedAt])
+}
+
+/// Requires separate explicit, per-operation additional-paid-call consent.
+/// No public issuer exists yet. Saving a workspace backup preference never
+/// creates this authorization and never enables the fallback executor.
+model BookFailoverPaidGrant {
+  id                 String   @id @default(cuid())
+  workspaceId        String
+  analysisRunId      String
+  routeSlot          String
+  operationHash      String
+  planHash           String
+  nextCandidateIndex Int
+  authorizedByUserId String
+  maxAdditionalUnits Int
+  expiresAt          DateTime
+  usedAt             DateTime?
+  createdAt          DateTime @default(now())
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  analysisRun        BookAnalysisRun @relation(fields: [analysisRunId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  checkpoints       BookFailoverCheckpoint[]
+
+  @@unique([id, workspaceId])
+  @@unique([analysisRunId, routeSlot, operationHash, nextCandidateIndex])
+  @@index([workspaceId, expiresAt])
 }
 
 model BookAnalysisBootstrap {

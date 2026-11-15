@@ -1,7 +1,7 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma, PrismaClient, lockWorkspaceExpensiveOperationCapacity } from "../../db/src/index.js";
 import { type Environment } from "@ai-cognitive/shared/server";
-import { stableHash, VersionedAesGcmCipher, ProviderExecutionRepository } from "@ai-cognitive/provider-gateway";
+import { stableHash, VersionedAesGcmCipher, ProviderExecutionRepository, boundedResourceUnits, type GatewayRequest, type ProviderModelManifest } from "@ai-cognitive/provider-gateway";
 import { createBookAnalysisQueue, createBookAnalysisWorker } from "../../../apps/worker/src/book-analysis.js";
 import {
   BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST,
@@ -28,6 +28,8 @@ import {
   bookRoutePlanHash,
   seedBookFailoverCheckpoint,
   reserveBookFailoverSendIntent,
+  reserveFirstBookFailoverSwitch,
+  bookFailoverOutboundFingerprint,
   observeBookFailoverFailure,
   claimBookAnalysisRun,
   type BookAnalysisRoutePlan,
@@ -1060,6 +1062,7 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     const configuration = {};
     const primaryConnectionId = `primary-${crypto.randomUUID()}`;
     const primaryCredentialId = `credential-${primaryConnectionId}`;
+    const backupConnectionId = `backup-${crypto.randomUUID()}`;
     const entry = (modelId: string, connectionId: string) => ({
       providerKey: "test", protocol: "TEST", modelId, configuration,
       configurationHash: stableHash(configuration),
@@ -1086,7 +1089,7 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
           requestedEnabled: true as const,
           maxSwitches: 1 as const,
           candidates: [primary.routes.BOOK_CHUNK_ANALYSIS, {
-            ...entry("backup", "backup"), structuredOutput: "JSON_MODE" as const,
+            ...entry("backup", backupConnectionId), structuredOutput: "JSON_MODE" as const,
           }],
         },
       },
@@ -1260,6 +1263,175 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       kind: "RECOVERABLE",
       response: { type: "STRUCTURED", structured: { summary: "restored without network" } },
     });
+
+    // Actual atomic admission: safe pre-remote failure + independent OWNER
+    // approval + request-scoped unit budget. No model adapter is invoked.
+    const backupCredentialId = "credential-" + backupConnectionId;
+    await prisma.providerConnection.create({ data: {
+      id: backupConnectionId, workspaceId: data.workspace.id,
+      providerKey: "test", protocol: "TEST",
+      displayName: "backup-" + crypto.randomUUID(),
+      endpoint: "https://provider.example.test/v1",
+    } });
+    await prisma.providerCredentialVersion.create({ data: {
+      id: backupCredentialId, workspaceId: data.workspace.id,
+      connectionId: backupConnectionId, credentialVersion: 1,
+      ciphertext: "fixture", iv: "fixture", authTag: "fixture",
+      keyVersion: "fixture", status: "ACTIVE",
+    } });
+    const backupRequest: GatewayRequest = {
+      workspaceId: data.workspace.id,
+      executionRunId: data.run.id,
+      routeSlot: "BOOK_CHUNK_ANALYSIS",
+      correlationId: data.run.id,
+      idempotencyKey: "book-test-backup-" + crypto.randomUUID(),
+      inputHash: stableHash(["original-text", "unchanged"]),
+      capability: { family: "TEXT_GENERATION", structuredOutput: "JSON_MODE" },
+      text: {
+        system: "Test-only contracted Book output",
+        messages: [{ role: "user", content: "same original evidence" }],
+        structuredOutput: { mode: "JSON_MODE" },
+      },
+      pinnedRoute: {
+        source: "WORKSPACE", providerKey: "test", protocol: "TEST",
+        modelId: "backup", adapterVersion: "fixture",
+        connectionId: backupConnectionId, credentialVersionId: backupCredentialId,
+        endpoint: "https://provider.example.test/v1",
+        capability: { modelId: "backup", families: ["TEXT_GENERATION"],
+          confidence: "VERIFIED", structuredOutput: "JSON_MODE" },
+        configuration: {},
+      },
+    };
+    const switchOp = {
+      ...input, operationHash: stableHash(["chunk", "pre-remote-switch"]),
+    };
+    const switchFingerprint = bookFailoverOutboundFingerprint(backupRequest);
+    const firstPrimaryKey = "book-test-primary-" + crypto.randomUUID();
+    expect(await reserveBookFailoverSendIntent({
+      ...switchOp, idempotencyKey: firstPrimaryKey, inputHash: switchFingerprint,
+    })).toMatchObject({ action: "SEND_PRIMARY_ONCE" });
+    const unfinished = await prisma.providerInvocation.create({ data: {
+      workspaceId: data.workspace.id, snapshotId: snapshot.id,
+      connectionId: primaryConnectionId, credentialVersionId: primaryCredentialId,
+      providerKey: "test", protocol: "TEST", modelId: "primary",
+      routeSlot: "BOOK_CHUNK_ANALYSIS", idempotencyKey: firstPrimaryKey,
+      requestFingerprint: stableHash(["pre-remote", firstPrimaryKey]),
+      correlationId: data.run.id, status: "PENDING",
+    } });
+    const recorded = await observeBookFailoverFailure({
+      ...switchOp, idempotencyKey: firstPrimaryKey, failureCode: "RATE_LIMITED",
+    });
+    expect(recorded.lastFailureCode).toBe("RATE_LIMITED");
+    expect(recorded.latestInvocationId).toBe(unfinished.id);
+    const modelCap = (modelId: string) => ({
+      modelId, families: ["TEXT_GENERATION"] as const,
+      confidence: "VERIFIED" as const, structuredOutput: "JSON_MODE" as const,
+    });
+    const manifest: ProviderModelManifest = { providers: [{
+      providerKey: "test", displayName: "test", protocol: "TEST",
+      adapterVersion: "fixture", models: [modelCap("primary"), modelCap("backup")],
+    }] };
+    const switchRequest = { ...switchOp, request: backupRequest, manifest };
+    expect(await reserveFirstBookFailoverSwitch(switchRequest))
+      .toEqual({ action: "HOLD", reason: "NO_PAID_CALL_AUTHORIZATION" });
+
+    // Content policy rejection remains sticky, even if a later component
+    // attempts to relabel it as rate limiting.
+    const moderated = {
+      ...switchOp, operationHash: stableHash(["chunk", "moderation"]),
+    };
+    const moderationKey = "book-test-moderation-" + crypto.randomUUID();
+    await reserveBookFailoverSendIntent({
+      ...moderated, idempotencyKey: moderationKey,
+      inputHash: switchFingerprint,
+    });
+    const review = await observeBookFailoverFailure({
+      ...moderated, idempotencyKey: moderationKey,
+      failureCode: "CONTENT_REJECTED",
+    });
+    expect(review.holdReason).toBe("CONTENT_POLICY_REVIEW_REQUIRED");
+    expect(await reserveFirstBookFailoverSwitch({
+      ...moderated, request: backupRequest, manifest,
+    })).toEqual({
+      action: "HOLD", reason: "CONTENT_POLICY_REVIEW_REQUIRED",
+    });
+    await expect(observeBookFailoverFailure({
+      ...moderated, idempotencyKey: moderationKey,
+      failureCode: "RATE_LIMITED",
+    })).rejects.toThrow("BOOK_FAILOVER_CONTENT_POLICY_REVIEW_REQUIRED");
+
+
+    const attempted = await prisma.providerInvocationAttempt.create({ data: {
+      workspaceId: data.workspace.id, invocationId: unfinished.id,
+      attemptNumber: 1, status: "REMOTE_FAILURE", completedAt: new Date(),
+    } });
+    expect(await reserveFirstBookFailoverSwitch(switchRequest))
+      .toEqual({ action: "HOLD", reason: "UNKNOWN_BILLING" });
+    await prisma.providerInvocationAttempt.delete({ where: { id: attempted.id } });
+
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: data.workspace.id, userId: data.user.id } },
+      data: { role: "VIEWER" },
+    });
+    expect(await reserveFirstBookFailoverSwitch(switchRequest))
+      .toEqual({ action: "HOLD", reason: "UNAUTHORIZED_TARGET" });
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: data.workspace.id, userId: data.user.id } },
+      data: { role: "OWNER" },
+    });
+
+
+    await prisma.workspaceResourcePolicy.upsert({
+      where: { workspaceId: data.workspace.id },
+      create: { workspaceId: data.workspace.id, dailyUnitLimit: 1000000,
+        runUnitLimit: 300000, runLimitEnabled: true },
+      update: { dailyUnitLimit: 1000000, runUnitLimit: 300000, runLimitEnabled: true },
+    });
+    const grant = await prisma.bookFailoverPaidGrant.create({ data: {
+      workspaceId: data.workspace.id, analysisRunId: data.run.id,
+      routeSlot: switchOp.routeSlot, operationHash: switchOp.operationHash,
+      planHash: switchOp.planHash, nextCandidateIndex: 1,
+      authorizedByUserId: data.user.id,
+      maxAdditionalUnits: boundedResourceUnits(backupRequest) + 20,
+      expiresAt: new Date(Date.now() + 15 * 60_000),
+    } });
+    await prisma.workspaceResourcePolicy.update({
+      where: { workspaceId: data.workspace.id }, data: { runUnitLimit: 1 },
+    });
+    expect(await reserveFirstBookFailoverSwitch(switchRequest))
+      .toEqual({ action: "HOLD", reason: "BUDGET_EXHAUSTED" });
+    await prisma.workspaceResourcePolicy.update({
+      where: { workspaceId: data.workspace.id }, data: { runUnitLimit: 300000 },
+    });
+    const admission = await reserveFirstBookFailoverSwitch(switchRequest);
+    expect(admission).toEqual({
+      action: "RESERVED", nextCandidateIndex: 1,
+      idempotencyKey: backupRequest.idempotencyKey, grantId: grant.id,
+    });
+    const switched = await prisma.bookFailoverCheckpoint.findUniqueOrThrow({
+      where: { analysisRunId_routeSlot_operationHash: {
+        analysisRunId: data.run.id, routeSlot: switchOp.routeSlot,
+        operationHash: switchOp.operationHash,
+      } },
+    });
+    expect(switched.candidateIndex).toBe(1);
+    expect(switched.switchesUsed).toBe(1);
+    expect(switched.state).toBe("SWITCH_RESERVED");
+    expect(switched.backupSendKey).toBe(backupRequest.idempotencyKey);
+    expect(switched.backupSendHash).toBe(switchFingerprint);
+    expect(switched.paidGrantId).toBe(grant.id);
+    // The old primary key is now terminal and cannot be reclaimed by a
+    // second Gateway owner after the backup reservation commits.
+    expect((await prisma.providerInvocation.findUniqueOrThrow({
+      where: { id: unfinished.id },
+    })).status).toBe("BLOCKED");
+    expect((await prisma.bookFailoverPaidGrant.findUniqueOrThrow({ where: { id: grant.id } })).usedAt)
+      .toBeInstanceOf(Date);
+    expect(await reserveFirstBookFailoverSwitch(switchRequest))
+      .toEqual({ action: "HOLD", reason: "INTEGRITY_FAILED" });
+    await expect(reserveBookFailoverSendIntent({
+      ...switchOp, idempotencyKey: firstPrimaryKey, inputHash: switchFingerprint,
+    })).rejects.toThrow("BOOK_FAILOVER_CHECKPOINT_INTEGRITY_FAILED");
 
     // Legacy seeded checkpoints have no pre-send identity; don't guess one.
     await expect(reserveBookFailoverSendIntent({
