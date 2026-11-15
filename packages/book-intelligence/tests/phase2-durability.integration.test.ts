@@ -29,6 +29,7 @@ import {
   seedBookFailoverCheckpoint,
   reserveBookFailoverSendIntent,
   reserveFirstBookFailoverSwitch,
+  authorizeOneBookBackupCall,
   bookFailoverOutboundFingerprint,
   observeBookFailoverFailure,
   claimBookAnalysisRun,
@@ -1350,6 +1351,14 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       failureCode: "CONTENT_REJECTED",
     });
     expect(review.holdReason).toBe("CONTENT_POLICY_REVIEW_REQUIRED");
+    await expect(authorizeOneBookBackupCall({
+      userId: data.user.id, workspaceId: data.workspace.id,
+    }, {
+      analysisRunId: data.run.id, routeSlot: moderated.routeSlot,
+      operationHash: moderated.operationHash, planHash: moderated.planHash,
+      expectedRevision: review.revision, maxAdditionalUnits: 10_000,
+      expiresInMinutes: 15, approval: "AUTHORIZE_ONE_ADDITIONAL_MODEL_CALL",
+    })).rejects.toThrow("BOOK_FAILOVER_GRANT_OPERATION_NOT_ELIGIBLE");
     expect(await reserveFirstBookFailoverSwitch({
       ...moderated, request: backupRequest, manifest,
     })).toEqual({
@@ -1387,14 +1396,47 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
         runUnitLimit: 300000, runLimitEnabled: true },
       update: { dailyUnitLimit: 1000000, runUnitLimit: 300000, runLimitEnabled: true },
     });
-    const grant = await prisma.bookFailoverPaidGrant.create({ data: {
-      workspaceId: data.workspace.id, analysisRunId: data.run.id,
-      routeSlot: switchOp.routeSlot, operationHash: switchOp.operationHash,
-      planHash: switchOp.planHash, nextCandidateIndex: 1,
-      authorizedByUserId: data.user.id,
+    const consentInput = {
+      analysisRunId: data.run.id, routeSlot: switchOp.routeSlot,
+      operationHash: switchOp.operationHash, planHash: switchOp.planHash,
+      expectedRevision: recorded.revision,
       maxAdditionalUnits: boundedResourceUnits(backupRequest) + 20,
-      expiresAt: new Date(Date.now() + 15 * 60_000),
-    } });
+      expiresInMinutes: 15,
+      approval: "AUTHORIZE_ONE_ADDITIONAL_MODEL_CALL" as const,
+    };
+    await expect(authorizeOneBookBackupCall({
+      userId: data.user.id, workspaceId: "another-workspace",
+    }, consentInput)).rejects.toThrow("BOOK_FAILOVER_GRANT_ACCESS_DENIED");
+    await expect(authorizeOneBookBackupCall({
+      userId: data.user.id, workspaceId: data.workspace.id,
+    }, { ...consentInput, approval: "NOT_APPROVED" as never }))
+      .rejects.toThrow("BOOK_FAILOVER_GRANT_INVALID_REQUEST");
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: data.workspace.id, userId: data.user.id } },
+      data: { role: "VIEWER" },
+    });
+    await expect(authorizeOneBookBackupCall({
+      userId: data.user.id, workspaceId: data.workspace.id,
+    }, consentInput)).rejects.toThrow("BOOK_FAILOVER_GRANT_OWNER_REQUIRED");
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: data.workspace.id, userId: data.user.id } },
+      data: { role: "OWNER" },
+    });
+    const approved = await authorizeOneBookBackupCall({
+      userId: data.user.id, workspaceId: data.workspace.id,
+    }, consentInput);
+    expect(approved.executionEnabled).toBe(false);
+    const grant = await prisma.bookFailoverPaidGrant.findUniqueOrThrow({
+      where: { id: approved.grantId },
+    });
+    expect(grant.authorizedByUserId).toBe(data.user.id);
+    await expect(authorizeOneBookBackupCall({
+      userId: data.user.id, workspaceId: data.workspace.id,
+    }, consentInput)).rejects.toThrow();
+    expect(await prisma.providerAuditEvent.count({
+      where: { workspaceId: data.workspace.id, targetType: "BookFailoverPaidGrant",
+        targetId: grant.id },
+    })).toBe(1);
     await prisma.workspaceResourcePolicy.update({
       where: { workspaceId: data.workspace.id }, data: { runUnitLimit: 1 },
     });
