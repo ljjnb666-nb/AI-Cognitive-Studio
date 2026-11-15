@@ -1335,6 +1335,32 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     expect(await reserveFirstBookFailoverSwitch(switchRequest))
       .toEqual({ action: "HOLD", reason: "NO_PAID_CALL_AUTHORIZATION" });
 
+    // Content policy rejection remains sticky, even if a later component
+    // attempts to relabel it as rate limiting.
+    const moderated = {
+      ...switchOp, operationHash: stableHash(["chunk", "moderation"]),
+    };
+    const moderationKey = "book-test-moderation-" + crypto.randomUUID();
+    await reserveBookFailoverSendIntent({
+      ...moderated, idempotencyKey: moderationKey,
+      inputHash: switchFingerprint,
+    });
+    const review = await observeBookFailoverFailure({
+      ...moderated, idempotencyKey: moderationKey,
+      failureCode: "CONTENT_REJECTED",
+    });
+    expect(review.holdReason).toBe("CONTENT_POLICY_REVIEW_REQUIRED");
+    expect(await reserveFirstBookFailoverSwitch({
+      ...moderated, request: backupRequest, manifest,
+    })).toEqual({
+      action: "HOLD", reason: "CONTENT_POLICY_REVIEW_REQUIRED",
+    });
+    await expect(observeBookFailoverFailure({
+      ...moderated, idempotencyKey: moderationKey,
+      failureCode: "RATE_LIMITED",
+    })).rejects.toThrow("BOOK_FAILOVER_CONTENT_POLICY_REVIEW_REQUIRED");
+
+
     const attempted = await prisma.providerInvocationAttempt.create({ data: {
       workspaceId: data.workspace.id, invocationId: unfinished.id,
       attemptNumber: 1, status: "REMOTE_FAILURE", completedAt: new Date(),
