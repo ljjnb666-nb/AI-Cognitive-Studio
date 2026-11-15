@@ -28,7 +28,7 @@ export type BookFailoverObservedOutcome = {
   attemptId: string | null;
 };
 type InvocationEvidence = {
-  id: string; providerKey: string; modelId: string; routeSlot: string;
+  id: string; status: string; providerKey: string; modelId: string; routeSlot: string;
   connectionId: string | null; credentialVersionId: string | null;
   attempts: { id: string; status: string }[];
 };
@@ -97,7 +97,7 @@ export function classifyBookFailoverEvidence(
   invocation: InvocationEvidence | null,
 ): BookFailoverObservedOutcome {
   const attempt = invocation?.attempts[0];
-  const settledOutcome = attempt ? "UNKNOWN" : "NOT_SENT";
+  const settledOutcome = !invocation || (!attempt && invocation.status === "PENDING") ? "NOT_SENT" : "UNKNOWN";
   return {
     settledOutcome,
     holdReason: failureCode === "CONTENT_REJECTED" ? "CONTENT_POLICY_REVIEW_REQUIRED"
@@ -135,7 +135,7 @@ export async function observeBookFailoverFailure(input: BookFailoverFailure) {
         },
       },
       select: {
-        id: true, routeSlot: true, providerKey: true, modelId: true,
+        id: true, status: true, routeSlot: true, providerKey: true, modelId: true,
         connectionId: true, credentialVersionId: true,
         attempts: {
           orderBy: { attemptNumber: "desc" }, take: 1,
