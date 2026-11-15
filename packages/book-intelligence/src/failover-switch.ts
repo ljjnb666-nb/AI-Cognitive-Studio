@@ -144,7 +144,7 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
         fail();
     } catch { return { action: "HOLD" as const, reason: "INCOMPATIBLE_CAPABILITY" as const }; }
 
-    const [clock] = await tx.$queryRawUnsafe<Array<{ now: Date }>>("SELECT clock_timestamp() AS now");
+    const [clock] = await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
     if (!clock?.now) throw new Error("BOOK_FAILOVER_SWITCH_CLOCK_UNAVAILABLE");
     const now = clock.now;
     const grant = await tx.bookFailoverPaidGrant.findUnique({
@@ -170,12 +170,13 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
       now.getUTCMonth(), now.getUTCDate()));
     // Mirror Gateway's per-row COALESCE semantics, so unsettled reservations
     // retain their full upper-bound units and cannot be double counted.
-    const [usage] = await tx.$queryRawUnsafe<Array<{ daily: bigint; run: bigint }>>(
-      'SELECT COALESCE(SUM(COALESCE("chargedUnits","units")) FILTER (WHERE "createdAt">=$1),0)::bigint AS daily, ' +
-      'COALESCE(SUM(COALESCE("chargedUnits","units")) FILTER (WHERE "scopeKey"=$2),0)::bigint AS run ' +
-      'FROM "ProviderResourceReservation" WHERE "workspaceId"=$3',
-      beginning, execution.analysisRunId, execution.workspaceId,
-    );
+    const [usage] = await tx.$queryRaw<Array<{ daily: bigint; run: bigint }>>`
+      SELECT
+        COALESCE(SUM(COALESCE("chargedUnits","units"))
+          FILTER (WHERE "createdAt" >= ${beginning}),0)::bigint AS daily,
+        COALESCE(SUM(COALESCE("chargedUnits","units"))
+          FILTER (WHERE "scopeKey"=${execution.analysisRunId}),0)::bigint AS run
+      FROM "ProviderResourceReservation" WHERE "workspaceId"=${execution.workspaceId}`;
     const budgetAvailable = Boolean(policy &&
       Number(usage?.daily ?? 0n) + units <= policy.dailyUnitLimit &&
       (policy.runLimitEnabled === false ||
