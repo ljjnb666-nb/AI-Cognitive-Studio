@@ -153,6 +153,14 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
         nextCandidateIndex: 1,
       } },
     });
+    const requester = await tx.workspaceMember.findUnique({
+      where: { workspaceId_userId: {
+        workspaceId: execution.workspaceId, userId: execution.userId,
+      } },
+      select: { role: true },
+    });
+    if (!requester || requester.role === "VIEWER")
+      return { action: "HOLD" as const, reason: "UNAUTHORIZED_TARGET" as const };
     const issuer = grant ? await tx.workspaceMember.findUnique({
       where: { workspaceId_userId: {
         workspaceId: execution.workspaceId, userId: grant.authorizedByUserId,
