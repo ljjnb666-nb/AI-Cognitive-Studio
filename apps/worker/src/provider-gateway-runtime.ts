@@ -1,5 +1,6 @@
 import { renewBookAnalysisLease, reserveBookFailoverSendIntent, observeBookFailoverFailure, type BookExecutionContext, type FrozenBookFailoverPlan } from "@ai-cognitive/book-intelligence";
 import { bookSynthesisContractVersion, bookSynthesisInstructions } from "./book-synthesis-instructions.js";
+import { assertBookBackupGatewayDispatchFenced } from "./book-backup-gateway-dispatch-fence.js";
 import { bookAnalysisMessage, bookAnalysisSpanReferenceInstruction, bookAnalysisSpanReferenceVersion, resolveBookAnalysisSpanReferences } from "./book-analysis-request.js";
 import { ProviderGatewayError } from "@ai-cognitive/provider-gateway";
 import { PostgresResourceBudget, boundedResourceUnits } from "@ai-cognitive/provider-gateway";
@@ -175,7 +176,24 @@ export function createBookProductionGatewayRuntime(source: NodeJS.ProcessEnv, ov
   const manifest = resolveProviderCatalog(source.PROVIDER_GATEWAY_MODEL_MANIFEST), registry = new ProviderRegistry(); for (const provider of manifest.providers) registry.register(provider);
   const store = new ProviderGatewayRepository(prisma, cipher), repository = new ProviderExecutionRepository(prisma, cipher), authorizer = new WorkspaceMembershipExecutionAuthorizer(prisma);
   const redis = !overrides.rate || !overrides.concurrency || !overrides.circuit ? (overrides.redisFactory ?? createRedisConnection)(source.REDIS_URL ?? "") : undefined;
-  const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: input => store.resolveWorkspaceRoute(input) }, { resolve: async () => undefined }, overrides.adapterResolver ?? createProviderAdapterResolver(new FetchProviderHttpTransport()), { authorize: (principal, request) => authorizer.authorizeExecution(principal, request.workspaceId), assertRouteUsable: snapshot => store.assertResolvedRouteUsable(snapshot.workspaceId, snapshot.connectionId, snapshot.credentialVersionId), assertBudget: request => { boundedResourceUnits(request); }, resourceBudget: new PostgresResourceBudget(), assertActive: async request => { try { await assertExecutionRunActive(request.workspaceId, request.executionRunId); } catch { throw new ProviderGatewayError("CANCELLED"); } }, validateEndpoint: overrides.validateEndpoint ?? (async snapshot => { if (!snapshot.endpoint) throw new Error("ROUTE_UNAVAILABLE"); await validateProviderEndpoint(snapshot.endpoint, { environment: source.NODE_ENV ?? "production", dns: { lookup: async hostname => (await (await import("node:dns/promises")).lookup(hostname, { all: true })).map(item => item.address) } }); }), repository, requestExecutionPolicy: (snapshot, request) => {
+  const gateway = createProductionProviderGateway(registry, { resolveWorkspaceRoute: input => store.resolveWorkspaceRoute(input) }, { resolve: async () => undefined }, overrides.adapterResolver ?? createProviderAdapterResolver(new FetchProviderHttpTransport()), { authorize: (principal, request) => authorizer.authorizeExecution(principal, request.workspaceId), assertRouteUsable: snapshot => store.assertResolvedRouteUsable(snapshot.workspaceId, snapshot.connectionId, snapshot.credentialVersionId), assertBudget: request => { boundedResourceUnits(request); }, resourceBudget: new PostgresResourceBudget(), assertActive: async request => {
+    try { await assertExecutionRunActive(request.workspaceId, request.executionRunId); }
+    catch { throw new ProviderGatewayError("CANCELLED"); }
+    // An authenticated caller cannot bypass Book's executionEnabled=false by
+    // invoking Gateway with a backup pinnedRoute. Recheck the authoritative
+    // job payload on each provider attempt, including post-retry attempts.
+    if (request.executionRunId && (
+      request.routeSlot === "BOOK_CHUNK_ANALYSIS" ||
+      request.routeSlot === "BOOK_REDUCTION_ANALYSIS" ||
+      request.routeSlot === "BOOK_SYNTHESIS"
+    )) {
+      const run = await prisma.bookAnalysisRun.findFirst({
+        where: { id: request.executionRunId, workspaceId: request.workspaceId },
+        select: { job: { select: { payload: true } } },
+      });
+      if (run) assertBookBackupGatewayDispatchFenced(run.job.payload, request);
+    }
+  }, validateEndpoint: overrides.validateEndpoint ?? (async snapshot => { if (!snapshot.endpoint) throw new Error("ROUTE_UNAVAILABLE"); await validateProviderEndpoint(snapshot.endpoint, { environment: source.NODE_ENV ?? "production", dns: { lookup: async hostname => (await (await import("node:dns/promises")).lookup(hostname, { all: true })).map(item => item.address) } }); }), repository, requestExecutionPolicy: (snapshot, request) => {
     if (request.routeSlot === "PODCAST_SCRIPT" && request.capability.family === "TEXT_GENERATION") return { timeoutMs: 300_000, maxAttempts: 1 };
     if (request.routeSlot === "SHORT_VIDEO_SCRIPT" && request.capability.family === "TEXT_GENERATION") return { timeoutMs: 300_000, maxAttempts: 1 };
     return bookProviderExecutionPolicy(snapshot, request);
