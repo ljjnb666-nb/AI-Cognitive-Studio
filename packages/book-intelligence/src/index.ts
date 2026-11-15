@@ -8,6 +8,7 @@ export * from "./route-plan.js";
 export * from "./failover-plan.js";
 export * from "./failover-checkpoint.js";
 export * from "./failover-switch.js";
+export * from "./failover-dryrun.js";
 export * from "./failover-grants.js";
 export * from "./product-execution.js";
 export * from "./ownership.js";
