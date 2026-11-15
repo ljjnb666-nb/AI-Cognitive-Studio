@@ -1,6 +1,6 @@
 
 import { prisma } from "@ai-cognitive/db";
-import { verifyFrozenBookFailoverPlan, type BookFailoverTextSlot } from "./failover-plan.js";
+import { verifyFrozenBookFailoverPlan, type BookFailoverTextSlot, type FrozenBookFailoverPlan } from "./failover-plan.js";
 import { bookRoutePlanHash, normalizeBookRoutePlan, type BookAnalysisRoutePlan } from "./route-plan.js";
 
 export type FirstBackupConsent = {
@@ -49,7 +49,8 @@ export async function authorizeOneBookBackupCall(
     if (run.workspaceId !== actor.workspaceId || run.status !== "RUNNING" ||
         !run.executionLeaseUntil) fail("BOOK_FAILOVER_GRANT_ACCESS_DENIED");
     const [clock] = await tx.$queryRawUnsafe<Array<{ now: Date }>>("SELECT clock_timestamp() AS now");
-    if (!clock?.now || run.executionLeaseUntil <= clock.now)
+    if (!clock?.now) throw new Error("BOOK_FAILOVER_GRANT_EXECUTION_NOT_ACTIVE");
+    if (run.executionLeaseUntil <= clock.now)
       fail("BOOK_FAILOVER_GRANT_EXECUTION_NOT_ACTIVE");
 
     const owner = await tx.workspaceMember.findUnique({
@@ -72,14 +73,15 @@ export async function authorizeOneBookBackupCall(
     const data = payload as Record<string, unknown>;
     if (!data.routePlan || typeof data.routePlanHash !== "string" || !data.failoverPlan)
       fail("BOOK_FAILOVER_GRANT_UNSEALED_PLAN");
-    let frozen;
+    let frozen: FrozenBookFailoverPlan;
     try {
       const primary = normalizeBookRoutePlan(data.routePlan as BookAnalysisRoutePlan);
       if (bookRoutePlanHash(primary) !== data.routePlanHash) fail("BOOK_FAILOVER_GRANT_UNSEALED_PLAN");
       frozen = verifyFrozenBookFailoverPlan(data.failoverPlan, primary);
     } catch { return fail("BOOK_FAILOVER_GRANT_UNSEALED_PLAN"); }
     const slot = frozen.slots[request.routeSlot];
-    if (!slot || slot.maxSwitches < 1 ||
+    if (!slot) throw new Error("BOOK_FAILOVER_GRANT_UNSEALED_PLAN");
+    if (slot.maxSwitches < 1 ||
         frozen.integrityHash !== request.planHash || frozen.executionEnabled !== false)
       fail("BOOK_FAILOVER_GRANT_UNSEALED_PLAN");
 
