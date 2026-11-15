@@ -1590,6 +1590,10 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
         consumedAt: new Date(), consumerKind: "BOOK_ANALYSIS",
         consumerKey: "test-backup-consumer-" + data.run.id,
         consumerFingerprint: stableHash(["consumed", backupInvocation.id]),
+        // Match the real consumeTextResult transition: a consumed receipt is
+        // tombstoned and its ciphertext is purged in the same transaction.
+        purgedAt: new Date(), ciphertext: null, iv: null,
+        authTag: null, keyVersion: null,
       },
     });
     await expect(reserveBookFailoverSendIntent(recoveryInput))
