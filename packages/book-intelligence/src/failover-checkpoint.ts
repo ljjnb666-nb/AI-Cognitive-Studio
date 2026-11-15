@@ -95,7 +95,95 @@ export async function seedBookFailoverCheckpoint(input: BookFailoverOperation) {
          checkpoint.holdReason === "CONTENT_POLICY_REVIEW_REQUIRED")) {
       throw new Error("BOOK_FAILOVER_PRIOR_OUTCOME_REVIEW_REQUIRED");
     }
+    // Older callers cannot bypass the atomic pre-send reservation contract
+    // once an outbound intent exists, even if no failure was observed.
+    if (checkpoint.sendIntentKey) {
+      throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+    }
     return checkpoint;
+  });
+}
+
+export type BookFailoverSendIntent = BookFailoverOperation & {
+  idempotencyKey: string;
+  inputHash: string;
+};
+export type BookFailoverSendDecision =
+  | { action: "SEND_PRIMARY_ONCE"; idempotencyKey: string }
+  | { action: "RECOVER_PERSISTED_TEXT"; idempotencyKey: string; invocationId: string; snapshotId: string };
+
+/**
+ * Atomic pre-send reservation. A crash after commit must NEVER allow a
+ * subsequent delivery to start a different paid request. The only automatic
+ * recovery is a proven successful, persisted text receipt for the exact
+ * originally reserved idempotency identity.
+ *
+ * Even a same-key retry without a receipt is unsafe: the Gateway may reclaim
+ * an old pre-remote invocation while its prior Worker is still in flight.
+ */
+export async function reserveBookFailoverSendIntent(input: BookFailoverSendIntent): Promise<BookFailoverSendDecision> {
+  if (!input.idempotencyKey || input.idempotencyKey.length > 2048 || !digest.test(input.inputHash))
+    fail();
+  return prisma.$transaction(async tx => {
+    const frozen = await authoritativePlan(tx, input);
+    const primary = frozen.slots[input.routeSlot]!.candidates[0]!;
+    const where = {
+      analysisRunId_routeSlot_operationHash: {
+        analysisRunId: input.execution.analysisRunId,
+        routeSlot: input.routeSlot,
+        operationHash: input.operationHash,
+      },
+    };
+    const created = await tx.bookFailoverCheckpoint.createMany({
+      data: [{
+        workspaceId: input.execution.workspaceId,
+        analysisRunId: input.execution.analysisRunId,
+        routeSlot: input.routeSlot,
+        operationHash: input.operationHash,
+        planHash: input.planHash,
+        candidateIndex: 0, switchesUsed: 0,
+        state: "HOLD", holdReason: "UNKNOWN_BILLING",
+        settledOutcome: "UNKNOWN",
+        sendIntentKey: input.idempotencyKey,
+        sendIntentInputHash: input.inputHash,
+        sendIntentAt: new Date(),
+      }],
+      skipDuplicates: true,
+    });
+    const checkpoint = await tx.bookFailoverCheckpoint.findUniqueOrThrow({ where });
+    if (checkpoint.workspaceId !== input.execution.workspaceId ||
+        checkpoint.planHash !== input.planHash || checkpoint.state !== "HOLD" ||
+        checkpoint.candidateIndex !== 0 || checkpoint.switchesUsed !== 0) fail();
+    if (created.count === 1) {
+      // The transaction COMMIT must complete before Gateway.execute can begin.
+      return { action: "SEND_PRIMARY_ONCE" as const, idempotencyKey: input.idempotencyKey };
+    }
+    // Rows created before pre-send intents existed are UNKNOWN, not "free."
+    if (!checkpoint.sendIntentKey || !checkpoint.sendIntentInputHash ||
+        !checkpoint.sendIntentAt || checkpoint.sendIntentInputHash !== input.inputHash)
+      throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+
+    const previous = await tx.providerInvocation.findUnique({
+      where: { workspaceId_idempotencyKey: {
+        workspaceId: input.execution.workspaceId,
+        idempotencyKey: checkpoint.sendIntentKey,
+      } },
+      select: {
+        id: true, snapshotId: true,
+        status: true, providerKey: true, modelId: true, routeSlot: true,
+        connectionId: true, credentialVersionId: true,
+        textResult: { select: { id: true } },
+      },
+    });
+    // Only a Gateway-persisted, successful, matching original receipt
+    // permits a read-only recovery. Any other state holds indefinitely.
+    if (previous?.status !== "SUCCEEDED" || !previous.textResult ||
+        previous.routeSlot !== input.routeSlot ||
+        previous.providerKey !== primary.providerKey || previous.modelId !== primary.modelId ||
+        previous.connectionId !== primary.connectionId ||
+        previous.credentialVersionId !== primary.credentialVersionId)
+      throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+    return { action: "RECOVER_PERSISTED_TEXT" as const, idempotencyKey: checkpoint.sendIntentKey, invocationId: previous.id, snapshotId: previous.snapshotId };
   });
 }
 
@@ -158,7 +246,15 @@ export async function observeBookFailoverFailure(input: BookFailoverFailure) {
          invocation.modelId !== primary.modelId ||
          invocation.connectionId !== primary.connectionId ||
          invocation.credentialVersionId !== primary.credentialVersionId)) fail();
-    const observed = classifyBookFailoverEvidence(input.failureCode, invocation);
+    if (checkpoint.sendIntentKey && checkpoint.sendIntentKey !== input.idempotencyKey) fail();
+    const initial = classifyBookFailoverEvidence(input.failureCode, invocation);
+    // Once a send was reserved, absence of an invocation does not prove that
+    // the prior Worker never crossed the network boundary before crashing.
+    const observed = checkpoint.sendIntentKey && initial.settledOutcome === "NOT_SENT"
+      ? { ...initial, settledOutcome: "UNKNOWN" as const,
+          holdReason: input.failureCode === "CONTENT_REJECTED"
+            ? "CONTENT_POLICY_REVIEW_REQUIRED" as const : "UNKNOWN_BILLING" as const }
+      : initial;
     // Redeliveries must preserve both the cursor and the evidence revision.
     if (checkpoint.latestInvocationId === observed.invocationId &&
         checkpoint.latestAttemptId === observed.attemptId &&

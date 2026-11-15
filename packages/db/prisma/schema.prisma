@@ -1695,6 +1695,10 @@ model BookFailoverCheckpoint {
   latestAttemptId    String?
   lastFailureCode    String?
   settledOutcome     String   @default("UNKNOWN")
+  /// These three immutable nullable fields are written before contacting the provider.
+  sendIntentKey      String?
+  sendIntentInputHash String?
+  sendIntentAt       DateTime?
   revision           Int      @default(1)
   observedAt         DateTime?
   createdAt          DateTime @default(now())
