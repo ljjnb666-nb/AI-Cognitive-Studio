@@ -87,6 +87,14 @@ export async function seedBookFailoverCheckpoint(input: BookFailoverOperation) {
         checkpoint.planHash !== input.planHash || checkpoint.candidateIndex !== checkpoint.switchesUsed ||
         checkpoint.candidateIndex < 0 || checkpoint.candidateIndex > 2 ||
         checkpoint.state !== "HOLD") fail();
+    // Failed operations may be redelivered under a *new* Job idempotency key.
+    // A previous unresolved remote attempt must fence even the primary model;
+    // otherwise a new key could silently trigger a second paid request.
+    if (checkpoint.lastFailureCode &&
+        (checkpoint.settledOutcome === "UNKNOWN" ||
+         checkpoint.holdReason === "CONTENT_POLICY_REVIEW_REQUIRED")) {
+      throw new Error("BOOK_FAILOVER_PRIOR_OUTCOME_REVIEW_REQUIRED");
+    }
     return checkpoint;
   });
 }
