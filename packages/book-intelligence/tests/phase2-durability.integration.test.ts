@@ -29,6 +29,7 @@ import {
   seedBookFailoverCheckpoint,
   reserveBookFailoverSendIntent,
   reserveFirstBookFailoverSwitch,
+  inspectReservedBookBackupDryRun,
   authorizeOneBookBackupCall,
   bookFailoverOutboundFingerprint,
   observeBookFailoverFailure,
@@ -1450,6 +1451,36 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       action: "RESERVED", nextCandidateIndex: 1,
       idempotencyKey: backupRequest.idempotencyKey, grantId: grant.id,
     });
+    // A separate read-only worker preflight can inspect this reservation but
+    // has no adapter, Gateway call, budget mutation or dispatch permission.
+    const invocationCount = await prisma.providerInvocation.count({
+      where: { workspaceId: data.workspace.id, routeSlot: switchOp.routeSlot },
+    });
+    const reservationCount = await prisma.providerResourceReservation.count({
+      where: { workspaceId: data.workspace.id },
+    });
+    const ready = { status: "DRY_RUN_READY", nextCandidateIndex: 1, canDispatch: false };
+    expect(await inspectReservedBookBackupDryRun(switchRequest)).toEqual(ready);
+    expect(await inspectReservedBookBackupDryRun(switchRequest)).toEqual(ready);
+    expect(await inspectReservedBookBackupDryRun({
+      ...switchRequest, request: { ...backupRequest, inputHash: stableHash(["tampered-input"]) },
+    })).toEqual({ status: "HOLD", reason: "NOT_RESERVED", canDispatch: false });
+    expect(await prisma.providerInvocation.count({
+      where: { workspaceId: data.workspace.id, routeSlot: switchOp.routeSlot },
+    })).toBe(invocationCount);
+    expect(await prisma.providerResourceReservation.count({
+      where: { workspaceId: data.workspace.id },
+    })).toBe(reservationCount);
+    await prisma.providerInvocation.update({
+      where: { id: unfinished.id }, data: { status: "PENDING", completedAt: null },
+    });
+    expect(await inspectReservedBookBackupDryRun(switchRequest))
+      .toEqual({ status: "HOLD", reason: "PRIMARY_NOT_FENCED", canDispatch: false });
+    await prisma.providerInvocation.update({
+      where: { id: unfinished.id }, data: { status: "BLOCKED", completedAt: new Date() },
+    });
+    expect(await inspectReservedBookBackupDryRun(switchRequest)).toEqual(ready);
+
     const switched = await prisma.bookFailoverCheckpoint.findUniqueOrThrow({
       where: { analysisRunId_routeSlot_operationHash: {
         analysisRunId: data.run.id, routeSlot: switchOp.routeSlot,
