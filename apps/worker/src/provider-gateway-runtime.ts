@@ -79,11 +79,15 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     const inputHash = sha256(JSON.stringify([this.input.workspaceId, routeSlot, this.input.analysisRunId, request.stage, operation, sha256(content), request.pipelineVersion, promptVersion, schema, bookAnalysisRelationsContractVersion, ...(spans ? [bookAnalysisSpanReferenceVersion, sha256(JSON.stringify(spans))] : []), ...(request.stage === "BOOK" ? [sha256(system), generation] : [])]));
     const idempotencyKey = `book-analysis-text:${this.input.analysisRunId}:${this.input.executionKey}:${request.stage}:${operation}${spans ? ":span-v3" : ""}`;
     const operationHash = sha256(JSON.stringify([request.stage, operation, request.pipelineVersion, promptVersion, inputHash]));
+    // Bind the pre-send intent to the COMPLETE outbound text body, not only the
+    // shorter Book semantic hash. Changed prompts may never reuse old receipts.
+    const sendFingerprint = stableHash({ inputHash, text, routeSlot, promptVersion,
+      pipelineVersion: request.pipelineVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` });
     const checkpoint = this.input.execution && this.input.failoverPlan?.slots[routeSlot]
       ? { execution: this.input.execution, routeSlot, operationHash, planHash: this.input.failoverPlan.integrityHash }
       : undefined;
     const send = checkpoint
-      ? await reserveBookFailoverSendIntent({ ...checkpoint, idempotencyKey, inputHash })
+      ? await reserveBookFailoverSendIntent({ ...checkpoint, idempotencyKey, inputHash: sendFingerprint })
       : undefined;
     const selectedIdempotencyKey = send?.idempotencyKey ?? idempotencyKey;
     try {
