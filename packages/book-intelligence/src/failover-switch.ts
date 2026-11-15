@@ -132,6 +132,8 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
         connection.region !== (backup.region ?? null))
       return { action: "HOLD" as const, reason: "UNAUTHORIZED_TARGET" as const };
     try {
+      const provider = input.manifest.providers.find(item => item.providerKey === backup.providerKey);
+      if (!provider || provider.adapterVersion !== backup.adapterVersion) fail();
       const model = validateRouteManifestSelection(input.manifest, {
         routeSlot, providerKey: backup.providerKey,
         protocol: backup.protocol, modelId: backup.modelId,
