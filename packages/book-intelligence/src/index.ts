@@ -7,6 +7,7 @@ export * from "./pipeline.js";
 export * from "./route-plan.js";
 export * from "./failover-plan.js";
 export * from "./failover-checkpoint.js";
+export * from "./failover-switch.js";
 export * from "./product-execution.js";
 export * from "./ownership.js";
 export * from "./gateway-materialization.js";
