@@ -124,7 +124,8 @@ export async function observeBookFailoverFailure(input: BookFailoverFailure) {
       },
     };
     const checkpoint = await tx.bookFailoverCheckpoint.findUnique({ where });
-    if (!checkpoint || checkpoint.workspaceId !== input.execution.workspaceId ||
+    if (!checkpoint) throw new Error("BOOK_FAILOVER_CHECKPOINT_INTEGRITY_FAILED");
+    if (checkpoint.workspaceId !== input.execution.workspaceId ||
         checkpoint.planHash !== input.planHash || checkpoint.state !== "HOLD" ||
         checkpoint.candidateIndex !== 0 || checkpoint.switchesUsed !== 0) fail();
     const invocation = await tx.providerInvocation.findUnique({
