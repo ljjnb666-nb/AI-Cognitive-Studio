@@ -7,7 +7,7 @@ import { prisma, assertExecutionRunActive } from "@ai-cognitive/db";
 import { GatewayPodcastGenerationProvider, GatewayPodcastRetrievalEmbeddingProvider, GatewayPodcastSpeechSynthesisProvider, type DurablePodcastGenerationProvider, type DurableSpeechSynthesisProvider } from "@ai-cognitive/podcast-generation";
 import { GatewayShortVideoProvider, GatewayShortVideoRetrievalEmbeddingProvider, GatewayShortVideoTtsProvider, type ShortVideoProvider, type ShortVideoTtsProvider } from "@ai-cognitive/short-video-generation";
 import { bookRoutePlanHash, fullBookRoutePlanHash, loadConsumedBookAnalysisEmbeddingIdentity, normalizeBookRoutePlan, verifyFrozenBookFailoverPlan, type AnalysisProvider, type AnalysisRequest, type AnalysisReceiptConsumer, type AnalysisTransaction, type BookAnalysisRoutePlan, type EmbeddingProvider, validateAnalysisResponse, assertAnalysisRelationsWithinMemory, bookAnalysisRelationsContractVersion, bookAnalysisRelationsInstruction } from "@ai-cognitive/book-intelligence";
-import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, resolveCredentialKeyring, resolveProviderCatalog, stableHash, validateProviderEndpoint, type ExecutionSnapshot, type GatewayExecutionDependencies, type ProviderAdapterResolver, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
+import { FetchProviderHttpTransport, ProviderExecutionRepository, ProviderGatewayRepository, ProviderRegistry, RedisCircuitBreaker, RedisConcurrencyLimiter, RedisRateLimiter, WorkspaceMembershipExecutionAuthorizer, createProductionProviderGateway, createProviderAdapterResolver, resolveCredentialKeyring, resolveProviderCatalog, stableHash, validateProviderEndpoint, type ExecutionSnapshot, type GatewayExecutionDependencies, type GatewayRequest, type ProviderAdapterResolver, type ProviderGateway, type ResolvedRoute } from "@ai-cognitive/provider-gateway";
 import { createRedisConnection } from "@ai-cognitive/shared/server";
 import { sha256 } from "@ai-cognitive/book-intelligence";
 import { bookProviderExecutionPolicy, bookProviderGeneration, bookProviderLeaseMs } from "./book-provider-execution-policy.js";
@@ -90,6 +90,16 @@ class GatewayAnalysisProvider implements AnalysisProvider {
       ? await reserveBookFailoverSendIntent({ ...checkpoint, idempotencyKey, inputHash: sendFingerprint })
       : undefined;
     const selectedIdempotencyKey = send?.idempotencyKey ?? idempotencyKey;
+    // Reuse the same canonical payload for execution and fingerprint-checked
+    // receipt recovery. Neither a changed prompt nor schema may borrow a
+    // successful backup result from an unrelated request.
+    const outbound: GatewayRequest = { bookExecution: this.input.execution,
+      executionRunId: this.input.analysisRunId,
+      workspaceId: this.input.workspaceId, routeSlot,
+      correlationId: request.correlationId, idempotencyKey: selectedIdempotencyKey,
+      inputHash, capability: { family: "TEXT_GENERATION", structuredOutput },
+      text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion,
+      promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` };
     try {
       // Receipt recovery MUST stay read-only. A second Gateway.execute call
       // could otherwise reclaim a stale pre-remote claim and charge twice.
@@ -100,6 +110,14 @@ class GatewayAnalysisProvider implements AnalysisProvider {
           if (handoff.kind !== "RECOVERABLE")
             throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
           const snapshot = await this.runtime.repository.loadExecutionSnapshot(this.input.workspaceId, send.snapshotId);
+          // Gateway's own persisted canonical request fingerprint must
+          // match the exact text, input and schema now being recovered.
+          const matching = await this.runtime.repository.findExistingTextInvocationForRequest({
+            ...outbound, idempotencyKey: send.idempotencyKey,
+          });
+          if (!matching || matching.invocationId !== send.invocationId ||
+              matching.snapshotId !== send.snapshotId)
+            throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
           const expected = send.action === "RECOVER_RESERVED_BACKUP_TEXT"
             ? this.input.failoverPlan?.slots[routeSlot]?.candidates[1]
             : pinned;
@@ -116,7 +134,7 @@ class GatewayAnalysisProvider implements AnalysisProvider {
           return { status: "ALREADY_PROCESSED" as const, invocationId: send.invocationId,
             snapshot, response: handoff.response, textConsumed: false as const };
         })()
-        : await this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: selectedIdempotencyKey, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` }, { userId: this.input.userId });
+        : await this.runtime.gateway.execute(outbound, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);
     if (outcome.status === "ALREADY_PROCESSED" && outcome.textConsumed) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const response = outcome.response as { type?: string; structured?: unknown } | undefined;
