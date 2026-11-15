@@ -60,7 +60,20 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
   const units = boundedResourceUnits(request);
   return prisma.$transaction(async tx => {
     // Run/Job/grant locks serialize every writer of the same Book operation.
-    const { job } = await assertBookExecutionAuthority(tx, execution);
+    const { run, job } = await assertBookExecutionAuthority(tx, execution);
+    // Consent checks source revision at issuance, but the source can be
+    // replaced or archived before this later atomic backup reservation.
+    const currentExtraction = await tx.currentDocumentExtraction.findUnique({
+      where: { sourceDocumentId_workspaceId: {
+        sourceDocumentId: run.sourceDocumentId, workspaceId: execution.workspaceId,
+      } }, select: { extractionId: true },
+    });
+    const activeDocument = await tx.sourceDocument.findFirst({
+      where: { id: run.sourceDocumentId, workspaceId: execution.workspaceId,
+        source: { archivedAt: null } }, select: { id: true },
+    });
+    if (!activeDocument || currentExtraction?.extractionId !== run.extractionId)
+      return { action: "HOLD" as const, reason: "INTEGRITY_FAILED" as const };
     const payload = job.payload;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) fail();
     const sealed = payload as Record<string, unknown>;
