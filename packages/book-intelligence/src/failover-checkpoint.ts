@@ -105,7 +105,7 @@ export type BookFailoverSendIntent = BookFailoverOperation & {
 };
 export type BookFailoverSendDecision =
   | { action: "SEND_PRIMARY_ONCE"; idempotencyKey: string }
-  | { action: "RECOVER_PERSISTED_TEXT"; idempotencyKey: string };
+  | { action: "RECOVER_PERSISTED_TEXT"; idempotencyKey: string; invocationId: string; snapshotId: string };
 
 /**
  * Atomic pre-send reservation. A crash after commit must NEVER allow a
@@ -164,6 +164,7 @@ export async function reserveBookFailoverSendIntent(input: BookFailoverSendInten
         idempotencyKey: checkpoint.sendIntentKey,
       } },
       select: {
+        id: true, snapshotId: true,
         status: true, providerKey: true, modelId: true, routeSlot: true,
         connectionId: true, credentialVersionId: true,
         textResult: { select: { id: true } },
@@ -177,7 +178,7 @@ export async function reserveBookFailoverSendIntent(input: BookFailoverSendInten
         previous.connectionId !== primary.connectionId ||
         previous.credentialVersionId !== primary.credentialVersionId)
       throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
-    return { action: "RECOVER_PERSISTED_TEXT", idempotencyKey: checkpoint.sendIntentKey };
+    return { action: "RECOVER_PERSISTED_TEXT", idempotencyKey: checkpoint.sendIntentKey, invocationId: previous.id, snapshotId: previous.snapshotId };
   });
 }
 
