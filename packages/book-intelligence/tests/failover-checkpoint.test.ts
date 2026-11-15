@@ -15,7 +15,7 @@ describe("Book fallback billing evidence never guesses that remote work was free
     "treats a persisted %s remote attempt as potentially billable",
     (status) => {
       expect(classifyBookFailoverEvidence("TIMEOUT", {
-        id: "inv-one", providerKey: "test", modelId: "model",
+        id: "inv-one", status: "FAILED", providerKey: "test", modelId: "model",
         routeSlot: "BOOK_CHUNK_ANALYSIS", connectionId: "connection", credentialVersionId: "credential",
         attempts: [{ id: "attempt-one", status }],
       })).toEqual({
@@ -33,9 +33,18 @@ describe("Book fallback billing evidence never guesses that remote work was free
     });
   });
 
+  it("a RUNNING invocation with no recorded attempt cannot be presumed free", () => {
+    const observed = classifyBookFailoverEvidence("TIMEOUT", {
+      id: "in-flight", status: "RUNNING", providerKey: "test", modelId: "model",
+      routeSlot: "BOOK_CHUNK_ANALYSIS", connectionId: "connection", credentialVersionId: "credential",
+      attempts: [],
+    });
+    expect(observed).toMatchObject({ settledOutcome: "UNKNOWN", holdReason: "UNKNOWN_BILLING" });
+  });
+
   it("an invocation without a started remote attempt remains NOT_SENT", () => {
     const observed = classifyBookFailoverEvidence("RATE_LIMITED", {
-      id: "preflight-claim", providerKey: "test", modelId: "model",
+      id: "preflight-claim", status: "PENDING", providerKey: "test", modelId: "model",
       routeSlot: "BOOK_CHUNK_ANALYSIS", connectionId: "connection", credentialVersionId: "credential",
       attempts: [],
     });
