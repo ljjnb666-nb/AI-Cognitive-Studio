@@ -159,7 +159,8 @@ export async function observeBookFailoverFailure(input: BookFailoverFailure) {
     return tx.bookFailoverCheckpoint.update({
       where,
       data: {
-        ...observed,
+        settledOutcome: observed.settledOutcome,
+        holdReason: observed.holdReason,
         latestInvocationId: observed.invocationId,
         latestAttemptId: observed.attemptId,
         lastFailureCode: input.failureCode,
