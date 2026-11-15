@@ -163,6 +163,10 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
       grant.workspaceId === execution.workspaceId && grant.planHash === planHash &&
       grant.expiresAt > now && grant.maxAdditionalUnits >= units);
 
+    // Serialize with PostgresResourceBudget.reserve, which locks the same
+    // policy row before inserting a new resource reservation.
+    await tx.$queryRaw`SELECT "workspaceId" FROM "WorkspaceResourcePolicy"
+      WHERE "workspaceId"=${execution.workspaceId} FOR UPDATE`;
     const policy = await tx.workspaceResourcePolicy.findUnique({
       where: { workspaceId: execution.workspaceId },
     });
@@ -202,6 +206,18 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
     // The execution is NOT enabled. The reservation cannot itself send a
     // model request. A future audited executor must take this exact key and
     // persist its outcome in a separate authenticated invocation.
+    // A released primary claim must become terminal in the SAME transaction.
+    // Otherwise another Gateway instance could reclaim the old PENDING key
+    // after we reserve a backup, resulting in two paid remote executions.
+    const fencedPrimary = await tx.providerInvocation.updateMany({
+      where: {
+        id: invocation!.id, workspaceId: execution.workspaceId,
+        status: "PENDING", claimToken: null, claimOwner: null,
+        claimExpiresAt: null, attempts: { none: {} },
+      },
+      data: { status: "BLOCKED", completedAt: now },
+    });
+    if (fencedPrimary.count !== 1) fail();
     const updated = await tx.bookFailoverCheckpoint.updateMany({
       where: {
         ...where, revision: cursor.revision, state: "HOLD",
