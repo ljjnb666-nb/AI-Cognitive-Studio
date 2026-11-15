@@ -246,6 +246,10 @@ export async function observeBookFailoverFailure(input: BookFailoverFailure) {
          invocation.modelId !== primary.modelId ||
          invocation.connectionId !== primary.connectionId ||
          invocation.credentialVersionId !== primary.credentialVersionId)) fail();
+    // Moderation rejection is a permanent review barrier for this operation;
+    // a subsequent retry classification may not erase it.
+    if (checkpoint.lastFailureCode === "CONTENT_REJECTED" && input.failureCode !== "CONTENT_REJECTED")
+      throw new Error("BOOK_FAILOVER_CONTENT_POLICY_REVIEW_REQUIRED");
     if (checkpoint.sendIntentKey && checkpoint.sendIntentKey !== input.idempotencyKey) fail();
     const initial = classifyBookFailoverEvidence(input.failureCode, invocation);
     // Once a send was reserved, absence of an invocation does not prove that
