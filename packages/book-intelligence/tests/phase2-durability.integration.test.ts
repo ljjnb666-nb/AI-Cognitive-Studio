@@ -1446,6 +1446,15 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     await prisma.workspaceResourcePolicy.update({
       where: { workspaceId: data.workspace.id }, data: { runUnitLimit: 300000 },
     });
+    // A changed source after OWNER consent must block the actual reservation.
+    await prisma.source.update({
+      where: { id: data.document.sourceId }, data: { archivedAt: new Date() },
+    });
+    expect(await reserveFirstBookFailoverSwitch(switchRequest))
+      .toEqual({ action: "HOLD", reason: "INTEGRITY_FAILED" });
+    await prisma.source.update({
+      where: { id: data.document.sourceId }, data: { archivedAt: null },
+    });
     const admission = await reserveFirstBookFailoverSwitch(switchRequest);
     expect(admission).toEqual({
       action: "RESERVED", nextCandidateIndex: 1,
@@ -1480,6 +1489,14 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       where: { id: unfinished.id }, data: { status: "BLOCKED", completedAt: new Date() },
     });
     expect(await inspectReservedBookBackupDryRun(switchRequest)).toEqual(ready);
+    await prisma.source.update({
+      where: { id: data.document.sourceId }, data: { archivedAt: new Date() },
+    });
+    expect(await inspectReservedBookBackupDryRun(switchRequest))
+      .toEqual({ status: "HOLD", reason: "SOURCE_CHANGED", canDispatch: false });
+    await prisma.source.update({
+      where: { id: data.document.sourceId }, data: { archivedAt: null },
+    });
 
     const switched = await prisma.bookFailoverCheckpoint.findUniqueOrThrow({
       where: { analysisRunId_routeSlot_operationHash: {
