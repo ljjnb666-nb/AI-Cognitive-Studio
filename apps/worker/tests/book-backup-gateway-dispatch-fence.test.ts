@@ -8,7 +8,7 @@ import { assertBookBackupGatewayDispatchFenced } from "../src/book-backup-gatewa
 
 const cfg = {};
 const entry = (modelId: string) => ({
-  providerKey: "fixture", protocol: "TEST",
+  providerKey: "fixture", protocol: "TEST" as const,
   modelId, connectionId: "connection-" + modelId,
   credentialVersionId: "credential-" + modelId,
   endpoint: "https://fixture.example.test/v1",
