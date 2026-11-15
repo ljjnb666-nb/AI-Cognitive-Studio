@@ -144,8 +144,9 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
         fail();
     } catch { return { action: "HOLD" as const, reason: "INCOMPATIBLE_CAPABILITY" as const }; }
 
-    const [{ now }] = await tx.$queryRawUnsafe<Array<{ now: Date }>>("SELECT clock_timestamp() AS now");
-    if (!now) fail();
+    const [clock] = await tx.$queryRawUnsafe<Array<{ now: Date }>>("SELECT clock_timestamp() AS now");
+    if (!clock?.now) throw new Error("BOOK_FAILOVER_SWITCH_CLOCK_UNAVAILABLE");
+    const now = clock.now;
     const grant = await tx.bookFailoverPaidGrant.findUnique({
       where: { analysisRunId_routeSlot_operationHash_nextCandidateIndex: {
         analysisRunId: execution.analysisRunId, routeSlot, operationHash,
