@@ -85,8 +85,18 @@ export async function seedBookFailoverCheckpoint(input: BookFailoverOperation) {
     const checkpoint = await tx.bookFailoverCheckpoint.findUniqueOrThrow({ where });
     if (checkpoint.workspaceId !== input.execution.workspaceId ||
         checkpoint.planHash !== input.planHash || checkpoint.candidateIndex !== checkpoint.switchesUsed ||
-        checkpoint.candidateIndex < 0 || checkpoint.candidateIndex > 2 ||
-        checkpoint.state !== "HOLD") fail();
+        checkpoint.candidateIndex < 0 || checkpoint.candidateIndex > 2) fail();
+    // Recovery may re-enter an already reserved backup operation. This never
+    // authorizes dispatch: reserveBookFailoverSendIntent will accept only a
+    // fully persisted, successful backup receipt and otherwise fail closed.
+    if (checkpoint.state === "SWITCH_RESERVED") {
+      if (checkpoint.candidateIndex !== 1 || checkpoint.switchesUsed !== 1 ||
+          !checkpoint.sendIntentKey || !checkpoint.sendIntentInputHash ||
+          !checkpoint.backupSendKey || !checkpoint.backupSendHash ||
+          !checkpoint.paidGrantId) fail();
+      return checkpoint;
+    }
+    if (checkpoint.state !== "HOLD") fail();
     // Failed operations may be redelivered under a *new* Job idempotency key.
     // A previous unresolved remote attempt must fence even the primary model;
     // otherwise a new key could silently trigger a second paid request.
@@ -110,7 +120,8 @@ export type BookFailoverSendIntent = BookFailoverOperation & {
 };
 export type BookFailoverSendDecision =
   | { action: "SEND_PRIMARY_ONCE"; idempotencyKey: string }
-  | { action: "RECOVER_PERSISTED_TEXT"; idempotencyKey: string; invocationId: string; snapshotId: string };
+  | { action: "RECOVER_PERSISTED_TEXT"; idempotencyKey: string; invocationId: string; snapshotId: string }
+  | { action: "RECOVER_RESERVED_BACKUP_TEXT"; idempotencyKey: string; invocationId: string; snapshotId: string };
 
 /**
  * Atomic pre-send reservation. A crash after commit must NEVER allow a
@@ -151,6 +162,96 @@ export async function reserveBookFailoverSendIntent(input: BookFailoverSendInten
       skipDuplicates: true,
     });
     const checkpoint = await tx.bookFailoverCheckpoint.findUniqueOrThrow({ where });
+    // An existing backup reservation never triggers a second paid call.
+    // Only a stored, matching, unconsumed and successful Gateway text receipt
+    // may be recovered. All other outcomes stay blocked for manual review.
+    if (created.count === 0 && checkpoint.state === "SWITCH_RESERVED") {
+      const candidates = frozen.slots[input.routeSlot]!.candidates;
+      const backupRoute = candidates[1];
+      if (!backupRoute || checkpoint.workspaceId !== input.execution.workspaceId ||
+          checkpoint.planHash !== input.planHash || checkpoint.candidateIndex !== 1 ||
+          checkpoint.switchesUsed !== 1 || !checkpoint.sendIntentKey ||
+          !checkpoint.sendIntentAt || !checkpoint.sendIntentInputHash ||
+          checkpoint.sendIntentInputHash !== input.inputHash ||
+          !checkpoint.backupSendKey || !checkpoint.backupReservedAt ||
+          checkpoint.backupSendKey === checkpoint.sendIntentKey ||
+          checkpoint.backupSendHash !== input.inputHash || !checkpoint.paidGrantId ||
+          !checkpoint.latestInvocationId || checkpoint.latestAttemptId)
+        throw new Error("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
+      const { run } = await assertBookExecutionAuthority(tx, input.execution);
+      const extraction = await tx.currentDocumentExtraction.findUnique({
+        where: { sourceDocumentId_workspaceId: {
+          sourceDocumentId: run.sourceDocumentId, workspaceId: input.execution.workspaceId,
+        } }, select: { extractionId: true },
+      });
+      const source = await tx.sourceDocument.findFirst({
+        where: { id: run.sourceDocumentId, workspaceId: input.execution.workspaceId,
+          source: { archivedAt: null } }, select: { id: true },
+      });
+      if (!source || extraction?.extractionId !== run.extractionId)
+        throw new Error("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
+      const grant = await tx.bookFailoverPaidGrant.findUnique({
+        where: { id: checkpoint.paidGrantId },
+      });
+      if (!grant || grant.workspaceId !== input.execution.workspaceId ||
+          grant.analysisRunId !== input.execution.analysisRunId ||
+          grant.routeSlot !== input.routeSlot || grant.operationHash !== input.operationHash ||
+          grant.planHash !== input.planHash || grant.nextCandidateIndex !== 1 ||
+          !grant.usedAt || grant.usedAt > grant.expiresAt)
+        throw new Error("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
+      const original = await tx.providerInvocation.findUnique({
+        where: { workspaceId_idempotencyKey: {
+          workspaceId: input.execution.workspaceId, idempotencyKey: checkpoint.sendIntentKey,
+        } }, include: { attempts: { select: { id: true }, take: 1 } },
+      });
+      const primaryRoute = candidates[0]!;
+      if (!original || original.id !== checkpoint.latestInvocationId ||
+          original.status !== "BLOCKED" || original.attempts.length !== 0 ||
+          original.claimToken || original.claimOwner || original.claimExpiresAt ||
+          original.providerKey !== primaryRoute.providerKey ||
+          original.modelId !== primaryRoute.modelId ||
+          original.routeSlot !== input.routeSlot ||
+          original.connectionId !== primaryRoute.connectionId ||
+          original.credentialVersionId !== primaryRoute.credentialVersionId)
+        throw new Error("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
+      const backup = await tx.providerInvocation.findUnique({
+        where: { workspaceId_idempotencyKey: {
+          workspaceId: input.execution.workspaceId, idempotencyKey: checkpoint.backupSendKey,
+        } },
+        include: {
+          snapshot: true,
+          attempts: { where: { status: "SUCCEEDED" }, select: { id: true }, take: 2 },
+          textResult: { select: { attemptId: true, snapshotId: true, consumedAt: true,
+            purgedAt: true, ciphertext: true } },
+        },
+      });
+      if (!backup || backup.status !== "SUCCEEDED" ||
+          backup.workspaceId !== input.execution.workspaceId ||
+          backup.routeSlot !== input.routeSlot ||
+          backup.providerKey !== backupRoute.providerKey ||
+          backup.protocol !== backupRoute.protocol ||
+          backup.modelId !== backupRoute.modelId ||
+          backup.connectionId !== backupRoute.connectionId ||
+          backup.credentialVersionId !== backupRoute.credentialVersionId ||
+          backup.snapshot.providerKey !== backupRoute.providerKey ||
+          backup.snapshot.modelId !== backupRoute.modelId ||
+          backup.snapshot.routeSlot !== input.routeSlot ||
+          backup.snapshot.connectionId !== backupRoute.connectionId ||
+          backup.snapshot.credentialVersionId !== backupRoute.credentialVersionId ||
+          backup.snapshot.endpoint !== backupRoute.endpoint ||
+          backup.snapshot.region !== (backupRoute.region ?? null) ||
+          backup.snapshot.adapterVersion !== backupRoute.adapterVersion ||
+          backup.snapshot.configurationHash !== backupRoute.configurationHash ||
+          backup.attempts.length !== 1 ||
+          !backup.textResult || !backup.textResult.ciphertext ||
+          backup.textResult.consumedAt || backup.textResult.purgedAt ||
+          backup.textResult.snapshotId !== backup.snapshotId ||
+          backup.textResult.attemptId !== backup.attempts[0]!.id)
+        throw new Error("BOOK_FAILOVER_BACKUP_RECEIPT_RECONCILIATION_REQUIRED");
+      return { action: "RECOVER_RESERVED_BACKUP_TEXT" as const,
+        idempotencyKey: checkpoint.backupSendKey,
+        invocationId: backup.id, snapshotId: backup.snapshotId };
+    }
     if (checkpoint.workspaceId !== input.execution.workspaceId ||
         checkpoint.planHash !== input.planHash || checkpoint.state !== "HOLD" ||
         checkpoint.candidateIndex !== 0 || checkpoint.switchesUsed !== 0) fail();
