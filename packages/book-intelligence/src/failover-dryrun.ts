@@ -27,8 +27,9 @@ export async function inspectReservedBookBackupDryRun(
   const hold = (reason: Extract<BookBackupDryRunDecision, { status: "HOLD" }>["reason"]) =>
     ({ status: "HOLD" as const, reason, canDispatch: false as const });
   const { execution, routeSlot, operationHash, planHash, request } = input;
+  const pinned = request.pinnedRoute;
   if (!/^[a-f0-9]{64}$/.test(operationHash) || !/^[a-f0-9]{64}$/.test(planHash) ||
-      !request.text || !request.pinnedRoute || request.pinnedRoute.source !== "WORKSPACE" ||
+      !request.text || !pinned || pinned.source !== "WORKSPACE" ||
       request.workspaceId !== execution.workspaceId ||
       request.executionRunId !== execution.analysisRunId ||
       request.routeSlot !== routeSlot || !request.idempotencyKey ||
@@ -58,7 +59,6 @@ export async function inspectReservedBookBackupDryRun(
         !chain || chain.maxSwitches < 1 || !chain.candidates[1])
       return hold("PLAN_INVALID");
     const backup = chain.candidates[1]!;
-    const pinned = request.pinnedRoute;
     if (pinned.providerKey !== backup.providerKey || pinned.modelId !== backup.modelId ||
         pinned.protocol !== backup.protocol || pinned.adapterVersion !== backup.adapterVersion ||
         pinned.connectionId !== backup.connectionId ||
