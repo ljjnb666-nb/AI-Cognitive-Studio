@@ -46,8 +46,9 @@ export async function authorizeOneBookBackupCall(
     );
     if (locked.length !== 1) fail("BOOK_FAILOVER_GRANT_ACCESS_DENIED");
     const run = await tx.bookAnalysisRun.findUniqueOrThrow({ where: { id: request.analysisRunId } });
-    if (run.workspaceId !== actor.workspaceId || run.status !== "RUNNING" ||
-        !run.executionLeaseUntil) fail("BOOK_FAILOVER_GRANT_ACCESS_DENIED");
+    if (!run.executionLeaseUntil) throw new Error("BOOK_FAILOVER_GRANT_ACCESS_DENIED");
+    if (run.workspaceId !== actor.workspaceId || run.status !== "RUNNING")
+      fail("BOOK_FAILOVER_GRANT_ACCESS_DENIED");
     const [clock] = await tx.$queryRawUnsafe<Array<{ now: Date }>>("SELECT clock_timestamp() AS now");
     if (!clock?.now) throw new Error("BOOK_FAILOVER_GRANT_EXECUTION_NOT_ACTIVE");
     if (run.executionLeaseUntil <= clock.now)
@@ -91,7 +92,8 @@ export async function authorizeOneBookBackupCall(
         operationHash: request.operationHash,
       } },
     });
-    if (!operation || operation.workspaceId !== actor.workspaceId ||
+    if (!operation) throw new Error("BOOK_FAILOVER_GRANT_OPERATION_NOT_ELIGIBLE");
+    if (operation.workspaceId !== actor.workspaceId ||
         operation.planHash !== request.planHash ||
         operation.revision !== request.expectedRevision ||
         operation.state !== "HOLD" || operation.candidateIndex !== 0 ||
@@ -104,9 +106,11 @@ export async function authorizeOneBookBackupCall(
 
     // An error code alone never proves unbilled. A PENDING claim with no
     // attempt and no owner is the Gateway's demonstrable NOT_SENT state.
+    const originalKey = operation.sendIntentKey;
+    if (!originalKey) throw new Error("BOOK_FAILOVER_GRANT_OPERATION_NOT_ELIGIBLE");
     const original = await tx.providerInvocation.findUnique({
       where: { workspaceId_idempotencyKey: {
-        workspaceId: actor.workspaceId, idempotencyKey: operation.sendIntentKey,
+        workspaceId: actor.workspaceId, idempotencyKey: originalKey,
       } },
       include: { attempts: { select: { id: true }, take: 1 } },
     });
