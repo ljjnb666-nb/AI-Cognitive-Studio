@@ -25,6 +25,8 @@ CREATE TABLE "BookFailoverPaidGrant" (
 );
 CREATE UNIQUE INDEX "BookFailoverPaidGrant_analysisRunId_routeSlot_operationHash_nextCandidateIndex_key"
   ON "BookFailoverPaidGrant" ("analysisRunId","routeSlot","operationHash","nextCandidateIndex");
+CREATE UNIQUE INDEX "BookFailoverPaidGrant_id_workspaceId_key"
+  ON "BookFailoverPaidGrant" ("id","workspaceId");
 CREATE INDEX "BookFailoverPaidGrant_workspaceId_expiresAt_idx"
   ON "BookFailoverPaidGrant" ("workspaceId","expiresAt");
 ALTER TABLE "BookFailoverPaidGrant" ADD CONSTRAINT "BookFailoverPaidGrant_workspaceId_fkey"
@@ -52,5 +54,5 @@ ALTER TABLE "BookFailoverCheckpoint"
   );
 ALTER TABLE "BookFailoverCheckpoint"
   ADD CONSTRAINT "BookFailoverCheckpoint_paidGrantId_fkey"
-  FOREIGN KEY ("paidGrantId") REFERENCES "BookFailoverPaidGrant"("id")
+  FOREIGN KEY ("paidGrantId","workspaceId") REFERENCES "BookFailoverPaidGrant"("id","workspaceId")
   ON DELETE RESTRICT ON UPDATE CASCADE;
