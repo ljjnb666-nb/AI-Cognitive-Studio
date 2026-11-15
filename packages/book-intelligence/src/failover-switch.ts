@@ -88,6 +88,9 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
       return { action: "HOLD" as const, reason: "INTEGRITY_FAILED" as const };
     if (cursor.sendIntentInputHash !== newFingerprint ||
         request.idempotencyKey === cursor.sendIntentKey) fail();
+    if (cursor.lastFailureCode === "CONTENT_REJECTED" ||
+        cursor.holdReason === "CONTENT_POLICY_REVIEW_REQUIRED")
+      return { action: "HOLD" as const, reason: "CONTENT_POLICY_REVIEW_REQUIRED" as const };
 
     const prior = preference.candidates[0]!;
     const backup = preference.candidates[1];
