@@ -1706,6 +1706,7 @@ model BookFailoverCheckpoint {
   backupSendHash     String?
   backupReservedAt   DateTime?
   paidGrantId        String?
+  paidGrant          BookFailoverPaidGrant? @relation(fields: [paidGrantId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   revision           Int      @default(1)
   observedAt         DateTime?
   createdAt          DateTime @default(now())
@@ -1736,7 +1737,9 @@ model BookFailoverPaidGrant {
   createdAt          DateTime @default(now())
   workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   analysisRun        BookAnalysisRun @relation(fields: [analysisRunId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  checkpoints       BookFailoverCheckpoint[]
 
+  @@unique([id, workspaceId])
   @@unique([analysisRunId, routeSlot, operationHash, nextCandidateIndex])
   @@index([workspaceId, expiresAt])
 }
