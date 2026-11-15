@@ -72,7 +72,8 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
     } catch { return fail(); }
     const frozen = verifyFrozenBookFailoverPlan(sealed.failoverPlan, plan);
     const preference = frozen.slots[routeSlot];
-    if (!preference || frozen.integrityHash !== planHash ||
+    if (!preference) throw new Error("BOOK_FAILOVER_SWITCH_INTEGRITY_FAILED");
+    if (frozen.integrityHash !== planHash ||
         frozen.executionEnabled !== false || preference.maxSwitches < 1) fail();
 
     const where = { analysisRunId_routeSlot_operationHash: {
@@ -96,6 +97,7 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
     const backup = preference.candidates[1];
     if (!backup) return { action: "HOLD" as const, reason: "NO_BACKUP" as const };
     const pinned = request.pinnedRoute;
+    if (!pinned) throw new Error("BOOK_FAILOVER_SWITCH_INTEGRITY_FAILED");
     if (pinned.providerKey !== backup.providerKey ||
         pinned.protocol !== backup.protocol ||
         pinned.modelId !== backup.modelId ||
@@ -213,7 +215,8 @@ export async function reserveFirstBookFailoverSwitch(input: BookFailoverSwitchIn
       switchesUsed: cursor.switchesUsed, maxSwitches: preference.maxSwitches,
     });
     if (decision.action === "HOLD") return decision;
-    if (decision.nextCandidateIndex !== 1 || !grant ||
+    if (!grant) throw new Error("BOOK_FAILOVER_SWITCH_INTEGRITY_FAILED");
+    if (decision.nextCandidateIndex !== 1 ||
         !paidAuthorized || !budgetAvailable) fail();
 
     // The execution is NOT enabled. The reservation cannot itself send a
