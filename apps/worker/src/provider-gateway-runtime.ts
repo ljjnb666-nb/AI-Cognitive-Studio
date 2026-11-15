@@ -103,7 +103,7 @@ class GatewayAnalysisProvider implements AnalysisProvider {
               snapshot.credentialVersionId !== pinned.credentialVersionId)
             throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
           return { status: "ALREADY_PROCESSED" as const, invocationId: send.invocationId,
-            snapshot, response: handoff.response };
+            snapshot, response: handoff.response, textConsumed: false as const };
         })()
         : await this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: selectedIdempotencyKey, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` }, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);
