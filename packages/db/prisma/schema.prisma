@@ -486,6 +486,7 @@ model Workspace {
   jobs                               Job[]
   chunkSets                          ChunkSet[]
   analysisRuns                       BookAnalysisRun[]
+  bookFailoverCheckpoints            BookFailoverCheckpoint[]
   bookAnalysisBootstraps             BookAnalysisBootstrap[]
   memoryItems                        BookMemoryItem[]
   podcastProjects                    PodcastProject[]
@@ -1668,12 +1669,41 @@ model BookAnalysisRun {
   currentMarkers           CurrentBookIntelligence[] @relation("CurrentIntelligenceRun")
   podcastGenerationSources PodcastGenerationSource[]
   bootstraps               BookAnalysisBootstrap[]
+  failoverCheckpoints      BookFailoverCheckpoint[]
 
   @@unique([id, workspaceId])
   @@unique([id, workspaceId, chunkSetId])
   @@unique([id, workspaceId, sourceDocumentId, extractionId], map: "BookAnalysisRun_lineage_key")
   @@unique([id, workspaceId, sourceDocumentId, extractionId, chunkSetId], map: "BookAnalysisRun_current_lineage_key")
   @@index([routePlanHash])
+}
+
+/// Per-operation failover evidence and cursor. No additional calls are
+/// authorized by the existence of these rows (runtime execution still OFF).
+/// The composite run+workspace FK prevents cross-tenant ledger grafting.
+model BookFailoverCheckpoint {
+  workspaceId       String
+  analysisRunId     String
+  routeSlot         String
+  operationHash     String
+  planHash          String
+  candidateIndex    Int      @default(0)
+  switchesUsed      Int      @default(0)
+  state             String   @default("HOLD")
+  holdReason        String   @default("NOT_ENABLED")
+  latestInvocationId String?
+  latestAttemptId    String?
+  lastFailureCode    String?
+  settledOutcome     String   @default("UNKNOWN")
+  revision           Int      @default(1)
+  observedAt         DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  analysisRun        BookAnalysisRun @relation(fields: [analysisRunId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@id([analysisRunId, routeSlot, operationHash])
+  @@index([workspaceId, analysisRunId, updatedAt])
 }
 
 model BookAnalysisBootstrap {

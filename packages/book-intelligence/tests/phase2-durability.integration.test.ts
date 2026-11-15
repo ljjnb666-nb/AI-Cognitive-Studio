@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma, PrismaClient, lockWorkspaceExpensiveOperationCapacity } from "../../db/src/index.js";
 import { type Environment } from "@ai-cognitive/shared/server";
+import { stableHash } from "@ai-cognitive/provider-gateway";
 import { createBookAnalysisQueue, createBookAnalysisWorker } from "../../../apps/worker/src/book-analysis.js";
 import {
   BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST,
@@ -23,6 +24,12 @@ import {
   type AnalysisResponse,
   type EmbeddingProvider,
   type ProcessBookAnalysisDependencies,
+  normalizeBookRoutePlan,
+  bookRoutePlanHash,
+  seedBookFailoverCheckpoint,
+  observeBookFailoverFailure,
+  claimBookAnalysisRun,
+  type BookAnalysisRoutePlan,
 } from "../src/index.js";
 import { createBookAnalysisEmbeddingGatewayFixture } from "./helpers/book-analysis-embedding-gateway.js";
 import { reconcileDurableExpensiveOperationsBatch } from "../../../apps/worker/src/durable-operation-reconciliation.js";
@@ -1041,5 +1048,121 @@ describe("单书并发数据库回归", () => {
     const after = (await prisma.bookAnalysisRun.findUniqueOrThrow({where:{id:data.run.id}})).executionLeaseUntil!;
     expect(after.getTime()).toBeGreaterThanOrEqual(before.getTime());
     await expect(renewBookAnalysisLease(data.run.id, "wrong-owner")).rejects.toThrow("BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST");
+  });
+});
+
+
+describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls", () => {
+  it("pins per-operation cursor and receipt evidence across duplicate Worker delivery", async () => {
+    const data = await fixture();
+    const configuration = {};
+    const entry = (modelId: string, connectionId: string) => ({
+      providerKey: "test", protocol: "TEST", modelId, configuration,
+      configurationHash: stableHash(configuration),
+      connectionId, credentialVersionId: "credential-" + connectionId,
+      endpoint: "https://provider.example.test/v1", adapterVersion: "fixture",
+    });
+    const primary: BookAnalysisRoutePlan = normalizeBookRoutePlan({
+      version: 1,
+      routes: {
+        BOOK_CHUNK_ANALYSIS: { ...entry("primary", "primary"), structuredOutput: "JSON_MODE" },
+        BOOK_REDUCTION_ANALYSIS: { ...entry("primary", "primary"), structuredOutput: "JSON_MODE" },
+        BOOK_SYNTHESIS: { ...entry("primary", "primary"), structuredOutput: "JSON_MODE" },
+        EMBEDDING: { ...entry("vector", "vector"), dimensions: 4 },
+      },
+    });
+    const unsigned = {
+      version: 1 as const,
+      executionEnabled: false as const,
+      primaryPlanHash: primary.integrityHash!,
+      slots: {
+        BOOK_CHUNK_ANALYSIS: {
+          preferenceRevision: 1,
+          preferenceHash: "a".repeat(64),
+          requestedEnabled: true as const,
+          maxSwitches: 1 as const,
+          candidates: [primary.routes.BOOK_CHUNK_ANALYSIS, {
+            ...entry("backup", "backup"), structuredOutput: "JSON_MODE" as const,
+          }],
+        },
+      },
+    };
+    const plan = { ...unsigned, integrityHash: stableHash(unsigned) };
+    await prisma.job.update({
+      where: { id: data.run.jobId },
+      data: {
+        userId: data.user.id,
+        payload: {
+          ...(data.job.payload as Record<string, unknown>),
+          routePlan: primary, routePlanHash: bookRoutePlanHash(primary),
+          failoverPlan: plan,
+        } as never,
+      },
+    });
+    const token = crypto.randomUUID();
+    expect(await claimBookAnalysisRun(data.run.id, token, data.run.dispatchGeneration)).toBe(true);
+    const execution = {
+      analysisRunId: data.run.id, workspaceId: data.workspace.id, userId: data.user.id,
+      jobId: data.run.jobId, dispatchGeneration: data.run.dispatchGeneration, claimToken: token,
+    };
+    const input = {
+      execution, routeSlot: "BOOK_CHUNK_ANALYSIS" as const,
+      operationHash: stableHash(["chunk", "one"]), planHash: plan.integrityHash,
+    };
+    const [first, duplicate] = await Promise.all([
+      seedBookFailoverCheckpoint(input), seedBookFailoverCheckpoint(input),
+    ]);
+    expect(first.revision).toBe(1);
+    expect(duplicate.revision).toBe(1);
+    expect(duplicate.candidateIndex).toBe(0);
+    expect(duplicate.switchesUsed).toBe(0);
+    expect(duplicate.state).toBe("HOLD");
+    expect(await prisma.bookFailoverCheckpoint.count({
+      where: { workspaceId: data.workspace.id, analysisRunId: data.run.id },
+    })).toBe(1);
+
+    const observed = await observeBookFailoverFailure({
+      ...input, failureCode: "QUOTA_EXCEEDED", idempotencyKey: "not-sent-" + crypto.randomUUID(),
+    });
+    expect(observed.settledOutcome).toBe("NOT_SENT");
+    expect(observed.holdReason).toBe("NOT_ENABLED");
+    expect(observed.revision).toBe(2);
+    const replay = await observeBookFailoverFailure({
+      ...input, failureCode: "QUOTA_EXCEEDED", idempotencyKey: "not-sent-" + crypto.randomUUID(),
+    });
+    expect(replay.revision).toBe(2);
+    expect(replay.candidateIndex).toBe(0);
+
+    await expect(seedBookFailoverCheckpoint({
+      ...input, planHash: "b".repeat(64),
+    })).rejects.toThrow("BOOK_FAILOVER_CHECKPOINT_INTEGRITY_FAILED");
+    await expect(seedBookFailoverCheckpoint({
+      ...input, execution: { ...execution, claimToken: "stale-owner" },
+    })).rejects.toThrow("BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST");
+    const nextOperation = await seedBookFailoverCheckpoint({
+      ...input, operationHash: stableHash(["chunk", "two"]),
+    });
+    expect(nextOperation.operationHash).not.toBe(input.operationHash);
+    expect(nextOperation.candidateIndex).toBe(0);
+    expect(nextOperation.revision).toBe(1);
+
+    // A resumed Book Job must not reissue the primary paid request with a
+    // fresh idempotency key when the prior remote outcome was unresolved.
+    await prisma.bookFailoverCheckpoint.update({
+      where: { analysisRunId_routeSlot_operationHash: {
+        analysisRunId: input.execution.analysisRunId,
+        routeSlot: input.routeSlot, operationHash: input.operationHash,
+      } },
+      data: { settledOutcome: "UNKNOWN", lastFailureCode: "TIMEOUT",
+        holdReason: "UNKNOWN_BILLING", latestAttemptId: "remote-attempt" },
+    });
+    await expect(seedBookFailoverCheckpoint(input))
+      .rejects.toThrow("BOOK_FAILOVER_PRIOR_OUTCOME_REVIEW_REQUIRED");
+
+    await prisma.bookAnalysisRun.update({
+      where: { id: data.run.id }, data: { executionLeaseUntil: new Date(0) },
+    });
+    await expect(seedBookFailoverCheckpoint(input))
+      .rejects.toThrow("BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST");
   });
 });
