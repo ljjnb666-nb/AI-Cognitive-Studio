@@ -1,4 +1,4 @@
-import { renewBookAnalysisLease, seedBookFailoverCheckpoint, observeBookFailoverFailure, type BookExecutionContext, type FrozenBookFailoverPlan } from "@ai-cognitive/book-intelligence";
+import { renewBookAnalysisLease, reserveBookFailoverSendIntent, observeBookFailoverFailure, type BookExecutionContext, type FrozenBookFailoverPlan } from "@ai-cognitive/book-intelligence";
 import { bookSynthesisContractVersion, bookSynthesisInstructions } from "./book-synthesis-instructions.js";
 import { bookAnalysisMessage, bookAnalysisSpanReferenceInstruction, bookAnalysisSpanReferenceVersion, resolveBookAnalysisSpanReferences } from "./book-analysis-request.js";
 import { ProviderGatewayError } from "@ai-cognitive/provider-gateway";
@@ -82,9 +82,26 @@ class GatewayAnalysisProvider implements AnalysisProvider {
     const checkpoint = this.input.execution && this.input.failoverPlan?.slots[routeSlot]
       ? { execution: this.input.execution, routeSlot, operationHash, planHash: this.input.failoverPlan.integrityHash }
       : undefined;
-    if (checkpoint) await seedBookFailoverCheckpoint(checkpoint);
+    const send = checkpoint
+      ? await reserveBookFailoverSendIntent({ ...checkpoint, idempotencyKey, inputHash })
+      : undefined;
+    const selectedIdempotencyKey = send?.idempotencyKey ?? idempotencyKey;
     try {
-      const outcome = await this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` }, { userId: this.input.userId });
+      // Receipt recovery MUST stay read-only. A second Gateway.execute call
+      // could otherwise reclaim a stale pre-remote claim and charge twice.
+      const outcome = send?.action === "RECOVER_PERSISTED_TEXT"
+        ? await (async () => {
+          const handoff = await this.runtime.repository.recoverTextHandoff(this.input.workspaceId, send.invocationId);
+          if (handoff.kind !== "RECOVERABLE") throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+          const snapshot = await this.runtime.repository.loadExecutionSnapshot(this.input.workspaceId, send.snapshotId);
+          if (snapshot.routeSlot !== routeSlot || snapshot.providerKey !== pinned.providerKey ||
+              snapshot.modelId !== pinned.modelId || snapshot.connectionId !== pinned.connectionId ||
+              snapshot.credentialVersionId !== pinned.credentialVersionId)
+            throw new Error("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+          return { status: "ALREADY_PROCESSED" as const, invocationId: send.invocationId,
+            snapshot, response: handoff.response };
+        })()
+        : this.runtime.gateway.execute({ bookExecution: this.input.execution, executionRunId: this.input.analysisRunId, workspaceId: this.input.workspaceId, routeSlot, correlationId: request.correlationId, idempotencyKey: selectedIdempotencyKey, inputHash, capability: { family: "TEXT_GENERATION", structuredOutput }, text, pinnedRoute: pinned, pipelineVersion: request.pipelineVersion, promptVersion, schemaVersion: `${spans ? bookAnalysisSpanReferenceVersion : "book-analysis-v2-evidence"}:${bookAnalysisRelationsContractVersion}` }, { userId: this.input.userId });
     if (outcome.status !== "SUCCEEDED" && outcome.status !== "ALREADY_PROCESSED") throw new Error(`BOOK_ANALYSIS_TEXT_GATEWAY_${outcome.status}`);
     if (outcome.status === "ALREADY_PROCESSED" && outcome.textConsumed) throw new Error("BOOK_ANALYSIS_TEXT_RECONCILIATION_REQUIRED");
     const response = outcome.response as { type?: string; structured?: unknown } | undefined;
@@ -97,7 +114,7 @@ class GatewayAnalysisProvider implements AnalysisProvider {
       if (checkpoint) {
         await observeBookFailoverFailure({
           ...checkpoint,
-          idempotencyKey,
+          idempotencyKey: selectedIdempotencyKey,
           failureCode: error instanceof ProviderGatewayError ? error.code : "INTERNAL_PROVIDER_ERROR",
         });
       }
