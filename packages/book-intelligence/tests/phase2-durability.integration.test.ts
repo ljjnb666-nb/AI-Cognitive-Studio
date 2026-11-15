@@ -1335,6 +1335,26 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     expect(await reserveFirstBookFailoverSwitch(switchRequest))
       .toEqual({ action: "HOLD", reason: "NO_PAID_CALL_AUTHORIZATION" });
 
+    const attempted = await prisma.providerInvocationAttempt.create({ data: {
+      workspaceId: data.workspace.id, invocationId: unfinished.id,
+      attemptNumber: 1, status: "REMOTE_FAILURE", completedAt: new Date(),
+    } });
+    expect(await reserveFirstBookFailoverSwitch(switchRequest))
+      .toEqual({ action: "HOLD", reason: "UNKNOWN_BILLING" });
+    await prisma.providerInvocationAttempt.delete({ where: { id: attempted.id } });
+
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: data.workspace.id, userId: data.user.id } },
+      data: { role: "VIEWER" },
+    });
+    expect(await reserveFirstBookFailoverSwitch(switchRequest))
+      .toEqual({ action: "HOLD", reason: "UNAUTHORIZED_TARGET" });
+    await prisma.workspaceMember.update({
+      where: { workspaceId_userId: { workspaceId: data.workspace.id, userId: data.user.id } },
+      data: { role: "OWNER" },
+    });
+
+
     await prisma.workspaceResourcePolicy.upsert({
       where: { workspaceId: data.workspace.id },
       create: { workspaceId: data.workspace.id, dailyUnitLimit: 1000000,
@@ -1349,6 +1369,14 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       maxAdditionalUnits: boundedResourceUnits(backupRequest) + 20,
       expiresAt: new Date(Date.now() + 15 * 60_000),
     } });
+    await prisma.workspaceResourcePolicy.update({
+      where: { workspaceId: data.workspace.id }, data: { runUnitLimit: 1 },
+    });
+    expect(await reserveFirstBookFailoverSwitch(switchRequest))
+      .toEqual({ action: "HOLD", reason: "BUDGET_EXHAUSTED" });
+    await prisma.workspaceResourcePolicy.update({
+      where: { workspaceId: data.workspace.id }, data: { runUnitLimit: 300000 },
+    });
     const admission = await reserveFirstBookFailoverSwitch(switchRequest);
     expect(admission).toEqual({
       action: "RESERVED", nextCandidateIndex: 1,
