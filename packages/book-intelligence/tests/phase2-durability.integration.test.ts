@@ -27,6 +27,7 @@ import {
   normalizeBookRoutePlan,
   bookRoutePlanHash,
   seedBookFailoverCheckpoint,
+  reserveBookFailoverSendIntent,
   observeBookFailoverFailure,
   claimBookAnalysisRun,
   type BookAnalysisRoutePlan,
@@ -1145,6 +1146,55 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     expect(nextOperation.operationHash).not.toBe(input.operationHash);
     expect(nextOperation.candidateIndex).toBe(0);
     expect(nextOperation.revision).toBe(1);
+
+    const presend = {
+      ...input,
+      operationHash: stableHash(["chunk", "send-intent"]),
+      idempotencyKey: "book-test-send-" + crypto.randomUUID(),
+      inputHash: stableHash(["full-text", "system", "generation", "schema"]),
+    };
+    const firstSend = await reserveBookFailoverSendIntent(presend);
+    expect(firstSend).toEqual({
+      action: "SEND_PRIMARY_ONCE", idempotencyKey: presend.idempotencyKey,
+    });
+    const intent = await prisma.bookFailoverCheckpoint.findUniqueOrThrow({
+      where: { analysisRunId_routeSlot_operationHash: {
+        analysisRunId: presend.execution.analysisRunId,
+        routeSlot: presend.routeSlot, operationHash: presend.operationHash,
+      } },
+    });
+    expect(intent.sendIntentKey).toBe(presend.idempotencyKey);
+    expect(intent.sendIntentInputHash).toBe(presend.inputHash);
+    expect(intent.sendIntentAt).toBeInstanceOf(Date);
+    expect(intent.candidateIndex).toBe(0);
+    expect(intent.switchesUsed).toBe(0);
+
+    // Simulates the hardest crash: the Worker sent to the provider, then
+    // died before persisting even an Invocation/Attempt observation.
+    await expect(reserveBookFailoverSendIntent(presend))
+      .rejects.toThrow("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+    await expect(reserveBookFailoverSendIntent({
+      ...presend, idempotencyKey: presend.idempotencyKey + "-new-job",
+    })).rejects.toThrow("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+    await expect(reserveBookFailoverSendIntent({
+      ...presend, inputHash: stableHash(["different-prompt"]),
+    })).rejects.toThrow("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+
+    // A FAILED after the reservation without a Gateway invocation is
+    // conservatively UNKNOWN, never assumed NOT_SENT.
+    const unknown = await observeBookFailoverFailure({
+      ...presend, failureCode: "TIMEOUT",
+    });
+    expect(unknown.settledOutcome).toBe("UNKNOWN");
+    expect(unknown.holdReason).toBe("UNKNOWN_BILLING");
+    expect(unknown.candidateIndex).toBe(0);
+    await expect(reserveBookFailoverSendIntent(presend))
+      .rejects.toThrow("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
+
+    // Legacy seeded checkpoints have no pre-send identity; don't guess one.
+    await expect(reserveBookFailoverSendIntent({
+      ...input, idempotencyKey: "legacy-replay", inputHash: presend.inputHash,
+    })).rejects.toThrow("BOOK_FAILOVER_PRIOR_SEND_RECONCILIATION_REQUIRED");
 
     // A resumed Book Job must not reissue the primary paid request with a
     // fresh idempotency key when the prior remote outcome was unresolved.
