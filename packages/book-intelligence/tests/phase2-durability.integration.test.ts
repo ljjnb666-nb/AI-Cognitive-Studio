@@ -1564,6 +1564,11 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     });
     expect(fakeResult.response).toEqual({ fixture: true });
     expect(fakeAdapter.calls).toBe(1);
+    const fakeStructuredOutput = { type: "STRUCTURED", structured: {
+      summary: (fakeResult.response as { fixture: boolean }).fixture
+        ? "backup recovered without network"
+        : "fake response invalid",
+    } };
     // A post-dispatch crash must not make another simulation slot available.
     expect(await claimBookReservedBackupSimulationOnce(switchRequest)).toEqual({
       status: "HOLD", reason: "NOT_READY", canDispatch: false,
@@ -1584,7 +1589,7 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       workspaceId: data.workspace.id, invocationId: backupInvocation.id,
       attemptId: backupAttempt.id, snapshotId: backupSnapshot.id,
       ...cipher.encryptTextResult(
-        JSON.stringify({ type: "STRUCTURED", structured: { summary: "backup recovered without network" } }),
+        JSON.stringify(fakeStructuredOutput),
         { workspaceId: data.workspace.id, invocationId: backupInvocation.id,
           attemptId: backupAttempt.id, snapshotId: backupSnapshot.id,
           providerKey: "test", modelId: "backup" }),
