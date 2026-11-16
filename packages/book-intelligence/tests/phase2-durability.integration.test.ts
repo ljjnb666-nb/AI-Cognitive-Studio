@@ -1598,8 +1598,9 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       invocations: await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } }),
       reservations: await prisma.providerResourceReservation.count({ where: { workspaceId: data.workspace.id } }),
     };
-    expect((await seedBookFailoverCheckpoint(switchOp)).state)
-      .toBe("BACKUP_SIMULATION_CLAIMED");
+    const rehearsalCursor = await seedBookFailoverCheckpoint(switchOp);
+    expect(rehearsalCursor.state).toBe("SWITCH_RESERVED");
+    expect(rehearsalCursor.holdReason).toBe("SIMULATION_ONLY");
     const expectedBackupRecovery = {
       action: "RECOVER_RESERVED_BACKUP_TEXT",
       idempotencyKey: backupRequest.idempotencyKey,
@@ -1664,7 +1665,8 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     });
     expect(switched.candidateIndex).toBe(1);
     expect(switched.switchesUsed).toBe(1);
-    expect(switched.state).toBe("BACKUP_SIMULATION_CLAIMED");
+    expect(switched.state).toBe("SWITCH_RESERVED");
+    expect(switched.holdReason).toBe("SIMULATION_ONLY");
     expect(switched.backupSendKey).toBe(backupRequest.idempotencyKey);
     expect(switched.backupSendHash).toBe(switchFingerprint);
     expect(switched.paidGrantId).toBe(grant.id);
