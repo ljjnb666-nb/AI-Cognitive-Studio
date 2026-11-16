@@ -1,7 +1,8 @@
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma, PrismaClient, lockWorkspaceExpensiveOperationCapacity } from "../../db/src/index.js";
 import { type Environment } from "@ai-cognitive/shared/server";
-import { stableHash, VersionedAesGcmCipher, ProviderExecutionRepository, boundedResourceUnits, type GatewayRequest, type ProviderModelManifest } from "@ai-cognitive/provider-gateway";
+import { stableHash, VersionedAesGcmCipher, ProviderExecutionRepository, DeterministicFakeProviderAdapter, boundedResourceUnits, type GatewayRequest, type ProviderModelManifest } from "@ai-cognitive/provider-gateway";
+import { claimBookReservedBackupSimulationOnce } from "../src/failover-simulation.js";
 import { createBookAnalysisQueue, createBookAnalysisWorker } from "../../../apps/worker/src/book-analysis.js";
 import {
   BOOK_ANALYSIS_EXECUTION_OWNERSHIP_LOST,
@@ -1498,6 +1499,36 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       where: { id: data.document.sourceId }, data: { archivedAt: null },
     });
 
+    // Test-only atomic claim: two delivery workers compete for the same
+    // reserved backup. Exactly one receives a Fake Adapter simulation slot;
+    // the loser cannot retry a paid request even after a crash.
+    const noClaim = { status: "HOLD", reason: "NOT_READY", canDispatch: false };
+    expect(await claimBookReservedBackupSimulationOnce({
+      ...switchRequest, request: {
+        ...backupRequest, text: { ...backupRequest.text!, messages: [
+          { role: "user", content: "changed original evidence" },
+        ] },
+      },
+    })).toEqual(noClaim);
+    const claims = await Promise.all([
+      claimBookReservedBackupSimulationOnce(switchRequest),
+      claimBookReservedBackupSimulationOnce(switchRequest),
+    ]);
+    expect(claims.filter(value => value.status === "CLAIMED_FOR_FAKE_ADAPTER"))
+      .toHaveLength(1);
+    expect(claims.filter(value => value.status === "HOLD")).toHaveLength(1);
+    expect(claims.every(value => value.canDispatch === false)).toBe(true);
+    expect(await claimBookReservedBackupSimulationOnce(switchRequest))
+      .toEqual({ status: "HOLD", reason: "NOT_READY", canDispatch: false });
+    expect(await inspectReservedBookBackupDryRun(switchRequest))
+      .toEqual({ status: "HOLD", reason: "NOT_RESERVED", canDispatch: false });
+    expect(await prisma.providerInvocation.count({
+      where: { workspaceId: data.workspace.id, routeSlot: switchOp.routeSlot },
+    })).toBe(invocationCount);
+    expect(await prisma.providerResourceReservation.count({
+      where: { workspaceId: data.workspace.id },
+    })).toBe(reservationCount);
+
     // Future backup executors may already have persisted a paid result
     // before a Worker crashes. Resumption must consume that immutable receipt,
     // not resend the primary or execute another backup.
@@ -1517,6 +1548,26 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       configuration: {}, configurationHash: stableHash({}),
       adapterVersion: "fixture", correlationId: data.run.id,
     } });
+    // The ONLY outbound execution in this test is an in-memory, deterministic
+    // fake adapter. No production Gateway, network client, or real credential.
+    const fakeAdapter = new DeterministicFakeProviderAdapter("success");
+    const fakeResult = await fakeAdapter.execute({
+      snapshot: {
+        ...backupRequest.pinnedRoute!, id: backupSnapshot.id,
+        workspaceId: data.workspace.id, routeSlot: switchOp.routeSlot,
+        configurationHash: stableHash({}), correlationId: data.run.id,
+        createdAt: new Date(),
+      },
+      request: { ...backupRequest, requestFingerprint: stableHash(["offline-fake"]) },
+      signal: new AbortController().signal,
+      credential: "local-fake-only",
+    });
+    expect(fakeResult.response).toEqual({ fixture: true });
+    expect(fakeAdapter.calls).toBe(1);
+    // A post-dispatch crash must not make another simulation slot available.
+    expect(await claimBookReservedBackupSimulationOnce(switchRequest)).toEqual({
+      status: "HOLD", reason: "NOT_READY", canDispatch: false,
+    });
     const backupInvocation = await prisma.providerInvocation.create({ data: {
       workspaceId: data.workspace.id, snapshotId: backupSnapshot.id,
       connectionId: backupConnectionId, credentialVersionId: backupCredentialId,
@@ -1542,7 +1593,8 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
       invocations: await prisma.providerInvocation.count({ where: { workspaceId: data.workspace.id } }),
       reservations: await prisma.providerResourceReservation.count({ where: { workspaceId: data.workspace.id } }),
     };
-    expect((await seedBookFailoverCheckpoint(switchOp)).state).toBe("SWITCH_RESERVED");
+    expect((await seedBookFailoverCheckpoint(switchOp)).state)
+      .toBe("BACKUP_SIMULATION_CLAIMED");
     const expectedBackupRecovery = {
       action: "RECOVER_RESERVED_BACKUP_TEXT",
       idempotencyKey: backupRequest.idempotencyKey,
@@ -1607,7 +1659,7 @@ describe("durable Book failover checkpoint: real PostgreSQL and zero paid calls"
     });
     expect(switched.candidateIndex).toBe(1);
     expect(switched.switchesUsed).toBe(1);
-    expect(switched.state).toBe("SWITCH_RESERVED");
+    expect(switched.state).toBe("BACKUP_SIMULATION_CLAIMED");
     expect(switched.backupSendKey).toBe(backupRequest.idempotencyKey);
     expect(switched.backupSendHash).toBe(switchFingerprint);
     expect(switched.paidGrantId).toBe(grant.id);
