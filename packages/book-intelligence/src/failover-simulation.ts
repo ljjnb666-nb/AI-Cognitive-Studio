@@ -83,10 +83,11 @@ export async function claimBookReservedBackupSimulationOnce(input: BookFailoverS
       analysisRunId: execution.analysisRunId, routeSlot, operationHash,
     } };
     const cursor = await tx.bookFailoverCheckpoint.findUnique({ where });
-    if (cursor?.state === "BACKUP_SIMULATION_CLAIMED")
+    if (cursor?.state === "SWITCH_RESERVED" && cursor.holdReason === "SIMULATION_ONLY")
       return { status: "HOLD" as const, reason: "ALREADY_CLAIMED" as const, canDispatch: false as const };
     if (!cursor || cursor.workspaceId !== execution.workspaceId ||
         cursor.planHash !== planHash || cursor.state !== "SWITCH_RESERVED" ||
+        cursor.holdReason !== "WAITING_FOR_EXECUTOR" ||
         cursor.candidateIndex !== 1 || cursor.switchesUsed !== 1 ||
         cursor.sendIntentInputHash !== fingerprint ||
         cursor.backupSendHash !== fingerprint ||
@@ -158,10 +159,10 @@ export async function claimBookReservedBackupSimulationOnce(input: BookFailoverS
       where: { analysisRunId: execution.analysisRunId,
         routeSlot, operationHash, workspaceId: execution.workspaceId,
         revision: cursor.revision, state: "SWITCH_RESERVED",
+        holdReason: "WAITING_FOR_EXECUTOR",
         candidateIndex: 1, switchesUsed: 1,
         backupSendKey: request.idempotencyKey, paidGrantId: cursor.paidGrantId },
-      data: { state: "BACKUP_SIMULATION_CLAIMED",
-        holdReason: "SIMULATION_ONLY",
+      data: { holdReason: "SIMULATION_ONLY",
         revision: { increment: 1 }, observedAt: clock.now },
     });
     return claimed.count === 1
