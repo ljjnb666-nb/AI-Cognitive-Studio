@@ -89,7 +89,8 @@ export async function seedBookFailoverCheckpoint(input: BookFailoverOperation) {
     // Recovery may re-enter an already reserved backup operation. This never
     // authorizes dispatch: reserveBookFailoverSendIntent will accept only a
     // fully persisted, successful backup receipt and otherwise fail closed.
-    if (checkpoint.state === "SWITCH_RESERVED") {
+    if (checkpoint.state === "SWITCH_RESERVED" ||
+        checkpoint.state === "BACKUP_SIMULATION_CLAIMED") {
       if (checkpoint.candidateIndex !== 1 || checkpoint.switchesUsed !== 1 ||
           !checkpoint.sendIntentKey || !checkpoint.sendIntentInputHash ||
           !checkpoint.backupSendKey || !checkpoint.backupSendHash ||
@@ -165,7 +166,9 @@ export async function reserveBookFailoverSendIntent(input: BookFailoverSendInten
     // An existing backup reservation never triggers a second paid call.
     // Only a stored, matching, unconsumed and successful Gateway text receipt
     // may be recovered. All other outcomes stay blocked for manual review.
-    if (created.count === 0 && checkpoint.state === "SWITCH_RESERVED") {
+    if (created.count === 0 &&
+        (checkpoint.state === "SWITCH_RESERVED" ||
+         checkpoint.state === "BACKUP_SIMULATION_CLAIMED")) {
       const candidates = frozen.slots[input.routeSlot]!.candidates;
       const backupRoute = candidates[1];
       if (!backupRoute || checkpoint.workspaceId !== input.execution.workspaceId ||
