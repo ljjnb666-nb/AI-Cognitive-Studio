@@ -86,6 +86,7 @@ export async function inspectReservedBookBackupDryRun(
         cursor.sendIntentInputHash !== fingerprint ||
         cursor.backupSendKey === cursor.sendIntentKey || !cursor.lastFailureCode ||
         cursor.planHash !== planHash || cursor.state !== "SWITCH_RESERVED" ||
+        cursor.holdReason !== "WAITING_FOR_EXECUTOR" ||
         cursor.candidateIndex !== 1 || cursor.switchesUsed !== 1 ||
         cursor.backupSendKey !== request.idempotencyKey || !cursor.sendIntentKey ||
         cursor.backupSendHash !== fingerprint || !cursor.paidGrantId ||
